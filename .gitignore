@@ -1,0 +1,15 @@
+# 依赖与构建产物
+node_modules/
+dist/
+bin/asr
+
+# 运行时数据（配置里有 API Key，绝不能进仓库）
+.data/
+.cache/
+*.log
+
+# 截图与临时验证产物
+shots/
+
+# macOS
+.DS_Store

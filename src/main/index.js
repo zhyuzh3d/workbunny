@@ -1,0 +1,1516 @@
+'use strict';
+/**
+ * Buddy Pet 主进程
+ * ─ 透明置顶浮窗（可穿透、可拖拽、跨桌面空间）
+ * ─ 大脑：OpenAI 兼容流式 LLM（默认复用 WorkBuddy 自己的模型额度）
+ * ─ 嗓子：A1X 掌机 Qwen3-TTS
+ * ─ 耳朵：原生 SFSpeechRecognizer 子进程
+ * ─ 眼睛：直接 tail WorkBuddy 会话日志
+ */
+const {
+  app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage,
+  shell, dialog, globalShortcut, Notification, systemPreferences,
+} = require('electron');
+const path = require('path');
+const fs = require('fs');
+const { spawn } = require('child_process');
+
+// 最早的一行探针：写到 /tmp，用来看「进程到底有没有跑到 JS」
+try {
+  fs.appendFileSync('/tmp/buddy-boot.log',
+    `${new Date().toISOString()} pid=${process.pid} argv=${JSON.stringify(process.argv.slice(1))}
+`);
+} catch {}
+
+const config = require('./config');
+const llm = require('./llm');
+const tts = require('./tts');
+const { Monitor, taskName } = require('./monitor');
+const { Asr, probeAccess } = require('./asr');
+
+/* ── 数据目录（开发时可被 BUDDY_PET_HOME 指到工作区） ── */
+if (process.env.BUDDY_PET_NO_SANDBOX === '1') {
+  // 某些沙箱环境里 Chromium 自己的 sandbox 起不来，开了才能渲染
+  app.commandLine.appendSwitch('no-sandbox');
+  app.commandLine.appendSwitch('disable-gpu-sandbox');
+}
+if (process.env.BUDDY_PET_HOME) {
+  try { app.setPath('userData', process.env.BUDDY_PET_HOME); } catch (e) { console.error(e); }
+}
+const USER_DIR = app.getPath('userData');
+config.setPath(path.join(USER_DIR, 'config.json'));
+
+const IS_DEV = !app.isPackaged;
+const BOOT_AT = Date.now();          // 启动时刻：此前的历史事件不触发主动说话
+const ASR_BIN = app.isPackaged
+  ? path.join(process.resourcesPath, 'bin', 'asr')
+  : path.join(__dirname, '..', '..', 'bin', 'asr');
+
+let win = null;
+let tray = null;
+let monitor = null;
+let asr = null;
+let quitting = false;
+let rendererGoneAt = 0;
+let selfHealTimer = null;
+let asrStatus = { speech: null, mic: null, checkedAt: 0, note: '' };
+
+/* ── 顶层崩溃捕获：桌宠没有终端，崩了必须留下痕迹 ──
+ * 注意：这里故意不退出 —— 桌宠崩掉比带病活着更糟，能继续跑就继续跑。 */
+process.on('uncaughtException', (e) => {
+  try { log('[crash] uncaught: ' + (e && e.stack ? e.stack.split('\n').slice(0, 6).join(' | ') : String(e))); } catch {}
+});
+process.on('unhandledRejection', (e) => {
+  try { log('[crash] rejection: ' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : String(e))); } catch {}
+});
+/* 死因取证：桌宠"莫名其妙就没了"必须有据可查。这三条把退出码、
+ * 子进程暴毙、渲染进程异常都记进 buddy.log，下次再出问题一眼看到。 */
+process.on('exit', (code) => {
+  try { log(`[exit] code=${code} uptime=${Math.round(process.uptime())}s`); } catch {}
+});
+process.on('SIGTERM', () => {
+  try { log('[exit] 收到 SIGTERM（被要求退出）'); } catch {}
+  markCleanExit();
+  app.quit();
+});
+
+/* ── 文件日志（桌宠没有终端，出问题只能看这个） ── */
+const LOG_PATH = path.join(USER_DIR, 'buddy.log');
+function log(...args) {
+  const line = `[${new Date().toISOString().slice(11, 19)}] ` + args.map((a) =>
+    typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })()
+  ).join(' ');
+  // 只留最近 400 行，防止日志无限长
+  try {
+    fs.mkdirSync(USER_DIR, { recursive: true });
+    let prev = '';
+    try {
+      const st = fs.statSync(LOG_PATH);
+      if (st.size > 256 * 1024) {
+        const all = fs.readFileSync(LOG_PATH, 'utf8').split('\n');
+        prev = all.slice(-400).join('\n') + '\n';
+      } else {
+        prev = fs.readFileSync(LOG_PATH, 'utf8');
+      }
+    } catch { prev = ''; }
+    fs.writeFileSync(LOG_PATH, prev + line + '\n');
+  } catch {}
+  if (process.stdout && process.stdout.writable) { try { process.stdout.write(line + '\n'); } catch {} }
+}
+
+log(`[boot] pid=${process.pid} packaged=${app.isPackaged} userData=${USER_DIR}`);
+
+/* ── 看门狗 ──────────────────────────────────────────────────────────
+ * 主进程崩掉（段错误、ObjC 异常、被 -9）时，进程内任何 JS 都来不及执行，
+ * 只能靠一个**进程外**的东西把它拉回来。这里在开机时 spawn 一个脱离进程组
+ * 的 sh 影子，它每 2 秒确认一次"父进程还在吗"。
+ * 退出时靠 .clean-exit 标记区分「正常退出」和「崩了」，避免主人点了退出它又爬回来。 */
+/** 主动退出前留个记号，告诉看门狗「别把我拉回来」 */
+function markCleanExit() {
+  try { fs.writeFileSync(path.join(USER_DIR, '.clean-exit'), String(Date.now())); } catch {}
+}
+
+/** 看门狗还活着吗？没了就补一个（心跳里每 20 秒问一次） */
+function ensureWatchdog() {
+  if (!app.isPackaged) return;
+  try {
+    const pidFile = path.join(USER_DIR, 'watchdog.pid');
+    const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    if (pid) {
+      try { process.kill(pid, 0); return; } catch {}   // 还活着
+    }
+    log('[watchdog] 看门狗不见了，重新布防');
+    startWatchdog();
+  } catch {
+    startWatchdog();
+  }
+}
+
+function startWatchdog() {  if (!app.isPackaged) return;
+  try {
+    const stop = path.join(USER_DIR, '.no-restart');
+    if (fs.existsSync(stop)) { log('[watchdog] 有 .no-restart，不启动看门狗'); return; }
+    // 新实例起来 = 之前无论怎么退的，都翻篇
+    try { fs.unlinkSync(path.join(USER_DIR, '.clean-exit')); } catch {}
+
+    const script = path.join(__dirname, 'watchdog.sh');
+    if (!fs.existsSync(script)) { log('[watchdog] 缺少 watchdog.sh，跳过'); return; }
+    const bundle = path.resolve(app.getAppPath(), '../../..');
+    // 先收掉上一任看门狗，避免越积越多
+    try {
+      const pidFile = path.join(USER_DIR, 'watchdog.pid');
+      const old = Number(fs.readFileSync(pidFile, 'utf8').trim());
+      if (old && old !== process.pid) { try { process.kill(old, 'SIGTERM'); } catch {} }
+    } catch {}
+
+    const p = spawn('/bin/sh', [script, String(process.pid), bundle, USER_DIR], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    p.unref();
+    try { fs.writeFileSync(path.join(USER_DIR, 'watchdog.pid'), String(p.pid)); } catch {}
+    log(`[watchdog] 已布防 pid=${p.pid}`);
+  } catch (e) {
+    log('[watchdog] 启动失败：' + e.message);
+  }
+}
+
+
+/* ── 会话记忆（让娃娃记得刚才聊了什么） ── */
+const MEM_PATH = path.join(USER_DIR, 'memory.json');
+let history = [];
+try { history = JSON.parse(fs.readFileSync(MEM_PATH, 'utf8')).history || []; } catch { history = []; }
+
+function saveHistory() {
+  try {
+    fs.mkdirSync(USER_DIR, { recursive: true });
+    fs.writeFileSync(MEM_PATH, JSON.stringify({ history: history.slice(-24) }, null, 2));
+  } catch {}
+}
+
+function pushHistory(role, content) {
+  if (!content) return;
+  history.push({ role, content: String(content).slice(0, 800) });
+  if (history.length > 24) history = history.slice(-24);
+  saveHistory();
+}
+
+/* ── 窗口 ── */
+function defaultPos(w, h) {
+  const d = screen.getPrimaryDisplay();
+  const wa = d.workArea;
+  return {
+    x: Math.round(wa.x + wa.width - w - 28),
+    y: Math.round(wa.y + wa.height - h - 8),
+  };
+}
+
+function createWindow() {
+  const c = config.load();
+  const { w, h } = c.window;
+  let { x, y } = c.window;
+  const disp = screen.getPrimaryDisplay().workArea;
+  if (typeof x !== 'number' || typeof y !== 'number' ||
+      x < disp.x - 50 || x > disp.x + disp.width - 80 ||
+      y < disp.y - 50 || y > disp.y + disp.height - 80) {
+    const p = defaultPos(w, h);
+    x = p.x; y = p.y;
+  }
+
+  win = new BrowserWindow({
+    width: w,
+    height: h,
+    x,
+    y,
+    transparent: true,
+    frame: false,
+    hasShadow: false,
+    resizable: true,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    show: false,
+    backgroundColor: '#00000000',
+    acceptFirstMouse: true,
+    webPreferences: {
+      preload: path.join(__dirname, '..', 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,   // 关键：桌宠永远在后台，不能被降帧
+      webgl: true,
+    },
+  });
+
+  win.setAlwaysOnTop(true, 'screen-saver', 1);
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  win.setIgnoreMouseEvents(true, { forward: true });
+
+  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+
+  // 渲染层日志接到主进程（打包版只记 warn/error，dev 全记）
+  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    const tag = ['log', 'warn', 'error', 'debug'][level] || 'log';
+    const msg = String(message);
+    if (msg.includes('DevTools')) return;
+    if (!IS_DEV && level < 2) return;
+    log(`[renderer:${tag}] ${msg}  (${String(sourceId || '').split('/').pop()}:${line})`);
+  });
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    log('[renderer] did-fail-load ' + [code, desc, url].join(' '));
+  });
+  win.webContents.on('render-process-gone', (_e, d) => {
+    log('[renderer] gone ' + JSON.stringify(d) + ' —— 自动重建窗口');
+    // 渲染进程没了，画面就空白一片。别让主人盯着一个死画面，重建一个。
+    rendererGoneAt = Date.now();
+    setTimeout(() => {
+      if (!win || win.isDestroyed()) { createWindow(); return; }
+      // 窗口对象还在但画布已经死了：重新加载最省事
+      try { win.webContents.reload(); } catch { createWindow(); }
+    }, 600);
+  });
+  win.webContents.on('unresponsive', () => {
+    log('[renderer] 卡住了，3 秒后若还没缓过来就重载');
+    setTimeout(() => {
+      try { if (win && !win.isDestroyed()) win.webContents.forcefullyCrashRenderer(); } catch {}
+    }, 3000);
+  });
+
+  win.once('ready-to-show', () => {
+    win.showInactive();
+    scheduleSelfTest();
+  });
+
+  win.on('close', (e) => {
+    if (!quitting) {
+      e.preventDefault();
+      win.hide();
+    }
+  });
+
+  win.on('moved', () => {
+    if (!win) return;
+    const [px, py] = win.getPosition();
+    config.save({ window: { x: px, y: py } });
+  });
+}
+
+/* ── 鼠标穿透开关 ── */
+let interactive = false;
+function setInteractive(v) {
+  if (!win || v === interactive) return;
+  interactive = v;
+  win.setIgnoreMouseEvents(!v, { forward: true });
+}
+
+/* ── 拖拽（用光标屏幕坐标，鼠标移出窗口也不会断） ── */
+let dragTimer = null;
+let dragAnchor = null;
+ipcMain.on('pet:drag', (_e, action) => {
+  if (!win) return;
+  if (action === 'start') {
+    if (dragTimer) clearInterval(dragTimer);
+    const cur = screen.getCursorScreenPoint();
+    const [wx, wy] = win.getPosition();
+    dragAnchor = { cx: cur.x, cy: cur.y, wx, wy };
+    dragTimer = setInterval(() => {
+      if (!dragAnchor || !win) return;
+      const p = screen.getCursorScreenPoint();
+      win.setPosition(dragAnchor.wx + (p.x - dragAnchor.cx), dragAnchor.wy + (p.y - dragAnchor.cy));
+    }, 16);
+  } else {
+    if (dragTimer) { clearInterval(dragTimer); dragTimer = null; }
+    dragAnchor = null;
+  }
+});
+
+/* ── 事件推给渲染层 ── */
+function send(type, payload) {
+  if (!win || win.isDestroyed()) return;
+  const wc = win.webContents;
+  if (!wc || wc.isDestroyed() || wc.isCrashed()) return;
+  try {
+    wc.send('pet:ev', { type, ...payload });
+  } catch {
+    /* 渲染层正在重载时会抛，忽略即可 */
+  }
+}
+
+/* ── 说话队列（合成 → 播放，逐句流水线，可被打断） ── */
+const speechQueue = [];
+let speaking = false;
+let speechGen = 0;
+let speakWatchdog = null;
+let recentSpeech = '';    // 最近说过的字，用来识别"这句其实是自己的回声"
+let lastSpokeAt = 0;
+
+/** 刚出口的话留个尾巴，用于回声判定 */
+function noteSpoken(text) {
+  recentSpeech = (recentSpeech + ' ' + text).slice(-140);
+  lastSpokeAt = Date.now();
+}
+
+/** 这句识别结果是不是我自己刚说过的？用 2-gram 覆盖率判，够糙也够稳 */
+function echoLike(text) {
+  const clean = (s) => String(s || '').replace(/[^\p{L}\p{N}]/gu, '');
+  const a = clean(text);
+  const b = clean(recentSpeech);
+  if (a.length < 2 || b.length < 2) return false;
+  let hit = 0;
+  let n = 0;
+  for (let i = 0; i < a.length - 1; i++) {
+    n++;
+    if (b.includes(a.slice(i, i + 2))) hit++;
+  }
+  return n > 0 && hit / n > 0.72;
+}
+
+function stopSpeaking() {
+  speechGen++;
+  speechQueue.length = 0;
+  speaking = false;
+  if (speakWatchdog) { clearTimeout(speakWatchdog); speakWatchdog = null; }
+  unmuteAsr('stopSpeaking');
+  send('audio', { stop: true });
+}
+
+/* ── 闭麦/开麦：只此两个入口，带日志和兜底 ────────────────────────────
+ * 踩过的坑：自己说一句话之后，开麦那一步只要有一条路径没走到，麦克风就永久
+ * 闭着 —— 表现是"电平日志不走了、主人怎么说话都没反应"，而且没有任何报错。
+ * 所以这里强制加一道死线：闭麦超过 MUTE_MAX_MS 一律自动打开。 */
+const MUTE_MAX_MS = 20000;
+let muteWatchdog = null;
+let mutedSince = 0;
+
+function muteAsr(reason) {
+  if (!asr) return;
+  if (!mutedSince) mutedSince = Date.now();
+  asr.mute();
+  if (muteWatchdog) clearTimeout(muteWatchdog);
+  muteWatchdog = setTimeout(() => {
+    log('[asr] 闭麦超时（' + Math.round(MUTE_MAX_MS / 1000) + 's），强制开麦 —— 上次是：' + (reason || ''));
+    unmuteAsr('watchdog');
+  }, MUTE_MAX_MS);
+}
+
+function unmuteAsr(reason) {
+  if (mutedSince) {
+    log('[asr] 开麦（' + (reason || '') + '，闭了 ' + Math.round((Date.now() - mutedSince) / 1000) + 's）');
+    mutedSince = 0;
+  }
+  if (muteWatchdog) { clearTimeout(muteWatchdog); muteWatchdog = null; }
+  if (asr) asr.unmute();
+}
+
+/* 情绪 → 音色微调（VoiceDesign 用自然语言描述音色，所以情绪也写成人话） */
+const EMO_VOICE = {
+  Angry: 'Now a bit annoyed and pouty: shorter phrasing, firmer tone, still cute and young.',
+  Sad: 'Now soft and low and slow, slightly downcast, like a small sigh at the end.',
+  Surprised: 'Now bright and startled, pitch lifted, speaking quickly with a little gasp.',
+  Blush: 'Now shy and soft, slightly breathy, hesitant, a little embarrassed.',
+  Clapping: 'Now cheerful and lively, smiling through the words, warm and bouncy.',
+  Jump: 'Now excited and energetic, quick and bright.',
+  Sleepy: 'Now drowsy and very soft and slow, trailing off lazily.',
+  Thinking: 'Now thoughtful, unhurried, with small pauses.',
+};
+
+function voiceFor(emo, base) {
+  const extra = emo && EMO_VOICE[emo] ? EMO_VOICE[emo] : '';
+  return extra ? `${base} ${extra}` : base;
+}
+
+/* 合成缓存 + 预取：念第一句的同时把第二句先合成好，句与句之间几乎没有等待 */
+const synthCache = new Map();
+const SYNTH_CACHE_MAX = 8;
+
+let fallbackLogged = '';
+function synthBuffer(text, emo) {
+  const key = (emo || '') + '\u0000' + text;
+  const hit = synthCache.get(key);
+  if (hit) return hit;
+  const c = config.load();
+  const ttsCfg = { ...c.tts, instructions: voiceFor(emo, c.tts.instructions) };
+  const p = tts.synthesize(text, ttsCfg).then((r) => {
+    if (r.ms > 900) log(`[tts] 合成 ${r.ms}ms（${text.length} 字${r.cached ? '，缓存' : ''}）`);
+    if (r.fallback && r.reason !== fallbackLogged) {
+      fallbackLogged = r.reason || '';
+      log('[tts] A1X 合成不可用（' + fallbackLogged + '），改用它自带的系统语音');
+    }
+    return r.buffer;
+  });
+  p.catch(() => synthCache.delete(key));   // 失败别把坏结果留在缓存里
+  synthCache.set(key, p);
+  if (synthCache.size > SYNTH_CACHE_MAX) synthCache.delete(synthCache.keys().next().value);
+  return p;
+}
+
+function prefetchNext() {
+  const c = config.load();
+  if (!(c.tts.enabled && c.voice.enabled)) return;
+  const next = speechQueue[0];
+  if (next) synthBuffer(next.text, next.emo);
+}
+
+async function pumpSpeech() {
+  if (speaking) return;
+  const item = speechQueue.shift();
+  if (!item) return;
+  speaking = true;
+  const gen = speechGen;
+  const c = config.load();
+  // 有回声消除就不闭麦：边说她边听，主人能随时插话打断
+  if (asr && !asr.aec) muteAsr('说话中');
+  noteSpoken(item.text);
+  send('speaking', { on: true, text: item.text });
+
+  if (c.tts.enabled && c.voice.enabled) {
+    // 注意：不再要求 apiKey —— 远程 TTS 不可用时会自动退回系统语音，
+    // 否则"没有密钥"就等于"永远不说话"。
+    // 合成阶段也要有看门狗：TTS 服务端不返回时，await 会一直悬着，
+    // 闭麦状态就永久锁死（"主人说话没反应"的真实成因，踩过一次）。
+    if (speakWatchdog) clearTimeout(speakWatchdog);
+    speakWatchdog = setTimeout(() => {
+      if (gen === speechGen && speaking) {
+        log('[tts] 合成超时，放弃这句');
+        finishSpeech();
+      }
+    }, 30000);
+    try {
+      const bufP = synthBuffer(item.text, item.emo);
+      prefetchNext();           // 和当前这句并行，先把下一句准备出来
+      const buffer = await bufP;
+      // 被打断/换代：不能裸 return —— 那样 speaking 和闭麦都留在原地，麦克风永久哑
+      if (gen !== speechGen) { finishSpeech(); return; }
+      if (turnT0) { log(`[turn] 听见→出声 ${Date.now() - turnT0}ms`); turnT0 = 0; }
+      send('audio', { buffer, text: item.text });
+      // 看门狗：万一渲染层没回 audio-done（窗口崩了/解码失败），别让队列永远卡住
+      if (speakWatchdog) clearTimeout(speakWatchdog);
+      const durMs = Math.max(1500, ((buffer.length - 44) / (24000 * 2)) * 1000) + 2500;
+      speakWatchdog = setTimeout(() => {
+        if (gen === speechGen && speaking) finishSpeech();
+      }, durMs);
+    } catch (e) {
+      // 以前只往 stderr 写，日志里什么都看不到 —— 于是"她不说话"永远查不出原因
+      log('[tts] 合成失败：' + e.message);
+      console.error('[tts]', e.message);
+      send('ttsError', { message: e.message });
+      send('speaking', { on: false });
+      speaking = false;
+      unmuteAsr('合成失败');
+      if (speechQueue.length) pumpSpeech();
+      return;
+    }
+  } else {
+    // 静音模式：只显示气泡，靠定时收尾
+    const ms = Math.max(1200, item.text.length * 180);
+    setTimeout(() => {
+      if (gen !== speechGen) return;
+      finishSpeech();
+    }, ms);
+    return;
+  }
+}
+
+function finishSpeech() {
+  speaking = false;
+  if (speakWatchdog) { clearTimeout(speakWatchdog); speakWatchdog = null; }
+  send('speaking', { on: false });
+  // 说完再等 450ms 才开麦：尾巴上的混响别当成新的一句
+  if (asr) setTimeout(() => { if (!speaking) unmuteAsr('说完'); }, 450);
+  if (speechQueue.length) setTimeout(pumpSpeech, 60);
+}
+
+function speak(text, { motion, emo, silent = false } = {}) {
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  if (motion) send('motion', { key: motion, once: true });
+  if (emo) send('emo', { key: emo });
+  send('say', { text: clean });
+  if (silent) return;
+  speechQueue.push({ text: clean, emo });
+  pumpSpeech();
+}
+
+/* ── 大脑 ── */
+const PROMPT_TASK_DONE =
+  '（系统提示，不是主人说的话：主人刚在 WorkBuddy 里把一件事交付了，情况写在「主人现在的状态」里。' +
+  '用一到两句话告诉他这件事办完了：先说结果，再说一句你认为他该留意的地方。' +
+  '没办成就直说没办成、卡在哪。别复述他的原话，别说"任务已完成"这种空话，别列举过程。）';
+const PROMPT_TASK_LONG =
+  '（系统提示，不是主人说的话：主人手上这件事已经做了好一阵子还没交付，情况写在「主人现在的状态」里。' +
+  '用一到两句话给出你的判断：是正常的慢，还是可能在某个地方绕圈；然后给一个他能马上动手的建议。' +
+  '别催，别显得不耐烦，别说"加油"。）';
+const PROMPT_TASK_STALL =
+  '（系统提示，不是主人说的话：这件事已经很久没有任何进展了，像卡住了。' +
+  '用一句话轻轻提醒他去看一眼，并猜一个最可能卡住的原因。语气要软，别指责、别惊动。）';
+const PROMPT_REST =
+  '（系统提示，不是主人说的话：主人已经连着干了一个多小时没歇。' +
+  '用一句话提醒他歇一会儿，要具体说你看见他连着做完了几件事，别说空话。）';
+
+let busy = false;
+
+/** 时间感知：小模型不知道"现在"，不给它就会瞎猜 */
+function nowLine() {
+  const d = new Date();
+  const week = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()];
+  const hh = d.getHours();
+  const part = hh < 5 ? '凌晨' : hh < 9 ? '早上' : hh < 12 ? '上午' : hh < 14 ? '中午' : hh < 18 ? '下午' : hh < 23 ? '晚上' : '深夜';
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `现在是 ${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${week} ${part}${hh}:${mm}。`;
+}
+
+/** 常驻监听时先判断「这句是不是在对我说」 */
+const JUDGE_RULE = `
+
+# 附加任务（优先于上面所有规则）
+下面这句是麦克风听到的话。它可能是在跟我说，也可能是主人在跟别人说话、开会、打电话、
+自言自语、或者在念屏幕上的代码和文档。
+先判断，再决定：
+- 不是对我说的 → 只输出 <skip>，一个字都不要多。
+- 是对我说的 → 按平常的方式回答。
+**这些一定是对我说的**：叫我的名字、问我问题、让我做事、问我在不在/能不能听见、
+跟我说"你好/谢谢/辛苦了"、接着我刚说的话题往下讲。
+**这些通常不是对我说的**：念代码或报错、给别人布置任务、电话会议内容、
+带具体文件路径的指令、第三人称提到我（"让它看看"）但没有直接叫我。
+我的名字在语音识别里经常被听错，听起来像我的名字也要当成在叫我。
+拿不准的时候，如果像在跟我说话，就回答；明显是别的场合，选 <skip>。
+`;
+
+const HISTORY_TURNS = 6;   // 只带最近 3 轮对话，够接话又不撑爆上下文
+
+async function think({ userText, internal = false, allowSpeech = true, judge = false }) {
+  const c = config.load();
+  if (!c.llm.apiKey) {
+    send('chat', { role: 'assistant', text: '（还没配好模型：在设置里填 API Key，或先让 WorkBuddy 里配好模型）' });
+    return null;
+  }
+  const ctx = nowLine() + '\n' + (monitor ? monitor.context() : '');
+  const sys = config.buildSystemPrompt(ctx) + (judge ? JUDGE_RULE : '');
+  const msgs = [{ role: 'system', content: sys }];
+  for (const h of history.slice(-HISTORY_TURNS)) msgs.push(h);
+  // 别把同一句主人话塞两遍。调用方有时已经 pushHistory('user') 过了，
+  // 这里再无脑 push 一次，模型看到连着两条一模一样的输入，就会开始复读。
+  const lastH = history[history.length - 1];
+  const dup = lastH && lastH.role === 'user' && String(lastH.content).trim() === String(userText).trim();
+  if (!dup) msgs.push({ role: 'user', content: userText });
+
+  busy = true;
+  // 立刻给一个"我在想"的姿态。主人说完到第一句出声通常有 0.8~2 秒，
+  // 没有这个反馈，玩偶看起来就像没听见。
+  send('think', { on: true });
+  // 边生成边念。判官模式也能提前出声：<skip> 只可能出现在开头，
+  // 第一句一旦不是 skip，就等于已经判定"这话是对我说的"，可以直接念 —— 省掉整段等生成。
+  let silenced = false;   // 已判定不该出声（命中 skip）
+  let streamed = false;   // 已经有句子进了朗读队列
+  const saySentence = (s) => {
+    if (silenced || !allowSpeech) return;
+    if (/<\s*skip/i.test(s)) { silenced = true; return; }
+    const parsed = llm.extractTags(s);
+    const txt = parsed.clean.replace(/<\s*skip\s*\/?>/gi, '').trim();
+    if (!txt) return;
+    streamed = true;
+    speechQueue.push({ text: txt });
+    if (!speaking) pumpSpeech();
+  };
+
+  try {
+    const r = await llm.chat({
+      ...c.llm,
+      messages: msgs,
+      onDelta: (d) => {
+        if (!internal && !judge) send('delta', { text: d });
+      },
+      onSentence: saySentence,
+    });
+
+    const raw = (r.text || '').trim();
+    // 判官说「不是在跟我说话」→ 什么都不做，也不记进历史
+    if (judge && /<\s*skip\s*\/?>/i.test(raw)) {
+      silenced = true;
+      stopSpeaking();
+      send('heard', { text: userText, replied: false });
+      log('[judge] skip: ' + userText.slice(0, 40));
+      return r;
+    }
+
+    const clean = raw.replace(/<\s*skip\s*\/?>/gi, '').trim();
+    // 把她实际说的话记下来：回看时才知道"她到底说了什么蠢话"，否则无从优化
+    if (clean) log('[say] ' + clean.replace(/\s+/g, ' ').slice(0, 90));
+    if (clean) {
+      if (judge) pushHistory('user', userText);
+      pushHistory('assistant', clean);
+      if (!internal && !judge) {
+        send('chat', { role: 'assistant', text: clean, final: true });
+      } else if (!streamed) {
+        // 没有边生成边念（比如整段没有句号）→ 这里补一次，且只补一次
+        speak(clean, { motion: r.motions[0], emo: r.emos[0] });
+      }
+    }
+    if (r.motions && r.motions[0]) send('motion', { key: r.motions[0], once: true });
+    if (r.emos && r.emos[0]) send('emo', { key: r.emos[0] });
+    // 注意：这里绝不能调 finishSpeech() —— 句子是流水线朗读的，
+    // 真正的收尾由渲染层播完音频回 pet:audio-done 驱动。
+    return r;
+  } catch (e) {
+    console.error('[llm]', e.message);
+    send('chat', { role: 'assistant', text: '（我这会儿想不出来：' + e.message + '）' });
+    return null;
+  } finally {
+    busy = false;
+    send('think', { on: false });
+  }
+}
+
+/* ── 主动播报 ──
+ * 只有这几件事值得娃娃主动开口（主人在 WorkBuddy 里干活时）：
+ *   taskDone  —— 一件事交付了 → 报结果 + 一句该留意的地方（核心）
+ *   taskLong  —— 同一件事拖太久 → 分析一下 + 给建议
+ *   taskStall —— 很久没动静 → 轻轻提醒去看一眼
+ *   rest      —— 连着干了一个多小时 → 劝歇（不单独说，挂在 taskDone 尾巴上）
+ * 明确不做：不因某条命令失败而开口，不逐条念工具调用，不在主人刚下指令时抢话。
+ */
+let lastProactiveAt = 0;
+let turnT0 = 0;         // 本轮的计时起点（听见 → 第一声）
+let lastHeardAt = 0;    // 主上一次开口的时刻：用来避免抢话
+let quietUntil = 0;     // 「别烦我」之后安静到什么时候
+
+/* 主人明确让我闭嘴的说法。命中就安静 10 分钟，只留一行字，不出声 —— 
+ * 这时候再"好的一声"本身就是烦人的一部分。 */
+const QUIET_WORDS = /别(再)?(说|念|烦|吵|唠叨|讲)了?|安静(点|一下)?|闭嘴|不要说话|先别说|别打扰/;
+let workSpanStart = 0;
+let lastWorkSeenAt = 0;
+let restNoticedAt = 0;
+
+function proactiveAllowed() {
+  const c = config.load();
+  if (!c.monitor.enabled) return false;
+  if (busy) return false;
+  // 主人刚说了「别烦」→ 安静期内一声不吭（除非他先开口）
+  if (Date.now() < quietUntil) return false;
+  // 主人正在说话/刚说完 8 秒内不插话 —— 抢话是最掉好感的毛病
+  if (Date.now() - lastHeardAt < 8000) return false;
+  // 热身期：刚启动的 12 秒内不主动开口，避免"一开机就复述历史"
+  if (Date.now() - BOOT_AT < 12000) return false;
+  if (Date.now() - lastProactiveAt < c.monitor.minGapMs) return false;
+  return true;
+}
+
+function proactive(kind, extra = {}) {
+  const c = config.load();
+  const s = monitor ? monitor.snap : null;
+  if (!s || !s.sessionId) return;
+  // 只对"本次启动之后新发生的事"有反应
+  if (!s.lastEventAt || s.lastEventAt < BOOT_AT) return;
+  if (!proactiveAllowed()) return;
+
+  let prompt = '';
+  if (kind === 'taskDone') {
+    if (!c.monitor.speakOnDone) return;
+    prompt = PROMPT_TASK_DONE;
+  } else if (kind === 'taskLong') {
+    if (!c.monitor.speakOnLong) return;
+    prompt = PROMPT_TASK_LONG;
+  } else if (kind === 'taskStall') {
+    if (!c.monitor.speakOnStall) return;
+    prompt = PROMPT_TASK_STALL;
+  } else {
+    return;
+  }
+  if (extra.withRest) prompt += '\n另外：主人已经连着干了一个多小时了，最后补一句让他歇一会儿。';
+
+  lastProactiveAt = Date.now();
+  if (kind === 'taskDone' && win && !win.isVisible()) {
+    notify('这件事做完了', s.task ? taskName(s.task) : '去看看结果？');
+  }
+  log('[proactive] ' + kind + (extra.note ? ' · ' + extra.note : ''));
+  think({ userText: prompt, internal: true });
+}
+
+function notify(title, body) {
+  try {
+    if (!Notification.isSupported()) return;
+    const n = new Notification({ title, body, silent: true });
+    n.on('click', () => { showWindow(); });
+    n.show();
+  } catch {}
+}
+
+/* ── 监控接线 ── */
+function startMonitor() {
+  const c = config.load();
+  if (monitor) monitor.stop();
+  monitor = new Monitor();
+
+  monitor.on('update', (s) => {
+    lastWorkSeenAt = Date.now();
+    send('monitor', snapshotForUi(s));
+    // 状态映射到动作（只在空闲态跟随，避免打断正在播的动作）
+    if (s.phase === 'running') send('phase', { phase: 'work' });
+    else if (s.phase === 'done') send('phase', { phase: 'done' });
+    else send('phase', { phase: 'idle' });
+  });
+
+  monitor.on('taskStart', () => {
+    const now = Date.now();
+    // 歇了半小时以上再开工 → 连续工作时间重新算
+    if (!workSpanStart || now - lastWorkSeenAt > 30 * 60e3) workSpanStart = now;
+    lastWorkSeenAt = now;
+  });
+
+  monitor.on('taskDone', (s) => {
+    const now = Date.now();
+    if (!workSpanStart) workSpanStart = now;
+    const c2 = config.load();
+    // 连着干太久：不单独说，合并进"做完了"那句的尾巴
+    const withRest =
+      c2.monitor.speakOnRest !== false &&
+      now - workSpanStart > 95 * 60e3 &&
+      now - restNoticedAt > 90 * 60e3;
+    if (withRest) {
+      restNoticedAt = now;
+      workSpanStart = now;
+    }
+    proactive('taskDone', { withRest, note: s.task ? taskName(s.task) : '' });
+  });
+
+  monitor.on('taskLong', ({ elapsedMs, round }) => {
+    proactive('taskLong', { note: Math.round(elapsedMs / 60000) + 'min#' + round });
+  });
+
+  monitor.on('taskStall', ({ idleMs }) => {
+    proactive('taskStall', { note: Math.round(idleMs / 60000) + 'min 无动静' });
+  });
+
+  if (c.monitor.enabled) monitor.start(c.monitor.root);
+}
+
+function snapshotForUi(s) {
+  const t = s.task;
+  return {
+    sessionId: s.sessionId,
+    title: s.sessionTitle || (t && t.title) || '',
+    phase: s.phase,
+    userText: s.userText,
+    assistantText: s.assistantText,
+    lastEventAt: s.lastEventAt,
+    task: t
+      ? {
+          name: taskName(t),
+          status: t.status,
+          startedAt: t.startedAt,
+          endedAt: t.endedAt,
+          durationMs: t.status === 'running' ? Date.now() - t.startedAt : t.durationMs,
+          steps: t.steps,
+        }
+      : null,
+    history: (s.history || []).map((h) => ({
+      name: taskName(h),
+      status: h.status,
+      durationMs: h.durationMs,
+      endedAt: h.endedAt,
+    })),
+  };
+}
+
+/* ── 托盘 ── */
+function trayImage() {
+  const p = path.join(__dirname, '..', '..', 'res', 'trayTemplate.png');
+  let img = nativeImage.createFromPath(p);
+  if (img.isEmpty()) {
+    // 兜底：8x8 全透明，至少不崩
+    img = nativeImage.createEmpty();
+  }
+  img.setTemplateImage(true);
+  return img;
+}
+
+function buildTrayMenu() {
+  const c = config.load();
+  const vis = win && win.isVisible();
+  return Menu.buildFromTemplate([
+    { label: `${c.buddy.name} · ${vis ? '在屏幕上' : '已收起'}`, enabled: false },
+    { type: 'separator' },
+    { label: vis ? '收起' : '叫出来', click: () => (vis ? hideWindow() : showWindow()) },
+    { label: '说句话', click: () => { showWindow(); send('ask', { focus: true }); } },
+    { label: '按住说话  ⌘⇧Space', click: () => toggleRecord() },
+    { type: 'separator' },
+    {
+      label: '形象',
+      submenu: ['D', 'E', 'F', 'G'].map((k) => ({
+        label: `Avatar ${k}${c.avatar === k ? '  ✓' : ''}`,
+        click: () => { config.save({ avatar: k }); send('avatar', { key: k }); },
+      })),
+    },
+    {
+      label: '声音',
+      submenu: [
+        {
+          label: '说话（TTS）', type: 'checkbox', checked: c.voice.enabled,
+          click: (i) => { config.save({ voice: { enabled: i.checked } }); rebuildTray(); },
+        },
+        {
+          label: '只在我叫它时才说', type: 'checkbox', checked: !c.monitor.speakOnDone,
+          click: (i) => {
+            config.save({
+              monitor: {
+                speakOnDone: !i.checked,
+                speakOnLong: !i.checked,
+                speakOnStall: !i.checked,
+                speakOnRest: !i.checked,
+              },
+            });
+            rebuildTray();
+          },
+        },
+      ],
+    },
+    { type: 'separator' },
+    { label: '打开设置…', click: () => { showWindow(); send('settings', {}); } },
+    {
+      label: (asrStatus.speech === 3 && (asrStatus.mic === true || asrStatus.micSystem === 'granted'))
+        ? '语音权限 ✓ 正常'
+        : '语音权限 ✗ 未就绪（点这里修）',
+      click: () => { showWindow(); send('settings', {}); },
+    },
+    { label: '打开数据目录', click: () => shell.openPath(USER_DIR) },
+    { type: 'separator' },
+    { label: '退出', click: () => { quitting = true; app.quit(); } },
+  ]);
+}
+
+function rebuildTray() {
+  if (tray) tray.setContextMenu(buildTrayMenu());
+}
+
+function showWindow() {
+  if (!win) return;
+  win.showInactive();
+  rebuildTray();
+}
+function hideWindow() {
+  if (!win) return;
+  win.hide();
+  rebuildTray();
+}
+
+/* ── 录音（单次，按住说话） ── */
+function toggleRecord() {
+  if (!asr) { log('[asr] not initialized'); return; }
+  if (asr.running) {
+    log('[asr] stop requested');
+    asr.stop();
+    send('record', { state: 'stopping' });
+  } else {
+    stopSpeaking();
+    const c = config.load();
+    log('[asr] start requested, bin=' + ASR_BIN + ' exists=' + fs.existsSync(ASR_BIN));
+    asr.start({ lang: c.asr.lang, silenceMs: c.asr.silenceMs, maxSeconds: c.asr.maxSeconds });
+    send('record', { state: 'starting' });
+  }
+}
+
+/* ══════════ 常驻聆听 ══════════
+ * 设计要点（用户明确要求）：
+ *   · 麦克风与识别常开（系统 ASR，端侧），但这不等于一直在调模型
+ *   · 只有「听到一句人话」或「WorkBuddy 有事件」时才调 LLM，空闲时零调用
+ *   · 娃娃自己在说话时 mute 掉采集，避免自听自答
+ */
+let alwaysOn = false;
+let asrStartedAt = 0;    // 上一次 ASR 进程起来的时刻：用来判"秒死"并退避
+let asrFailStreak = 0;
+let listenRestartTimer = null;
+let lastLiveAt = 0;        // 实时字幕节流
+let lastLiveText = '';
+let micPeak = 0;           // 麦克风电平峰值（自检用）
+let micPeakAt = Date.now();
+let micQuietLoggedAt = 0;
+let lastPartialLogAt = 0;  // "半句"日志节流（漏声明过一次，导致每次 partial 都抛 ReferenceError）
+
+function asrOpts(always) {
+  const c = config.load();
+  return {
+    lang: c.asr.lang,
+    silenceMs: c.asr.silenceMs,
+    maxSeconds: c.asr.maxSeconds,
+    always,
+    maxUtterances: c.asr.recycleUtterances || 30,
+    device: c.asr.device || '',
+    // 授权只由应用自己问一次，子进程绝不再问 —— 否则 TCC 会被两个身份来回问
+    noMicAsk: true,
+  };
+}
+
+function startListen(reason) {
+  if (!asr) return;
+  if (asr.running) return;
+  const c = config.load();
+  if (!c.voice.alwaysListen) return;
+  if (!fs.existsSync(ASR_BIN)) { send('listen', { on: false, error: '缺少 bin/asr' }); return; }
+  alwaysOn = true;
+  asrStartedAt = Date.now();
+  asr.start(asrOpts(true));
+  send('listen', { on: true, reason: reason || '' });
+  log('[listen] start (' + (reason || 'boot') + ')');
+}
+
+function stopListen() {
+  alwaysOn = false;
+  if (listenRestartTimer) { clearTimeout(listenRestartTimer); listenRestartTimer = null; }
+  if (asr && asr.running) asr.stop();
+  send('listen', { on: false });
+  log('[listen] stop');
+}
+
+function scheduleListenRestart(delay) {
+  if (!alwaysOn) return;
+  if (listenRestartTimer) clearTimeout(listenRestartTimer);
+  listenRestartTimer = setTimeout(() => {
+    listenRestartTimer = null;
+    if (alwaysOn && asr && !asr.running) {
+      log('[listen] restart');
+      asr.start(asrOpts(true));
+    }
+  }, delay || 900);
+}
+
+/** 本地小门槛：挡掉气泡音、单字噪声、明显的自己人声残留，不花一次模型调用 */
+function worthJudging(text) {
+  const t = String(text || '').trim();
+  if (t.length < 2) return false;
+  const meaningful = t.replace(/[^\p{L}\p{N}]/gu, '');
+  return meaningful.length >= 2;
+}
+
+/** 听见有人叫我名字（含常见误听写法）→ 直接当在跟我说话，省一次判断 */
+function nameHit(text) {
+  const t = String(text || '').toLowerCase();
+  const c = config.load();
+  const hints = [
+    c.buddy.name, 'baby', 'bab', '贝比', '贝贝', '宝贝', '小伴', '小曼', '小班', '小半', '小帮',
+  ];
+  return hints.some((h) => h && t.includes(String(h).toLowerCase()));
+}
+
+/** 每听到一句 → 先判断是不是在对我说，是就回，不是就闭嘴（一次调用搞定） */
+async function handleUtterance(text) {
+  const t = String(text || '').trim();
+  if (!worthJudging(t)) { log('[listen] drop noise: ' + t.slice(0, 20)); return; }
+  // 这句可能就是我自己刚说的（回声消除没吃干净）→ 当没听见
+  if (echoLike(t) && Date.now() - lastSpokeAt < 2600) {
+    log('[listen] drop self echo: ' + t.slice(0, 24));
+    return;
+  }
+  if (speaking) {
+    // 主人在我说话的时候开口 → 立刻收声，听他说完
+    log('[listen] barge-in: ' + t.slice(0, 24));
+    stopSpeaking();
+  }
+  const c = config.load();
+  turnT0 = Date.now();      // 计时起点：从"听见一句"到"第一声出口"有多久
+  lastHeardAt = turnT0;
+  send('heard', { text: t });
+  log('[listen] heard: ' + t.slice(0, 60));
+
+  // 「别烦我」→ 立刻静音 10 分钟。这是主人的明确指令，优先级高于一切。
+  // 只在气泡里回一句字，不出声、不撒娇 —— 这时候出声本身就是烦人的一部分。
+  if (QUIET_WORDS.test(t)) {
+    quietUntil = Date.now() + 10 * 60e3;
+    stopSpeaking();
+    send('chat', { role: 'assistant', text: '（好，我安静。）' });
+    log('[quiet] 主人让我安静 10 分钟');
+    send('heard', { text: t, replied: true });
+    return;
+  }
+
+  // 叫名字 = 一定在跟我说话，直接答（省一次判官调用，也不会被误判成 skip）
+  if (nameHit(t)) {
+    pushHistory('user', t);
+    log('[listen] name hit -> direct reply');
+    await think({ userText: t });
+    send('heard', { text: t, replied: true });
+    return;
+  }
+
+  if (!c.asr.judge) {
+    pushHistory('user', t);
+    send('chat', { role: 'user', text: t });
+    think({ userText: t });
+    return;
+  }
+  // judge 模式：模型先判断，不是对它说的就只输出 <skip>，不发一声
+  const r = await think({ userText: t, judge: true });
+  if (!r) return;
+  const skipped = /<\s*skip\s*\/?>/i.test(r.text || '');
+  send('heard', { text: t, replied: !skipped });
+}
+
+/** 主动要权限：会真的弹系统窗，所以只在用户点「检查权限」时调用 */
+async function requestAsrPermission() {
+  if (global.__refreshAsrStatus) return global.__refreshAsrStatus({ timeoutMs: 25000, requestMic: true });
+  return asrStatus;
+}
+
+/* ── IPC ── */
+ipcMain.handle('pet:init', async () => {
+  const c = config.load();
+  const hasAsr = fs.existsSync(ASR_BIN);
+  return {
+    config: c,
+    motions: config.MOTIONS,
+    avatar: c.avatar,
+    avatars: ['D', 'E', 'F', 'G'],
+    monitor: monitor ? snapshotForUi(monitor.snap) : null,
+    asrAvailable: hasAsr,
+    versions: { electron: process.versions.electron, chrome: process.versions.chrome },
+    paths: { userData: USER_DIR },
+  };
+});
+
+ipcMain.on('pet:stop-speak', () => {
+  // 点她一下 = 打断。没有回声消除时，主人"开口"她听不见（说着话是闭麦的），
+  // 所以必须给一个不需要她听见的打断方式 —— 点一下最直觉。
+  if (speaking || speechQueue.length) {
+    log('[speak] 主人点了一下，收声');
+    stopSpeaking();
+  }
+});
+
+ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
+  const t = String(text || '').trim();
+  if (!t) return { ok: false };
+  stopSpeaking();
+  pushHistory('user', t);
+  send('chat', { role: 'user', text: t });
+  think({ userText: t });
+  return { ok: true };
+});
+
+ipcMain.handle('pet:config', (_e, patch) => {
+  const c = config.save(patch || {});
+  if (patch && patch.monitor) startMonitor();
+  if (patch && patch.avatar) send('avatar', { key: c.avatar });
+  rebuildTray();
+  return c;
+});
+
+ipcMain.handle('pet:probe', async () => {
+  const c = config.load();
+  const out = {};
+  // LLM
+  const t0 = Date.now();
+  try {
+    const r = await llm.chat({
+      ...c.llm, messages: [{ role: 'user', content: '回一个字：好' }], maxTokens: 12, timeoutMs: 20000,
+    });
+    out.llm = { ok: true, ms: Date.now() - t0, text: (r.text || '').slice(0, 40) };
+  } catch (e) {
+    out.llm = { ok: false, ms: Date.now() - t0, error: e.message };
+  }
+  out.tts = await tts.probe(c.tts);
+  out.asr = { ok: fs.existsSync(ASR_BIN), path: ASR_BIN };
+  out.monitor = { file: monitor ? monitor.file : null, snap: monitor ? snapshotForUi(monitor.snap) : null };
+  return out;
+});
+
+ipcMain.on('pet:hit', (_e, v) => setInteractive(!!v));
+ipcMain.on('pet:audio-done', () => finishSpeech());
+ipcMain.on('pet:record', () => toggleRecord());
+ipcMain.on('pet:listen', (_e, v) => {
+  const want = v === 'toggle' ? !alwaysOn : !!v;
+  if (want) { config.save({ voice: { alwaysListen: true } }); startListen('user'); }
+  else { stopListen(); config.save({ voice: { alwaysListen: false } }); }
+  send('listen', { on: alwaysOn });
+});
+ipcMain.handle('pet:asr-status', async (_e, opts) => {
+  if (opts && opts.request) return requestAsrPermission();
+  if (global.__refreshAsrStatus) return global.__refreshAsrStatus({ timeoutMs: 4000 });
+  return asrStatus;
+});
+ipcMain.on('pet:open-privacy', (_e, kind) => {
+  const pane = kind === 'mic'
+    ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
+    : 'x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition';
+  shell.openExternal(pane);
+});
+ipcMain.on('pet:vis', (_e, v) => (v ? showWindow() : hideWindow()));
+ipcMain.on('pet:quit', () => { quitting = true; app.quit(); });
+ipcMain.on('pet:open', (_e, what) => {
+  if (what === 'workbuddy') shell.openPath('/Applications/WorkBuddy.app');
+  else if (what === 'userData') shell.openPath(USER_DIR);
+});
+ipcMain.handle('pet:resize', (_e, { w, h }) => {
+  if (!win) return;
+  const [x, y] = win.getPosition();
+  win.setBounds({ x, y, width: Math.round(w), height: Math.round(h) });
+  config.save({ window: { w: Math.round(w), h: Math.round(h) } });
+});
+
+/* ── 自检：定时截图后退出，用于无头验证真实画面 ──
+ *  两种驱动方式：
+ *   1) 环境变量 BUDDY_PET_SHOT / _SCRIPT / _SHOT_MS / _SHOT_DELAY / _SHOT_EXTRA
+ *   2) <userData>/selftest.json（打包版用 open 启动时拿不到环境变量，只能走这个）
+ *      { "shotDir": "/tmp/ps", "script": ["window.pet.record()"], "delay": 5000, "every": 2500, "extra": 0 }
+ */
+function readSelfTestSpec() {
+  const env = process.env.BUDDY_PET_SHOT;
+  if (env) {
+    return {
+      shotDir: env,
+      script: (process.env.BUDDY_PET_SCRIPT || '').split('|').filter(Boolean),
+      every: Number(process.env.BUDDY_PET_SHOT_MS || 3000),
+      delay: Number(process.env.BUDDY_PET_SHOT_DELAY || 4000),
+      extra: Number(process.env.BUDDY_PET_SHOT_EXTRA || 1),
+    };
+  }
+  const f = path.join(USER_DIR, 'selftest.json');
+  try {
+    if (!fs.existsSync(f)) return null;
+    const spec = JSON.parse(fs.readFileSync(f, 'utf8'));
+    fs.unlinkSync(f);              // 一次性：跑完就删，避免每次启动都自检
+    return {
+      shotDir: spec.shotDir || path.join(USER_DIR, 'shots'),
+      script: Array.isArray(spec.script) ? spec.script : (spec.script ? String(spec.script).split('|') : []),
+      every: Number(spec.every || 3000),
+      delay: Number(spec.delay || 4000),
+      extra: Number(spec.extra ?? 1),
+    };
+  } catch (e) {
+    log('[selftest] bad spec', e.message);
+    return null;
+  }
+}
+
+function scheduleSelfTest() {
+  const spec = readSelfTestSpec();
+  if (!spec) return;
+  const { shotDir, script, every, delay, extra } = spec;
+  log('[selftest] spec', spec);
+  let step = 0;
+
+  const tick = async () => {
+    try {
+      if (script[step]) {
+        const js = script[step];
+        log('[selftest] eval: ' + js.slice(0, 120));
+        const r = await win.webContents.executeJavaScript(js, true).catch((e) => 'ERR:' + e.message);
+        if (r !== undefined) log('[selftest] => ' + JSON.stringify(r).slice(0, 900));
+      }
+      step++;
+      const img = await win.webContents.capturePage();
+      const p = path.join(shotDir, `shot-${String(step).padStart(2, '0')}.png`);
+      fs.mkdirSync(shotDir, { recursive: true });
+      fs.writeFileSync(p, img.toPNG());
+      const sz = img.getSize();
+      log(`[selftest] shot ${p}  ${sz.width}x${sz.height}`);
+      if (step >= Math.max(script.length, 1) + extra) {
+        log('[selftest] done');
+        quitting = true;
+        markCleanExit();
+        app.exit(0);
+        return;
+      }
+      setTimeout(tick, every);
+    } catch (e) {
+      log('[selftest] fail ' + e.message);
+      quitting = true;
+      markCleanExit();
+      app.exit(1);
+    }
+  };
+  setTimeout(tick, delay);
+}
+
+/* ── 麦克风体检：哪个麦能收得到，测出来而不是猜 ── */
+function runMicProbeAll(sec) {
+  return new Promise((resolve) => {
+    log(`[probe] 逐个麦克风测电平，每个 ${sec} 秒`);
+    const p = spawn(ASR_BIN, ['--probe-all', '--probe-sec', String(sec)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let buf = '';
+    let best = { name: '', peak: 0, id: 0 };
+    p.stdout.setEncoding('utf8');
+    p.stdout.on('data', (chunk) => {
+      buf += chunk;
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try {
+          const m = JSON.parse(line);
+          if (m.t === 'probe') {
+            log(`[probe] ${m.name} 峰值=${Number(m.peak).toFixed(4)} 绑定=${m.bound}${m.err ? ' 错误=' + m.err : ''}`);
+            if (m.peak > best.peak) best = { name: m.name, peak: m.peak, id: m.id };
+          }
+          if (m.t === 'probeBegin') log(`[probe] 共 ${m.v} 个输入设备`);
+        } catch {}
+      }
+    });
+    p.stderr.setEncoding('utf8');
+    p.stderr.on('data', (d) => {
+      const s = String(d).trim();
+      if (s) log('[probe stderr] ' + s.slice(0, 200));
+    });
+    const done = () => {
+      if (best.name) {
+        log(`[probe] 最适合收人声的是「${best.name}」（峰值 ${best.peak.toFixed(4)}），已记进配置`);
+        config.save({ asr: { device: best.name } });
+      } else {
+        log('[probe] 所有设备都没收到声音');
+      }
+      resolve(best);
+    };
+    p.on('exit', done);
+    p.on('error', () => resolve(null));
+    setTimeout(() => { try { p.kill('SIGKILL'); } catch {} }, (sec * 8 + 15) * 1000);
+  });
+}
+
+/* ── 启动 ── */
+const lock = app.requestSingleInstanceLock();
+if (!lock) {
+  log('[boot] single-instance lock 未拿到，退出（已有实例在跑）');
+  app.quit();
+} else {
+  app.on('second-instance', () => showWindow());
+
+  app.whenReady().then(() => {
+    createWindow();
+
+    app.on('child-process-gone', (_e, d) => {
+      log('[child-gone] ' + JSON.stringify({ type: d.type, name: d.name, reason: d.reason, exitCode: d.exitCode }));
+    });
+    app.on('gpu-process-crashed', () => log('[gpu] 进程崩了（会自己恢复，只是画面会顿一下）'));
+    try {
+      tray = new Tray(trayImage());
+      tray.setToolTip('workbaby · 你的桌面伙伴');
+      tray.setContextMenu(buildTrayMenu());
+      tray.on('click', () => (win && win.isVisible() ? hideWindow() : showWindow()));
+    } catch (e) {
+      console.error('[tray]', e.message);
+    }
+
+    // ── 麦克风授权：由**应用自己**去要，不让子进程 asr 去要 ──────────
+    // 为什么：TCC 记授权，记的是"谁去要的"。让 bin/asr 去要，责任进程可能
+    // 被解析成那个裸可执行文件，于是授权记在一个既没有 bundle id、路径又随
+    // 打包变化的身份上 —— 表现就是每次启动都重新弹框。
+    // 应用自己 askForMediaAccess 一次，授权就牢牢记在 cn.haminn.workbaby 上；
+    // 再配合固定证书签名（tools/make-signing-cert.sh），重打包多少次都不会再问。
+    (async () => {
+      try {
+        const before = systemPreferences.getMediaAccessStatus('microphone');
+        log('[mic] 系统授权状态=' + before);
+        if (before !== 'granted') {
+          const ok = await systemPreferences.askForMediaAccess('microphone');
+          log('[mic] 申请结果=' + ok + '，之后状态=' + systemPreferences.getMediaAccessStatus('microphone'));
+        }
+      } catch (e) {
+        log('[mic] 申请授权出错：' + e.message);
+      }
+    })();
+
+    asr = new Asr(ASR_BIN, log);
+    const SPEECH_ZH = ['待授权', '缺语言包', '不可用', '可用'];
+    function applyStatus(st) {
+      asrStatus = { ...asrStatus, ...st, checkedAt: Date.now() };
+      send('asrStatus', asrStatus);
+      log('[asr] status', asrStatus);
+      return asrStatus;
+    }
+
+    /** 静默查一次状态：不采集、默认不弹窗（SpeechAnalyzer 不需要 Siri/听写） */
+    let firstProbe = true;
+    async function refreshAsrStatus({ timeoutMs = 4000, requestMic = false } = {}) {
+      if (!fs.existsSync(ASR_BIN)) {
+        return applyStatus({ speech: -1, mic: false, note: '缺少 bin/asr' });
+      }
+      let mic = null;
+      try { mic = systemPreferences.getMediaAccessStatus('microphone'); } catch {}
+      const r = await probeAccess(ASR_BIN, { timeoutMs, requestMic });
+      if (r.timedOut) {
+        return applyStatus({ speech: 0, mic, note: 'pending', micSystem: mic });
+      }
+      firstProbe = false;
+      const ok = r.speech === 3 && r.mic;
+      if (!ok && firstProbe === false && !requestMic) { /* 静默，不打扰 */ }
+      return applyStatus({
+        speech: r.speech,
+        mic: r.mic,
+        micSystem: mic,
+        locale: r.locale || '',
+        engine: r.engine || '',
+        note: ok ? 'ok' : (r.mic ? (SPEECH_ZH[r.speech] || '未知') : '待授权'),
+        error: r.error || '',
+      });
+    }
+    global.__refreshAsrStatus = refreshAsrStatus;
+
+    asr.on('auth', (a) => {
+      applyStatus({
+        speech: a.speech, mic: a.mic, locale: a.locale || '', engine: a.engine || '',
+        note: a.speech === 3 && a.mic ? 'ok' : 'denied',
+      });
+      if (a.speech !== 3) {
+        send('asrError', {
+          message: '这台机器的「' + (a.locale || 'zh-CN') + '」语音模型还没装好，装完我才能听懂你。',
+        });
+      } else if (!a.mic) {
+        send('asrError', { message: '麦克风被关了，去「系统设置 → 隐私与安全性 → 麦克风」勾上我。' });
+      }
+    });
+    asr.on('ready', () => {
+      log('[asr] ready' + (alwaysOn ? ' (always)' : ''));
+      if (alwaysOn) send('listen', { on: true, ready: true });
+      else send('record', { state: 'listening' });
+    });
+    asr.on('audioPlan', (plan) => {
+      log('[asr] 音频链路就绪（方案：' + (plan || '?') + '）');
+      send('aec', { on: !!asr.aec, plan });
+    });
+    asr.on('aec', (on) => {
+      log('[asr] 回声消除 ' + (on ? '已开启 —— 我说话时也能听见你（可随时打断）' : '不可用 —— 我说话时会闭麦'));
+      send('aec', { on });
+    });
+    asr.on('micDevice', (d) => {
+      if (d.on) log(`[asr] 输入设备已钉到「${d.name}」`);
+      else if (d.note) log(`[asr] 输入设备：${d.note}`);
+      else if (d.name) log(`[asr] 想钉到「${d.name}」但绑定失败，先用系统默认`);
+    });
+    asr.on('fmt', (f) => log(`[asr] 格式 硬件=${f.hw} → 识别=${f.tgt}`));
+    asr.on('partial', (t) => {
+      send('asrPartial', { text: t });
+      // 调试用：能听到"半句"就说明识别真的在工作（限流，别刷屏）
+      const now0 = Date.now();
+      if (t && now0 - lastPartialLogAt > 1800) {
+        lastPartialLogAt = now0;
+        log('[asr] 半句: ' + String(t).slice(0, 40));
+      }
+      // 常驻监听时把"半句话"实时显示在胶囊里，主人能看到自己被听清了
+      if (!alwaysOn) return;
+      const now = Date.now();
+      if (now - lastLiveAt < 110 || t === lastLiveText) return;
+      lastLiveAt = now;
+      lastLiveText = t;
+      send('asrLive', { text: t });
+    });
+    asr.on('level', (v) => {
+      send('asrLevel', { v });
+      // 麦克风电平自检：安静时也会走动，方便判断"到底有没有收到声音"。
+      // 但不能每 5 秒写一行 —— 常驻一整天就是几万行垃圾。只在这两种时候记：
+      //   · 真的有人声（峰值 > 0.3，正常说话就是这个量级）
+      //   · 或者安静满 5 分钟，留一条心跳证明链路还活着
+      if (v > micPeak) micPeak = v;
+      const now = Date.now();
+      if (now - micPeakAt > 5000) {
+        const loud = micPeak > 0.3;
+        if (loud || now - micQuietLoggedAt > 300000) {
+          log(`[asr] lvl 峰值 ${micPeak.toFixed(3)}`);
+          micQuietLoggedAt = now;
+        }
+        micPeak = 0;
+        micPeakAt = now;
+      }
+    });
+    asr.on('utterance', (t) => {
+      lastLiveText = '';
+      send('asrLive', { text: '' });
+      handleUtterance(t);
+    });
+    asr.on('final', (t) => {
+      log('[asr] final', t);
+      send('asrFinal', { text: t });
+      if (!alwaysOn && t && t.trim().length >= 1) {
+        pushHistory('user', t.trim());
+        send('chat', { role: 'user', text: t.trim() });
+        think({ userText: t.trim() });
+      }
+    });
+    asr.on('recycle', (n) => log('[asr] recycled after ' + n + ' utterances'));
+    asr.on('error', (m) => { log('[asr] error', m); send('asrError', { message: m }); });
+    asr.on('end', () => { if (!alwaysOn) send('record', { state: 'idle' }); });
+    asr.on('exit', () => {
+      if (!alwaysOn) { send('record', { state: 'idle' }); return; }
+      // 起来 3 秒内就死的算一次失败。连续失败就退避，否则「授权没了」这种情况
+      // 会每 1.2 秒刷一次日志、把 CPU 白烧掉。
+      const lived = Date.now() - (asrStartedAt || 0);
+      asrFailStreak = lived < 3000 ? asrFailStreak + 1 : 0;
+      if (asrFailStreak >= 3) {
+        const wait = Math.min(60000, 4000 * asrFailStreak);
+        log(`[listen] 连续失败 ${asrFailStreak} 次，${Math.round(wait / 1000)} 秒后再试`);
+        if (asrFailStreak === 3) {
+          send('asrError', { message: '我听不见了（麦克风可能被系统关掉），去「系统设置 → 隐私与安全性 → 麦克风」把 workbaby 勾上。' });
+        }
+        scheduleListenRestart(wait);
+      } else {
+        scheduleListenRestart(1200);
+      }
+    });
+
+    startMonitor();
+
+    /* ── 心跳自愈：每 20 秒检查自己有没有坏掉 ─────────────────────────
+     * 桌宠没人看着。坏了就自己修，别等主人发现"它又不理我了"。
+     * 检查项都只看"该在的东西还在不在"，不做昂贵操作。 */
+    let lastHealAt = 0;
+    selfHealTimer = setInterval(() => {
+      try {
+        const now = Date.now();
+        // 1) 该在听却没在听（既没进程也没排着重启）→ 拉起来
+        if (alwaysOn && asr && !asr.running && !listenRestartTimer) {
+          log('[heal] 语音进程不见了，重新拉起');
+          startListen('heal');
+        }
+        // 2) 窗口被毁了 → 重建
+        if (!win || win.isDestroyed()) {
+          log('[heal] 窗口没了，重建');
+          createWindow();
+          return;
+        }
+        // 3) 渲染进程死了 30 秒还没活过来（reload 也失败）→ 重建窗口
+        if (rendererGoneAt && now - rendererGoneAt > 30000) {
+          log('[heal] 渲染进程超过 30 秒没恢复，重建窗口');
+          rendererGoneAt = 0;
+          try { win.destroy(); } catch {}
+          createWindow();
+          return;
+        }
+        // 4) 闭麦卡住：说了半分钟还没开麦 → 强制开
+        if (speaking && now - lastHealAt > 45000) unmuteAsr('心跳超时');
+
+        // 5) 看门狗自己掉队了 → 补一个。它和我们是互相兜底的关系：
+        //    它看着我崩了就拉我，我看着它没了就重布防。
+        ensureWatchdog();
+
+        lastHealAt = now;
+      } catch (e) {
+        log('[heal] 自检出错（忽略，继续跑）：' + e.message);
+      }
+    }, 20000);
+
+    /* ── 看门狗：进程崩了得有人在场地外把它拉回来 ───────────────────
+     * launchd 用不了（bootstrap 报 EIO），所以自己带一个脱离进程组的影子。
+     * 它靠"父进程活着吗"来判断，主进程被 -9 / 段错误都拦不住它。 */
+    startWatchdog();
+
+    setTimeout(() => {
+      // 一次性麦克风体检：把每个能收音的设备各开几秒，看谁的峰值高
+      const c0 = config.load();
+      if (c0.asr && c0.asr.probeAll) {
+        config.save({ asr: { probeAll: false } });
+        runMicProbeAll(Number(c0.asr.probeSec) || 3).then(() => {
+          refreshAsrStatus({ timeoutMs: 4000 }).then((st) => { if (st && st.speech === 3) startListen('after-probe'); });
+        });
+        return;
+      }
+      refreshAsrStatus({ timeoutMs: 4000 })
+        .then((st) => {
+          if (st && st.speech === 3) startListen('boot');
+        })
+        .catch(() => {});
+    }, 2200);
+
+    try {
+      globalShortcut.register('CommandOrControl+Shift+Space', () => {
+        if (alwaysOn) stopListen();
+        else startListen('hotkey');
+      });
+      globalShortcut.register('CommandOrControl+Shift+B', () => (win && win.isVisible() ? hideWindow() : showWindow()));
+    } catch (e) {
+      console.error('[hotkey]', e.message);
+    }
+
+    app.on('activate', () => showWindow());
+  });
+}
+
+app.on('before-quit', () => {
+  quitting = true;
+  markCleanExit();
+  if (monitor) monitor.stop();
+  if (asr) asr.kill();
+  globalShortcut.unregisterAll();
+});
+
+app.on('window-all-closed', (e) => {
+  // 桌宠常驻，不退出
+  e.preventDefault?.();
+});
