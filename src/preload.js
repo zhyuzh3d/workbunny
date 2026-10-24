@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('pet', {
   say: (text) => ipcRenderer.invoke('pet:say', { text }),
   config: (patch) => ipcRenderer.invoke('pet:config', patch),
   probe: () => ipcRenderer.invoke('pet:probe'),
+  avatars: () => ipcRenderer.invoke('pet:avatars'),
   resize: (w, h) => ipcRenderer.invoke('pet:resize', { w, h }),
   hit: (v) => ipcRenderer.send('pet:hit', v),
   audioDone: () => ipcRenderer.send('pet:audio-done'),

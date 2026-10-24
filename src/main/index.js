@@ -27,6 +27,7 @@ const llm = require('./llm');
 const tts = require('./tts');
 const { Monitor, taskName } = require('./monitor');
 const { Asr, probeAccess } = require('./asr');
+const avatars = require('./avatars');
 
 /* ── 数据目录（开发时可被 BUDDY_PET_HOME 指到工作区） ── */
 if (process.env.BUDDY_PET_NO_SANDBOX === '1') {
@@ -721,12 +722,14 @@ function startMonitor() {
   if (monitor) monitor.stop();
   monitor = new Monitor();
 
-  monitor.on('update', (s) => {
+  monitor.on('update', (v) => {
     lastWorkSeenAt = Date.now();
-    send('monitor', snapshotForUi(s));
+    // 单会话事件（assistant 说话/工具调用）传进来的是 snap，汇总视图从 monitor 现取
+    const view = v && v.running ? v : monitor.view;
+    send('monitor', snapshotForUi(view));
     // 状态映射到动作（只在空闲态跟随，避免打断正在播的动作）
-    if (s.phase === 'running') send('phase', { phase: 'work' });
-    else if (s.phase === 'done') send('phase', { phase: 'done' });
+    if (view && view.running && view.running.length) send('phase', { phase: 'work' });
+    else if (view && view.primary && view.primary.phase === 'done') send('phase', { phase: 'done' });
     else send('phase', { phase: 'idle' });
   });
 
@@ -764,26 +767,47 @@ function startMonitor() {
   if (c.monitor.enabled) monitor.start(c.monitor.root);
 }
 
-function snapshotForUi(s) {
-  const t = s.task;
-  return {
+/* 汇总视图 → 给界面的扁平结构。
+ * tasks 是「要轮播的那几行」：在跑的排前面（可以有多个），再跟最多两条刚做完的。 */
+function snapshotForUi(v) {
+  if (!v) return null;
+  // 兼容旧调用：传进来的是单个会话 snap 就包成 view
+  const view = v.running
+    ? v
+    : { primary: v, running: v.task && v.task.status === 'running' ? [v] : [], done: v.task && v.task.status !== 'running' ? [v] : [], count: 0 };
+  const one = (s) => ({
     sessionId: s.sessionId,
-    title: s.sessionTitle || (t && t.title) || '',
-    phase: s.phase,
-    userText: s.userText,
-    assistantText: s.assistantText,
-    lastEventAt: s.lastEventAt,
-    task: t
-      ? {
-          name: taskName(t),
-          status: t.status,
-          startedAt: t.startedAt,
-          endedAt: t.endedAt,
-          durationMs: t.status === 'running' ? Date.now() - t.startedAt : t.durationMs,
-          steps: t.steps,
-        }
-      : null,
-    history: (s.history || []).map((h) => ({
+    title: s.sessionTitle || (s.task && s.task.title) || '',
+    name: s.task ? taskName(s.task) : '',
+    status: s.task ? s.task.status : 'idle',
+    startedAt: s.task ? s.task.startedAt : 0,
+    endedAt: s.task ? s.task.endedAt : 0,
+    durationMs: s.task ? (s.task.status === 'running' ? Date.now() - s.task.startedAt : s.task.durationMs) : 0,
+    steps: s.task ? s.task.steps : 0,
+  });
+  const running = (view.running || []).map(one);
+  const done = (view.done || []).map(one);
+  const primary = view.primary;
+  const t = primary && primary.task;
+  return {
+    sessionId: primary ? primary.sessionId : null,
+    title: primary ? primary.sessionTitle || (t && t.title) || '' : '',
+    phase: running.length ? 'running' : (primary ? primary.phase : 'idle'),
+    userText: primary ? primary.userText : '',
+    assistantText: primary ? primary.assistantText : '',
+    lastEventAt: primary ? primary.lastEventAt : 0,
+    task: t ? {
+      name: taskName(t),
+      status: t.status,
+      startedAt: t.startedAt,
+      endedAt: t.endedAt,
+      durationMs: t.status === 'running' ? Date.now() - t.startedAt : t.durationMs,
+      steps: t.steps,
+    } : null,
+    running,                                     // 同时在跑的全部
+    runningCount: running.length,
+    tasks: [...running, ...done.slice(0, 2)],    // 界面上轮播的行
+    history: (primary ? primary.history || [] : []).map((h) => ({
       name: taskName(h),
       status: h.status,
       durationMs: h.durationMs,
@@ -816,9 +840,9 @@ function buildTrayMenu() {
     { type: 'separator' },
     {
       label: '形象',
-      submenu: ['D', 'E', 'F', 'G'].map((k) => ({
-        label: `Avatar ${k}${c.avatar === k ? '  ✓' : ''}`,
-        click: () => { config.save({ avatar: k }); send('avatar', { key: k }); },
+      submenu: avatars.scan().map((a) => ({
+        label: `${a.label}${c.avatar === a.key ? '  ✓' : ''}`,
+        click: () => { config.save({ avatar: a.key }); send('avatar', { key: a.key }); },
       })),
     },
     {
@@ -1034,17 +1058,24 @@ async function requestAsrPermission() {
 ipcMain.handle('pet:init', async () => {
   const c = config.load();
   const hasAsr = fs.existsSync(ASR_BIN);
+  const list = avatars.scan();
+  const current = avatars.resolve(c.avatar, list);
+  // 老配置存的是 'D' 这种短键，第一次跑顺手改写成文件名，之后就不用再换算
+  if (current && current !== c.avatar) { try { config.save({ avatar: current }); c.avatar = current; } catch {} }
   return {
     config: c,
     motions: config.MOTIONS,
-    avatar: c.avatar,
-    avatars: ['D', 'E', 'F', 'G'],
-    monitor: monitor ? snapshotForUi(monitor.snap) : null,
+    avatar: current,
+    avatars: list,
+    monitor: monitor ? snapshotForUi(monitor.view) : null,
     asrAvailable: hasAsr,
     versions: { electron: process.versions.electron, chrome: process.versions.chrome },
     paths: { userData: USER_DIR },
   };
 });
+
+/* 重扫形象目录：主人往 assets/models/ 丢一个 .vrm，打开设置就能看见，不用重启 */
+ipcMain.handle('pet:avatars', () => avatars.scan());
 
 ipcMain.on('pet:stop-speak', () => {
   // 点她一下 = 打断。没有回声消除时，主人"开口"她听不见（说着话是闭麦的），
@@ -1088,7 +1119,11 @@ ipcMain.handle('pet:probe', async () => {
   }
   out.tts = await tts.probe(c.tts);
   out.asr = { ok: fs.existsSync(ASR_BIN), path: ASR_BIN };
-  out.monitor = { file: monitor ? monitor.file : null, snap: monitor ? snapshotForUi(monitor.snap) : null };
+  out.monitor = {
+    file: monitor ? monitor.file : null,
+    files: monitor ? monitor.sessions.size : 0,
+    snap: monitor ? snapshotForUi(monitor.view) : null,
+  };
   return out;
 });
 

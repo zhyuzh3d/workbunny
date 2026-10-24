@@ -5,12 +5,21 @@ import { VRMAnimationLoaderPlugin, createVRMAnimationClip, VRMLookAtQuaternionPr
 import { makeRig, groundClip, soleHeight } from './ground.js';
 
 /* ═══════════ 常量 ═══════════ */
-const AVATARS = {
-  D: { file: 'AvatarSample_D.vrm', label: 'D' },
-  E: { file: 'AvatarSample_E.vrm', label: 'E' },
-  F: { file: 'AvatarSample_F.vrm', label: 'F' },
-  G: { file: 'AvatarSample_G.vrm', label: 'G' },
-};
+/* 形象列表由主进程扫 assets/models/*.vrm 得到（丢个文件进来就能换角色），
+ * 这里只留一份兜底，主进程没给的时候至少还能显示官方样例。 */
+let AVATAR_LIST = [];
+let AVATARS = {};
+const FALLBACK_AVATARS = [
+  { key: 'AvatarSample_D.vrm', file: 'AvatarSample_D.vrm', label: 'D' },
+  { key: 'AvatarSample_E.vrm', file: 'AvatarSample_E.vrm', label: 'E' },
+  { key: 'AvatarSample_F.vrm', file: 'AvatarSample_F.vrm', label: 'F' },
+  { key: 'AvatarSample_G.vrm', file: 'AvatarSample_G.vrm', label: 'G' },
+];
+function setAvatarList(list) {
+  AVATAR_LIST = (Array.isArray(list) && list.length ? list : FALLBACK_AVATARS);
+  AVATARS = {};
+  for (const a of AVATAR_LIST) AVATARS[a.key] = a;
+}
 const MOTION_FILES = [
   'idle_loop', 'LookAround', 'Relax', 'Thinking', 'Sleepy',
   'Goodbye', 'Clapping', 'Jump', 'Surprised', 'Angry', 'Sad', 'Blush',
@@ -24,7 +33,7 @@ let vrm = null;
 let mixer = null;
 let currentAction = null;
 let currentMotion = null;
-let avatarKey = 'D';
+let avatarKey = '';
 const rawAnims = new Map();
 const clips = new Map();
 let loading = false;
@@ -274,13 +283,13 @@ function loadMotions() {
 }
 
 function loadAvatar(key) {
-  if (loading) return;
+  if (loading) return Promise.resolve(false);
   loading = true;
   avatarKey = key;
-  const info = AVATARS[key] || AVATARS.D;
+  const info = AVATARS[key] || AVATAR_LIST[0];
   const ld = document.getElementById('hint');
 
-  vrmLoader.load(`./assets/models/${info.file}`, (gltf) => {
+  return new Promise((resolve) => vrmLoader.load(`./assets/models/${info.file}`, (gltf) => {
     if (mixer) { mixer.stopAllAction(); mixer.uncacheRoot(mixer.getRoot()); mixer = null; }
     currentAction = null;
     if (vrm) {
@@ -297,7 +306,7 @@ function loadAvatar(key) {
       });
     }
     vrm = gltf.userData.vrm;
-    if (!vrm) { loading = false; return; }
+    if (!vrm) { loading = false; resolve(false); return; }
     if (vrm.meta?.metaVersion === '0') vrm.scene.rotation.y = Math.PI;
     vrm.scene.traverse((o) => { o.frustumCulled = false; });
     if (vrm.humanoid) vrm.humanoid.autoUpdateHumanBones = true;
@@ -322,10 +331,12 @@ function loadAvatar(key) {
     loading = false;
     pet.config({ avatar: key });
     if (ld) ld.classList.add('hidden');
+    resolve(true);
   }, undefined, (e) => {
     console.error('模型加载失败', e);
     loading = false;
-  });
+    resolve(false);
+  }));
 }
 
 /* ═══════════ 命中测试（决定窗口哪块能点） ═══════════ */
@@ -658,9 +669,55 @@ document.getElementById('permOpenMic')?.addEventListener('click', () => pet.open
 /* ═══════════ 设置面板 ═══════════ */
 const settings = document.getElementById('settings');
 
+/* 形象切换：点一下立刻换，不用等「保存」；换完顺手写回配置 */
+function paintAvatars() {
+  const row = document.getElementById('avRow');
+  if (!row) return;
+  if (!row.childElementCount) {
+    for (const info of AVATAR_LIST) {
+      const b = document.createElement('button');
+      b.dataset.key = info.key;
+      b.textContent = info.label || info.key;
+      b.title = info.author ? `${info.label} · ${info.author}` : info.file || info.key;
+      b.addEventListener('click', () => switchAvatar(info.key));
+      row.appendChild(b);
+    }
+  }
+  for (const b of row.children) b.classList.toggle('on', b.dataset.key === avatarKey);
+}
+
+async function switchAvatar(k) {
+  if (k === avatarKey || loading) return;
+  const row = document.getElementById('avRow');
+  const btns = row ? [...row.children] : [];
+  for (const b of btns) b.disabled = true;
+  const label = (AVATARS[k] || {}).label || k;
+  showBubble('换一下…', 4000);
+  const ok = await loadAvatar(k);
+  for (const b of btns) b.disabled = false;
+  if (!ok) { showBubble('这个形象没加载起来。', 2200); paintAvatars(); return; }
+  paintAvatars();
+  showBubble(`${label} 来了。`, 1600);
+  pet.log(`[avatar] ${k} ${label}`);
+}
+
+/* 重扫模型目录：丢一个 .vrm 进来，下次打开设置就在列表里（不用重启、不用改代码） */
+async function refreshAvatars() {
+  try {
+    const list = await pet.avatars();
+    if (!Array.isArray(list) || !list.length) return;
+    setAvatarList(list);
+    const row = document.getElementById('avRow');
+    if (row) row.innerHTML = '';
+    paintAvatars();
+  } catch {}
+}
+
 function openSettings() {
   const c = cfg;
   document.getElementById('setName').value = c.buddy.name || '';
+  paintAvatars();
+  refreshAvatars();
   document.getElementById('setUrl').value = c.llm.baseURL || '';
   document.getElementById('setModel').value = c.llm.model || '';
   document.getElementById('setKey').value = c.llm.apiKey ? '••••••••' : '';
@@ -891,7 +948,7 @@ function wire() {
         paintActivityText(ev.text);
         break;
       case 'avatar':
-        if (ev.key && ev.key !== avatarKey) loadAvatar(ev.key);
+        if (ev.key && ev.key !== avatarKey) switchAvatar(ev.key);
         break;
       case 'record':
         if (ev.state === 'listening') { startRecordUI(); document.getElementById('recText').textContent = '在听…'; }
@@ -945,55 +1002,162 @@ let activityHideTimer = null;
 let lastWorkSnap = null;
 let lastActivityAt = 0;
 
-/** 状态条只说"在做什么/做完了没"，绝不显示命令、路径、工具名 */
+/* ── 状态条轮播 ──
+ * 同时可能有好几件事在跑（WorkBuddy 一次开几个任务很常见），一条横幅放不下，
+ * 就让这些行自己上下轮播：每 3.8 秒往上顶一行，新行从下方滑进来。 */
+const ACT_ROLL_MS = 3800;
+let actLines = [];        // 当前要轮播的全部行
+let actSig = '';          // 这些行的"身份"（不含耗时，避免每分钟重置到第一行）
+let actIdx = 0;
+let actTimer = null;
+let actTextMode = false;  // 临时提示语抢占时暂停轮播
+
+const actTextEl = () => document.getElementById('activityText');
+
+function actNode(t, i, n) {
+  const mins = Math.floor((t.durationMs || 0) / 60000);
+  const pos = n > 1 ? `${i + 1}/${n} · ` : '';
+  const lead =
+    t.status === 'running' ? `在干活 ${pos}`
+      : t.status === 'failed' ? '这次没成 · '
+        : t.status === 'abandoned' ? '没下文 · '
+          : '做完了 · ';
+  const name = t.name || '一件事';
+  const tail = mins >= 1 ? `（${mins} 分）` : '';
+  // 一行只放得下 ~17 个字：名字长就别塞耗时，不然会截成「（6 …」这种废字
+  const BUDGET = 17;
+  return lead + name + (tail && lead.length + name.length + tail.length <= BUDGET ? tail : '');
+}
+
+function activityLines(snap) {
+  const tasks = (snap && snap.tasks) || [];
+  const running = tasks.filter((t) => t.status === 'running');
+  const out = [];
+  running.forEach((t, i) => out.push(actNode(t, i, running.length)));
+  for (const t of tasks) if (t.status !== 'running') out.push(actNode(t, 0, 0));
+  return out.slice(0, 4);
+}
+
+function setActLine(txt) {
+  const el = actTextEl();
+  if (!el || el.textContent === txt) return;
+  el.textContent = txt;
+}
+
+function slideLine(txt, up = true) {
+  const el = actTextEl();
+  if (!el) return;
+  for (const a of el.getAnimations()) a.cancel();
+  const h = el.offsetHeight || 16;
+  const min = up ? -h : h;
+  el.animate(
+    [{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: `translateY(${min * 0.55}px)` }],
+    { duration: 190, easing: 'ease-in' }
+  ).onfinish = () => {
+    el.textContent = txt;
+    el.animate(
+      [{ opacity: 0, transform: `translateY(${-min * 0.55}px)` }, { opacity: 1, transform: 'translateY(0)' }],
+      { duration: 250, easing: 'ease-out' }
+    );
+  };
+}
+
+function stopRoll() {
+  if (actTimer) clearInterval(actTimer);
+  actTimer = null;
+}
+
+function startRoll() {
+  stopRoll();
+  if (actLines.length < 2 || actTextMode) return;
+  actTimer = setInterval(() => {
+    if (actTextMode || !actLines.length) return;
+    if (activity.classList.contains('hidden')) return;
+    actIdx = (actIdx + 1) % actLines.length;
+    slideLine(actLines[actIdx]);
+  }, ACT_ROLL_MS);
+}
+
+/** 状态条只说"在做什么/做完了没"，绝不显示命令、路径、工具名。多任务时轮播。 */
 function paintActivity(snap) {
   lastWorkSnap = snap;
   lastActivityAt = Date.now();
-  if (!snap || !snap.sessionId || !snap.task) { activity.classList.add('hidden'); return; }
-  const t = snap.task;
-  let txt = null;
-  if (t.status === 'running') {
-    const mins = Math.floor(t.durationMs / 60000);
-    txt = `在干活 · ${t.name}${mins >= 1 ? `（${mins} 分）` : ''}`;
-  } else if (t.status === 'failed') {
-    txt = `这次没成 · ${t.name}`;
-  } else if (t.status === 'ok') {
-    txt = `做完了 · ${t.name}`;
+  const lines = activityLines(snap);
+  if (!lines.length) {
+    activity.classList.add('hidden');
+    actLines = []; actSig = ''; actIdx = 0; stopRoll();
+    return;
   }
-  if (!txt) { activity.classList.add('hidden'); return; }
-  document.getElementById('activityText').textContent = txt;
+  const sig = ((snap && snap.tasks) || []).map((t) => `${t.sessionId}:${t.status}`).join('|');
+  actLines = lines;
   activity.classList.remove('hidden');
+  actTextMode = false;
+  if (sig !== actSig) {
+    // 任务集合变了：从第一条重新开始（这时候换行是合理的）
+    actSig = sig;
+    actIdx = 0;
+    setActLine(lines[0]);
+  } else {
+    // 只是耗时在涨：原地更新当前这一行，别把轮播打回第一行
+    setActLine(lines[actIdx % lines.length]);
+  }
+  startRoll();
 }
+
+/** 临时提示语（"看着呢"之类）：占住横幅，过一会儿自动回到轮播 */
 function paintActivityText(txt) {
   if (!txt) return;
-  document.getElementById('activityText').textContent = txt;
+  actTextMode = true;
+  stopRoll();
+  setActLine(txt);
   activity.classList.remove('hidden');
   if (activityHideTimer) clearTimeout(activityHideTimer);
   activityHideTimer = setTimeout(() => {
-    activity.classList.add('hidden');
+    actTextMode = false;
+    if (actLines.length) {
+      actIdx = 0;
+      setActLine(actLines[0]);
+      startRoll();
+    } else {
+      activity.classList.add('hidden');
+    }
   }, 5200);
 }
-// 任务在跑时，耗时得自己往上爬（监控只在有事件时才推）
+// 任务在跑时，耗时得自己往上爬（监控只在结构变化时才推）
 setInterval(() => {
-  if (lastWorkSnap && lastWorkSnap.task && lastWorkSnap.task.status === 'running') paintActivity(lastWorkSnap);
+  if (lastWorkSnap && lastWorkSnap.tasks && lastWorkSnap.tasks.some((t) => t.status === 'running')) {
+    paintActivity(lastWorkSnap);
+  }
 }, 15000);
 
 /* ═══════════ 启动 ═══════════ */
-(async function boot() {
-  cfg = (await pet.init()).config;
-  paintMute();
-  wire();
-  renderer.setAnimationLoop(frame);
-  await loadMotions();
-  loadAvatar(cfg.avatar || 'D');
-  fab.classList.remove('hidden');
-  setTimeout(() => fab.classList.add('show'), 300);
-  // 耳朵状态：配置里开着就先点亮，真实状态等主进程回报
-  listening = !!(cfg.voice && cfg.voice.alwaysListen);
-  paintListen();
-  setTimeout(async () => {
-    try { paintPerm(await pet.asrStatus()); } catch {}
-  }, 1500);
+/* 启动链路任何一步失败都必须留痕：以前是静默半死（面板能开、角色不出来） */
+(function boot() {
+  const run = async () => {
+    const init = await pet.init();
+    cfg = init.config;
+    setAvatarList(init.avatars);
+    paintMute();
+    wire();
+    renderer.setAnimationLoop(frame);
+    await loadMotions();
+    loadAvatar(AVATARS[init.avatar] ? init.avatar : AVATAR_LIST[0].key);
+    fab.classList.remove('hidden');
+    setTimeout(() => fab.classList.add('show'), 300);
+    // 耳朵状态：配置里开着就先点亮，真实状态等主进程回报
+    listening = !!(cfg.voice && cfg.voice.alwaysListen);
+    paintListen();
+    setTimeout(async () => {
+      try { paintPerm(await pet.asrStatus()); } catch {}
+    }, 1500);
+  };
+  run().catch((e) => {
+    window.__bootErr = String((e && e.stack) || e);
+    console.error('启动失败', e);
+    try { pet.log('[boot] 失败 ' + String((e && e.message) || e)); } catch {}
+    const ld = document.getElementById('hint');
+    if (ld) { ld.textContent = '我起不来了：' + String((e && e.message) || e).slice(0, 80); ld.classList.remove('hidden'); }
+  });
 })();
 
 window.__pet = () => ({
@@ -1001,10 +1165,13 @@ window.__pet = () => ({
   talkLevel: +talkLevel.toFixed(3), recording, avatarKey,
   audio: !!currentSource, emo: emoTimer > 0,
   hit: lastHit, dockOpen: dockMode === 'open',
-  asr: asrStat, listening,
+  asr: asrStat, listening, bootErr: window.__bootErr || null,
 });
 window.__play = (k) => { playOneShot(k, 0.18); return k; };
-window.__avatar = (k) => { loadAvatar(k); return k; };
+window.__avatar = (k) => { switchAvatar(k); return k; };
+window.__avatars = () => Object.keys(AVATARS);
+window.__openSettings = () => { openSettings(); return true; };
+addEventListener('error', (e) => { window.__err = String(e.message || e.error || e); });
 // 自检钩子：直接驱动底部胶囊的三种形态
 window.__dock = (m) => {
   if (m === 'open') openDock();

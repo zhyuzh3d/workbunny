@@ -11,6 +11,9 @@ const ROOT = path.resolve(__dirname, '..');
 const OUT = path.join(ROOT, 'shots', 'anim');
 
 const args = process.argv.slice(2).filter((a) => !a.startsWith('-') && !/\.(c|m)?js$/.test(a));
+const modelArg = (process.argv.slice(2).find((a) => a.startsWith('--model=')) || '').replace('--model=', '');
+const model = modelArg || 'AvatarSample_D.vrm';
+const tag = modelArg ? model.replace(/\.vrm$/i, '') + '-' : '';
 const jobs = [];
 if (args.length) {
   for (const a of args) {
@@ -32,7 +35,7 @@ app.whenReady().then(async () => {
     webPreferences: { contextIsolation: false, nodeIntegration: false },
   });
   const page = path.join(ROOT, 'src/renderer/dev-anim.html');
-  await win.loadFile(page);
+  await win.loadFile(page, { query: { m: model } });
 
   // 等就绪
   for (let i = 0; i < 120; i++) {
@@ -48,7 +51,7 @@ app.whenReady().then(async () => {
       if (ok !== true) { console.error(j.name, mode, ok); continue; }
       await new Promise((r) => setTimeout(r, 120));
       const img = await win.capturePage();
-      const f = path.join(OUT, `${j.name}-${mode}-${j.t.toFixed(1)}.png`);
+      const f = path.join(OUT, `${tag}${j.name}-${mode}-${j.t.toFixed(1)}.png`);
       fs.writeFileSync(f, img.toPNG());
       console.log('  ', path.relative(ROOT, f));
     }

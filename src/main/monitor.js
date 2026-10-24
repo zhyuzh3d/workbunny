@@ -1,10 +1,14 @@
 'use strict';
 /**
- * 任务级监控
+ * 任务级监控（多会话）
  * ─────────────────────────────────────────────────────────────
  * 数据源：WorkBuddy 自己的会话落盘 ~/.workbuddy/projects/<slug>/<sessionId>.jsonl
- * 不抓包、不注入，只 tail 这个文件（逐行 append，读增量就行）。
+ * 不抓包、不注入，只 tail 这些文件（逐行 append，读增量就行）。
  * 每行都自带 timestamp（ms），所以回放历史时用的是真实时间，不会假装"刚刚发生"。
+ *
+ * 为什么要多会话：主人会**同时**开好几个 WorkBuddy 任务（几个窗口、几件事一起推）。
+ * 只盯 mtime 最新的那个文件，就会出现「A 在跑却显示 B」「A 做完了没播报」这种漏报。
+ * 现在每个 jsonl 各有一套独立的任务状态机，互不干扰；对外给一份汇总视图。
  *
  * 设计原则（主人明确要求）：
  *   1. **只看任务，不看命令行**。工具调用只用来数"推进了几步"、判"有没有反复撞墙"，
@@ -12,29 +16,34 @@
  *   2. **任务结束才播报**。一条用户消息 = 一个任务；任务交付（助手给出最终答复、
  *      之后没有新的工具调用/思考）才算结束，才值得说话。
  *   3. **答得出进度**。context() 给模型一份"人话版"战况：在做什么、多久了、
- *      到哪一步、最近几件做完了什么 —— 主人中途问进度必须答得上来。
+ *      到哪一步、最近几件做完了什么 —— 主人中途问进度必须答得上来（还可能是好几件一起）。
  *
- * 状态机（任务级）
+ * 状态机（任务级，每个会话一份）
  *   user 消息（有实义文字）→ beginTask()   phase=running
  *   assistant 文字          → 记候选最终答复（candidateAt）
  *   之后又出现工具调用/思考 → 候选作废（说明那句只是中间汇报）
  *   静默 IDLE_MS 且候选有效 → finishTask('done')  → emit taskDone
  *
- * 事件：update / taskStart / taskDone / taskLong / taskStall
+ * 事件：update（汇总）/ taskStart / taskDone / taskLong / taskStall（都带单个会话的 snap）
  */
 const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 
-const SCAN_MS = 1200;          // 读当前文件增量的频率
-const FULL_SCAN_MS = 6000;     // 全树找"是不是换会话了"的频率（这个贵）
+const SCAN_MS = 1200;          // 读文件增量的频率
+const FULL_SCAN_MS = 6000;     // 全树找"有没有新会话"的频率（这个贵）
 const IDLE_MS = 3200;          // 候选最终答复出现后，静默这么久 = 这一轮真交付了
-const HISTORY_MAX = 8;         // 记住最近多少个已完成任务（给"给建议"用）
+const HISTORY_MAX = 8;         // 每个会话记住最近多少个已完成任务
 const STALL_MS = 8 * 60e3;     // 运行中这么久没任何动静 = 卡住了
 const LONG_MS = 6 * 60e3;      // 一个任务超过这么久 = 长任务，值得关心一次
 const LONG_MS2 = 20 * 60e3;    // 再久一次
 const ABANDON_MS = 25 * 60e3;  // 一直在跑却连答复都没有、也没动静 → 当它已经放下了
 const TAIL_ON_ATTACH = 1500 * 1024;  // 首次接入回看的字节数（要够看到最近几个任务）
+
+/* 多会话的边界 */
+const MAX_SESSIONS = 6;              // 同时跟几个会话（再多也没意义，界面也放不下）
+const ATTACH_WINDOW_MS = 6 * 3600e3; // 只接 6 小时内动过的会话文件
+const KEEP_DONE_MS = 40 * 60e3;      // 已完成且静了这么久就让它退场，别无限涨
 
 /** 只有「助手自己说这件事没办成」才算失败 —— 不看命令行回显 */
 const FAIL_WORDS = /失败|没能|没能完成|无法完成|做不到|没有成功|还是不行|权限不足|没跑通/;
@@ -112,18 +121,17 @@ class Monitor extends EventEmitter {
   constructor() {
     super();
     this.root = null;
-    this.file = null;
-    this.offset = 0;
-    this.offsets = new Map();
-    this.buf = '';
-    this.scanTimer = null;
     this.enabled = false;
-    this.priming = false;      // 刚接上文件、正在回放历史：只建台账，不发声
-    this.snap = this.blank();
+    this.sessions = new Map();   // file → { file, offset, buf, snap, priming }
+    this.snap = this.blank();    // 主会话（最近在跑 / 最近做完的那条），兼容旧调用
+    this.file = null;
+    this.view = { primary: null, running: [], done: [], count: 0 };
+    this.scanTimer = null;
     this.seq = 0;
     this.fullScanAt = 0;
     this.dirCache = null;
     this.dirCacheAt = 0;
+    this.lastSig = '';
   }
 
   blank() {
@@ -150,7 +158,7 @@ class Monitor extends EventEmitter {
       durationMs: 0,
       steps: 0,             // 工具调用次数（只用来衡量"推进程度"，不对外讲细节）
       failures: 0,          // 工具失败次数（只进隐藏字段，绝不主动提）
-      status: 'running',    // running | ok | failed
+      status: 'running',    // running | ok | failed | abandoned
       summary: '',
       candidateAt: 0,       // 候选最终答复出现的时刻
       longNoticed: 0,       // 已经提醒过几次"这事时间有点长"
@@ -162,10 +170,7 @@ class Monitor extends EventEmitter {
     this.root = root;
     this.enabled = true;
     this.scan();
-    this.scanTimer = setInterval(() => {
-      this.scan();
-      this.tick();
-    }, SCAN_MS);
+    this.scanTimer = setInterval(() => this.scan(), SCAN_MS);
   }
 
   stop() {
@@ -174,18 +179,20 @@ class Monitor extends EventEmitter {
     this.scanTimer = null;
   }
 
-  /** 定时器只做两件事：读当前文件增量（便宜）；偶尔全树找一下有没有换会话（贵） */
+  /** 定时器做三件事：全树找会话（贵，低频）；读每个文件的增量（便宜）；逐会话跑状态机 */
   scan() {
     if (!this.enabled) return;
     const now = Date.now();
-    if (!this.file || now - this.fullScanAt > FULL_SCAN_MS) {
+    if (!this.dirCache || now - this.fullScanAt > FULL_SCAN_MS) {
       this.fullScanAt = now;
       this.walk();
     }
-    if (this.file) this.readNew();
+    for (const e of this.sessions.values()) this.readNew(e);
+    for (const e of this.sessions.values()) this.tick(e.snap);
+    this.publish();
   }
 
-  /** 全树找最近被改过的 jsonl（跨所有项目）。目录列表缓存 30 秒，别每次都 readdir */
+  /** 全树扫一遍 jsonl（跨所有项目）。目录列表缓存 30 秒，别每次都 readdir */
   walk() {
     if (!this.dirCache || Date.now() - this.dirCacheAt > 30000) {
       try {
@@ -198,8 +205,7 @@ class Monitor extends EventEmitter {
         return;
       }
     }
-    let best = null;
-    let bestMtime = 0;
+    const found = [];
     for (const dir of this.dirCache) {
       let files;
       try {
@@ -216,42 +222,51 @@ class Monitor extends EventEmitter {
         } catch {
           continue;
         }
-        if (st.mtimeMs > bestMtime) {
-          bestMtime = st.mtimeMs;
-          best = { file: p, size: st.size };
-        }
+        found.push({ file: p, size: st.size, mtime: st.mtimeMs });
       }
     }
-    if (best && best.file !== this.file) this.switchTo(best);
+    const now = Date.now();
+    // 只接最近动过的，且只接前 MAX_SESSIONS 个（同一秒里改过的都算）
+    const live = found
+      .filter((f) => now - f.mtime < ATTACH_WINDOW_MS)
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, MAX_SESSIONS);
+    for (const f of live) {
+      if (!this.sessions.has(f.file)) this.attach(f);
+    }
+    // 退场：文件已经不在活跃名单里、手上没有在跑的任务、而且静了很久
+    const liveSet = new Set(live.map((f) => f.file));
+    for (const [file, e] of this.sessions) {
+      if (liveSet.has(file)) continue;
+      const t = e.snap.task;
+      if (t && t.status === 'running') continue;         // 在跑的绝不丢
+      if (now - (e.snap.lastEventAt || 0) < KEEP_DONE_MS) continue;
+      this.sessions.delete(file);
+    }
   }
 
-  switchTo(best) {
-    this.file = best.file;
-    this.offset = this.offsets.get(best.file) || 0;
-    this.buf = '';
-    this.snap = this.blank();
-    this.snap.sessionId = path.basename(best.file, '.jsonl');
-    // 首次接入若文件很大，只看尾部，避免一次性灌几 MB
-    if (this.offset === 0 && best.size > TAIL_ON_ATTACH) this.offset = best.size - TAIL_ON_ATTACH;
-    this.priming = true;
-    this.readNew();
-    this.priming = false;
-    this.emit('update', this.snap);
+  /** 接上一个会话文件：从头查台账，但只回看尾部，别一次性灌几 MB */
+  attach(f) {
+    const e = { file: f.file, offset: 0, buf: '', snap: this.blank(), priming: true };
+    e.snap.sessionId = path.basename(f.file, '.jsonl');
+    if (f.size > TAIL_ON_ATTACH) e.offset = f.size - TAIL_ON_ATTACH;
+    this.sessions.set(f.file, e);
+    this.readNew(e);                 // priming=true：只建台账，不发声
+    e.priming = false;
   }
 
-  readNew() {
-    if (!this.file) return;
+  readNew(e) {
+    if (!e.file) return;
     let fd;
     try {
-      const st = fs.statSync(this.file);
-      if (st.size <= this.offset) return;
-      fd = fs.openSync(this.file, 'r');
-      const len = Math.min(st.size - this.offset, TAIL_ON_ATTACH);
+      const st = fs.statSync(e.file);
+      if (st.size <= e.offset) return;
+      fd = fs.openSync(e.file, 'r');
+      const len = Math.min(st.size - e.offset, TAIL_ON_ATTACH);
       const b = Buffer.alloc(len);
-      fs.readSync(fd, b, 0, len, this.offset);
-      this.offset += len;
-      this.offsets.set(this.file, this.offset);
-      this.buf += b.toString('utf8');
+      fs.readSync(fd, b, 0, len, e.offset);
+      e.offset += len;
+      e.buf += b.toString('utf8');
     } catch {
       return;
     } finally {
@@ -259,9 +274,9 @@ class Monitor extends EventEmitter {
     }
 
     let nl;
-    while ((nl = this.buf.indexOf('\n')) >= 0) {
-      const line = this.buf.slice(0, nl).trim();
-      this.buf = this.buf.slice(nl + 1);
+    while ((nl = e.buf.indexOf('\n')) >= 0) {
+      const line = e.buf.slice(0, nl).trim();
+      e.buf = e.buf.slice(nl + 1);
       if (!line) continue;
       let o;
       try {
@@ -270,14 +285,14 @@ class Monitor extends EventEmitter {
         continue;
       }
       try {
-        this.handleEvent(o);
+        this.handleEvent(o, e);
       } catch {}
     }
   }
 
-  handleEvent(o) {
+  handleEvent(o, e) {
     const t = o.type;
-    const s = this.snap;
+    const s = e.snap;
     // 行里自带真实时间，回放历史时不会假装"刚刚发生"
     const ts = Number(o.timestamp) || Date.now();
 
@@ -300,8 +315,8 @@ class Monitor extends EventEmitter {
       if (o.role === 'user') {
         const txt = textOf(o.content);
         if (isRealInstruction(txt)) {
-          this.finishTask('superseded', ts);
-          this.beginTask(txt, ts);
+          this.finishTask('superseded', ts, s);
+          this.beginTask(txt, ts, s, e);
         }
       } else if (o.role === 'assistant') {
         const txt = textOf(o.content);
@@ -309,7 +324,7 @@ class Monitor extends EventEmitter {
           s.assistantText = txt;
           s.task.summary = txt;
           s.task.candidateAt = ts;
-          if (!this.priming) this.emit('update', s);
+          if (!e.priming) this.emit('update', s);
         }
       }
       return;
@@ -326,7 +341,7 @@ class Monitor extends EventEmitter {
         s.task.candidateAt = 0;
         s.task.steps += 1;
         s.phase = 'running';
-        if (!this.priming) this.emit('update', s);
+        if (!e.priming) this.emit('update', s);
       }
       return;
     }
@@ -338,21 +353,19 @@ class Monitor extends EventEmitter {
     }
   }
 
-  beginTask(txt, ts) {
-    const s = this.snap;
+  beginTask(txt, ts, s, e) {
     s.task = this.taskBlank(txt, ts);
     s.userText = s.task.userText;
     s.assistantText = '';
     s.phase = 'running';
-    if (!this.priming) {
+    if (!(e && e.priming)) {
       this.emit('taskStart', s);
       this.emit('update', s);
     }
   }
 
   /** 收掉当前任务（正常交付 / 被新指令顶掉 / 超时放弃） */
-  finishTask(reason, atTs) {
-    const s = this.snap;
+  finishTask(reason, atTs, s) {
     const t = s.task;
     if (!t || t.status !== 'running') return;
     // 被新指令顶掉时，用新指令的时间当结束时间，这样耗时才是真的
@@ -378,19 +391,17 @@ class Monitor extends EventEmitter {
       status: t.status,
       durationMs: t.durationMs,
       endedAt: t.endedAt,
+      sessionId: s.sessionId,
     });
     if (s.history.length > HISTORY_MAX) s.history.length = HISTORY_MAX;
 
-    if (!this.priming) {
-      // 只有"正常交付"才值得播报；被新指令顶掉/超时的旧任务不必打扰主人
-      if (reason === 'done') this.emit('taskDone', s);
-      this.emit('update', s);
-    }
+    // 只有"正常交付"才值得播报；被新指令顶掉/超时的旧任务不必打扰主人
+    if (reason === 'done') this.emit('taskDone', s);
+    this.emit('update', s);
   }
 
-  /** 每轮扫描后检查：该收工了吗？是不是拖太久了？是不是卡住了？ */
-  tick() {
-    const s = this.snap;
+  /** 每轮扫描后检查：该收工了吗？是不是拖太久了？是不是卡住了？（逐会话） */
+  tick(s) {
     const t = s.task;
     if (!t || t.status !== 'running') return;
     const now = Date.now();
@@ -399,13 +410,13 @@ class Monitor extends EventEmitter {
 
     // 1) 交付判定：有候选最终答复 + 真静下来了
     if (t.candidateAt && idle > IDLE_MS) {
-      this.finishTask('done');
+      this.finishTask('done', undefined, s);
       return;
     }
 
     // 2) 彻底没动静也没答复：当主人已经走开了，别一直挂着"正在进行"
     if (idle > ABANDON_MS) {
-      this.finishTask('abandoned');
+      this.finishTask('abandoned', undefined, s);
       return;
     }
 
@@ -413,7 +424,7 @@ class Monitor extends EventEmitter {
     if (idle > STALL_MS) {
       if (!t.stallNoticed) {
         t.stallNoticed = true;
-        if (!this.priming) this.emit('taskStall', { snap: s, idleMs: idle });
+        this.emit('taskStall', { snap: s, idleMs: idle });
       }
       return;
     }
@@ -421,56 +432,108 @@ class Monitor extends EventEmitter {
     // 4) 长任务（还在推进，只是慢）：第一次 6 分钟、第二次 20 分钟
     if (elapsed > LONG_MS && t.longNoticed === 0) {
       t.longNoticed = 1;
-      if (!this.priming) this.emit('taskLong', { snap: s, elapsedMs: elapsed, round: 1 });
+      this.emit('taskLong', { snap: s, elapsedMs: elapsed, round: 1 });
       return;
     }
     if (elapsed > LONG_MS2 && t.longNoticed === 1) {
       t.longNoticed = 2;
-      if (!this.priming) this.emit('taskLong', { snap: s, elapsedMs: elapsed, round: 2 });
+      this.emit('taskLong', { snap: s, elapsedMs: elapsed, round: 2 });
     }
+  }
+
+  /**
+   * 汇总：在跑的全部排前面（越近动过越前），再往后排最近做完的。
+   * 只在"结构真的变了"的时候发 update，避免每 1.2 秒吵一次前端。
+   */
+  publish() {
+    const arr = [...this.sessions.values()].map((e) => e.snap).filter((s) => s.sessionId);
+    const running = arr
+      .filter((s) => s.task && s.task.status === 'running')
+      .sort((a, b) => b.lastEventAt - a.lastEventAt);
+    const done = arr
+      .filter((s) => s.task && s.task.status !== 'running')
+      .sort((a, b) => (b.task.endedAt || 0) - (a.task.endedAt || 0));
+    const primary = running[0] || done[0] || null;
+    this.snap = primary || this.blank();
+    this.file = primary ? this.primaryFileOf(primary) : null;
+    const view = { primary, running, done: done.slice(0, 4), count: running.length };
+    this.view = view;
+
+    const sig = JSON.stringify([
+      running.map((s) => [s.sessionId, s.task.id, s.task.steps, s.task.candidateAt > 0]),
+      done.slice(0, 4).map((s) => [s.sessionId, s.task.id, s.task.status]),
+    ]);
+    if (sig !== this.lastSig) {
+      this.lastSig = sig;
+      this.emit('update', view);
+    }
+  }
+
+  primaryFileOf(snap) {
+    for (const [file, e] of this.sessions) if (e.snap === snap) return file;
+    return null;
   }
 
   /**
    * 给大脑看的「人话战况」。
    * 只讲：在做什么、多久了、到哪一步、最近做完的几件事和结果。
    * 不讲：命令、路径、工具名、单条报错 —— 主人不关心这些。
-   * 标题必须明确区分「正在做」和「刚做完」，否则模型会把两件事混成一件。
+   * 标题必须明确区分「正在做」和「刚做完」，否则模型会把几件事混成一件。
+   * 多会话时按"几件同时在跑"来叙述，别说成一件。
    */
   context() {
-    const s = this.snap;
-    if (!s.sessionId) return '（暂时读不到 WorkBuddy 的任务信息）';
+    const v = this.view || { running: [], done: [], primary: null };
+    const running = v.running || [];
+    const done = v.done || [];
+    if (!running.length && !done.length) return '（暂时读不到 WorkBuddy 的任务信息）';
     const L = [];
-    const t = s.task;
-    const running = !!(t && t.status === 'running');
 
-    if (running) {
+    if (running.length === 1) {
+      const t = running[0].task;
       const mins = Math.round((Date.now() - t.startedAt) / 60000);
       L.push(`【现在正在做】${taskName(t)}`);
       L.push(`已经做了 ${dur(Date.now() - t.startedAt)}${mins >= 20 ? '（拖得有点久了）' : ''}，还没交付。`);
-      // "步"这个数只给你自己判断轻重用 —— 千万别念给主人听。
-      // 说过一次「你推进了六十三步」，像机器在报流水账，一点不像人。
       if (t.steps >= 8) L.push(`（心里有数就行：这活不小，内部推进了 ${t.steps} 次操作。别把这个数字说出口。）`);
       if (t.failures >= 3) L.push('过程里反复撞了几次墙，可能卡在某个绕不过去的地方。');
+    } else if (running.length > 1) {
+      L.push(`【现在同时在做 ${running.length} 件】`);
+      for (const s of running) {
+        const t = s.task;
+        const mins = Math.round((Date.now() - t.startedAt) / 60000);
+        L.push(`· ${taskName(t)} —— 已经 ${dur(Date.now() - t.startedAt)}${mins >= 20 ? '（有点久了）' : ''}`);
+      }
+      L.push('（主人问"做到哪了"要先说清现在有几件在跑，再逐件说，别只答一件。）');
     } else {
       L.push('【现在】主人手上没有正在跑的事，WorkBuddy 是空的。');
     }
 
-    if (t && t.endedAt) {
-      const when = running ? '上一件做完的' : '刚做完的那件事';
-      L.push(`【${when}】${taskName(t)} —— ${verdict(t.status)}，用了 ${dur(t.durationMs)}。`);
-      if (t.summary) L.push(`结果：${plain(t.summary).slice(0, 160)}`);
+    if (done.length) {
+      L.push(running.length ? '【另外，刚做完的】' : '【刚做完的那件事】');
+      for (const s of done.slice(0, 3)) {
+        const t = s.task;
+        const tail = t.summary ? `结果：${plain(t.summary).slice(0, 110)}` : '';
+        L.push(`· ${taskName(t)} —— ${verdict(t.status)}，用了 ${dur(t.durationMs)}。${tail}`);
+      }
     }
 
-    const hist = s.history.filter((h) => h.id !== (t && t.id)).slice(0, 3);
-    if (hist.length) {
+    // 再往前的历史（跨会话合并，只看最近 3 件）
+    const hist = [];
+    for (const e of this.sessions.values()) {
+      for (const h of e.snap.history || []) hist.push(h);
+    }
+    hist.sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0));
+    const shown = hist
+      .filter((h) => !done.some((s) => s.task && s.task.id === h.id && s.sessionId === h.sessionId))
+      .slice(0, 3);
+    if (shown.length) {
       L.push('【再往前做的】');
-      for (const h of hist) {
+      for (const h of shown) {
         const tail = h.summary ? `：${plain(h.summary).slice(0, 55)}` : '';
         L.push(`· ${taskName(h)}（${verdict(h.status)}，${dur(h.durationMs)}）${tail}`);
       }
     }
 
-    L.push('（以上是你能看到的全部事实。问"做到哪了"就答正在做的那件；问"成了没 / 结果"就答刚做完那件。别编。）');
+    L.push('（以上是你能看到的全部事实。问"做到哪了"就答正在做的那几件；问"成了没 / 结果"就答刚做完的。别编。）');
     return L.join('\n');
   }
 }

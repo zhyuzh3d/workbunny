@@ -449,6 +449,22 @@ html, body {
 }
 #settings .permTip.hidden { display: none; }
 
+/* ── 形象切换 ── */
+#settings .avRow { display: flex; gap: 6px; flex-wrap: wrap; }
+#settings .avRow button {
+  flex: 0 1 auto; max-width: 100%;
+  border: 1px solid var(--line); background: #f3efe8;
+  color: var(--ink-soft); border-radius: 8px; padding: 7px 10px;
+  font-size: 11px; cursor: pointer; font-family: var(--font);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: background .14s, color .14s, border-color .14s;
+}
+#settings .avRow button:hover { filter: brightness(.97); }
+#settings .avRow button.on {
+  background: var(--ink); color: #fff; border-color: var(--ink);
+}
+#settings .avRow button:disabled { opacity: .55; cursor: default; }
+
 /* 麦克风未授权时的小红点 */
 #micBtn.warn::after {
   content: ''; position: absolute; top: 5px; right: 5px;
@@ -460,10 +476,20 @@ html, body {
 #settings .sb { flex: 1 1 auto; min-height: 0; }
 
 /* 活动条：长命令不要撑破卡片 */
-#activity #activityText {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+#activity .actRoll {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 196px;
+  height: 15px;
+  overflow: hidden;      /* 轮播时上下滑动的文字就裁在这条缝里 */
 }
+#activity #activityText {
+  display: block;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  line-height: 15px;
+  max-width: 196px;
+} 
 
 /* 设置面板底部固定操作区（内容区滚动时保存按钮始终可见） */
 #settings .sf {

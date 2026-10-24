@@ -11,5 +11,10 @@ bin/asr
 # 截图与临时验证产物
 shots/
 
+# 自己放进去的角色模型：许可普遍是「禁止再分发」(Redistribution_Prohibited)，
+# 只留在本机，绝不进公开仓库；官方样例继续跟踪。
+src/renderer/assets/models/*.vrm
+!src/renderer/assets/models/AvatarSample_*.vrm
+
 # macOS
 .DS_Store

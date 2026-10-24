@@ -89,7 +89,8 @@ async function loadMotion(name) {
 }
 
 async function boot() {
-  const gltf = await new Promise((res, rej) => gltfLoader.load('./assets/models/AvatarSample_D.vrm', res, undefined, rej));
+  const model = new URLSearchParams(location.search).get('m') || 'AvatarSample_D.vrm';
+  const gltf = await new Promise((res, rej) => gltfLoader.load(`./assets/models/${model}`, res, undefined, rej));
   vrm = gltf.userData.vrm;
   if (vrm.meta?.metaVersion === '0') vrm.scene.rotation.y = Math.PI;
   vrm.scene.traverse((o) => { o.frustumCulled = false; });
@@ -99,6 +100,20 @@ async function boot() {
   vrm.scene.add(proxy);
   scene.add(vrm.scene);
   frameCamera(vrm.scene);
+
+  // 记下原始姿势：用来分辨「穿模是模型自带，还是播动作导致的」
+  const restPose = [];
+  vrm.scene.traverse((o) => {
+    if (o.isBone) restPose.push([o, o.quaternion.clone(), o.position.clone()]);
+  });
+  window.__rest = () => {
+    if (mixer) { mixer.stopAllAction(); mixer.uncacheRoot(vrm.scene); }
+    for (const [o, q, p] of restPose) { o.quaternion.copy(q); o.position.copy(p); }
+    vrm.humanoid?.resetNormalizedPose?.();
+    vrm.update(0.016);
+    renderer.render(scene, camera);
+    return true;
+  };
 
   const anims = new Map();
   for (const m of MOTIONS) {
@@ -123,13 +138,14 @@ async function boot() {
     const r = groundClip(c, rig, ref);
     report.push(`${k}:${r.ik ? r.ik.contacts + '段' : '无'}`);
   }
-  window.__report = report.join(' ');
+  window.__report = `${model} hip=${rig.hipHeight.toFixed(3)} | ` + report.join(' ');
 
   renderer.render(scene, camera);
   window.__ready = true;
 }
 
 window.__shot = (name, t, mode = 'ik') => {
+  if (name === '__rest') return window.__rest();
   const clip = (sets[mode] || sets.ik).get(name);
   if (!clip) return 'no clip: ' + name;
   mixer.stopAllAction();
@@ -139,7 +155,8 @@ window.__shot = (name, t, mode = 'ik') => {
   act.paused = true;
   act.time = t;
   mixer.update(0.0001);
-  vrm.update(0.016);
+  // 裙子 / 包是 spring bone：只走一帧会甩成一片，先让它按 60fps 稳定下来再拍
+  for (let i = 0; i < 90; i++) vrm.update(1 / 60);
   renderer.render(scene, camera);
   return true;
 };

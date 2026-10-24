@@ -26,10 +26,10 @@
   <div id="bubbleTail"></div>
 </div>
 
-<!-- 干活状态条 -->
+<!-- 干活状态条：多任务时这一行会上下轮播 -->
 <div id="activity" class="hidden">
   <span class="dot"></span>
-  <span id="activityText">在干活</span>
+  <span class="actRoll"><span id="activityText">在干活</span></span>
 </div>
 
 <!-- 录制律动 -->
@@ -84,6 +84,9 @@
   </div>
   <div class="sb">
     <label class="row"><span>名字</span><input id="setName" type="text" /></label>
+
+    <div class="group">形象</div>
+    <div class="avRow" id="avRow"></div>
 
     <div class="group">听见你</div>
     <div class="permBox">
