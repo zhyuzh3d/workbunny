@@ -102,9 +102,10 @@ function chat(opts) {
       },
       (res) => {
         if (res.statusCode !== 200) {
-          let body = '';
-          res.on('data', (d) => (body += d));
-          res.on('end', () => reject(new Error(`LLM ${res.statusCode}: ${body.slice(0, 300)}`)));
+          // Upstream errors may echo credentials or prompts; keep them out of UI/logs.
+          res.resume();
+          res.on('end', () => reject(new Error(`模型接口返回 HTTP ${res.statusCode}，请检查密钥、所选模型、额度或请求频率`)));
+          res.on('error', reject);
           return;
         }
         res.setEncoding('utf8');

@@ -18,6 +18,11 @@ fi
 if [ ! -x "$ROOT/bin/speech/speech" ]; then
   zsh "$ROOT/tools/fetch-tts-runtime.sh"
 fi
+for helper in vault desktop; do
+  if [ ! -x "$ROOT/bin/$helper" ] || [ "$ROOT/native/$helper.swift" -nt "$ROOT/bin/$helper" ]; then
+    zsh "$ROOT/tools/build-$helper.sh"
+  fi
+done
 
 echo "▸ 清理"
 rm -rf "$APP"
@@ -43,6 +48,8 @@ cp -R "$ROOT/res" "$APP/Contents/Resources/app/" 2>/dev/null || true
 echo "▸ 放入原生语音识别"
 mkdir -p "$APP/Contents/Resources/bin"
 cp "$ROOT/bin/asr" "$APP/Contents/Resources/bin/asr"
+cp "$ROOT/bin/vault" "$APP/Contents/Resources/bin/vault"
+cp "$ROOT/bin/desktop" "$APP/Contents/Resources/bin/desktop"
 chmod +x "$APP/Contents/Resources/bin/asr"
 cp -R "$ROOT/bin/speech" "$APP/Contents/Resources/bin/speech"
 
@@ -94,6 +101,8 @@ fi
 # 内层可执行文件先签，再签外壳（顺序不能反）
 if [ "$HAVE_ID" = "1" ]; then
   codesign --force --sign "$IDENTITY" "$APP/Contents/Resources/bin/speech/speech"
+  codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.vault" "$APP/Contents/Resources/bin/vault"
+  codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.desktop" "$APP/Contents/Resources/bin/desktop"
   codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.asr" "$APP/Contents/Resources/bin/asr" 2>&1 | grep -v "replacing existing signature" || true
   codesign --force --deep --sign "$IDENTITY" "$APP" 2>&1 | grep -v "replacing existing signature" || true
 else

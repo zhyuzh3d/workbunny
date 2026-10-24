@@ -1,0 +1,52 @@
+{
+  "schema": "workbunny-memory-benchmark-v1",
+  "generatedAt": "2026-10-24T18:25:14.601Z",
+  "dataset": {
+    "messages": 10000,
+    "memories": 2000,
+    "totalRows": 12000,
+    "spanYears": 10,
+    "syntheticOnly": true,
+    "fixedRandom": 0
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v18.18.2",
+    "cpuCount": 8
+  },
+  "timingsMs": {
+    "databaseBuild": 4239.68,
+    "retrieval": {
+      "samples": 30,
+      "p50": 6.89,
+      "p95": 8.92
+    },
+    "context": {
+      "samples": 10,
+      "p50": 52.53,
+      "p95": 64.22,
+      "maxChars": 1670,
+      "budgetChars": 8500
+    },
+    "reopen": 10.83
+  },
+  "databaseBytes": {
+    "database": 41463808,
+    "wal": 2974672,
+    "sharedMemory": 32768,
+    "databaseAndWal": 44438480,
+    "total": 44471248
+  },
+  "checks": {
+    "chineseOldFactSearchPassed": true,
+    "englishOldFactSearchPassed": true,
+    "crossYearMemoryRecallCount": 4,
+    "crossYearRecallRequired": 3,
+    "crossYearRecallYearCount": 4,
+    "crossYearRecallYearCountRequired": 3,
+    "reopenedMessageCount": 10000,
+    "reopenedMemoryCount": 2000
+  },
+  "scope": "Synthetic scale and reopen simulation; not evidence of ten-year production reliability or real user-memory quality."
+}

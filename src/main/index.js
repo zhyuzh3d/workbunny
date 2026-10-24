@@ -9,7 +9,7 @@
  */
 const {
   app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage,
-  shell, dialog, globalShortcut, Notification, systemPreferences,
+  shell, dialog, globalShortcut, Notification, systemPreferences, safeStorage, powerMonitor,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -31,6 +31,10 @@ const replyPolicy = require('./reply-policy');
 const { Monitor, taskName } = require('./monitor');
 const { Asr, probeAccess } = require('./asr');
 const avatars = require('./avatars');
+const { MemoryService } = require('./memory-service');
+const { DesktopService } = require('./desktop-service');
+const { Interactions, InteractionAudio } = require('./interaction');
+const { SessionGate } = require('./session-gate');
 
 /* ── 数据目录（开发时可被 BUDDY_PET_HOME 指到工作区） ── */
 app.setName('workbunny');
@@ -163,23 +167,19 @@ function startWatchdog() {  if (!app.isPackaged) return;
 }
 
 
-/* ── 会话记忆（让娃娃记得刚才聊了什么） ── */
-const MEM_PATH = path.join(USER_DIR, 'memory.json');
+/* RAM is only the current-session fallback. Durable history lives in the encrypted vault. */
+let memory = null;
+let desktop = null;
+let sessionGate = null, screenLocked = true;
+let unlockMemory = async () => {};
 let history = [];
-try { history = JSON.parse(fs.readFileSync(MEM_PATH, 'utf8')).history || []; } catch { history = []; }
-
-function saveHistory() {
-  try {
-    fs.mkdirSync(USER_DIR, { recursive: true });
-    fs.writeFileSync(MEM_PATH, JSON.stringify({ history: history.slice(-24) }, null, 2));
-  } catch {}
-}
-
-function pushHistory(role, content) {
+const interactions = new Interactions();
+const interactionAudio = new InteractionAudio(path.join(USER_DIR, 'cache', 'interactions'));
+function pushHistory(role, content, details) {
   if (!content) return;
-  history.push({ role, content: String(content).slice(0, 800) });
+  history.push({ role, content: String(content).slice(0, 12000) });
   if (history.length > 24) history = history.slice(-24);
-  saveHistory();
+  memory?.addMessage(role, content, details).catch(() => log('[memory] 写入失败，未降级明文'));
 }
 
 /* ── 窗口 ── */
@@ -342,6 +342,8 @@ const panels = new Map();
 const PANEL_SIZE = {
   settings: { w: 420, h: 760, title: 'workbunny · 设置' },
   motions: { w: 340, h: 660, title: 'workbunny · 动作库' },
+  memory: { w: 560, h: 760, title: 'workbunny · 记忆与关系' },
+  desktop: { w: 560, h: 760, title: 'workbunny · 桌面任务' },
 };
 
 function openPanel(kind) {
@@ -380,7 +382,7 @@ function openPanel(kind) {
     log(`[panel:${kind}:${tag}] ${msg}  (${String(sourceId || '').split('/').pop()}:${line})`);
   });
   w.webContents.on('did-fail-load', (_e, code, desc) => log(`[panel:${kind}] did-fail-load ${code} ${desc}`));
-  w.loadFile(path.join(__dirname, '..', 'renderer', 'panel.html'), { query: { p: kind } });
+  w.loadFile(path.join(__dirname, '..', 'renderer', ['memory', 'desktop'].includes(kind) ? 'companion.html' : 'panel.html'), { query: { p: kind } });
   w.once('ready-to-show', () => w.show());
   w.on('closed', () => panels.delete(kind));
   panels.set(kind, w);
@@ -636,7 +638,9 @@ async function pumpSpeech() {
     }, c.tts.engine === 'qwen' ? 145000 : c.tts.engine === 'remote' ? 90000 : 30000);
     try {
       const playback = streamingPlayback(c, gen, item.text);
-      const bufP = synthBuffer(item.text, item.emo, playback.options);
+      const bufP = item.interaction
+        ? interactionAudio.audio(item.text, c, () => synthBuffer(item.text, item.emo))
+        : synthBuffer(item.text, item.emo, playback.options);
       prefetchNext();           // 和当前这句并行，先把下一句准备出来
       const result = await bufP, buffer = result.buffer;
       // 被打断/换代：不能裸 return —— 那样 speaking 和闭麦都留在原地，麦克风永久哑
@@ -677,6 +681,7 @@ async function pumpSpeech() {
 
 function finishSpeech() {
   speaking = false;
+  memory?.scheduleExtraction();
   if (speakWatchdog) { clearTimeout(speakWatchdog); speakWatchdog = null; }
   send('speaking', { on: false });
   // 说完再等 450ms 才开麦：尾巴上的混响别当成新的一句
@@ -731,6 +736,7 @@ const HISTORY_TURNS = 6;   // 只带最近 3 轮对话，够接话又不撑爆�
 
 async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn }) {
   const c = config.load();
+  if (screenLocked || (c.memory.enabled && !memory?.db)) { if (!internal) send('toast', { text: '请先解锁电脑与记忆，再继续对话。' }); return null; }
   // 大脑的配置在 brain 里，这里折算成真正能发请求的那三个字段
   const L = config.resolveLLM(c);
   if (L.transport !== 'workbuddy' && !L.apiKey) {
@@ -740,16 +746,25 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
   activeThought?.abort();
   const controller = new AbortController();
   activeThought = controller;
+  memory?.cancelExtraction();
   log(`[brain] provider=${L.provider} model=${L.model}`);
-  const ctx = nowLine() + '\n' + (monitor ? monitor.context() : '');
+  const memoryContext = memory
+    ? await memory.context(userText, { internal, recent: history }).catch(() => ({ text: nowLine(), messages: history.slice(-12), epoch: memory.generation }))
+    : { text: nowLine(), messages: history.slice(-12) };
+  if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return null;
+  const memoryGeneration = memory?.generation;
+  const ctx = memoryContext.text + '\n' + (monitor ? monitor.context().slice(0, 2000) : '');
   const sys = config.buildSystemPrompt(ctx) + (judge ? JUDGE_RULE : '');
   const msgs = [{ role: 'system', content: sys }];
-  for (const h of history.slice(-HISTORY_TURNS)) msgs.push(h);
+  for (const h of memoryContext.messages) msgs.push(h);
   // 别把同一句主人话塞两遍。调用方有时已经 pushHistory('user') 过了，
   // 这里再无脑 push 一次，模型看到连着两条一模一样的输入，就会开始复读。
-  const lastH = history[history.length - 1];
+  const lastH = memoryContext.messages.at(-1);
   const dup = lastH && lastH.role === 'user' && String(lastH.content).trim() === String(userText).trim();
-  if (!dup) msgs.push({ role: 'user', content: userText });
+  const ramLast = history.at(-1);
+  if (!dup && lastH?.role === 'user' && ramLast?.role === 'user' && ramLast.content === userText && userText.startsWith(lastH.content)) {
+    msgs[msgs.length - 1] = { role: 'user', content: userText };
+  } else if (!dup) msgs.push({ role: 'user', content: userText });
 
   busy = true;
   const requestStarted = Date.now();
@@ -790,7 +805,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       },
       onSentence: saySentence,
     });
-    if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return null;
+    if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent()) || memoryGeneration !== memory?.generation) return null;
     log(`[brain] 完成 ${Date.now() - requestStarted}ms（一次请求 · ${L.provider}/${r.model || L.model}）`);
 
     responseGate.flush();
@@ -801,7 +816,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       silenced = true;
       stopSpeaking();
       send('heard', { text: userText, replied: false });
-      log('[judge] skip: ' + userText.slice(0, 40));
+      log('[judge] skip');
       return r;
     }
 
@@ -815,10 +830,10 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
 
     const clean = raw.replace(/<\s*skip\s*\/?>/gi, '').trim();
     // 把她实际说的话记下来：回看时才知道"她到底说了什么蠢话"，否则无从优化
-    if (clean) log('[say] ' + clean.replace(/\s+/g, ' ').slice(0, 90));
+    if (clean) log(`[say] ${clean.length} 字`);
     if (clean) {
       if (judge && !voiceTurn) pushHistory('user', userText);
-      pushHistory('assistant', clean);
+      if (!internal) pushHistory('assistant', clean, { delivery: 'generated', sources: memoryContext.sourceIds || [] });
       if (!internal) {
         send('chat', { role: 'assistant', text: clean, final: true });
       }
@@ -841,6 +856,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       activeThought = null;
       busy = false;
       send('think', { on: false });
+      memory?.scheduleExtraction();
     }
   }
 }
@@ -866,6 +882,7 @@ let lastWorkSeenAt = 0;
 let restNoticedAt = 0;
 
 function proactiveAllowed() {
+  if (screenLocked || (config.load().memory.enabled && !memory?.db)) return false;
   const c = config.load();
   if (!c.monitor.enabled) return false;
   if (busy) return false;
@@ -1043,6 +1060,9 @@ function buildTrayMenu() {
     { label: '按住说话  ⌘⇧Space', click: () => toggleRecord() },
     { type: 'separator' },
     { label: '动作列表…', click: () => { showWindow(); openPanel('motions'); } },
+    { label: '记忆与关系…', click: () => openPanel('memory') },
+    { label: '桌面任务…', click: () => openPanel('desktop') },
+    { label: '停止桌面操作  ⌘⇧Esc', click: () => desktop?.stop() },
     {
       label: '形象',
       submenu: avatars.scan().map((a) => ({
@@ -1166,6 +1186,7 @@ function asrOpts(always) {
 function startListen(reason) {
   if (!asr) return;
   const c = config.load();
+  if (screenLocked || (c.memory.enabled && !memory?.db)) return;
   if (!c.voice.alwaysListen) return;
   if (!fs.existsSync(ASR_BIN)) { send('listen', { on: false, error: '缺少 bin/asr' }); return; }
   alwaysOn = true;
@@ -1230,15 +1251,15 @@ const voiceTurns = require('./voice-turns').createVoiceTurns({
 
 async function handleUtterance(text, voiceTurn) {
   const t = String(text || '').trim();
-  if (!worthJudging(t)) { log('[listen] drop noise: ' + t.slice(0, 20)); return; }
+  if (!worthJudging(t)) { log('[listen] drop noise'); return; }
   // 这句可能就是我自己刚说的（回声消除没吃干净）→ 当没听见
   if (echoLike(t) && Date.now() - lastSpokeAt < 2600) {
-    log('[listen] drop self echo: ' + t.slice(0, 24));
+    log('[listen] drop self echo');
     return;
   }
   if (speaking) {
     // 主人在我说话的时候开口 → 立刻收声，听他说完
-    log('[listen] barge-in: ' + t.slice(0, 24));
+    log('[listen] barge-in');
     stopSpeaking();
   }
   const c = config.load();
@@ -1246,7 +1267,7 @@ async function handleUtterance(text, voiceTurn) {
   lastHeardAt = Date.now();
   send('heard', { text: t });
   if (voiceTurn) log(`[listen] 预请求：停顿 ${Date.now() - voiceTurn.heardAt}ms`);
-  log('[listen] heard: ' + t.slice(0, 60));
+  log(`[listen] heard ${t.length} 字`);
 
   // 「别烦我」→ 立刻静音 10 分钟。这是主人的明确指令，优先级高于一切。
   // 只在气泡里回一句字，不出声、不撒娇 —— 这时候出声本身就是烦人的一部分。
@@ -1288,6 +1309,80 @@ async function requestAsrPermission() {
 }
 
 /* ── IPC ── */
+function trustedCompanion(event, kind) {
+  const allowed = kind ? panels.get(kind) : null;
+  if (kind && allowed?.webContents === event.sender) return;
+  if (!kind && (win?.webContents === event.sender || [...panels.values()].some(p => !p.isDestroyed() && p.webContents === event.sender))) return;
+  throw new Error('此窗口无权执行该操作');
+}
+function invalidateMemoryContext() { voiceTurns.reset(); stopSpeaking(); history = []; }
+ipcMain.handle('pet:memory-stats', e => { trustedCompanion(e); return memory?.stats() || { ready: false }; });
+ipcMain.handle('pet:memory-unlock', async e => { trustedCompanion(e, 'memory'); if (screenLocked) throw new Error('请先解锁电脑'); await unlockMemory(); return memory.stats(); });
+ipcMain.handle('pet:memory-list', (e, options = {}) => {
+  trustedCompanion(e, 'memory');
+  if (!['memory', 'message', 'summary', 'persona', 'task'].includes(options.kind || 'memory')) throw new Error('不支持的记忆类型');
+  return memory.list({ kind: options.kind, query: String(options.query || '').slice(0, 300), before: Number.isSafeInteger(options.before) ? options.before : undefined, beforeId: typeof options.beforeId === 'string' ? options.beforeId.slice(0, 256) : undefined });
+});
+ipcMain.handle('pet:memory-sources', async (e, ids) => {
+  trustedCompanion(e, 'memory');
+  if (!Array.isArray(ids) || ids.length > 30 || ids.some(x => typeof x !== 'string' || x.length > 256)) throw new Error('无效的来源');
+  await memory.tail; memory.check();
+  return (await memory.db.request('get', { ids })).rows.map(r => { const v = memory.decode(r); return { id: v.id, ts: v.ts, ...v.value }; });
+});
+ipcMain.handle('pet:memory-update', async (e, v = {}) => {
+  trustedCompanion(e, 'memory'); invalidateMemoryContext();
+  return memory.updateMemory(String(v.id || '').slice(0, 256), v.content);
+});
+ipcMain.handle('pet:memory-remove', async (e, id) => {
+  trustedCompanion(e, 'memory');
+  const r = await dialog.showMessageBox(panels.get('memory'), { type: 'warning', buttons: ['取消', '删除'], defaultId: 0, cancelId: 0,
+    message: '删除这条记忆？', detail: '关联的原始对话和派生摘要也会移除，避免以后重新想起。已导出的备份需另行管理。' });
+  if (r.response !== 1) return { removed: 0, canceled: true };
+  invalidateMemoryContext(); return memory.remove(String(id || '').slice(0, 256));
+});
+ipcMain.handle('pet:memory-clear', async e => {
+  trustedCompanion(e, 'memory');
+  const r = await dialog.showMessageBox(panels.get('memory'), { type: 'warning', buttons: ['取消', '清空记忆'], defaultId: 0, cancelId: 0,
+    message: '清空全部聊天和长期记忆？', detail: '也会清除对话摘要、人格修订与桌面任务记录。设置、模型和音色保留。请先导出加密备份。' });
+  if (r.response !== 1) return { ok: false, canceled: true };
+  await desktop.stop('清空本地记忆'); invalidateMemoryContext(); return memory.clear();
+});
+ipcMain.handle('pet:memory-export', async (e, passphrase) => {
+  trustedCompanion(e, 'memory');
+  const data = await memory.export(passphrase);
+  const r = await dialog.showSaveDialog(panels.get('memory'), { defaultPath: `workbunny-${new Date().toISOString().slice(0, 10)}.bunnyvault`, filters: [{ name: 'workbunny 加密备份', extensions: ['bunnyvault'] }] });
+  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+  require('./vault-crypto').atomicPrivate(r.filePath, data); return { ok: true };
+});
+ipcMain.handle('pet:memory-restore', async (e, passphrase) => {
+  trustedCompanion(e, 'memory');
+  const r = await dialog.showOpenDialog(panels.get('memory'), { properties: ['openFile'], filters: [{ name: 'workbunny 加密备份', extensions: ['bunnyvault'] }] });
+  if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
+  const file = r.filePaths[0]; if (fs.statSync(file).size > 256 * 1024 * 1024) throw new Error('备份过大，请使用分段迁移');
+  invalidateMemoryContext();
+  const result = await memory.restore(await fs.promises.readFile(file, 'utf8'), passphrase);
+  const persona = (await memory.query('persona', 1))[0]?.value.setting;
+  if (persona) { config.save({ buddy: { name: persona.name, ownerName: persona.ownerName, profile: persona.profile } }); sendConfig(); }
+  return result;
+});
+ipcMain.handle('pet:task-status', e => { trustedCompanion(e, 'desktop'); return desktop.status(); });
+ipcMain.handle('pet:desktop-permission', async e => { trustedCompanion(e, 'desktop'); const status = await desktop.requestPermission(); return status.permissions; });
+ipcMain.handle('pet:task-start', async (e, v) => {
+  trustedCompanion(e, 'desktop');
+  try { voiceTurns.reset(); stopSpeaking(); memory?.cancelExtraction(); return await desktop.start(v); } catch (error) { return { ok: false, error: error.message }; }
+});
+ipcMain.handle('pet:task-stop', e => { trustedCompanion(e, 'desktop'); return desktop.stop(); });
+ipcMain.handle('pet:task-accept', e => { trustedCompanion(e, 'desktop'); return desktop.accept(); });
+ipcMain.handle('pet:desktop-insert', (e, text) => { trustedCompanion(e, 'desktop'); return desktop.insert(text); });
+ipcMain.handle('pet:interact', (e, region) => {
+  if (e.sender !== win?.webContents) return null;
+  if (busy || speaking || Date.now() - lastSpokeAt < 1200 || desktop?.running) return null;
+  const reaction = interactions.pick(region, { quiet: Date.now() < quietUntil });
+  if (!reaction) return null;
+  send('motion', { key: reaction.slot, once: true }); send('emo', { key: reaction.emo }); send('say', { text: reaction.text });
+  if (reaction.sound) { speechQueue.push({ text: reaction.text, emo: reaction.emo, interaction: true }); pumpSpeech(); }
+  return { slot: reaction.slot };
+});
 ipcMain.handle('pet:init', async () => {
   const c = config.load();
   const hasAsr = fs.existsSync(ASR_BIN);
@@ -1334,6 +1429,8 @@ ipcMain.on('pet:stop-speak', () => {
 ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
   const t = String(text || '').trim();
   if (!t) return { ok: false };
+  if (screenLocked || (config.load().memory.enabled && !memory?.db)) return { ok: false, error: '记忆尚未解锁，请在“记忆与关系”中解锁后继续。' };
+  if (t.length > 12000) return { ok: false, error: '单次对话最多 12000 字，请分段发送。' };
   voiceTurns.reset();
   stopSpeaking();
   pushHistory('user', t);
@@ -1346,6 +1443,11 @@ ipcMain.handle('pet:config', (_e, patch) => {
   const previous = config.load();
   if (patch?.window && Object.hasOwn(patch.window, 'scale')) patch = { ...patch, window: { ...patch.window, scale: clampScale(patch.window.scale) } };
   const c = config.save(patch || {});
+  if (patch?.buddy) memory?.personaRevision(c.buddy).catch(() => log('[memory] 人格修订保存失败'));
+  if (patch?.memory && c.memory.enabled !== previous.memory.enabled) {
+    memory?.cancelExtraction();
+    voiceTurns.reset(); stopSpeaking(); history = [];
+  }
   if (patch?.monitor && JSON.stringify(previous.monitor) !== JSON.stringify(c.monitor)) startMonitor();
   if (patch?.avatar && c.avatar !== previous.avatar) send('avatar', { key: c.avatar });
   if (patch?.voice && c.voice.alwaysListen !== previous.voice.alwaysListen) {
@@ -1416,6 +1518,7 @@ ipcMain.on('pet:quit', () => { quitting = true; app.quit(); });
 ipcMain.on('pet:open', (_e, what) => {
   if (what === 'settings') openPanel('settings');
   else if (what === 'motions') openPanel('motions');
+  else if (what === 'memory' || what === 'desktop') openPanel(what);
   else if (what === 'workbuddy') require('./workbuddy').openApplication().catch(e => log('[workbuddy] ' + e.message));
   else if (what === 'userData') shell.openPath(USER_DIR);
 });
@@ -1754,7 +1857,60 @@ if (!lock) {
 } else {
   app.on('second-instance', () => showWindow());
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    memory = new MemoryService({ dir: path.join(USER_DIR, 'vault'),
+      bin: app.isPackaged ? path.join(process.resourcesPath, 'bin', 'vault') : path.join(__dirname, '../../bin/vault'), safeStorage,
+      getSettings: () => { const m = config.load().memory; return { ...m, extract: m.extract && !screenLocked && !busy && !speaking && !desktop?.running }; },
+      extract: require('./workbuddy-free').extractMemories,
+      onStatus: st => log('[memory] ' + (st.ready ? '已解锁加密资料库' : '锁定：' + st.error)),
+    });
+    desktop = new DesktopService({ emit: status => {
+      for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'desktop', ...status });
+    }, imageResize: png => {
+      const image = nativeImage.createFromBuffer(png), size = image.getSize();
+      return size.width > 1536 ? image.resize({ width: 1536 }).toPNG() : png;
+    }, persist: task => memory.serial(() => memory.write([{ id: task.id, kind: 'task', ts: task.startedAt, updatedAt: Date.now(), value: { ...task, content: task.goal + '\n' + task.note, sources: [] } }])) });
+    async function restoreTask() {
+    if (memory.db && desktop) {
+      const lastTask = (await memory.query('task', 1))[0]?.value;
+      if (lastTask) {
+        desktop.task = lastTask;
+        if (['starting', 'running'].includes(lastTask.status)) {
+          desktop.task = { ...lastTask, status: 'paused', note: '应用已重启；未重复发送输入，请先查看原窗口的结果。', updatedAt: Date.now() };
+          await desktop.journal();
+        }
+      }
+    }
+    }
+    let vaultOpening = null;
+    unlockMemory = () => {
+      if (memory.db) return Promise.resolve();
+      if (vaultOpening) return vaultOpening;
+      memory.waitingForUnlock = false;
+      vaultOpening = memory.init().then(async () => {
+        if (quitting || screenLocked) return;
+        if (!memory.db) { asrStatus = { ...asrStatus, captureReady: false, note: 'memory-locked' }; send('asrStatus', asrStatus); }
+        if (memory.db && config.load().memory.enabled) await memory.personaRevision(config.load().buddy);
+        await restoreTask();
+        for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'memory-ready' });
+        startListen('memory-ready');
+      }).finally(() => { vaultOpening = null; });
+      return vaultOpening;
+    };
+    sessionGate = new SessionGate({
+      readLocked: async () => (await desktop.status()).permissions.sessionLocked,
+      onLocked: () => {
+        screenLocked = true; stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.stop('电脑锁屏').catch(() => {});
+        asrStatus = { ...asrStatus, captureReady: false, note: 'locked' }; send('asrStatus', asrStatus);
+        if (!memory.db) { memory.waitingForUnlock = true; memory.error = '电脑已锁屏，解锁后自动载入记忆'; log('[memory] 屏幕锁定，延后钥匙串读取'); }
+      },
+      onUnlocked: async () => { screenLocked = false; await unlockMemory(); if (!quitting) startListen('unlock'); },
+    });
+    powerMonitor.on('lock-screen', () => sessionGate.lock());
+    powerMonitor.on('unlock-screen', () => sessionGate.refresh().catch(() => {}));
+    await sessionGate.start();
+    if (quitting) return;
+    globalShortcut.register('CommandOrControl+Shift+Escape', () => { desktop.stop(); stopSpeaking(); });
     createWindow();
     syncQwenRuntime();
 
@@ -1794,6 +1950,8 @@ if (!lock) {
     const SPEECH_ZH = ['待授权', '缺语言包', '不可用', '可用'];
     function applyStatus(st) {
       asrStatus = { ...asrStatus, ...st, checkedAt: Date.now() };
+      if (screenLocked) asrStatus = { ...asrStatus, captureReady: false, note: 'locked' };
+      else if (config.load().memory.enabled && !memory.db) asrStatus = { ...asrStatus, captureReady: false, note: 'memory-locked' };
       send('asrStatus', asrStatus);
       log('[asr] status', asrStatus);
       return asrStatus;
@@ -1874,7 +2032,7 @@ if (!lock) {
       const now0 = Date.now();
       if (t && now0 - lastPartialLogAt > 1800) {
         lastPartialLogAt = now0;
-        log('[asr] 半句: ' + String(t).slice(0, 40));
+        log(`[asr] 半句 ${String(t).length} 字`);
       }
       // 一秒停顿即可预请求，无需等待原生识别器最终收句。
       if (!alwaysOn) return;
@@ -2015,8 +2173,10 @@ if (!lock) {
   });
 }
 
-app.on('before-quit', () => {
+let shutdownStarted = false, shutdownFlushed = false;
+app.on('before-quit', event => {
   quitting = true;
+  sessionGate?.close();
   markCleanExit();
   closePanels();          // 面板是普通窗口，不关会拖住退出
   if (monitor) monitor.stop();
@@ -2024,6 +2184,15 @@ app.on('before-quit', () => {
   if (asr) asr.kill();
   tts.shutdown();
   globalShortcut.unregisterAll();
+  if (memory && !shutdownFlushed) {
+    event.preventDefault();
+    if (!shutdownStarted) {
+      shutdownStarted = true;
+      Promise.resolve(desktop?.stop('应用退出')).catch(() => {}).then(async () => {
+        await desktop?.close(); return memory.close();
+      }).catch(() => log('[memory] 退出时写入未完成，保留已提交数据')).finally(() => { shutdownFlushed = true; app.quit(); });
+    }
+  } else desktop?.close();
 });
 
 app.on('window-all-closed', (e) => {

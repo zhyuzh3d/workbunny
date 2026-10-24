@@ -4,6 +4,7 @@ import { VRMLoaderPlugin } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip, VRMLookAtQuaternionProxy } from '@pixiv/three-vrm-animation';
 import { makeRig, groundClip, soleHeight } from './ground.js';
 import { cutClip, MOTION_WINDOWS } from './motion-cut.js';
+import { processMotionClip, crossFadeMotionAction } from './motion-quality.mjs';
 import { createPCMPlayer } from './pcm-player.mjs';
 
 /* ═══════════ 常量 ═══════════ */
@@ -126,6 +127,7 @@ let cfg = null;
 let vrm = null;
 let mixer = null;
 let currentAction = null;
+const motionActions = new Set();
 let currentMotion = null;
 let avatarKey = '';
 const rawAnims = new Map();
@@ -310,6 +312,12 @@ function rebuildClips() {
     }
   }
   groundAllClips();
+  let repaired = 0;
+  for (const [key, clip] of clips) {
+    const result = processMotionClip(clip, { loop: MOTIONS.some(m => m.key === key && m.loop) });
+    repaired += result.isolatedSpikesRepaired + result.loopSeamsSmoothed + result.quaternionSignFlips;
+  }
+  pet.log(`[motion] ${clips.size} 条动作已检查，处理 ${repaired} 处轨道问题`);
 }
 
 function groundAllClips() {
@@ -350,7 +358,6 @@ function playMotion(key, { loop = false, fade = FADE } = {}) {
   const next = mixer.clipAction(clip);
   next.enabled = true;
   next.setEffectiveTimeScale(1);
-  next.setEffectiveWeight(1);
   next.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1);
   next.clampWhenFinished = !loop;
 
@@ -361,12 +368,11 @@ function playMotion(key, { loop = false, fade = FADE } = {}) {
     return;
   }
   if (currentAction) {
-    next.reset();
-    next.play();
-    next.crossFadeFrom(currentAction, fade, false);
+    crossFadeMotionAction(next, currentAction, Math.max(0.25, fade), motionActions);
   } else {
-    next.reset().play();
+    next.setEffectiveWeight(1); next.reset().play();
   }
+  motionActions.add(next);
   currentAction = next;
   currentMotion = key;
   paintMotionActive();
@@ -602,8 +608,10 @@ function loadAvatar(key) {
 
     fitCamera(vrm.scene);
 
+    motionActions.clear();
     mixer = new THREE.AnimationMixer(vrm.scene);
-    mixer.addEventListener('finished', () => {
+    mixer.addEventListener('finished', event => {
+      if (event.action !== currentAction) return;
       toIdle(0.35);
       paintMotionActive();
     });
@@ -771,6 +779,8 @@ function asrHealthy() {
 }
 
 function earLabel() {
+  if (asrStat.note === 'locked') return '锁屏中 · 监听暂停';
+  if (asrStat.note === 'memory-locked') return '记忆待解锁';
   if (listening && asrStat.captureReady === false) return asrStat.note === 'installing' ? '准备语音资源…' : asrStat.note === 'starting' ? '正在连接麦克风…' : '正在重连麦克风…';
   if (liveText) return liveText;
   if (shownHeard) {
@@ -866,16 +876,6 @@ function closeDock() {
  *
  * 分区用骨头投影出来的横向分界线（脖子 / 胯），不猜模型比例：
  * 换任何一个 VRM 都照样分得对。 */
-const POKE = {
-  head:  [['refuse', .46], ['surprise', .2], ['tease', .18], ['shy', .16]],
-  upper: [['shy', .44], ['tease', .22], ['thanks', .18], ['greet', .16]],
-  lower: [['angry', .44], ['refuse', .22], ['sorry', .18], ['surprise', .16]],
-};
-function pokeSlot(list) {
-  let r = Math.random();
-  for (const [slot, p] of list) { if ((r -= p) <= 0) return slot; }
-  return list[0][0];
-}
 function bodyRegionAt(x, y) {
   if (!vrm || !vrm.humanoid) return null;
   const yOf = (bone) => {
@@ -902,11 +902,10 @@ function onPetClick(e) {
   const onBody = !!(r && e && vrm &&
     e.clientX >= r.x0 && e.clientX <= r.x1 && e.clientY >= r.y0 && e.clientY <= r.y1);
   if (onBody) {
+    if (performance.now() - lastInterruptedAt < 900 || thinkingNow) return;
     const region = bodyRegionAt(e.clientX, e.clientY) || 'upper';
-    const slot = pokeSlot(POKE[region]);
-    const k = playSlot(slot, 0.28);
+    pet.interact(region).catch(() => {});
     ambientTimer = 26;
-    if (k) pet.log(`[poke] ${region} → ${slot} / ${k}`);
     return;
   }
   if (dockMode === 'open') closeDock();
@@ -922,7 +921,8 @@ async function sendText() {
   shownHeard = '';
   paintEar();
   showBubble(v, 3200);
-  await pet.say(v);
+  const result = await pet.say(v);
+  if (result && !result.ok) { if (!input.value) input.value = v; showBubble(result.error || '这句话没有发送成功。'); }
 }
 
 document.getElementById('sendBtn').addEventListener('click', sendText);
@@ -935,8 +935,10 @@ input.addEventListener('keydown', (e) => {
  * 为什么需要这个：她说话时是闭麦的（没有可用的系统回声消除），所以"主人开口"
  * 她根本听不见 —— 语音打断在物理上不可能。点一下是最直觉、最可靠的替代。 */
 const stageEl = document.getElementById('stage');
+let lastInterruptedAt = -Infinity;
 stageEl.addEventListener('pointerdown', () => {
-  if (!speakingNow) return;
+  if (!speakingNow && !thinkingNow) return;
+  lastInterruptedAt = performance.now();
   pet.stopSpeak();
   stopAudio(true);
   speakingNow = false;

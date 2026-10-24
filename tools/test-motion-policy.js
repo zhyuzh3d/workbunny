@@ -15,7 +15,7 @@ test('the real playback gateway and slot resolver replace disabled, empty and mi
  const idle=s.slice(s.indexOf('let idleKey = IDLE;'),s.indexOf('/* ═══════════ 表情'));
  const played=[];
  const actions=new Map(config.MOTIONS.map(m=>[m.key,{enabled:true,setEffectiveTimeScale(){},setEffectiveWeight(){},setLoop(loop){this.loop=loop},reset(){return this},play(){played.push({key:m.key,loop:this.loop});return this},crossFadeFrom(){}}]));
- const context={cfg:{motions:{disabled:config.MOTIONS.filter(m=>m.key!=='idle_breath').map(m=>m.key)}},MOTIONS:config.MOTIONS,clips:new Map(config.MOTIONS.map(m=>[m.key,m])),mixer:{clipAction:m=>actions.get(m.key)},THREE:{LoopRepeat:1,LoopOnce:0},currentAction:null,currentMotion:'',FADE:.2,IDLE:'idle_loop',phase:'idle',paintMotionActive(){},pet:{log(){}},Math};
+ const context={motionActions:new Set(),crossFadeMotionAction(next){next.reset().play()},cfg:{motions:{disabled:config.MOTIONS.filter(m=>m.key!=='idle_breath').map(m=>m.key)}},MOTIONS:config.MOTIONS,clips:new Map(config.MOTIONS.map(m=>[m.key,m])),mixer:{clipAction:m=>actions.get(m.key)},THREE:{LoopRepeat:1,LoopOnce:0},currentAction:null,currentMotion:'',FADE:.2,IDLE:'idle_loop',phase:'idle',paintMotionActive(){},pet:{log(){}},Math};
  vm.createContext(context);vm.runInContext(playback+idle,context);
  for(const key of ['','cheer','cheer_joy','work_maid','not-a-motion']){assert.equal(vm.runInContext(`resolveMotion(${JSON.stringify(key)})`,context),'idle_breath');vm.runInContext(`playMotion(${JSON.stringify(key)})`,context);}
  vm.runInContext('toIdle();rotateIdle()',context);

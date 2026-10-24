@@ -1,7 +1,7 @@
 {
   "name": "workbunny",
   "productName": "workbunny",
-  "version": "0.2.15",
+  "version": "0.3.0",
   "description": "workbunny · 透明置顶的桌面伙伴 baby：常驻聆听、语音对话、盯 WorkBuddy 任务",
   "main": "src/main/index.js",
   "private": true,

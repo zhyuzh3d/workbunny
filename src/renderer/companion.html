@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'" />
+  <title>伙伴空间 · workbunny</title>
+  <link rel="stylesheet" href="./companion.css" />
+</head>
+<body>
+  <main id="memoryPage" class="page" hidden>
+    <header class="head">
+      <div><div class="eyebrow">WORKBUNNY</div><h1>记忆</h1></div>
+      <span id="memoryStatus" class="status-pill">正在读取</span>
+    </header>
+    <section class="main memory-main">
+      <div class="card settings-card">
+        <button id="memoryUnlock" class="button quiet" hidden>解锁记忆</button>
+        <div class="setting-row"><div><strong>使用记忆</strong><p>保存聊天，并在对话中参考记忆</p></div><label class="switch"><input id="memoryEnabled" type="checkbox"><span></span></label></div>
+        <div class="setting-row"><div><strong>整理新记忆</strong><p>空闲时将近期对话交给 WorkBuddy 免费模型整理</p></div><label class="switch"><input id="memoryExtract" type="checkbox"><span></span></label></div>
+        <div id="memoryConfigNote" class="inline-note" role="status"></div>
+      </div>
+
+      <div class="count-grid" id="memoryCounts"></div>
+
+      <div class="tabs" id="memoryTabs" role="tablist" aria-label="记忆内容">
+        <button class="tab active" data-kind="memory" role="tab">长期记忆</button>
+        <button class="tab" data-kind="message" role="tab">聊天</button>
+        <button class="tab" data-kind="summary" role="tab">摘要</button>
+      </div>
+      <div class="search-row"><input id="memorySearch" type="search" placeholder="搜索内容" aria-label="搜索记忆内容"><button id="memorySearchBtn" class="button quiet">搜索</button></div>
+      <div id="memoryList" class="records" aria-live="polite"></div>
+      <div class="more-row"><span id="memoryListNote" class="inline-note"></span><button id="memoryMore" class="button quiet" hidden>更早内容</button></div>
+
+      <section class="card backup-card">
+        <div class="section-heading"><div><h2>备份与恢复</h2><p>备份使用密码保护，请妥善记住密码。</p></div></div>
+        <label class="field-label" for="backupPassphrase">备份密码</label>
+        <input id="backupPassphrase" type="password" autocomplete="new-password" placeholder="输入备份密码">
+        <div class="button-row"><button id="memoryExport" class="button">导出加密备份</button><button id="memoryRestore" class="button quiet">从备份恢复</button></div>
+        <p class="inline-note">恢复前请先导出备份，并清空当前记忆。</p>
+        <div class="button-row destructive-row"><button id="memoryClear" class="button danger">清空本地记忆</button><span id="memoryActionNote" class="inline-note" role="status"></span></div>
+      </section>
+    </section>
+  </main>
+
+  <main id="desktopPage" class="page" hidden>
+    <header class="head">
+      <div><div class="eyebrow">WORKBUNNY</div><h1>桌面任务</h1></div>
+      <span id="desktopStatus" class="status-pill">尚未读取</span>
+    </header>
+    <section class="main desktop-main">
+      <div class="card task-card">
+        <label class="field-label" for="taskTarget">任务目标</label>
+        <select id="taskTarget">
+          <option value="workbuddy">WorkBuddy</option>
+          <option value="wechat">微信文件传输助手</option>
+        </select>
+        <p class="inline-note">微信目标仅用于文件传输助手实验。</p>
+        <label class="field-label" for="taskGoal">要做什么</label>
+        <textarea id="taskGoal" rows="3" maxlength="1200" placeholder="用几句话描述希望完成的任务"></textarea>
+        <div class="button-row"><button id="desktopRefresh" class="button quiet">刷新状态</button></div>
+      </div>
+
+      <div class="card permissions-card">
+        <div class="section-heading"><div><h2>系统权限</h2><p>权限需要在系统设置中授权。</p></div><button id="desktopPermission" class="button quiet">请求权限</button></div>
+        <div id="permissionList" class="permission-list"></div>
+        <p id="permissionNote" class="inline-note"></p>
+      </div>
+
+      <div class="card task-state-card">
+        <div class="section-heading"><div><h2>当前步骤</h2><p id="taskStateNote">没有正在运行的任务</p></div></div>
+        <div id="taskDetails" class="task-details"></div>
+        <figure id="taskPreview" class="preview" hidden><img id="taskScreenshot" alt="最近一次任务截图"><figcaption>最近任务截图</figcaption></figure>
+      </div>
+
+      <div class="card insert-card">
+        <div class="section-heading"><div><h2>输入到当前窗口</h2><p>点击后有 3 秒切换输入焦点。</p></div></div>
+        <textarea id="desktopInsertText" rows="2" maxlength="3500" placeholder="要输入的单段文字（3500 字以内）"></textarea>
+        <div class="button-row"><button id="desktopInsert" class="button">倒计时输入</button><button id="desktopInsertCancel" class="button quiet" hidden>取消</button><span id="desktopInsertNote" class="inline-note" role="status"></span></div>
+      </div>
+      <p class="safety-note">截图只会随任务发送给 WorkBuddy 的免费视觉模型，不会常驻截屏。</p>
+    </section>
+    <footer class="sticky-actions"><div class="sticky-button-row"><button id="taskStart" class="button primary">开始任务</button><button id="taskStop" class="button danger" disabled>停止</button><button id="taskAccept" class="button quiet" disabled>验收完成</button></div><span id="desktopActionNote" class="inline-note" role="status"></span></footer>
+  </main>
+
+  <footer id="pageError" class="global-note" role="status" hidden></footer>
+  <script type="module" src="./companion.js"></script>
+</body>
+</html>

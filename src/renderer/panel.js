@@ -551,6 +551,8 @@ function buildMotionList() {
       $('brainStatus').textContent = '切换的是草稿，点保存后用于对话。';
     });
     $('brainModelsBtn').addEventListener('click', refreshBrainModels);
+    $('openMemory').addEventListener('click', () => window.pet.open('memory'));
+    $('openDesktop').addEventListener('click', () => window.pet.open('desktop'));
     $('openWorkBuddy').addEventListener('click', async () => {
       const result = await window.pet.workbuddyOpen();
       $('brainStatus').textContent = result.ok ? 'WorkBuddy 已打开。登录后获取模型列表。' : result.error;
