@@ -1093,6 +1093,7 @@ ipcMain.handle('pet:probe', async () => {
 });
 
 ipcMain.on('pet:hit', (_e, v) => setInteractive(!!v));
+ipcMain.on('pet:log', (_e, m) => log('[ui] ' + String(m).slice(0, 2400)));
 ipcMain.on('pet:audio-done', () => finishSpeech());
 ipcMain.on('pet:record', () => toggleRecord());
 ipcMain.on('pet:listen', (_e, v) => {

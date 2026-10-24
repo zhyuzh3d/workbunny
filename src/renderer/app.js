@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip, VRMLookAtQuaternionProxy } from '@pixiv/three-vrm-animation';
+import { makeRig, groundClip, soleHeight } from './ground.js';
 
 /* ═══════════ 常量 ═══════════ */
 const AVATARS = {
@@ -116,6 +117,38 @@ function rebuildClips() {
       console.warn('retarget 失败', id, e);
     }
   }
+  groundAllClips();
+}
+
+function groundAllClips() {
+  if (!vrm || clips.size === 0) return;
+  let rig = null;
+  try { rig = makeRig(vrm); } catch (e) { console.warn('建替身骨架失败', e); }
+  if (!rig) return;
+
+  // 地面基准：以站立待机为准；没有待机动作就取所有动作的中位数
+  const soles = new Map();
+  for (const [id, clip] of clips) {
+    try {
+      const h = soleHeight(clip, rig);
+      if (h != null) soles.set(id, h);
+    } catch (e) { console.warn('量落脚高度失败', id, e); }
+  }
+  let ref = soles.has(IDLE) ? soles.get(IDLE) : null;
+  if (ref == null) {
+    const all = [...soles.values()].sort((p, q) => p - q);
+    if (all.length) ref = all[Math.floor(all.length / 2)];
+  }
+
+  const lines = [];
+  for (const [id, clip] of clips) {
+    try {
+      const r = groundClip(clip, rig, ref);
+      lines.push(`${id} 竖直${(r.yShift * 100).toFixed(1)}cm 落脚${r.ik ? r.ik.contacts : 0}段`);
+    } catch (e) { console.warn('地面锚定失败', id, e); }
+  }
+  console.log('[ground]', lines.join(' | '));
+  pet.log('ground ' + lines.join(' | '));
 }
 
 function playMotion(key, { loop = false, fade = FADE } = {}) {

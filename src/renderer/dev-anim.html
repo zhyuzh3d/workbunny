@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>workbaby · 动作检视台（开发者用，不随应用加载）</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/jsm/",
+    "@pixiv/three-vrm": "./vendor/three-vrm.module.js",
+    "@pixiv/three-vrm-animation": "./vendor/three-vrm-animation.module.js"
+  }
+}
+</script>
+<style>
+  html, body { margin: 0; background: #23272f; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<script type="module">
+/* 定帧检视台：把一个动作摆到指定时间渲染一帧，用来肉眼验「脚钉没钉住、腿有没有拉歪」。
+ * 地面网格是关键 —— 没有地面参照物根本看不出脚在不在动。 */
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin } from '@pixiv/three-vrm';
+import { VRMAnimationLoaderPlugin, createVRMAnimationClip, VRMLookAtQuaternionProxy } from '@pixiv/three-vrm-animation';
+import { makeRig, groundClip, soleHeight } from './ground.js';
+
+const W = 420, H = 660;
+const MOTIONS = ['idle_loop', 'LookAround', 'Relax', 'Thinking', 'Sleepy', 'Goodbye', 'Clapping', 'Jump', 'Surprised', 'Angry', 'Sad', 'Blush'];
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(2);
+renderer.setSize(W, H);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x23272f);
+const camera = new THREE.PerspectiveCamera(28, W / H, 0.05, 60);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+const key = new THREE.DirectionalLight(0xfff6ec, 2.2);
+key.position.set(1.1, 2.6, 2.2);
+scene.add(key);
+const rim = new THREE.DirectionalLight(0xbcc8ff, 1.0);
+rim.position.set(-1.6, 1.7, -1.6);
+scene.add(rim);
+
+// 地面：一格 10cm，眼睛盯着脚和格子的相对位置就知道有没有滑动
+const grid = new THREE.GridHelper(3, 30, 0x5a6478, 0x39404e);
+grid.position.y = 0;
+scene.add(grid);
+const axis = new THREE.Mesh(
+  new THREE.BoxGeometry(0.006, 0.001, 1.2),
+  new THREE.MeshBasicMaterial({ color: 0x7d8aa8 })
+);
+axis.position.set(0, 0.001, 0);
+scene.add(axis);
+
+const gltfLoader = new GLTFLoader();
+gltfLoader.register((p) => new VRMLoaderPlugin(p));
+const animLoader = new GLTFLoader();
+animLoader.register((p) => new VRMAnimationLoaderPlugin(p));
+
+let vrm = null, mixer = null;
+const sets = { raw: new Map(), ik: new Map() };
+
+function frameCamera(obj) {
+  const box = new THREE.Box3().setFromObject(obj);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const fovR = (camera.fov * Math.PI) / 180;
+  const fill = 1.08;
+  const visibleH = size.y / fill;
+  const dist = visibleH / 2 / Math.tan(fovR / 2);
+  const aimY = center.y - 0.075 * visibleH;
+  camera.position.set(0, aimY, dist);
+  camera.lookAt(0, aimY, 0);
+  camera.updateProjectionMatrix();
+}
+
+async function loadMotion(name) {
+  return new Promise((res) => {
+    animLoader.load(`./assets/motions/${name}.vrma`, (g) => res(g.userData.vrmAnimations[0] || null), undefined, () => res(null));
+  });
+}
+
+async function boot() {
+  const gltf = await new Promise((res, rej) => gltfLoader.load('./assets/models/AvatarSample_D.vrm', res, undefined, rej));
+  vrm = gltf.userData.vrm;
+  if (vrm.meta?.metaVersion === '0') vrm.scene.rotation.y = Math.PI;
+  vrm.scene.traverse((o) => { o.frustumCulled = false; });
+  if (vrm.humanoid) vrm.humanoid.autoUpdateHumanBones = true;
+  const proxy = new VRMLookAtQuaternionProxy(vrm.lookAt);
+  proxy.name = 'VRMLookAtQuaternionProxy';
+  vrm.scene.add(proxy);
+  scene.add(vrm.scene);
+  frameCamera(vrm.scene);
+
+  const anims = new Map();
+  for (const m of MOTIONS) {
+    const a = await loadMotion(m);
+    if (a) anims.set(m, a);
+  }
+
+  // 两套 clip：raw = 原样；ik = 走完「冻位移 + 统一地面 + 锁脚」
+  mixer = new THREE.AnimationMixer(vrm.scene);
+  const rig = makeRig(vrm);
+  const soles = new Map();
+  for (const [k, a] of anims) {
+    sets.raw.set(k, createVRMAnimationClip(a, vrm));
+    const c2 = createVRMAnimationClip(a, vrm);
+    soles.set(k, soleHeight(c2, rig));
+    sets.ik.set(k, c2);
+  }
+  const sorted = [...soles.values()].sort((p, q) => p - q);
+  const ref = soles.get('idle_loop') ?? sorted[Math.floor(sorted.length / 2)];
+  const report = [];
+  for (const [k, c] of sets.ik) {
+    const r = groundClip(c, rig, ref);
+    report.push(`${k}:${r.ik ? r.ik.contacts + '段' : '无'}`);
+  }
+  window.__report = report.join(' ');
+
+  renderer.render(scene, camera);
+  window.__ready = true;
+}
+
+window.__shot = (name, t, mode = 'ik') => {
+  const clip = (sets[mode] || sets.ik).get(name);
+  if (!clip) return 'no clip: ' + name;
+  mixer.stopAllAction();
+  const act = mixer.clipAction(clip);
+  act.reset();
+  act.play();
+  act.paused = true;
+  act.time = t;
+  mixer.update(0.0001);
+  vrm.update(0.016);
+  renderer.render(scene, camera);
+  return true;
+};
+
+boot().catch((e) => { window.__error = String(e && e.message || e); });
+</script>
+</body>
+</html>

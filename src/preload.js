@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('pet', {
   vis: (v) => ipcRenderer.send('pet:vis', v),
   quit: () => ipcRenderer.send('pet:quit'),
   stopSpeak: () => ipcRenderer.send('pet:stop-speak'),
+  log: (m) => ipcRenderer.send('pet:log', m),
   open: (what) => ipcRenderer.send('pet:open', what),
   on: (cb) => {
     ipcRenderer.on('pet:ev', (_e, d) => cb(d));
