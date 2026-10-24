@@ -80,12 +80,29 @@ function isRealInstruction(txt) {
   return true;
 }
 
-/** 一句话概括任务名：主人的原话压成一行，别超过 44 字 */
+/** 首句是裸 URL / 路径时不能当任务名用 —— 主人不关心链接，界面也不该显示它 */
+const URLISH = /^(https?:\/\/|file:\/\/|www\.|localhost|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}[:\/]|~?\/|[A-Za-z]:\\)/i;
+
+/** 从一段话里挑一个能当名字的片段：跳过链接/路径，也把句首贴的链接剥掉 */
+function pickName(txt) {
+  const segs = plain(txt).split(/[。！？!?\n]/).map((s) => s.trim()).filter(Boolean);
+  for (const s of segs) {
+    const clean = s
+      .replace(/^(?:https?:\/\/|file:\/\/)\S*/i, '')
+      .replace(/^~?\/\S*\s*/, '')     // 句首贴的绝对路径（/Users/.../58.vrm）也剥掉
+      .replace(/^@\S+\s*/, '')
+      .trim();
+    if (clean.length >= 2 && !URLISH.test(clean)) return clean;
+  }
+  return '';
+}
+
+/** 一句话概括任务名：优先主人的原话，原话只有链接/路径就退回 WorkBuddy 起的标题 */
 function taskName(t) {
-  const raw = plain((t && (t.userText || t.title)) || '');
+  let raw = pickName((t && t.userText) || '');
+  if (!raw) raw = pickName((t && t.title) || '');
   if (!raw) return '一件事';
-  const firstLine = raw.split(/[。！？!?\n]/)[0].trim() || raw;
-  return firstLine.length > 44 ? firstLine.slice(0, 44) + '…' : firstLine;
+  return raw.length > 44 ? raw.slice(0, 44) + '…' : raw;
 }
 
 function dur(ms) {

@@ -1088,7 +1088,7 @@ function paintActivity(snap) {
     actLines = []; actSig = ''; actIdx = 0; stopRoll();
     return;
   }
-  const sig = ((snap && snap.tasks) || []).map((t) => `${t.sessionId}:${t.status}`).join('|');
+  const sig = ((snap && snap.tasks) || []).map((t) => `${t.sessionId}:${t.status}:${t.name}`).join('|');
   actLines = lines;
   activity.classList.remove('hidden');
   actTextMode = false;
