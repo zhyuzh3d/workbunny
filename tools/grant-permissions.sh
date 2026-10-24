@@ -1,5 +1,5 @@
 #!/bin/zsh
-# 直接给 WorkBaby 写 TCC 授权（麦克风 + 语音识别），从此不再弹窗。
+# 直接给 workbunny 写 TCC 授权（麦克风 + 语音识别），从此不再弹窗。
 #
 # 前提：跑这个脚本的进程（正常是 WorkBuddy.app）必须有「完全磁盘访问权限」。
 #   系统设置 → 隐私与安全性 → 完全磁盘访问权限 → + → /Applications/WorkBuddy.app
@@ -10,8 +10,8 @@
 set -u
 
 DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
-BID="cn.haminn.workbaby"
-APP="$HOME/Applications/WorkBaby.app"
+BID="cn.haminn.workbunny"
+APP="$HOME/Applications/workbunny.app"
 
 if [ ! -f "$DB" ]; then
   echo "✗ 找不到 $DB"
@@ -56,5 +56,5 @@ sqlite3 "$DB" "select service, auth_value from access where client='$BID';"
 OLD="cn.haminn.buddypet"
 sqlite3 "$DB" "delete from access where client='$OLD';" 2>/dev/null && echo "▸ 已清掉旧应用名 $OLD 的授权记录"
 
-echo "✓ 完成。重启 WorkBaby 生效："
-echo "  pkill -f WorkBaby.app/Contents/MacOS/WorkBaby; open -n \"$APP\""
+echo "✓ 完成。重启 workbunny 生效："
+echo "  pkill -f workbunny.app/Contents/MacOS/workbunny; open -n \"$APP\""

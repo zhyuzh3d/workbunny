@@ -24,7 +24,7 @@ function extractTags(raw) {
   return { clean, motions, emos };
 }
 
-/** 句子切分：中文句末 + 换行；短于 4 字不单独成句（避免"嗯。"被拆出去单独念） */
+/** Keep short spoken replies as well; never consume and discard “好。” / “嗯。” */
 const SENT_RE = /[^。！？!?\n…]*[。！？!?\n…]+/g;
 
 function makeSentenceSplitter(onSentence) {
@@ -38,7 +38,7 @@ function makeSentenceSplitter(onSentence) {
       while ((m = SENT_RE.exec(buf))) {
         const s = m[0].trim();
         last = SENT_RE.lastIndex;
-        if (s.replace(/[\s，,。！？!?…、]/g, '').length >= 2) onSentence(s);
+        if (s) onSentence(s);
       }
       if (last > 0) buf = buf.slice(last);
     },
@@ -57,21 +57,15 @@ function makeSentenceSplitter(onSentence) {
  * @returns {Promise<{text:string,motions:string[],emos:string[],usage:any,ms:number}>}
  */
 function chat(opts) {
+  if (opts.transport === 'workbuddy') return require('./workbuddy').chat(opts);
   const {
     baseURL, apiKey, model, messages,
     temperature = 0.8, maxTokens = 220, timeoutMs = 30000,
     onDelta, onSentence, signal,
     // 思考强度：只有明确支持的服务商才发这个字段（doubao 用 thinking:{type}，
     // nemotron 用 chat_template_kwargs.thinking）。auto = 什么都不发，让服务方自己定。
-    thinking = 'auto', thinkingSupported = false,
+    extraBody = {},
   } = opts;
-
-  const extra = {};
-  if (thinkingSupported && thinking && thinking !== 'auto') {
-    const on = thinking === 'high' || thinking === 'medium';
-    extra.thinking = { type: on ? 'enabled' : 'disabled' };
-    extra.chat_template_kwargs = { thinking: on };
-  }
 
   return new Promise((resolve, reject) => {
     let u;
@@ -84,12 +78,11 @@ function chat(opts) {
     const payload = JSON.stringify({
       model,
       messages,
-      temperature,
       max_tokens: maxTokens,
       stream: true,
       // 部分网关认这个；不认的会忽略
       stream_options: { include_usage: true },
-      ...extra,
+      ...extraBody,
     });
 
     const req = (isHttps ? https : http).request(
@@ -151,6 +144,7 @@ function chat(opts) {
         res.on('end', () => {
           splitter.flush();
           const { clean, motions, emos } = extractTags(text);
+          if (!clean.trim()) { reject(new Error('模型没有返回回答正文，请检查所选模型和思考设置')); return; }
           resolve({ text: clean.trim(), raw: text, motions, emos, usage, model });
         });
         res.on('error', reject);
@@ -164,9 +158,10 @@ function chat(opts) {
       if (signal && signal.aborted) return reject(new Error('aborted'));
       reject(e);
     });
-    if (signal) {
-      signal.addEventListener('abort', () => req.destroy(new Error('aborted')), { once: true });
-    }
+    const abort = () => req.destroy(new Error('aborted'));
+    if (signal?.aborted) { abort(); return; }
+    if (signal) signal.addEventListener('abort', abort, { once: true });
+    req.on('close', () => signal?.removeEventListener('abort', abort));
     req.write(payload);
     req.end();
   });

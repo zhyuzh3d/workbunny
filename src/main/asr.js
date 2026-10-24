@@ -4,7 +4,7 @@
  *
  * 注意（踩过的坑）：
  *  · 裸可执行文件调用 SFSpeechRecognizer 时，TCC 会校验「责任进程」的 Info.plist。
- *    dev 模式的责任进程是 node_modules/electron/dist/Electron.app，打包后是 Buddy Pet.app，
+ *    dev 模式的责任进程是 node_modules/electron/dist/Electron.app，打包后是 workbunny.app，
  *    两者都必须含 NSSpeechRecognitionUsageDescription / NSMicrophoneUsageDescription，
  *    否则子进程直接 SIGABRT（134），且 stdout 一行都不吐 —— 表现为「点了麦克风没反应」。
  *  · 所以这里必须给启动加超时：只要 25s 内没收到 auth/ready，就当权限没批，报错给 UI。
@@ -25,6 +25,9 @@ class Asr extends EventEmitter {
     this.log = log;
     this.authWaitTimer = null;
     this.aec = false;      // 回声消除是否可用（决定能不能边说边听）
+    this.lastCaptureAt = 0;
+    this.captureTimer = null;
+    this.installing = false;
   }
 
   get running() {
@@ -56,6 +59,8 @@ class Asr extends EventEmitter {
     this.ready = false;
     this.partial = '';
     this.aec = false;
+    this.lastCaptureAt = 0;
+    this.installing = false;
     this.log(`[asr] spawn ${this.bin} ${args.join(' ')} pid=${p.pid}`);
     let buf = '';
     let sawAuth = false;
@@ -99,10 +104,12 @@ class Asr extends EventEmitter {
       this.emit('error', '语音模块启动失败：' + e.message);
     });
 
-    p.on('exit', (code, sig) => {
+    p.on('close', (code, sig) => {
       this.log(`[asr] exit code=${code} sig=${sig}`);
+      if (this.proc && this.proc !== p) return;
       if (this.authWaitTimer) { clearTimeout(this.authWaitTimer); this.authWaitTimer = null; }
-      this.proc = null;
+      if (this.captureTimer) { clearInterval(this.captureTimer); this.captureTimer = null; }
+      if (this.proc === p) this.proc = null;
       this.ready = false;
       // 134 = SIGABRT：几乎一定是 TCC 少了 usage description
       if (!sawAuth && (code === 134 || sig === 'SIGABRT')) {
@@ -115,12 +122,35 @@ class Asr extends EventEmitter {
   onMessage(m) {
     switch (m.t) {
       case 'auth':
-        this.emit('auth', { speech: m.speech, mic: m.mic });
+        this.emit('auth', { speech: m.speech, mic: m.mic, locale: m.locale || '', engine: m.engine || '' });
         break;
       case 'ready':
+        this.installing = false;
         this.ready = true;
         if (this.authWaitTimer) { clearTimeout(this.authWaitTimer); this.authWaitTimer = null; }
         this.emit('ready');
+        if (m.captureHeartbeat && !this.captureTimer) {
+          this.lastCaptureAt = Date.now();
+          this.captureTimer = setInterval(() => {
+            if (this.proc && Date.now() - this.lastCaptureAt > 6000) {
+              this.emit('error', '麦克风输入中断，正在重连'); this.kill();
+            }
+          }, 1000);
+          this.captureTimer.unref?.();
+        }
+        break;
+      case 'installing':
+        this.installing = true;
+        if (this.authWaitTimer) clearTimeout(this.authWaitTimer);
+        this.authWaitTimer = setTimeout(() => {
+          this.emit('error', '语音资源准备超时，请检查网络后重试'); this.kill();
+        }, 5 * 60 * 1000);
+        this.emit('installing', { locale: m.locale || '' });
+        break;
+      case 'tap':
+      case 'capture':
+        this.lastCaptureAt = Date.now();
+        this.emit('capture', m);
         break;
       case 'partial':
         this.partial = m.v || '';
@@ -186,8 +216,9 @@ class Asr extends EventEmitter {
 
   stop() {
     if (!this.proc) return;
+    this.ready = false;
     try {
-      this.proc.stdin.write('stop\n');
+      this.proc.stdin.write(this.always ? 'quit\n' : 'stop\n');
     } catch {}
     const p = this.proc;
     setTimeout(() => {
@@ -201,6 +232,7 @@ class Asr extends EventEmitter {
   }
 
   kill() {
+    if (this.captureTimer) { clearInterval(this.captureTimer); this.captureTimer = null; }
     if (this.authWaitTimer) { clearTimeout(this.authWaitTimer); this.authWaitTimer = null; }
     if (this.proc) {
       try {
@@ -219,10 +251,11 @@ class Asr extends EventEmitter {
  */
 function probeAccess(binPath, { timeoutMs = 5000, requestMic = false } = {}) {
   return new Promise((resolve) => {
-    let done = false;
+    let done = false, timer;
     const finish = (r) => {
       if (done) return;
       done = true;
+      clearTimeout(timer);
       try { p && p.kill('SIGKILL'); } catch {}
       resolve(r);
     };
@@ -260,7 +293,7 @@ function probeAccess(binPath, { timeoutMs = 5000, requestMic = false } = {}) {
     });
     p.on('exit', (code, sig) => finish({ speech: -1, mic: false, error: `exit code=${code} sig=${sig}` }));
     p.on('error', (e) => finish({ speech: -1, mic: false, error: 'spawn ' + e.message }));
-    setTimeout(() => finish({ speech: 0, mic: false, timedOut: true }), timeoutMs);
+    timer = setTimeout(() => finish({ speech: 0, mic: false, timedOut: true }), timeoutMs);
   });
 }
 

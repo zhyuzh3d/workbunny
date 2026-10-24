@@ -6,6 +6,8 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const qwenVoices = require('./qwen-voices');
+const modelCatalog = require('./model-catalog');
 
 const HOME = os.homedir();
 
@@ -217,10 +219,10 @@ const PERSONA = `你叫「{name}」，是住在主人 Mac 桌面角上的一只�
 没情绪可配就别硬塞：平铺直叙的陈述句（"文件在桌面上""已经改好了"）不加动作反而更像人。
 
 # 你的声音
-你现在用的是 macOS 自带的系统语音，这是默认配置，不是毛病。
+你的嗓子以当前设置为准，不要猜测正在使用哪个引擎或音色。
 主人嫌你声音难听、想换个声音、说"换个人来讲"的时候，**别辩解也别说你改不了**，
-直接告诉他去哪儿换：打开设置 → 「嘴巴」那一页 —— 里面能换系统音色，
-也能下载一个更像你的大模型、或者传一段声音让你照着说。
+直接告诉他去哪儿换：打开设置 → 「语音」那一页 —— 里面能换系统音色，
+也能下载 CustomVoice 本地模型，选择内置音色。
 就这么一句，说完该干嘛干嘛，不要反复道歉。
 
 # 主人现在的状态
@@ -242,77 +244,47 @@ const PERSONA = `你叫「{name}」，是住在主人 Mac 桌面角上的一只�
 主人一口气交付了三件 → 三件全过了<m>pose</m><e>happy</e>，你今天手挺顺的。
 主人坐了三小时 → 你这椅子都快烧了<m>tired</m>，站起来抻一下再坐回去。
 主人："你长什么样" → 就这个样子呀<m>pose</m>，小是小了点，站得挺稳。
-主人："你声音好难听" → 这是系统自带的嗓子，去设置里「嘴巴」那页换，还能下一个更像我的。
+主人："你声音好难听" → 去设置里「语音」那页换个音色，还能下一个更像我的。
 `;
 
 
-/* ── 大脑：钱从哪来 ──
- * workbuddy（默认）= 用主人自己的 WorkBuddy 账号额度，凭据从 ~/.workbuddy/models.json 拿，
- *   主人一行都不用填。这也是唯一"开箱就能说话"的路。
- * apikey = 主人自己有 key。只留四家：DeepSeek 官方、豆包（火山方舟）、Grok（xAI）、NVIDIA Nemotron。
- *   为什么只有四家：列二十家等于没列 —— 主人只会挑他听过的，剩下的图标是噪音。
- *   这四家覆盖了"便宜快 / 中文好 / 推理强 / 免费用量大"四种取向。 */
-const PROVIDERS = [
-  {
-    id: 'deepseek', label: 'DeepSeek 官方',
-    baseURL: 'https://api.deepseek.com/v1',
-    models: ['deepseek-chat', 'deepseek-reasoner'],
-    thinking: false,
-    hint: '最便宜。deepseek-reasoner 自带长思考，慢一些。',
-  },
-  {
-    id: 'doubao', label: '豆包（火山方舟）',
-    baseURL: 'https://ark.cn-beijing.volces.com/api/v3',
-    models: ['doubao-seed-1-6-250615', 'doubao-seed-1-6-thinking-250715', 'doubao-pro-32k-241215'],
-    thinking: true,
-    hint: '中文最顺。thinking 那档会自己多想一会儿。',
-  },
-  {
-    id: 'grok', label: 'Grok（xAI）',
-    baseURL: 'https://api.x.ai/v1',
-    models: ['grok-4-fast-non-reasoning', 'grok-4-fast-reasoning', 'grok-3-mini-fast'],
-    thinking: false,
-    hint: '反应快、嘴贫，适合闲聊。',
-  },
-  {
-    id: 'nemotron', label: 'NVIDIA Nemotron',
-    baseURL: 'https://integrate.api.nvidia.com/v1',
-    models: ['nvidia/nemotron-3-nano-30b-a3b', 'nvidia/nemotron-3.5-bolt-e4b', 'nvidia/llama-3.3-nemotron-super-49b-v1.5'],
-    thinking: true,
-    hint: '免费额度大。bolt 那档最快。',
-  },
-];
-
-/* 思考强度：auto = 交给服务方自己决定（闲聊不浪费时间，难问题自己多想） */
+/* Default: the active WorkBuddy account via its authenticated local broker.
+ * External providers keep independent model/key/thinking profiles. */
+const PROVIDERS = modelCatalog.PROVIDERS;
 const THINKING_LEVELS = [
-  { id: 'auto', label: 'auto（自动）' },
-  { id: 'low', label: '低 · 快' },
-  { id: 'medium', label: '中' },
-  { id: 'high', label: '高 · 想久一点' },
+  { id: 'auto', label: '模型默认' }, { id: 'off', label: '关闭思考' },
+  { id: 'on', label: '开启思考' }, { id: 'minimal', label: '极低' },
+  { id: 'low', label: '低' }, { id: 'medium', label: '中' },
+  { id: 'high', label: '高' }, { id: 'xhigh', label: '超高' }, { id: 'max', label: '极致' },
 ];
+function thinkingOptions(provider, model) { return modelCatalog.thinking(provider, model); }
+function thinkingFields(provider, model, thinking) { return modelCatalog.body(provider, model, thinking); }
 
 /* ── 发声：默认就是系统语音 ──
  * 以前默认是局域网里那台 A1X 上的 Qwen3-TTS。机器一关机，娃娃就先卡两秒再降级，
  * 对话节奏明显发木。默认改成 macOS 自带语音：
  *   /usr/bin/say 从 OS X 10.7 起就在，最近十几年的 macOS 全都有，不依赖任何网络和设备。
- * 想要更像"她"的声音，主人自己去「嘴巴」那一页下载大模型 —— 那是加分项，不是开机条件。 */
+ * 想要更像"她"的声音，主人自己去「语音」那一页下载大模型 —— 那是加分项，不是开机条件。 */
 const TTS_ENGINES = [
-  { id: 'system', label: '系统语音（默认）', hint: 'macOS 自带，离线、立刻出声。' },
-  { id: 'qwen', label: 'Qwen 本地大模型', hint: '下载 1.7B 量化版，音色更像她，还能克隆音色。' },
-  { id: 'remote', label: '远程 API', hint: '自己有 TTS 服务时填地址（比如局域网里那台 A1X）。' },
+  { id: 'system', label: '系统语音', hint: 'macOS 自带，离线、立刻出声。' },
+  { id: 'qwen', label: 'Qwen 本地', hint: 'CustomVoice 离线合成，内置九种音色。' },
+  { id: 'remote', label: '局域网 CHP', hint: '连接 CHP 服务，获取已加载的模型与可用音色。' },
 ];
 
 const DEFAULTS = {
   version: 2,
+  motions: { disabled: [] },
   avatar: 'D',
-  buddy: { name: 'baby' },
+  buddy: { name: 'baby', ownerName: '主人',
+    profile: '我是你的桌面小助手，陪你更轻松地使用 WorkBuddy。我会留意工作进展、帮你协调任务，也愿意陪你聊天、听你说话。我很喜欢和你待在一起：忙时帮忙，闲时陪伴。' },
   brain: {
     source: 'workbuddy',   // workbuddy | apikey
-    model: '',             // workbuddy 模式：空 = 自动挑最快的那个
-    thinking: 'auto',      // auto | low | medium | high
+    model: 'hy3',           // WorkBuddy 内置混元三
+    thinking: 'low',       // WorkBuddy 混元三：低 / 高 / 模型默认
     provider: 'deepseek',  // apikey 模式：用哪家
     modelId: '',           // apikey 模式：模型 id（空 = 该家列表里的第一个）
     apiKey: '',
+    profiles: {},          // 每个外部服务商独立保存 key / model / thinking
   },
   tts: {
     enabled: true,
@@ -321,13 +293,14 @@ const DEFAULTS = {
     rate: 200,             // say 的语速（字/分钟）
     qwen: {
       dir: '',             // gguf 落在哪（下载完自动填）
-      ready: false,        // 两个文件都齐了才算就绪
-      voice: 'default',    // 内置音色名
-      refFile: '',         // 主人上传的参考音色（≤2MB），用来克隆自己的声音
-      refName: '',
+      ready: false,        // CustomVoice 模型通过完整性校验
+      modelKind: 'customvoice',
+      voice: 'serena',
+      streaming: false,   // Enabled only after on-device generation/playback speed validation.
     },
-    // 远程 API（engine = 'remote' 时才用）
-    baseURL: 'http://192.168.124.31:8020',
+    // CHP（engine = 'remote' 时才用）；保留旧字段以兼容既有数据。
+    baseURL: '',
+    chp: { voice: '' },
     apiKey: '',
     model: 'qwen3-tts-1.7b-voice-design',
     instructions:
@@ -341,18 +314,10 @@ const DEFAULTS = {
     // 兜底嗓子：远程失败时的最后一道。空 = 系统默认音色。
     fallbackVoice: 'Tingting',
   },
-  llm: {
-    baseURL: 'https://integrate.api.nvidia.com/v1',
-    apiKey: '',
-    model: 'nvidia/nemotron-3.5-bolt-e4b',
-    temperature: 0.8,
-    maxTokens: 220,
-    timeoutMs: 30000,
-  },
   asr: {
     enabled: true,
     lang: 'zh-CN',
-    device: '',              // 输入设备名（子串匹配）。空 = 自动优先 USB 麦
+    device: '',              // 输入设备名（子串匹配）。空 = 系统默认输入
     probeAll: false,         // 一次性体检：逐个麦克风测电平
     probeSec: 3,
     silenceMs: 900,          // 一句话说完静多久算「说完了」
@@ -373,7 +338,7 @@ const DEFAULTS = {
   },
   /* w/h 永远是「100% 大小」时的基准窗口；角色放大时窗口按倍数临时放大，
    * 基准不跟着变 —— 否则 150% 存过一次，退回 100% 就回不到原尺寸了。 */
-  window: { w: 400, h: 620, x: null, y: null, alwaysOnTop: true, clickThrough: true, scale: 1 },
+  window: { w: 400, h: 620, x: null, y: null, alwaysOnTop: true, clickThrough: true, scale: 1, canvasWidthVersion: 1 },
 };
 
 let cfgPath = null;
@@ -381,6 +346,7 @@ let cache = null;
 
 function setPath(p) {
   cfgPath = p;
+  modelCatalog.setPath(path.join(path.dirname(p), 'model-catalog.json'));
   cache = null;
 }
 
@@ -397,88 +363,51 @@ function deepMerge(base, over) {
   return out;
 }
 
-/** 从 WorkBuddy 自己的模型配置里拿 url / apiKey —— 主人不用再配一遍 */
+/** WorkBuddy model access is brokered by the running, signed-in app. */
 function readWorkBuddyLLM() {
-  const p = path.join(HOME, '.workbuddy', 'models.json');
-  try {
-    const arr = JSON.parse(fs.readFileSync(p, 'utf8'));
-    if (!Array.isArray(arr) || !arr.length) return null;
-    // 优先挑"快"的：名字里带 flash / bolt / lightning / mini / small，且不是纯推理模型
-    const score = (m) => {
-      const id = String(m.id || '').toLowerCase();
-      let s = 0;
-      if (/bolt|lightning|flash|mini|small|nano|instant/.test(id)) s += 10;
-      if (/reason/.test(id)) s -= 6;
-      if (m.supportsToolCall) s += 1;
-      return s;
-    };
-    const best = arr.slice().sort((a, b) => score(b) - score(a))[0];
-    if (!best || !best.apiKey) return null;
-    let base = String(best.url || '');
-    base = base.replace(/\/chat\/completions\/?$/, '');
-    return { baseURL: base, apiKey: best.apiKey, model: best.id, from: 'workbuddy:models.json' };
-  } catch {
-    return null;
-  }
+  return { transport: 'workbuddy', provider: 'workbuddy', model: 'hy3', apiKey: '' };
 }
-
-/** 设置面板里「大脑」那页要列给主人选的模型清单（来自 ~/.workbuddy/models.json） */
-function listWorkBuddyModels() {
-  try {
-    const arr = JSON.parse(fs.readFileSync(path.join(HOME, '.workbuddy', 'models.json'), 'utf8'));
-    if (!Array.isArray(arr)) return [];
-    return arr
-      .filter((m) => m && m.id)
-      .map((m) => ({ id: String(m.id), label: String(m.name || m.id) }))
-      .sort((a, b) => a.label.localeCompare(b.label));
-  } catch {
-    return [];
-  }
-}
-
-/** 把 brain 的配置折算成真正能发请求的那三个字段。
- * 主人只选"用谁的额度 + 哪个模型 + 想多久"，底下怎么拼不该让他操心。 */
+function listWorkBuddyModels() { return modelCatalog.get('workbuddy').models; }
 function resolveLLM(c) {
-  const c2 = c || load();
-  const b = c2.brain || {};
-  if (b.source === 'apikey') {
-    const p = PROVIDERS.find((x) => x.id === b.provider) || PROVIDERS[0];
-    return {
-      baseURL: p.baseURL,
-      apiKey: (b.apiKey || '').trim(),
-      model: (b.modelId || '').trim() || p.models[0],
-      thinking: b.thinking || 'auto',
-      provider: p.id,
-      thinkingSupported: !!p.thinking,
-    };
-  }
-  // workbuddy：凭据还是借 ~/.workbuddy/models.json 的
-  const wb = readWorkBuddyLLM();
-  const picked = b.model ? listWorkBuddyModels().find((m) => m.id === b.model) : null;
-  const one = (wb && readWorkBuddyModel(b.model)) || wb;
-  return {
-    baseURL: (one && one.baseURL) || (c2.llm && c2.llm.baseURL) || '',
-    apiKey: (one && one.apiKey) || (c2.llm && c2.llm.apiKey) || '',
-    model: (picked && picked.id) || b.model || (one && one.model) || (c2.llm && c2.llm.model) || '',
-    thinking: b.thinking || 'auto',
-    provider: 'workbuddy',
-    thinkingSupported: false,     // 各家网关不统一，别瞎传参数
-  };
+  const b = (c || load()).brain || {};
+  const wb = b.source !== 'apikey' || !PROVIDERS.some(p => p.id === b.provider);
+  const provider = wb ? 'workbuddy' : b.provider;
+  const p = PROVIDERS.find(p => p.id === provider);
+  const profile = wb ? b : b.profiles?.[provider] || {};
+  const model = String(wb ? b.model || 'hy3' : profile.modelId || p.models[0]);
+  const selection = profile.thinking || (wb && model === 'hy3' ? 'low' : 'auto');
+  const thinking = thinkingOptions(provider, model).some(t => t.id === selection) ? selection : 'auto';
+  const metadata = modelCatalog.get(provider).models.find(m => m.id === model);
+  return { ...(wb ? { transport: 'workbuddy' } : { baseURL: p.baseURL }),
+    provider, model, apiKey: wb ? '' : String(profile.apiKey || '').trim(), thinking,
+    extraBody: thinkingFields(provider, model, thinking),
+    maxTokens: Math.min(4096, metadata?.maxOutputTokens || 4096), timeoutMs: 55000 };
 }
-
-/** 从 WorkBuddy 的模型表里按 id 取一条（url + key） */
-function readWorkBuddyModel(id) {
-  if (!id) return null;
-  try {
-    const arr = JSON.parse(fs.readFileSync(path.join(HOME, '.workbuddy', 'models.json'), 'utf8'));
-    const m = (Array.isArray(arr) ? arr : []).find((x) => x && String(x.id) === String(id));
-    if (!m || !m.apiKey) return null;
-    let base = String(m.url || '');
-    base = base.replace(/\/chat\/completions\/?$/, '');
-    return { baseURL: base, apiKey: m.apiKey, model: m.id };
-  } catch {
-    return null;
+function migrateBrain(c) {
+  const b = c.brain;
+  b.profiles = b.profiles || {};
+  if (!b.connectionsVersion) {
+    if (b.apiKey && PROVIDERS.some(p => p.id === b.provider)) {
+      b.profiles[b.provider] = { apiKey: b.apiKey, modelId: b.modelId || '', thinking: b.thinking || 'auto', ...b.profiles[b.provider] };
+    }
+    if (b.source !== 'apikey') { b.model = 'hy3'; b.thinking = 'low'; }
+    b.connectionsVersion = 1;
   }
+  // Keep old credentials on disk, but removed providers can no longer be selected or routed.
+  if (!PROVIDERS.some(p => p.id === b.provider)) {
+    if (b.source === 'apikey') { b.source = 'workbuddy'; b.model = 'hy3'; b.thinking = 'low'; }
+    b.provider = 'deepseek';
+  }
+  for (const p of PROVIDERS) b.profiles[p.id] = { apiKey: '', modelId: p.models[0], thinking: 'auto', ...b.profiles[p.id] };
+  return c;
+}
+function preview(patch) { return deepMerge(load(), patch || {}); }
+function publicConfig(c = load()) {
+  const out = JSON.parse(JSON.stringify(c));
+  for (const section of [out.brain, out.llm, out.tts, ...Object.values(out.brain?.profiles || {})]) {
+    if (section && Object.hasOwn(section, 'apiKey')) { section.hasApiKey = !!section.apiKey; delete section.apiKey; }
+  }
+  return out;
 }
 
 function load() {
@@ -489,37 +418,63 @@ function load() {
   } catch {
     disk = {};
   }
-  let merged = deepMerge(DEFAULTS, disk);
+  let merged = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), disk);
 
-  // 凭据补全：主人自己没填 key，就借用 WorkBuddy 的
-  if (!merged.llm.apiKey) {
-    const wb = readWorkBuddyLLM();
-    if (wb) merged.llm = { ...merged.llm, ...wb, model: merged.llm.model || wb.model };
-  }
-  cache = merged;
+  if (disk.tts?.qwen && !disk.tts.qwen.modelKind) merged.tts.qwen.modelKind = 'legacy-base';
+  if (disk.window && disk.window.canvasWidthVersion !== 1) merged.window.canvasWidthVersion = 0;
+  cache = migrateBrain(merged);
+  const known = new Set(MOTIONS.map(m => m.key));
+  cache.motions.disabled = [...new Set((Array.isArray(cache.motions.disabled) ? cache.motions.disabled : []).filter(k => known.has(k)))];
+  if (MOTIONS.filter(m => m.slot === 'idle').every(m => cache.motions.disabled.includes(m.key)))
+    cache.motions.disabled = cache.motions.disabled.filter(k => k !== 'idle_loop');
+  cache.tts.qwen = qwenVoices.normalize(cache.tts.qwen);
   return cache;
 }
 
 function save(patch) {
   const next = deepMerge(load(), patch || {});
-  cache = next;
+  next.settingsRevision = (Number(load().settingsRevision) || 0) + 1;
+  if (patch?.buddy) {
+    next.buddy.name = String(next.buddy.name || 'baby').trim().slice(0, 64) || 'baby';
+    next.buddy.ownerName = String(next.buddy.ownerName || '主人').trim().slice(0, 64) || '主人';
+    next.buddy.profile = String(next.buddy.profile ?? DEFAULTS.buddy.profile).slice(0, 2000);
+  }
+  if (patch?.motions) {
+    if (!Array.isArray(next.motions.disabled)) throw new Error('动作配置格式不正确');
+    const known = new Set(MOTIONS.map(m => m.key));
+    next.motions.disabled = [...new Set(next.motions.disabled.filter(k => known.has(k)))];
+    if (!MOTIONS.some(m => m.slot === 'idle' && !next.motions.disabled.includes(m.key)))
+      throw new Error('至少保留一个空闲动作');
+  }
   try {
     fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-    fs.writeFileSync(cfgPath, JSON.stringify(next, null, 2), 'utf8');
+    const temporary = cfgPath + '.' + process.pid + '.tmp';
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(next, null, 2), { encoding: 'utf8', mode: 0o600 });
+      fs.renameSync(temporary, cfgPath);
+    } finally { try { fs.unlinkSync(temporary); } catch {} }
   } catch (e) {
     console.error('[config] save failed:', e.message);
+    throw new Error('设置保存失败，请检查数据目录权限。');
   }
+  cache = next;
   return next;
 }
 
 function buildSystemPrompt(extraContext) {
   const c = load();
   const ctx = extraContext || '主人现在没有在跑任务，可能只是在发呆或者看别的东西。';
-  return PERSONA.replace(/\{name\}/g, c.buddy.name).replace('{context}', ctx);
+  const activeSlots = [...new Set(MOTIONS.filter(m => m.tag === 'llm' && !c.motions.disabled.includes(m.key)).map(m => m.slot))];
+  const motionHint = activeSlots.map(s => s + '（' + SLOT_LABEL[s] + '）').join(' / ');
+  const ownerName = String(c.buddy.ownerName || '主人').trim() || '主人';
+  const profile = String(c.buddy.profile ?? DEFAULTS.buddy.profile).trim();
+  return PERSONA.replace(MOTION_HINT, motionHint).replace(/主人/g, () => ownerName)
+    .replace(/\{name\}/g, () => c.buddy.name).replace('{context}', () => ctx) +
+    `\n\n# 用户设定的角色\n${profile}\n\n# 对话称呼\n你的名字是「${c.buddy.name}」。请称呼用户为「${ownerName}」，将这个称呼自然地用于对话。`;
 }
 
 module.exports = {
-  load, save, setPath, buildSystemPrompt,
+  load, save, setPath, buildSystemPrompt, preview, publicConfig, thinkingOptions, thinkingFields,
   MOTIONS, MOTION_GROUPS, MOTION_KEYS, MOTION_SLOTS, MOTION_HINT, SLOT_LABEL,
   readWorkBuddyLLM, listWorkBuddyModels, resolveLLM, DEFAULTS,
   PROVIDERS, THINKING_LEVELS, TTS_ENGINES,

@@ -4,6 +4,7 @@ import { VRMLoaderPlugin } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip, VRMLookAtQuaternionProxy } from '@pixiv/three-vrm-animation';
 import { makeRig, groundClip, soleHeight } from './ground.js';
 import { cutClip, MOTION_WINDOWS } from './motion-cut.js';
+import { createPCMPlayer } from './pcm-player.mjs';
 
 /* ═══════════ 常量 ═══════════ */
 /* 形象列表由主进程扫 assets/models/*.vrm 得到（丢个文件进来就能换角色），
@@ -152,6 +153,23 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.setSize(innerWidth, innerHeight);
 stage.appendChild(renderer.domElement);
 
+// MSAA already smooths geometry edges. Hair cutouts also need alpha coverage;
+// this reuses those samples without an extra render pass or higher resolution.
+function softenCutoutEdges(root) {
+  const gl = renderer.getContext(), samples = gl.getParameter(gl.SAMPLES);
+  if (!samples) return;
+  const changed = new Set();
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    for (const material of Array.isArray(o.material) ? o.material : [o.material]) {
+      if (material && material.alphaTest > 0 && !material.transparent && !changed.has(material)) {
+        material.alphaToCoverage = true; material.needsUpdate = true; changed.add(material);
+      }
+    }
+  });
+  pet.log(`[render] MSAA ${samples}x · AlphaToCoverage ${changed.size} 个裁剪材质 · DPR ${renderer.getPixelRatio()}`);
+}
+
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(28, innerWidth / innerHeight, 0.05, 60);
 camera.position.set(0, 1.2, 3);
@@ -195,7 +213,7 @@ const pointerSmooth = new THREE.Vector2(0, 0);
 /* ═══════════ 相机取景 ═══════════ */
 let fitInfo = { dist: 3, centerY: 1, visibleH: 2, modelH: 1.5 };
 
-/* 角色大小：50% / 100% / 150%。
+/* 角色取景：100% 半身 / 100% 全身 / 150% 放大；半身内部值沿用 0.5。
  * 超过 100% 时窗口会跟着撑大（她真的变大，而不是被窗口裁掉），
  * 所以取景比例只有「小于 100%」时才需要压 —— 放大交给窗口。 */
 let viewScale = 1;
@@ -215,7 +233,7 @@ function panelInsetPx() {
 }
 
 /* ── 三种尺寸各是一套「取景」，不是同一个缩放系数 ──
- *   50%  ：半身。窗口一点不变，等于把镜头推近：只取头顶到胯，
+ *   半身 ：内部值 0.5。窗口一点不变，等于把镜头推近：只取头顶到胯，
  *          头压在画面上部的主视觉区，下面留够气泡的位置。
  *          桌面角落里的小尺寸要的是「一张脸」，不是「一个小人」。
  *   100% ：全身。脚落在窗口最下方 2%，头顶上方留出气泡位（原来的构图）。
@@ -326,6 +344,7 @@ function groundAllClips() {
 }
 
 function playMotion(key, { loop = false, fade = FADE } = {}) {
+  if (!key || !motionEnabled(key) || !clips.has(key)) { key = randomIdle(); loop = true; }
   const clip = clips.get(key);
   if (!clip || !mixer) return;
   const next = mixer.clipAction(clip);
@@ -360,9 +379,15 @@ function playMotion(key, { loop = false, fade = FADE } = {}) {
  *   2. 只挑真正载入成功的（clips.has），某条 .vrma 坏了也不至于演空。
  * 传进来的若已经是具体动作 key（含下划线），直接照播。 */
 const slotLast = new Map();
+function motionEnabled(key) { return !(cfg?.motions?.disabled || []).includes(key); }
+function randomIdle(except = currentMotion) {
+  const pool = MOTIONS.filter(m => m.slot === 'idle' && motionEnabled(m.key) && clips.has(m.key)).map(m => m.key);
+  const fresh = pool.length > 1 ? pool.filter(k => k !== except) : pool;
+  return fresh[Math.floor(Math.random() * fresh.length)] || null;
+}
 function pickSlotKey(slot) {
-  const pool = MOTIONS.filter((m) => m.slot === slot && clips.has(m.key));
-  if (!pool.length) return null;
+  const pool = MOTIONS.filter((m) => m.slot === slot && motionEnabled(m.key) && clips.has(m.key));
+  if (!pool.length) return randomIdle();
   const last = slotLast.get(slot);
   const fresh = pool.length > 1 ? pool.filter((m) => m.key !== last) : pool;
   const m = fresh[Math.floor(Math.random() * fresh.length)];
@@ -371,8 +396,8 @@ function pickSlotKey(slot) {
 }
 /** 槽位名或具体 key 都吃：有 key 就播 key，否则当槽位随机。 */
 function resolveMotion(name) {
-  if (!name) return null;
-  if (clips.has(name)) return name;
+  if (!name) return randomIdle();
+  if (clips.has(name)) return motionEnabled(name) ? name : randomIdle();
   return pickSlotKey(name);
 }
 function playSlot(slot, fade = 0.22) {
@@ -383,8 +408,7 @@ function playSlot(slot, fade = 0.22) {
 }
 
 function playOneShot(key, fade = 0.2) {
-  if (!clips.has(key)) return;
-  playMotion(key, { loop: false, fade });
+  playMotion(key, { loop: MOTIONS.some(m => m.key === key && m.slot === 'idle'), fade });
 }
 
 const AWAY_MS = 30 * 60e3;
@@ -402,7 +426,7 @@ function noteMaster() {
  * 只用一条待机的话，两种场景要共用一张脸，怎么都不对。 */
 let idleKey = IDLE;
 function currentIdle() {
-  return clips.has(idleKey) ? idleKey : IDLE;
+  return clips.has(idleKey) && motionEnabled(idleKey) ? idleKey : randomIdle();
 }
 function toIdle(fade = 0.32) {
   playMotion(currentIdle(), { loop: true, fade });
@@ -411,7 +435,7 @@ function toIdle(fade = 0.32) {
  * 主人在干活时不换 —— 那时她该是待命站姿，不是在那儿换重心玩。 */
 function rotateIdle() {
   if (phase === 'work') return;
-  const pool = IDLE_POOL.filter((k) => clips.has(k) && k !== idleKey);
+  const pool = MOTIONS.filter(m => m.slot === 'idle' && motionEnabled(m.key) && clips.has(m.key) && m.key !== idleKey).map(m => m.key);
   if (!pool.length) return;
   idleKey = pool[Math.floor(Math.random() * pool.length)];
   toIdle(0.7);
@@ -446,6 +470,8 @@ let audioCtx = null;
 let analyser = null;
 let analyserData = null;
 let currentSource = null;
+let pcmPlayer = null;
+let audioRevision = 0;
 
 function ensureAudio() {
   if (audioCtx) return audioCtx;
@@ -455,10 +481,17 @@ function ensureAudio() {
   analyser.smoothingTimeConstant = 0.55;
   analyser.connect(audioCtx.destination);
   analyserData = new Uint8Array(analyser.fftSize);
+  pcmPlayer = createPCMPlayer({ context: audioCtx, destination: analyser,
+    onStart: () => { markReplyStarted(); pet.audioStarted(); },
+    onDone: () => { talkLevel = 0; pet.audioDone(); },
+    onUnderrun: () => pet.log('[tts] 流式播放缓冲不足'),
+  });
   return audioCtx;
 }
 
 async function playWav(u8) {
+  stopAudio(true);
+  const revision = audioRevision;
   const ctx = ensureAudio();
   if (ctx.state === 'suspended') await ctx.resume();
   const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
@@ -466,11 +499,12 @@ async function playWav(u8) {
   try {
     buf = await ctx.decodeAudioData(ab);
   } catch (e) {
+    if (revision !== audioRevision) return;
     console.warn('decode 失败', e);
     pet.audioDone();
     return;
   }
-  stopAudio(true);
+  if (revision !== audioRevision) return;
   const src = ctx.createBufferSource();
   src.buffer = buf;
   src.connect(analyser);
@@ -483,15 +517,34 @@ async function playWav(u8) {
   };
   currentSource = src;
   src.start();
+  markReplyStarted(); pet.audioStarted();
 }
 
 function stopAudio(keepQuiet) {
+  audioRevision++;
+  pcmPlayer?.stop();
   if (currentSource) {
     try { currentSource.onended = null; currentSource.stop(); } catch {}
     currentSource = null;
   }
   talkLevel = 0;
   if (!keepQuiet) pet.audioDone();
+}
+
+function playPCM(event) {
+  if (event.start) {
+    stopAudio(true);
+    const ctx = ensureAudio();
+    if (ctx.state === 'suspended') ctx.resume().catch(() => { pcmPlayer.stop(event.id); pet.audioDone(); });
+    pcmPlayer.begin(event.id);
+  }
+  if (event.stop) pcmPlayer?.stop(event.id);
+  if (event.pcm) pcmPlayer?.push(event.id, event.pcm);
+  if (event.end) pcmPlayer?.end(event.id);
+}
+
+function markReplyStarted() {
+  if (shownHeard && shownState !== 'skip') { shownState = 'reply'; paintEar(); }
 }
 
 /* ═══════════ 加载 ═══════════ */
@@ -532,6 +585,7 @@ function loadAvatar(key) {
     }
     vrm = gltf.userData.vrm;
     if (!vrm) { loading = false; setLoading(false); resolve(false); return; }
+    softenCutoutEdges(vrm.scene);
     if (vrm.meta?.metaVersion === '0') vrm.scene.rotation.y = Math.PI;
     vrm.scene.traverse((o) => { o.frustumCulled = false; });
     if (vrm.humanoid) vrm.humanoid.autoUpdateHumanBones = true;
@@ -704,7 +758,7 @@ const activity = document.getElementById('activity');
 let dockMode = 'mini';        // mini | open
 let listening = false;        // 耳朵开着（常驻聆听）
 let shownHeard = '';          // 「你说 · …」
-let shownState = '';          // '' | 'ok' | 'skip'
+let shownState = '';          // pending | ready | reply | done | skip
 let liveText = '';            // 正说到一半的字（实时字幕）
 let aecOn = false;            // 系统回声消除可用 → 她说话时也能听
 let pendingHeard = '';        // 刚听到、还没被主人用过的一句 —— 留着填进输入框
@@ -713,14 +767,16 @@ let heardTimer = null;
 
 function asrHealthy() {
   const micOk = asrStat.mic === true || asrStat.micSystem === 'granted';
-  return asrStat.speech === 3 && micOk;
+  return asrStat.speech === 3 && micOk && asrStat.captureReady !== false;
 }
 
 function earLabel() {
-  if (shownHeard) {
-    return `你说 · ${shownHeard}${shownState === 'ok' ? ' ✓' : shownState === 'skip' ? ' 略过' : ''}`;
-  }
+  if (listening && asrStat.captureReady === false) return asrStat.note === 'installing' ? '准备语音资源…' : asrStat.note === 'starting' ? '正在连接麦克风…' : '正在重连麦克风…';
   if (liveText) return liveText;
+  if (shownHeard) {
+    const status = { pending: '正在回应', ready: '正在准备声音', reply: '正在说话', skip: '略过' }[shownState];
+    return `你说 · ${shownHeard}${status ? ' · ' + status : ''}`;
+  }
   return listening ? '在听' : '耳朵关着';
 }
 
@@ -750,13 +806,18 @@ function paintEar() {
   const ear = document.getElementById('ear');
   const t = document.getElementById('earTxt');
   if (!ear) return;
-  const known = asrStat.speech !== null && asrStat.speech !== undefined;
-  const warn = listening && known && !asrHealthy();
+  const warn = listening && !asrHealthy();
   ear.classList.toggle('on', listening && !warn);
   ear.classList.toggle('off', !listening || warn);
   ear.classList.toggle('warn', warn);
   ear.classList.toggle('skip', shownState === 'skip');
   ear.classList.toggle('expand', !!(shownHeard || liveText));
+  const toggle = document.getElementById('listenToggle');
+  if (toggle) {
+    toggle.title = listening ? '关闭实时监听' : '开启实时监听';
+    toggle.setAttribute('aria-label', toggle.title);
+    toggle.setAttribute('aria-pressed', String(listening));
+  }
 
   const txt = earLabel();
   if (txt !== earShown) {
@@ -772,6 +833,10 @@ function paintEar() {
 /** 实时字幕：主人还在说，字先滚出来 —— 让他确信自己被听见了 */
 function paintLive(text) {
   liveText = String(text || '').slice(0, 120);
+  if (liveText) {
+    clearTimeout(heardTimer);
+    shownHeard = ''; shownState = '';
+  }
   paintEar();
 }
 
@@ -883,6 +948,9 @@ stageEl.addEventListener('pointerdown', () => {
 const earBar = document.getElementById('ear');
 let earHoldTimer = null;
 let earLongFired = false;
+const listenToggle = document.getElementById('listenToggle');
+listenToggle.addEventListener('pointerdown', e => { e.stopPropagation(); clearTimeout(earHoldTimer); });
+listenToggle.addEventListener('click', e => { e.stopPropagation(); clearTimeout(earHoldTimer); pet.listen('toggle'); });
 earBar.addEventListener('pointerdown', () => {
   earLongFired = false;
   clearTimeout(earHoldTimer);
@@ -912,9 +980,13 @@ document.getElementById('muteBtn').addEventListener('click', async () => {
 function paintMute() {
   const btn = document.getElementById('muteBtn');
   const wave = document.getElementById('muteWave');
+  const cross = document.getElementById('muteCross');
   const on = cfg && cfg.voice.enabled;
   btn.classList.toggle('muted', !on);
   wave.style.display = on ? '' : 'none';
+  cross.style.display = on ? 'none' : '';
+  btn.title = on ? '关闭语音' : '开启语音';
+  btn.setAttribute('aria-label', btn.title);
 }
 
 /* ═══════════ 录制 ═══════════ */
@@ -942,19 +1014,28 @@ function paintListen() {
 /** 听到一句话：脚下那条撑开显示「你说 · …」，主人一眼能确认有没有被听清 */
 function paintHeard(text, replied) {
   if (!text) return;
+  // 完成通知可能属于已被新一句打断的旧请求，不覆盖当前字幕。
+  if (replied !== undefined && shownHeard !== String(text).slice(0, 180)) return;
   liveText = '';
   shownHeard = String(text).slice(0, 180);
-  shownState = replied === true ? 'ok' : replied === false ? 'skip' : '';
+  shownState = replied === false ? 'skip' : replied === true
+    ? (speakingNow ? (shownState === 'reply' ? 'reply' : 'ready') : 'done') : 'pending';
   pendingHeard = shownHeard;      // 留着，主人点开输入框时能填进去改
   pendingAt = Date.now();
   paintEar();
-  if (heardTimer) clearTimeout(heardTimer);
-  // 只是把文字条收起来，不丢 pendingHeard
+  clearTimeout(heardTimer);
+  // 等待模型和合成期间保留字幕，绝不靠固定超时回到「在听」。
+  if (['pending', 'ready', 'reply'].includes(shownState)) return;
+  clearHeardLater(replied === false ? 2400 : 3200);
+}
+
+function clearHeardLater(delay = 3200) {
+  clearTimeout(heardTimer);
   heardTimer = setTimeout(() => {
     shownHeard = '';
     shownState = '';
     paintEar();
-  }, replied === false ? 2400 : 5200);
+  }, delay);
 }
 
 /* ═══════════ 权限 ═══════════ */
@@ -1033,7 +1114,7 @@ function paintAvatars() {
   for (const b of row.children) b.classList.toggle('on', b.dataset.key === avatarKey);
 }
 
-/* 角色大小三档。放大交给主进程撑窗口（以中心为锚点），
+/* 角色大小三档。放大交给主进程撑窗口（以底部中心为锚点），
  * 缩小则窗口一动不动 —— 只是取景推近成半身（见 fitCamera）。 */
 function paintScale() {
   const row = document.getElementById('sizeRow');
@@ -1119,7 +1200,7 @@ function frame() {
     }
 
     // 口型：直接从播放中的波形取能量，真实对嘴
-    if (analyser && currentSource) {
+    if (analyser && (currentSource || pcmPlayer?.playing)) {
       analyser.getByteTimeDomainData(analyserData);
       let sum = 0;
       for (let i = 0; i < analyserData.length; i++) {
@@ -1199,6 +1280,11 @@ function frame() {
 function wire() {
   pet.on(async (ev) => {
     switch (ev.type) {
+      case 'config':
+        cfg = ev.config;
+        if (currentMotion && !motionEnabled(currentMotion)) toIdle(0.25);
+        paintMute();
+        break;
       case 'listen':
         listening = !!ev.on;
         paintListen();
@@ -1232,7 +1318,6 @@ function wire() {
         if (ev.key) applyEmo(ev.key, 1, 2800);
         break;
       case 'think':
-        // 说完到出声之间有 1~2 秒空档。这段时间她必须"在动"，否则就是死机脸。
         thinkingNow = !!ev.on;
         if (thinkingNow) {
           ambientTimer = 30;
@@ -1244,19 +1329,28 @@ function wire() {
           }
         } else if (!speakingNow) {
           toIdle(0.42);
+          if (shownState === 'pending') { shownState = 'done'; clearHeardLater(); }
         }
+        paintEar();
         break;
       case 'speaking':
         speakingNow = !!ev.on;
         if (ev.on) {
+          if (shownHeard && shownState !== 'skip') shownState = 'ready';
           ambientTimer = 30;
           // 说话时身体回中性站姿：不要在"抱臂思考"这种姿势里讲话
           if (currentMotion !== IDLE) toIdle(0.45);
+        } else if (!thinkingNow && shownHeard && shownState !== 'skip') {
+          shownState = 'done'; clearHeardLater();
         }
+        paintEar();
         break;
       case 'audio':
         if (ev.stop) { stopAudio(true); break; }
-        if (ev.buffer) playWav(ev.buffer);
+        if (ev.stream) { playPCM(ev.stream); break; }
+        if (ev.buffer) {
+          playWav(ev.buffer);
+        }
         break;
       case 'phase': {
         const next = ev.phase || 'idle';
@@ -1547,6 +1641,8 @@ setInterval(() => {
     cfg = init.config;
     const ver = document.getElementById('ver');
     if (ver) ver.textContent = 'v' + ((init.versions && init.versions.app) || '');
+    const settingsButton = document.getElementById('gearBtn');
+    if (settingsButton && init.versions?.app) settingsButton.title = `设置 · v${init.versions.app}`;
     setAvatarList(init.avatars);
     MOTIONS = Array.isArray(init.motions) ? init.motions : [];
     if (Array.isArray(init.motionGroups) && init.motionGroups.length) MOTION_GROUPS = init.motionGroups;

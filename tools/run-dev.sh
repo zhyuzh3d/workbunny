@@ -23,7 +23,7 @@ fi
 pkill -f "$EA/Contents/MacOS/Electron" 2>/dev/null || true
 
 # open 方式拿不到环境变量，userData 回落到默认目录：把 dev 配置搬过去
-UD="$HOME/Library/Application Support/WorkBaby"
+UD="$HOME/Library/Application Support/workbunny"
 if [ -f "$ROOT/.data/dev/config.json" ]; then
   mkdir -p "$UD"
   cp "$ROOT/.data/dev/config.json" "$UD/config.json"

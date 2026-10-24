@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('pet', {
   resize: (w, h) => ipcRenderer.invoke('pet:resize', { w, h }),
   hit: (v) => ipcRenderer.send('pet:hit', v),
   audioDone: () => ipcRenderer.send('pet:audio-done'),
+  audioStarted: () => ipcRenderer.send('pet:audio-started'),
   record: () => ipcRenderer.send('pet:record'),
   listen: (v) => ipcRenderer.send('pet:listen', v),
   asrStatus: (opts) => ipcRenderer.invoke('pet:asr-status', opts || {}),
@@ -26,11 +27,17 @@ contextBridge.exposeInMainWorld('pet', {
   panelMotion: (key) => ipcRenderer.send('pet:panel-motion', key),
   // 大脑 / 嘴巴
   brainInfo: () => ipcRenderer.invoke('pet:brain-info'),
+  workbuddyOpen: () => ipcRenderer.invoke('pet:workbuddy-open'),
+  brainModels: (brain) => ipcRenderer.invoke('pet:brain-models', brain),
+  brainTest: (brain) => ipcRenderer.invoke('pet:brain-test', brain),
   ttsInfo: () => ipcRenderer.invoke('pet:tts-info'),
+  chpDiscover: (patch) => ipcRenderer.invoke('pet:chp-discover', patch),
+  chpHelp: () => ipcRenderer.send('pet:chp-help'),
   ttsDownload: () => ipcRenderer.invoke('pet:tts-download'),
+  ttsCheck: () => ipcRenderer.invoke('pet:tts-check'),
   ttsDlState: () => ipcRenderer.invoke('pet:tts-dl-state'),
   ttsCancel: () => ipcRenderer.send('pet:tts-cancel'),
-  ttsPickRef: () => ipcRenderer.invoke('pet:tts-pick-ref'),
+  ttsDelete: () => ipcRenderer.invoke('pet:tts-delete'),
   ttsTest: () => ipcRenderer.invoke('pet:tts-test'),
   on: (cb) => {
     ipcRenderer.on('pet:ev', (_e, d) => cb(d));

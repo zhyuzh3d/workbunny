@@ -2,6 +2,8 @@
 node_modules/
 dist/
 bin/asr
+bin/tts/
+bin/speech/
 
 # 运行时数据（配置里有 API Key，绝不能进仓库）
 .data/

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>workbaby</title>
+<title>workbunny</title>
 <link rel="stylesheet" href="./style.css" />
 <script type="importmap">
 {
@@ -32,7 +32,13 @@
   <div id="loadingTxt">正在努力加载…</div>
 </div>
 
-<!-- 顶栏一条线：左边状态、右边按钮，三者竖向居中对齐（都在 top:11px、高 26px） -->
+<!-- 录制律动 -->
+<div id="rec" class="hidden">
+  <div class="ring"><i></i><i></i><i></i></div>
+  <div id="recText">在听…</div>
+</div>
+
+<!-- 上方任务状态：使用整行文字宽度。 -->
 <div id="activity" class="hidden">
   <span class="dot"></span>
   <span class="actRoll"><span id="activityText">在干活</span></span>
@@ -42,35 +48,31 @@
   </button>
 </div>
 
-<div id="fab" class="hidden">
-  <button id="muteBtn" title="静音">
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
-      <path d="M4 9.5h3l4-3.2v11.4l-4-3.2H4z"/><path id="muteWave" d="M15.4 9a4 4 0 0 1 0 6"/>
-    </svg>
-  </button>
-  <button id="gearBtn" title="设置">
-    <!-- 真齿轮：外齿 + 中心孔，一眼认得出是设置 -->
-    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-         stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round">
-      <path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z"/>
-      <path d="M19.1 14.6a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.1a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.1a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.1a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.1a1.65 1.65 0 0 0-1.51 1Z"/>
-    </svg>
-  </button>
-</div>
+<!-- 下方在听状态：为右侧喇叭、设置按钮预留空间。 -->
+<div id="statusRow" role="group" aria-label="在听与声音设置">
+  <div id="ear" class="off" title="点一下打字 · 长按开关耳朵">
+    <button id="listenToggle" class="earDot" type="button" title="开启实时监听" aria-label="开启实时监听" aria-pressed="false"></button>
+    <span class="bars"><i></i><i></i><i></i><i></i></span>
+    <span class="earWin"><span id="earTxt">耳朵关着</span></span>
+  </div>
 
-<!-- 录制律动 -->
-<div id="rec" class="hidden">
-  <div class="ring"><i></i><i></i><i></i></div>
-  <div id="recText">在听…</div>
-</div>
-
-<!-- 脚下这条：耳朵状态（绿=在听 / 灰=关着）+ 实时电平 + 刚听到的话。
-     左端钉在角色脚下左侧、地面线下方；一旦有话说，就撑到整窗宽，
-     长了不省略，而是横向滚动 —— 主人能完整看见自己说的每个字。 -->
-<div id="ear" class="off" title="点一下打字 · 长按开关耳朵">
-  <span class="earDot"></span>
-  <span class="bars"><i></i><i></i><i></i><i></i></span>
-  <span class="earWin"><span id="earTxt">耳朵关着</span></span>
+  <div id="fab" class="hidden">
+    <button id="muteBtn" title="关闭语音" aria-label="关闭语音">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true" stroke-linecap="round">
+        <path d="M4 9.5h3l4-3.2v11.4l-4-3.2H4z"/>
+        <path id="muteWave" d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/>
+        <path id="muteCross" d="M16 9l5 6M21 9l-5 6" style="display:none"/>
+      </svg>
+    </button>
+    <button id="gearBtn" title="设置">
+      <!-- 真齿轮：外齿 + 中心孔，一眼认得出是设置 -->
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z"/>
+        <path d="M19.1 14.6a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.1a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.1a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.1a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.1a1.65 1.65 0 0 0-1.51 1Z"/>
+      </svg>
+    </button>
+  </div>
 </div>
 
 <!-- 输入框：只在打字时出现（听的状态已经交给脚下那条了，不再重复） -->
@@ -83,7 +85,7 @@
   </button>
 </div>
 
-<!-- 右下角版本号：只是个安静的落款，被脚下那条盖住也无所谓（本来就该让位给她） -->
+<!-- 版本信息不占底部空间，显示在设置按钮提示中。 -->
 <div id="ver"></div>
 
 <!-- 首次提示 -->

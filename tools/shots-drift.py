@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image
 
 HOME = os.path.expanduser('~')
-CFG = os.path.join(HOME, 'Library/Application Support/WorkBaby/config.json')
+CFG = os.path.join(HOME, 'Library/Application Support/workbunny/config.json')
 TMP = '/tmp/wb-drift'
 os.makedirs(TMP, exist_ok=True)
 

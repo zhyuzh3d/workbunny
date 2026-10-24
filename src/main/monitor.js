@@ -29,6 +29,7 @@
 const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
+const { StringDecoder } = require('string_decoder');
 
 const SCAN_MS = 1200;          // 读文件增量的频率
 const FULL_SCAN_MS = 6000;     // 全树找"有没有新会话"的频率（这个贵）
@@ -256,7 +257,7 @@ class Monitor extends EventEmitter {
 
   /** 接上一个会话文件：从头查台账，但只回看尾部，别一次性灌几 MB */
   attach(f) {
-    const e = { file: f.file, offset: 0, buf: '', snap: this.blank(), priming: true };
+    const e = { file: f.file, offset: 0, buf: '', decoder: new StringDecoder('utf8'), snap: this.blank(), priming: true };
     e.snap.sessionId = path.basename(f.file, '.jsonl');
     if (f.size > TAIL_ON_ATTACH) e.offset = f.size - TAIL_ON_ATTACH;
     this.sessions.set(f.file, e);
@@ -266,20 +267,29 @@ class Monitor extends EventEmitter {
 
   readNew(e) {
     if (!e.file) return;
-    let fd;
+    let fd, reset = false;
+    const wasPriming = e.priming;
     try {
       const st = fs.statSync(e.file);
+      if (st.size < e.offset || (e.ino !== undefined && e.ino !== st.ino)) {
+        e.offset = 0; e.buf = ''; e.decoder = new StringDecoder('utf8');
+        e.snap = this.blank(); e.snap.sessionId = path.basename(e.file, '.jsonl');
+        e.priming = true; reset = true;
+      }
+      e.ino = st.ino;
       if (st.size <= e.offset) return;
       fd = fs.openSync(e.file, 'r');
       const len = Math.min(st.size - e.offset, TAIL_ON_ATTACH);
       const b = Buffer.alloc(len);
-      fs.readSync(fd, b, 0, len, e.offset);
-      e.offset += len;
-      e.buf += b.toString('utf8');
+      const count = fs.readSync(fd, b, 0, len, e.offset);
+      e.offset += count;
+      e.decoder ||= new StringDecoder('utf8');
+      e.buf += e.decoder.write(b.subarray(0, count));
     } catch {
       return;
     } finally {
       if (fd !== undefined) try { fs.closeSync(fd); } catch {}
+      if (reset && !e.buf) e.priming = wasPriming;
     }
 
     let nl;
@@ -297,13 +307,14 @@ class Monitor extends EventEmitter {
         this.handleEvent(o, e);
       } catch {}
     }
+    if (reset) e.priming = wasPriming;
   }
 
   handleEvent(o, e) {
     const t = o.type;
     const s = e.snap;
     // 行里自带真实时间，回放历史时不会假装"刚刚发生"
-    const ts = Number(o.timestamp) || Date.now();
+    const ts = Number(o.timestamp) || Date.parse(String(o.timestamp)) || Date.now();
 
     if (t === 'session-meta') {
       if (o.cwd) s.cwd = o.cwd;

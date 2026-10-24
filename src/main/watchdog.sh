@@ -1,5 +1,5 @@
 #!/bin/sh
-# workbaby 看门狗（脱离父进程运行的那个小影子）
+# workbunny 看门狗（脱离父进程运行的那个小影子）
 #
 # 为什么不用 launchd：试过 `launchctl bootstrap gui/501`，连一个最小 plist 都报
 # "Bootstrap failed: 5: Input/output error"，这个环境里根本进不去用户的 launchd
@@ -44,7 +44,7 @@ fi
 
 # 已经有人在跑了就别添乱（重装期间可能被别的路径拉起）。
 # 用 -x 精确匹配进程名：-f 匹配整条命令行，会把看门狗自己/安装脚本一起算进去。
-if pgrep -x WorkBaby >/dev/null 2>&1; then
+if pgrep -x workbunny >/dev/null 2>&1; then
   log "已有实例在跑，不重复启动"
   exit 0
 fi
@@ -55,17 +55,17 @@ while [ "$n" -lt 3 ]; do
   n=$((n + 1))
   open -n "$APP" >/dev/null 2>&1
   sleep 4
-  if pgrep -x WorkBaby >/dev/null 2>&1; then
+  if pgrep -x workbunny >/dev/null 2>&1; then
     log "已重启成功（第 $n 次尝试）"
     exit 0
   fi
   # open 偶尔会被 LaunchServices 静默拒绝（返回 0 但没起），
-  # 兜底直接跑包内可执行文件 —— 它仍在 .app 里，权限仍按 WorkBaby 认
-  BIN="$APP/Contents/MacOS/WorkBaby"
+  # 兜底直接跑包内可执行文件 —— 它仍在 .app 里，权限仍按 workbunny 认
+  BIN="$APP/Contents/MacOS/workbunny"
   if [ -x "$BIN" ]; then
     env -u ELECTRON_RUN_AS_NODE "$BIN" >/dev/null 2>&1 &
     sleep 5
-    if pgrep -x WorkBaby >/dev/null 2>&1; then
+    if pgrep -x workbunny >/dev/null 2>&1; then
       log "已重启成功（直接执行，第 $n 次尝试）"
       exit 0
     fi

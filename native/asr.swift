@@ -1,4 +1,4 @@
-// BuddyPet 语音识别子进程 —— macOS 26 SpeechAnalyzer 版
+// workbunny 语音识别子进程 —— macOS 26 SpeechAnalyzer 版
 //
 // 为什么不用 SFSpeechRecognizer：它依赖系统「听写/Siri」，用户没开就报
 // "Siri and Dictation are disabled"，而开 Siri 是很重的系统级动作。
@@ -198,6 +198,7 @@ var tapInstalled = false
 var inputCont: AsyncStream<AnalyzerInput>.Continuation?
 var analyzer: SpeechAnalyzer?
 var sessionTask: Task<Void, Never>?
+var sessionTimer: DispatchSourceTimer?
 var curLocale: Locale?
 var curFormat: AVAudioFormat?
 
@@ -224,6 +225,8 @@ func makeConverter(inF: AVAudioFormat, outF: AVAudioFormat) -> AVAudioConverter?
 
 var bufCount = 0
 var convFail = 0
+var lastAudioAt: TimeInterval = 0
+var lastCaptureReportAt: TimeInterval = 0
 
 /// 按一种「方案」配置并启动音频链路：开/关 AEC、钉/不钉设备。
 ///
@@ -243,14 +246,16 @@ func startAudio(aec: Bool, bind: (AudioDeviceID, String)?, target: AVAudioFormat
         try engine.inputNode.setVoiceProcessingEnabled(true)
     }
     aecEnabled = aec
-    if let b = bind { _ = bindInputDevice(engine, b.0) }
+    if let b = bind, !bindInputDevice(engine, b.0) {
+        throw NSError(domain: "workbunny", code: 23, userInfo: [NSLocalizedDescriptionKey: "无法连接指定麦克风"])
+    }
 
     // 格式必须在配好 AEC / 设备**之后**、且重新取一次 inputNode 再读：
     // 上面两步都会重建输入节点，旧引用的格式是过期的（这正是 tap 装了不回调的原因）
     let inp = engine.inputNode
     let hw = inp.outputFormat(forBus: 0)
     guard hw.channelCount > 0, hw.sampleRate > 0 else {
-        throw NSError(domain: "workbaby", code: 1,
+        throw NSError(domain: "workbunny", code: 1,
                       userInfo: [NSLocalizedDescriptionKey: "麦克风输入格式不可用（可能没有输入设备）"])
     }
     converterIn = hw
@@ -263,18 +268,24 @@ func startAudio(aec: Bool, bind: (AudioDeviceID, String)?, target: AVAudioFormat
 
     bufCount = 0
     convFail = 0
+    lastAudioAt = 0
+    lastCaptureReportAt = 0
     inp.installTap(onBus: 0, bufferSize: 4096, format: hw) { buffer, _ in
+        guard buffer.frameLength > 0 else { return }
+        let now = ProcessInfo.processInfo.systemUptime
         stateLock.lock()
         let m = muted
+        bufCount += 1
+        let count = bufCount
+        lastAudioAt = now
+        let report = now - lastCaptureReportAt >= 1
+        if report { lastCaptureReportAt = now }
+        let continuation = inputCont
         stateLock.unlock()
+        if count == 1 { emit(["t": "tap", "frames": Int(buffer.frameLength), "ch": Int(buffer.format.channelCount)]) }
+        if report { emit(["t": "capture", "buffers": count, "muted": m]) }
         // 有回声消除时不用闭麦：自己说话也能继续听主人
         if m && !aecEnabled { return }
-
-        // 第一个缓冲就报一声：这是"麦克风到底有没有在喂数据"的唯一直接证据
-        bufCount += 1
-        if bufCount == 1 {
-            emit(["t": "tap", "frames": Int(buffer.frameLength), "ch": Int(buffer.format.channelCount)])
-        }
 
         var toSend: AVAudioPCMBuffer = buffer
         if let conv = converter, let tf = target {
@@ -301,16 +312,18 @@ func startAudio(aec: Bool, bind: (AudioDeviceID, String)?, target: AVAudioFormat
                               "v": "重采样失败：" + (cErr?.localizedDescription ?? "status=\(st.rawValue)"),
                               "code": 21])
                     }
+                    if convFail >= 3 { fail("麦克风格式转换持续失败，重新连接音频输入", code: 21) }
+                    return
                 } else if out.frameLength > 0 {
                     toSend = out
                 }
             }
         }
-        inputCont?.yield(AnalyzerInput(buffer: toSend))
+        continuation?.yield(AnalyzerInput(buffer: toSend))
 
         // 电平必须从**原始硬件缓冲**算（Float32）；转换后的目标格式可能是 Int16，
         // floatChannelData 直接是 nil —— 之前电平一直是空的，就是这个原因。
-        if bufCount % 3 == 0, let ch = buffer.floatChannelData?[0] {
+        if count % 3 == 0, let ch = buffer.floatChannelData?[0] {
             let n = Int(buffer.frameLength)
             var sum: Float = 0
             for i in 0..<n { sum += ch[i] * ch[i] }
@@ -345,6 +358,8 @@ func emitUtterance(_ raw: String) {
 // ---------------------------------------------------------------- 会话
 
 func teardown() {
+    sessionTimer?.cancel()
+    sessionTimer = nil
     inputCont?.finish()
     inputCont = nil
     if tapInstalled { engine.inputNode.removeTap(onBus: 0); tapInstalled = false }
@@ -467,7 +482,7 @@ func resolveLocale(_ installed: [Locale]) -> Locale? {
     if let exact = installed.first(where: { localeIdentifier($0).lowercased() == want }) { return exact }
     let lang = String(want.split(separator: "-").first ?? "")
     if let sameLang = installed.first(where: { localeIdentifier($0).lowercased().hasPrefix(lang) }) { return sameLang }
-    return installed.first
+    return nil
 }
 
 func reportAndExit(_ speech: Int, _ mic: Bool, _ extra: [String: Any] = [:]) -> Never {
@@ -517,9 +532,8 @@ func run() async {
     // 2. 语言资产
     let supported = await SpeechTranscriber.supportedLocales
     let installed = await SpeechTranscriber.installedLocales
-    let pool = installed.isEmpty ? supported : installed
-    guard let locale = resolveLocale(pool) else {
-        reportAndExit(1, micOK, ["error": "系统没有可用的语音识别语言包"])
+    guard let locale = resolveLocale(supported) else {
+        reportAndExit(1, micOK, ["error": "系统不支持所选语音识别语言：\(localeId)"])
     }
     let localeReady = installed.contains { localeIdentifier($0) == localeIdentifier(locale) }
     curLocale = locale
@@ -536,7 +550,7 @@ func run() async {
 
     // 3. 没装资产就地装
     if !localeReady {
-        emit(["t": "error", "v": "正在安装 \(localeIdentifier(locale)) 语音模型，稍等…", "code": 12])
+        emit(["t": "installing", "locale": localeIdentifier(locale)])
         let probe = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
         do {
             if let req = try await AssetInventory.assetInstallationRequest(supporting: [probe]) {
@@ -564,14 +578,6 @@ func run() async {
     if !wantMic.isEmpty && wantMic.lowercased() != "auto" {
         picked = devs.first { $0.1.range(of: wantMic, options: .caseInsensitive) != nil }.map { ($0.0, $0.1) }
     }
-    if picked == nil && wantMic.lowercased() != "default" {
-        picked = devs.first { $0.1.lowercased().contains("usb") }.map { ($0.0, $0.1) }
-    }
-    if let p = picked {
-        emit(["t": "mic", "on": true, "name": p.1, "id": Int(p.0)])
-    } else {
-        emit(["t": "mic", "on": false, "name": "", "id": 0, "v": "没找到 USB 麦，用系统默认"])
-    }
 
     // ── 音频方案阶梯 ────────────────────────────────────────────────
     // 从"效果最好"到"最保底"依次试，第一个起得来的就用。宁可少回声消除，
@@ -593,7 +599,22 @@ func run() async {
     for plan in plans {
         do {
             try startAudio(aec: plan.1, bind: plan.2 ? picked : nil, target: targetFormat)
+            // AVAudioEngine.start() can succeed while a USB device never sends
+            // buffers. Do not report ready until actual microphone data arrives.
+            var received = false
+            for _ in 0..<20 {
+                received = stateLock.withLock { bufCount > 0 }
+                if received { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if !received { throw NSError(domain: "workbunny", code: 22,
+                userInfo: [NSLocalizedDescriptionKey: "输入设备没有音频数据"]) }
             audioOK = true
+            if plan.2, let p = picked {
+                emit(["t": "mic", "on": true, "name": p.1, "id": Int(p.0)])
+            } else {
+                emit(["t": "mic", "on": false, "name": "", "id": 0, "v": "使用系统默认输入设备"])
+            }
             emit(["t": "audio", "ok": true, "plan": plan.0])
             break
         } catch {
@@ -607,7 +628,7 @@ func run() async {
     lastChangeAt = Date()
 
     await startSession()
-    emit(["t": "ready"])
+    emit(["t": "ready", "captureHeartbeat": true])
 
     // 5. 静音 / 超时
     let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
@@ -615,6 +636,11 @@ func run() async {
     timer.setEventHandler {
         if isFinished() { return }
         stateLock.lock()
+        let audioAge = ProcessInfo.processInfo.systemUptime - lastAudioAt
+        if audioAge > 4 {
+            stateLock.unlock()
+            fail("麦克风音频输入中断，正在重新连接", code: 22)
+        }
         // 兜底：闭麦超过 25 秒还没被打开，就当上层漏了 unmute，自己开。
         // 宁可把自己的一句话当成主人说的，也不能让麦克风永久哑掉。
         if let at = mutedAt, Date().timeIntervalSince(at) > 25 {
@@ -640,6 +666,7 @@ func run() async {
             if (hasText && silent * 1000 > silenceMs) || long > maxSeconds { beginEnd() }
         }
     }
+    sessionTimer = timer
     timer.resume()
 }
 

@@ -1,8 +1,8 @@
 {
-  "name": "workbaby",
-  "productName": "WorkBaby",
-  "version": "0.2.0",
-  "description": "workbaby · 透明置顶的桌面伙伴 baby：常驻聆听、语音对话、盯 WorkBuddy 任务",
+  "name": "workbunny",
+  "productName": "workbunny",
+  "version": "0.2.15",
+  "description": "workbunny · 透明置顶的桌面伙伴 baby：常驻聆听、语音对话、盯 WorkBuddy 任务",
   "main": "src/main/index.js",
   "private": true,
   "scripts": {

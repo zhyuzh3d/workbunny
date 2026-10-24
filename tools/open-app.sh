@@ -7,19 +7,19 @@
 # 用法：./tools/open-app.sh [--quit]
 set -u
 cd "$(dirname "$0")/.." || exit 1
-APP="$PWD/dist/WorkBaby.app"
+APP="$PWD/dist/workbunny.app"
 
 if [ "${1:-}" = "--quit" ]; then
-  pkill -f "WorkBaby.app/Contents/MacOS/WorkBaby" 2>/dev/null
+  pkill -f "workbunny.app/Contents/MacOS/workbunny" 2>/dev/null
   sleep 0.8
 fi
 
 for i in 1 2 3 4 5; do
   open -n "$APP" 2>/dev/null
   sleep 1.6
-  if pgrep -f "WorkBaby.app/Contents/MacOS/WorkBaby" >/dev/null 2>&1; then
-    echo "✓ 已启动（第 $i 次尝试）  pid=$(pgrep -f 'WorkBaby.app/Contents/MacOS/WorkBaby' | head -1)"
-    echo "  日志：$HOME/Library/Application Support/WorkBaby/buddy.log"
+  if pgrep -f "workbunny.app/Contents/MacOS/workbunny" >/dev/null 2>&1; then
+    echo "✓ 已启动（第 $i 次尝试）  pid=$(pgrep -f 'workbunny.app/Contents/MacOS/workbunny' | head -1)"
+    echo "  日志：$HOME/Library/Application Support/workbunny/buddy.log"
     exit 0
   fi
 done

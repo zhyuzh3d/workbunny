@@ -1,9 +1,9 @@
-# workbaby（baby）产品要求与开发进度汇总
+# workbunny（baby）产品要求与开发进度汇总
 
 > **文档定位**：把主人对这个产品提过的要求、已经做成什么样、还差什么，收在一页里，方便随时回看"做到哪了"。
-> **产品**：workbaby —— macOS 上的透明置顶 VRM 伴侣娃娃，娃娃叫 **baby**。
+> **产品**：workbunny —— macOS 上的透明置顶 VRM 伴侣娃娃，娃娃叫 **baby**。
 > **主仓库**：`buddy-pet/`（远程 `git@github.com:zhyuzh3d/workbunny.git`，当前版本 `v0.2.0`）。
-> **运行形态**：`/Users/zhyuzh/Applications/WorkBaby.app`（开发签名 `WorkBaby Dev`）。
+> **运行形态**：`/Users/zhyuzh/Applications/workbunny.app`（开发签名 `workbunny Dev`）。
 > **更新时间**：2026-10-24。
 
 ---
@@ -29,7 +29,7 @@
 
 ### 2.1 形态与运行
 - 能在 macOS 上**真实运行**，透明置顶，不挡活儿。
-- 软件名 workbaby，娃娃叫 baby，**不要叫"小伴"**。
+- 软件名 workbunny，娃娃叫 baby，**不要叫"小伴"**。
 - 授权我直接自主安装依赖、编译运行、反复迭代，不需要逐步等确认。
 - 项目要**提交到 GitHub 仓库**（`zhyuzh3d/workbunny`）。
 - 异常退出要能自己恢复（看门狗 + 正常退出不重启）。
@@ -156,7 +156,7 @@ buddy-pet/
 
 | 问题 | 说明 | 优先级 |
 |---|---|---|
-| **打包产物陈旧** | `dist/WorkBaby.app` 里还是 116 条旧动作，且残留旧名 `dist/Buddy Pet.app`。近期都用"增量覆盖 `~/Applications/WorkBaby.app` + 重签名"绕过了整包重打，产物与源码已不同步 | 高 |
+| **打包产物陈旧** | `dist/workbunny.app` 里还是 116 条旧动作，且残留旧名 `dist/Buddy Pet.app`。近期都用"增量覆盖 `~/Applications/workbunny.app` + 重签名"绕过了整包重打，产物与源码已不同步 | 高 |
 | **配置迁移残留** | `config.json` 里 `version` 卡在 1，旧的 `llm` / `voice` 两块死键还在（含 A1X 旧地址和 NVIDIA key）。新代码只读 `brain` / `tts`，不影响运行，但容易看错 | 中 |
 | **Qwen 本地引擎缺运行时** | 本机没有 `llama-tts`，下载完 GGUF 仍会回退系统音。UI 需要把这件事说清，而不是让主人以为模型坏了 | 高 |
 | **58.vrm 两处穿模** | `work_maid` 手插裙、`work_sit` 并腿穿裙 | 中 |

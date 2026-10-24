@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Buddy Pet 主进程
+ * workbunny 主进程
  * ─ 透明置顶浮窗（可穿透、可拖拽、跨桌面空间）
  * ─ 大脑：OpenAI 兼容流式 LLM（默认复用 WorkBuddy 自己的模型额度）
  * ─ 嗓子：A1X 掌机 Qwen3-TTS
@@ -25,11 +25,15 @@ try {
 const config = require('./config');
 const llm = require('./llm');
 const tts = require('./tts');
+const { createTTSSession } = require('./tts-session');
+const voiceFiles = require('./qwen-voices');
+const replyPolicy = require('./reply-policy');
 const { Monitor, taskName } = require('./monitor');
 const { Asr, probeAccess } = require('./asr');
 const avatars = require('./avatars');
 
 /* ── 数据目录（开发时可被 BUDDY_PET_HOME 指到工作区） ── */
+app.setName('workbunny');
 if (process.env.BUDDY_PET_NO_SANDBOX === '1') {
   // 某些沙箱环境里 Chromium 自己的 sandbox 起不来，开了才能渲染
   app.commandLine.appendSwitch('no-sandbox');
@@ -39,6 +43,8 @@ if (process.env.BUDDY_PET_HOME) {
   try { app.setPath('userData', process.env.BUDDY_PET_HOME); } catch (e) { console.error(e); }
 }
 const USER_DIR = app.getPath('userData');
+fs.mkdirSync(USER_DIR, { recursive: true, mode: 0o700 });
+fs.chmodSync(USER_DIR, 0o700);
 config.setPath(path.join(USER_DIR, 'config.json'));
 
 const IS_DEV = !app.isPackaged;
@@ -187,11 +193,13 @@ function defaultPos(w, h) {
 }
 
 /* ── 角色大小 ────────────────────────────────────────────────
- * 三档：50% / 100% / 150%。窗口的 w/h 永远是 100% 的基准，
+ * 三档：100% 半身 / 100% 全身 / 150% 放大。半身沿用内部值 0.5，
+ * 窗口的 w/h 永远是 100% 的基准，
  * 只是「放大时」把窗口按倍数撑开（她在屏幕上也真的变大了）；
  * 缩小时窗口一点不动 —— 只是她自己在窗口中变小，绝不能把窗口缩到 UI 挤成一团。
- * 缩放以窗口中心为锚点：角色一直站在同一个地方。 */
+ * 切换时以窗口底部中心为锚点。 */
 const SCALES = [0.5, 1, 1.5];
+const SCALE_LABELS = { 0.5: '100% 半身', 1: '100% 全身', 1.5: '150% 放大' };
 function clampScale(v) {
   const n = Number(v);
   if (!isFinite(n)) return 1;
@@ -202,7 +210,7 @@ const winFactor = (k) => Math.max(1, clampScale(k));
 function windowSizeFor(k) {
   const c = config.load();
   const f = winFactor(k);
-  return { w: Math.round(c.window.w * f), h: Math.round(c.window.h * f) };
+  return { w: Math.round(c.window.w * f * 1.4), h: Math.round(c.window.h * f) };
 }
 
 function applyWindowScale(k) {
@@ -210,19 +218,25 @@ function applyWindowScale(k) {
   const { w, h } = windowSizeFor(k);
   const b = win.getBounds();
   const cx = b.x + b.width / 2;
-  const cy = b.y + b.height / 2;
-  const wa = screen.getDisplayNearestPoint({ x: Math.round(cx), y: Math.round(cy) }).workArea;
+  const bottom = b.y + b.height;
+  const wa = screen.getDisplayNearestPoint({ x: Math.round(cx), y: bottom - 1 }).workArea;
   const nw = Math.min(w, wa.width - 8);
-  const nh = Math.min(h, wa.height - 8);
-  const nx = Math.max(wa.x + 4, Math.min(Math.round(cx - nw / 2), wa.x + wa.width - nw - 4));
-  const ny = Math.max(wa.y + 4, Math.min(Math.round(cy - nh / 2), wa.y + wa.height - nh - 4));
+  // macOS 不允许窗口顶边越过菜单栏；空间不足时限制高度，避免系统把底部锚点推走。
+  const nh = Math.min(h, wa.height - 8, Math.max(1, bottom - wa.y));
+  const nx = Math.round(cx - nw / 2);
+  const ny = bottom - nh;
   win.setBounds({ x: nx, y: ny, width: nw, height: nh });
-  log(`[window] 角色 ${Math.round(clampScale(k) * 100)}%（窗口 ${nw}×${nh}）`);
+  win.setPosition(nx, ny, false);
+  log(`[window] 角色 ${SCALE_LABELS[clampScale(k)]}（窗口 ${nw}×${nh}）`);
   return { x: nx, y: ny, w: nw, h: nh };
 }
 
 function createWindow() {
-  const c = config.load();
+  let c = config.load();
+  if (c.window.canvasWidthVersion !== 1) {
+    const x = typeof c.window.x === 'number' ? Math.round(c.window.x - c.window.w * winFactor(c.window.scale) * .2) : null;
+    c = config.save({ window: { x, canvasWidthVersion: 1 } });
+  }
   const size = windowSizeFor(c.window.scale);
   const w = size.w;
   const h = size.h;
@@ -299,6 +313,8 @@ function createWindow() {
 
   win.once('ready-to-show', () => {
     win.showInactive();
+    // macOS 会在首次显示时把加宽窗口挪回工作区；恢复锚点，UI 才不会跟着位移。
+    win.setPosition(x, y, false);
     scheduleSelfTest();
   });
 
@@ -324,8 +340,8 @@ function createWindow() {
  * 同一个窗口只开一个：再点一次就把它提到前台，不叠出一排一样的窗。 */
 const panels = new Map();
 const PANEL_SIZE = {
-  settings: { w: 380, h: 620, title: 'workbaby · 设置' },
-  motions: { w: 340, h: 660, title: 'workbaby · 动作库' },
+  settings: { w: 420, h: 760, title: 'workbunny · 设置' },
+  motions: { w: 340, h: 660, title: 'workbunny · 动作库' },
 };
 
 function openPanel(kind) {
@@ -338,7 +354,7 @@ function openPanel(kind) {
   }
   const w = new BrowserWindow({
     width: spec.w,
-    height: spec.h,
+    height: Math.min(spec.h, screen.getPrimaryDisplay().workAreaSize.height - 48),
     title: spec.title,
     autoHideMenuBar: true,
     minimizable: false,
@@ -416,6 +432,13 @@ function send(type, payload) {
     /* 渲染层正在重载时会抛，忽略即可 */
   }
 }
+function sendConfig(c = config.load()) {
+  const payload = { type: 'config', config: config.publicConfig(c) };
+  send('config', { config: payload.config });
+  for (const panel of panels.values()) {
+    try { if (!panel.isDestroyed()) panel.webContents.send('pet:ev', payload); } catch {}
+  }
+}
 
 /* ── 说话队列（合成 → 播放，逐句流水线，可被打断） ── */
 const speechQueue = [];
@@ -447,12 +470,16 @@ function echoLike(text) {
 }
 
 function stopSpeaking() {
+  activeThought?.abort();
+  tts.cancel();
+  synthCache.clear();
   speechGen++;
   speechQueue.length = 0;
   speaking = false;
   if (speakWatchdog) { clearTimeout(speakWatchdog); speakWatchdog = null; }
   unmuteAsr('stopSpeaking');
   send('audio', { stop: true });
+  send('speaking', { on: false });
 }
 
 /* ── 闭麦/开麦：只此两个入口，带日志和兜底 ────────────────────────────
@@ -503,30 +530,79 @@ function voiceFor(emo, base) {
 /* 合成缓存 + 预取：念第一句的同时把第二句先合成好，句与句之间几乎没有等待 */
 const synthCache = new Map();
 const SYNTH_CACHE_MAX = 8;
+const ttsSession = createTTSSession({
+  getConfig: config.load, saveConfig: config.save, synthesize: tts.synthesize,
+  onFallback: (c, result) => {
+    synthCache.clear();
+    tts.shutdown();
+    sendConfig(c);
+    log(`[tts] 已切换到系统默认语音：${result.reason || '所选引擎不可用'}`);
+  },
+});
+function syncQwenRuntime(c = config.load()) {
+  if (c.tts.enabled && c.tts.engine === 'qwen') {
+    const q = { ...c.tts.qwen, dir: c.tts.qwen.dir || MODELS_DIR };
+    const alreadyReady = tts.runtimeStatus().ready;
+    tts.prewarm(q).then(() => {
+      if (!alreadyReady && tts.runtimeStatus().ready) log(`[tts] 本地模型已预热并常驻（初始化 ${tts.runtimeStatus().initMs}ms）`);
+    }).catch((e) => { if (e.name !== 'AbortError') log('[tts] 本地引擎预热未完成：' + e.message); });
+  } else tts.shutdown();
+}
+function ttsChanged(c = config.load()) {
+  tts.cancel(); tts.reset(); ttsSession.changed(); synthCache.clear();
+  syncQwenRuntime(c); sendConfig(c);
+}
 
 let fallbackLogged = '';
-const cfgEngineName = (t) => (t && t.engine === 'qwen' ? '本地大模型' : (t && t.engine === 'remote' ? '远程 TTS' : '系统语音'));
+const cfgEngineName = (t) => (t && t.engine === 'qwen' ? '本地大模型' : (t && t.engine === 'remote' ? '局域网 CHP' : '系统语音'));
 
-function synthBuffer(text, emo) {
+function synthBuffer(text, emo, options) {
   const key = (emo || '') + '\u0000' + text;
   const hit = synthCache.get(key);
-  if (hit) return hit;
+  if (hit) return hit.then((r) => ({ ...r, streamed: false }));
   const c = config.load();
   const ttsCfg = { ...c.tts, instructions: voiceFor(emo, c.tts.instructions) };
-  const p = tts.synthesize(text, ttsCfg).then((r) => {
+  const p = ttsSession.synthesize(text, ttsCfg, options).then((r) => {
     // 每次都说清嗓子是谁 + 用的哪个音色：主人抱怨"声音不对"时，日志能自证到底走的哪条路
     const src = r.engine === 'remote' ? '远程' : (r.engine === 'qwen' ? '本地大模型' : `系统·${r.voice || '默认'}`);
     if (r.ms > 900) log(`[tts] 合成 ${r.ms}ms（${text.length} 字 · ${src}${r.cached ? ' · 缓存' : ''}）`);
+    if (r.stats) log(`[tts] CustomVoice/${r.voice} 首片 ${r.stats.firstMs}ms · RTF ${r.stats.rtf.toFixed(2)}${r.streamed ? ' · 流式' : ''}`);
     if (r.degraded && r.reason !== fallbackLogged) {
       fallbackLogged = r.reason || '';
       log(`[tts] ${cfgEngineName(c.tts)} 合成不可用（${fallbackLogged}），退回系统语音 ${r.voice || '默认'}`);
     }
-    return r.buffer;
+    return r;
   });
   p.catch(() => synthCache.delete(key));   // 失败别把坏结果留在缓存里
   synthCache.set(key, p);
   if (synthCache.size > SYNTH_CACHE_MAX) synthCache.delete(synthCache.keys().next().value);
   return p;
+}
+
+let streamSequence = 0;
+function streamingPlayback(c, gen, text) {
+  const id = `${gen}:${++streamSequence}`;
+  let started = false, stopped = false;
+  const enabled = c.tts.engine === 'qwen' && c.tts.qwen?.streaming;
+  return {
+    options: !enabled ? undefined : {
+      onChunk: (pcm) => {
+        if (gen !== speechGen || stopped) return;
+        if (!started) {
+          started = true;
+          noteSpoken(text || '');
+          if (asr && !asr.aec) muteAsr('开始播放');
+          send('audio', { stream: { id, start: true } });
+        }
+        send('audio', { stream: { id, pcm } });
+      },
+      onStop: () => { stopped = true; if (started) send('audio', { stream: { id, stop: true } }); },
+    },
+    finish: (r) => {
+      if (!r.streamed || !started || stopped || gen !== speechGen) return false;
+      send('audio', { stream: { id, end: true } }); return true;
+    },
+  };
 }
 
 function prefetchNext() {
@@ -543,9 +619,7 @@ async function pumpSpeech() {
   speaking = true;
   const gen = speechGen;
   const c = config.load();
-  // 有回声消除就不闭麦：边说她边听，主人能随时插话打断
-  if (asr && !asr.aec) muteAsr('说话中');
-  noteSpoken(item.text);
+  // 合成期间继续识别；缺少 AEC 时只在即将播放音频时闭麦。
   send('speaking', { on: true, text: item.text });
 
   if (c.tts.enabled && c.voice.enabled) {
@@ -559,15 +633,19 @@ async function pumpSpeech() {
         log('[tts] 合成超时，放弃这句');
         finishSpeech();
       }
-    }, 30000);
+    }, c.tts.engine === 'qwen' ? 145000 : c.tts.engine === 'remote' ? 90000 : 30000);
     try {
-      const bufP = synthBuffer(item.text, item.emo);
+      const playback = streamingPlayback(c, gen, item.text);
+      const bufP = synthBuffer(item.text, item.emo, playback.options);
       prefetchNext();           // 和当前这句并行，先把下一句准备出来
-      const buffer = await bufP;
+      const result = await bufP, buffer = result.buffer;
       // 被打断/换代：不能裸 return —— 那样 speaking 和闭麦都留在原地，麦克风永久哑
-      if (gen !== speechGen) { finishSpeech(); return; }
-      if (turnT0) { log(`[turn] 听见→出声 ${Date.now() - turnT0}ms`); turnT0 = 0; }
-      send('audio', { buffer, text: item.text });
+      if (gen !== speechGen) return;
+      if (!playback.finish(result)) {
+        noteSpoken(item.text);
+        if (asr && !asr.aec) muteAsr('开始播放');
+        send('audio', { buffer, text: item.text });
+      }
       // 看门狗：万一渲染层没回 audio-done（窗口崩了/解码失败），别让队列永远卡住
       if (speakWatchdog) clearTimeout(speakWatchdog);
       const durMs = Math.max(1500, ((buffer.length - 44) / (24000 * 2)) * 1000) + 2500;
@@ -575,6 +653,7 @@ async function pumpSpeech() {
         if (gen === speechGen && speaking) finishSpeech();
       }, durMs);
     } catch (e) {
+      if (e.name === 'AbortError') { if (gen === speechGen) finishSpeech(); return; }
       // 以前只往 stderr 写，日志里什么都看不到 —— 于是"她不说话"永远查不出原因
       log('[tts] 合成失败：' + e.message);
       console.error('[tts]', e.message);
@@ -633,6 +712,7 @@ const PROMPT_REST =
   '用一句话提醒他歇一会儿，要具体说你看见他连着做完了几件事，别说空话。）';
 
 let busy = false;
+let activeThought = null;
 
 /** 时间感知：小模型不知道"现在"，不给它就会瞎猜 */
 function nowLine() {
@@ -644,33 +724,23 @@ function nowLine() {
   return `现在是 ${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${week} ${part}${hh}:${mm}。`;
 }
 
-/** 常驻监听时先判断「这句是不是在对我说」 */
-const JUDGE_RULE = `
-
-# 附加任务（优先于上面所有规则）
-下面这句是麦克风听到的话。它可能是在跟我说，也可能是主人在跟别人说话、开会、打电话、
-自言自语、或者在念屏幕上的代码和文档。
-先判断，再决定：
-- 不是对我说的 → 只输出 <skip>，一个字都不要多。
-- 是对我说的 → 按平常的方式回答。
-**这些一定是对我说的**：叫我的名字、问我问题、让我做事、问我在不在/能不能听见、
-跟我说"你好/谢谢/辛苦了"、接着我刚说的话题往下讲。
-**这些通常不是对我说的**：念代码或报错、给别人布置任务、电话会议内容、
-带具体文件路径的指令、第三人称提到我（"让它看看"）但没有直接叫我。
-我的名字在语音识别里经常被听错，听起来像我的名字也要当成在叫我。
-拿不准的时候，如果像在跟我说话，就回答；明显是别的场合，选 <skip>。
-`;
+/** 常驻监听：同一次输出中直接回答或跳过。 */
+const JUDGE_RULE = replyPolicy.RULE;
 
 const HISTORY_TURNS = 6;   // 只带最近 3 轮对话，够接话又不撑爆上下文
 
-async function think({ userText, internal = false, allowSpeech = true, judge = false }) {
+async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn }) {
   const c = config.load();
   // 大脑的配置在 brain 里，这里折算成真正能发请求的那三个字段
   const L = config.resolveLLM(c);
-  if (!L.apiKey) {
+  if (L.transport !== 'workbuddy' && !L.apiKey) {
     send('chat', { role: 'assistant', text: '（还没配好大脑：去设置里看看 —— 默认用 WorkBuddy 的额度，一行都不用填）' });
     return null;
   }
+  activeThought?.abort();
+  const controller = new AbortController();
+  activeThought = controller;
+  log(`[brain] provider=${L.provider} model=${L.model}`);
   const ctx = nowLine() + '\n' + (monitor ? monitor.context() : '');
   const sys = config.buildSystemPrompt(ctx) + (judge ? JUDGE_RULE : '');
   const msgs = [{ role: 'system', content: sys }];
@@ -682,14 +752,18 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
   if (!dup) msgs.push({ role: 'user', content: userText });
 
   busy = true;
-  // 立刻给一个"我在想"的姿态。主人说完到第一句出声通常有 0.8~2 秒，
-  // 没有这个反馈，玩偶看起来就像没听见。
+  const requestStarted = Date.now();
   send('think', { on: true });
   // 边生成边念。判官模式也能提前出声：<skip> 只可能出现在开头，
   // 第一句一旦不是 skip，就等于已经判定"这话是对我说的"，可以直接念 —— 省掉整段等生成。
   let silenced = false;   // 已判定不该出声（命中 skip）
   let streamed = false;   // 已经有句子进了朗读队列
-  const saySentence = (s) => {
+  const earlySentences = [];
+  const responseGate = replyPolicy.makeReplyGate((text) => {
+    if (!internal && !controller.signal.aborted) send('delta', { text });
+  });
+  const enqueueSentence = (s) => {
+    if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return;
     if (silenced || !allowSpeech) return;
     if (/<\s*skip/i.test(s)) { silenced = true; return; }
     const parsed = llm.extractTags(s);
@@ -699,20 +773,31 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     speechQueue.push({ text: txt });
     if (!speaking) pumpSpeech();
   };
+  const saySentence = (s) => voiceTurn ? earlySentences.push(s) : enqueueSentence(s);
 
   try {
     const r = await llm.chat({
       ...L,
+      // Hy3 的上限包含内部推理，压到 512 会截断到没有回答；
+      // 简短口语由提示词约束，不能靠截断推理来冒充加速。
+      maxTokens: L.maxTokens || 4096,
+      signal: controller.signal,
       messages: msgs,
       onDelta: (d) => {
-        if (!internal && !judge) send('delta', { text: d });
+        if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return;
+        if (judge) responseGate.push(d);
+        else if (!internal) send('delta', { text: d });
       },
       onSentence: saySentence,
     });
+    if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return null;
+    log(`[brain] 完成 ${Date.now() - requestStarted}ms（一次请求 · ${L.provider}/${r.model || L.model}）`);
 
+    responseGate.flush();
     const raw = (r.text || '').trim();
     // 判官说「不是在跟我说话」→ 什么都不做，也不记进历史
-    if (judge && /<\s*skip\s*\/?>/i.test(raw)) {
+    if (judge && (responseGate.skipped || /^<\s*skip\s*\/?>/i.test(raw))) {
+      voiceTurn?.skip();
       silenced = true;
       stopSpeaking();
       send('heard', { text: userText, replied: false });
@@ -720,16 +805,24 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       return r;
     }
 
+    // 请求已在一秒停顿时发出；三秒边界前的续说仍能撤销它。
+    // 模型生成与轮次收尾并行，绝不在请求前再等待三秒。
+    if (voiceTurn) {
+      if (!await voiceTurn.waitForCommit() || !voiceTurn.isCurrent() || controller.signal.aborted) return null;
+      voiceTurn.remember();
+      for (const sentence of earlySentences) enqueueSentence(sentence);
+    }
+
     const clean = raw.replace(/<\s*skip\s*\/?>/gi, '').trim();
     // 把她实际说的话记下来：回看时才知道"她到底说了什么蠢话"，否则无从优化
     if (clean) log('[say] ' + clean.replace(/\s+/g, ' ').slice(0, 90));
     if (clean) {
-      if (judge) pushHistory('user', userText);
+      if (judge && !voiceTurn) pushHistory('user', userText);
       pushHistory('assistant', clean);
-      if (!internal && !judge) {
+      if (!internal) {
         send('chat', { role: 'assistant', text: clean, final: true });
-      } else if (!streamed) {
-        // 没有边生成边念（比如整段没有句号）→ 这里补一次，且只补一次
+      }
+      if (!streamed && allowSpeech) {
         speak(clean, { motion: r.motions[0], emo: r.emos[0] });
       }
     }
@@ -739,12 +832,16 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     // 真正的收尾由渲染层播完音频回 pet:audio-done 驱动。
     return r;
   } catch (e) {
+    if (controller.signal.aborted) return null;
     console.error('[llm]', e.message);
     send('chat', { role: 'assistant', text: '（我这会儿想不出来：' + e.message + '）' });
     return null;
   } finally {
-    busy = false;
-    send('think', { on: false });
+    if (activeThought === controller) {
+      activeThought = null;
+      busy = false;
+      send('think', { on: false });
+    }
   }
 }
 
@@ -956,7 +1053,7 @@ function buildTrayMenu() {
     {
       label: '角色大小',
       submenu: SCALES.map((k) => ({
-        label: `${Math.round(k * 100)}%${clampScale(c.window.scale) === k ? '  ✓' : ''}`,
+        label: `${SCALE_LABELS[k]}${clampScale(c.window.scale) === k ? '  ✓' : ''}`,
         click: () => {
           config.save({ window: { scale: k } });
           applyWindowScale(k);
@@ -1008,7 +1105,9 @@ function rebuildTray() {
 
 function showWindow() {
   if (!win) return;
+  const [x, y] = win.getPosition();
   win.showInactive();
+  win.setPosition(x, y, false);
   rebuildTray();
 }
 function hideWindow() {
@@ -1066,11 +1165,14 @@ function asrOpts(always) {
 
 function startListen(reason) {
   if (!asr) return;
-  if (asr.running) return;
   const c = config.load();
   if (!c.voice.alwaysListen) return;
   if (!fs.existsSync(ASR_BIN)) { send('listen', { on: false, error: '缺少 bin/asr' }); return; }
   alwaysOn = true;
+  send('listen', { on: true, reason: reason || '' });
+  if (asr.running) return;
+  asrStatus = { ...asrStatus, captureReady: false, note: 'starting' };
+  send('asrStatus', asrStatus);
   asrStartedAt = Date.now();
   asr.start(asrOpts(true));
   send('listen', { on: true, reason: reason || '' });
@@ -1078,6 +1180,7 @@ function startListen(reason) {
 }
 
 function stopListen() {
+  voiceTurns.reset();
   alwaysOn = false;
   if (listenRestartTimer) { clearTimeout(listenRestartTimer); listenRestartTimer = null; }
   if (asr && asr.running) asr.stop();
@@ -1116,7 +1219,16 @@ function nameHit(text) {
 }
 
 /** 每听到一句 → 先判断是不是在对我说，是就回，不是就闭嘴（一次调用搞定） */
-async function handleUtterance(text) {
+const voiceTurns = require('./voice-turns').createVoiceTurns({
+  onRequest: (turn) => handleUtterance(turn.text, turn),
+  onInvalidate: () => stopSpeaking(),
+  onRemember: (text) => pushHistory('user', text),
+  onError: (message) => { log('[listen] ' + message); send('toast', { text: message }); },
+  onLive: (text, state) => state.final && state.pending
+    ? send('heard', { text }) : send('asrLive', { text }),
+});
+
+async function handleUtterance(text, voiceTurn) {
   const t = String(text || '').trim();
   if (!worthJudging(t)) { log('[listen] drop noise: ' + t.slice(0, 20)); return; }
   // 这句可能就是我自己刚说的（回声消除没吃干净）→ 当没听见
@@ -1130,9 +1242,10 @@ async function handleUtterance(text) {
     stopSpeaking();
   }
   const c = config.load();
-  turnT0 = Date.now();      // 计时起点：从"听见一句"到"第一声出口"有多久
-  lastHeardAt = turnT0;
+  turnT0 = voiceTurn?.heardAt || Date.now();
+  lastHeardAt = Date.now();
   send('heard', { text: t });
+  if (voiceTurn) log(`[listen] 预请求：停顿 ${Date.now() - voiceTurn.heardAt}ms`);
   log('[listen] heard: ' + t.slice(0, 60));
 
   // 「别烦我」→ 立刻静音 10 分钟。这是主人的明确指令，优先级高于一切。
@@ -1146,24 +1259,24 @@ async function handleUtterance(text) {
     return;
   }
 
-  // 叫名字 = 一定在跟我说话，直接答（省一次判官调用，也不会被误判成 skip）
+  // 叫名字时直接回答，不附加跳过规则；仍然只调用一次模型。
   if (nameHit(t)) {
-    pushHistory('user', t);
+    if (!voiceTurn) pushHistory('user', t);
     log('[listen] name hit -> direct reply');
-    await think({ userText: t });
-    send('heard', { text: t, replied: true });
+    const r = await think({ userText: t, voiceTurn });
+    if (r && (!voiceTurn || voiceTurn.isCurrent())) send('heard', { text: t, replied: true });
     return;
   }
 
   if (!c.asr.judge) {
-    pushHistory('user', t);
+    if (!voiceTurn) pushHistory('user', t);
     send('chat', { role: 'user', text: t });
-    think({ userText: t });
+    think({ userText: t, voiceTurn });
     return;
   }
-  // judge 模式：模型先判断，不是对它说的就只输出 <skip>，不发一声
-  const r = await think({ userText: t, judge: true });
-  if (!r) return;
+  // 一次模型输出：要回复就直接给正文；否则只输出 <skip>。
+  const r = await think({ userText: t, judge: true, voiceTurn });
+  if (!r || (voiceTurn && !voiceTurn.isCurrent())) return;
   const skipped = /<\s*skip\s*\/?>/i.test(r.text || '');
   send('heard', { text: t, replied: !skipped });
 }
@@ -1183,7 +1296,7 @@ ipcMain.handle('pet:init', async () => {
   // 老配置存的是 'D' 这种短键，第一次跑顺手改写成文件名，之后就不用再换算
   if (current && current !== c.avatar) { try { config.save({ avatar: current }); c.avatar = current; } catch {} }
   return {
-    config: c,
+    config: config.publicConfig(c),
     motions: config.MOTIONS,
     motionGroups: config.MOTION_GROUPS,
     avatar: current,
@@ -1200,8 +1313,10 @@ ipcMain.handle('pet:scale', (_e, { scale } = {}) => {
   const k = clampScale(scale);
   config.save({ window: { scale: k } });
   applyWindowScale(k);
+  send('scale', { scale: k });
   rebuildTray();
-  return { scale: k };
+  sendConfig(config.load());
+  return { scale: k, config: config.publicConfig() };
 });
 
 /* 重扫形象目录：主人往 assets/models/ 丢一个 .vrm，打开设置就能看见，不用重启 */
@@ -1210,15 +1325,16 @@ ipcMain.handle('pet:avatars', () => avatars.scan());
 ipcMain.on('pet:stop-speak', () => {
   // 点她一下 = 打断。没有回声消除时，主人"开口"她听不见（说着话是闭麦的），
   // 所以必须给一个不需要她听见的打断方式 —— 点一下最直觉。
-  if (speaking || speechQueue.length) {
+  if (speaking || speechQueue.length || busy) {
     log('[speak] 主人点了一下，收声');
-    stopSpeaking();
+    voiceTurns.reset(); stopSpeaking();
   }
 });
 
 ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
   const t = String(text || '').trim();
   if (!t) return { ok: false };
+  voiceTurns.reset();
   stopSpeaking();
   pushHistory('user', t);
   send('chat', { role: 'user', text: t });
@@ -1227,11 +1343,21 @@ ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
 });
 
 ipcMain.handle('pet:config', (_e, patch) => {
+  const previous = config.load();
+  if (patch?.window && Object.hasOwn(patch.window, 'scale')) patch = { ...patch, window: { ...patch.window, scale: clampScale(patch.window.scale) } };
   const c = config.save(patch || {});
-  if (patch && patch.monitor) startMonitor();
-  if (patch && patch.avatar) send('avatar', { key: c.avatar });
+  if (patch?.monitor && JSON.stringify(previous.monitor) !== JSON.stringify(c.monitor)) startMonitor();
+  if (patch?.avatar && c.avatar !== previous.avatar) send('avatar', { key: c.avatar });
+  if (patch?.voice && c.voice.alwaysListen !== previous.voice.alwaysListen) {
+    if (c.voice.alwaysListen) startListen('settings'); else stopListen();
+  }
+  if (patch?.tts && JSON.stringify(previous.tts) !== JSON.stringify(c.tts)) { ttsChanged(c); }
+  if (patch?.window && c.window.scale !== previous.window.scale) {
+    applyWindowScale(c.window.scale); send('scale', { scale: c.window.scale });
+  }
+  sendConfig();
   rebuildTray();
-  return c;
+  return config.publicConfig();
 });
 
 ipcMain.handle('pet:probe', async () => {
@@ -1247,7 +1373,10 @@ ipcMain.handle('pet:probe', async () => {
   } catch (e) {
     out.llm = { ok: false, ms: Date.now() - t0, error: e.message };
   }
-  out.tts = await tts.probe(c.tts);
+  try {
+    const r = await ttsSession.synthesize('让我试试这个声音。', c.tts);
+    out.tts = { ok: true, ms: r.ms, engine: r.engine, degraded: r.degraded, reason: r.reason };
+  } catch (e) { out.tts = { ok: false, error: e.message }; }
   out.asr = { ok: fs.existsSync(ASR_BIN), path: ASR_BIN };
   out.monitor = {
     file: monitor ? monitor.file : null,
@@ -1260,12 +1389,16 @@ ipcMain.handle('pet:probe', async () => {
 ipcMain.on('pet:hit', (_e, v) => setInteractive(!!v));
 ipcMain.on('pet:log', (_e, m) => log('[ui] ' + String(m).slice(0, 2400)));
 ipcMain.on('pet:audio-done', () => finishSpeech());
+ipcMain.on('pet:audio-started', () => {
+  if (turnT0 && speaking) { log(`[turn] 停顿→开始播放 ${Date.now() - turnT0}ms`); turnT0 = 0; }
+});
 ipcMain.on('pet:record', () => toggleRecord());
 ipcMain.on('pet:listen', (_e, v) => {
   const want = v === 'toggle' ? !alwaysOn : !!v;
   if (want) { config.save({ voice: { alwaysListen: true } }); startListen('user'); }
   else { stopListen(); config.save({ voice: { alwaysListen: false } }); }
   send('listen', { on: alwaysOn });
+  sendConfig(config.load());
 });
 ipcMain.handle('pet:asr-status', async (_e, opts) => {
   if (opts && opts.request) return requestAsrPermission();
@@ -1283,7 +1416,7 @@ ipcMain.on('pet:quit', () => { quitting = true; app.quit(); });
 ipcMain.on('pet:open', (_e, what) => {
   if (what === 'settings') openPanel('settings');
   else if (what === 'motions') openPanel('motions');
-  else if (what === 'workbuddy') shell.openPath('/Applications/WorkBuddy.app');
+  else if (what === 'workbuddy') require('./workbuddy').openApplication().catch(e => log('[workbuddy] ' + e.message));
   else if (what === 'userData') shell.openPath(USER_DIR);
 });
 
@@ -1293,7 +1426,7 @@ ipcMain.handle('pet:panel-init', async () => {
   const c = config.load();
   const list = avatars.scan();
   return {
-    config: c,
+    config: config.publicConfig(c),
     avatars: list,
     motions: config.MOTIONS,
     motionGroups: config.MOTION_GROUPS,
@@ -1305,37 +1438,85 @@ ipcMain.handle('pet:panel-init', async () => {
 /* 面板点了一个动作 → 转给角色窗口去演。
  * 面板自己没有 3D，也不该有：演的地方永远只有一处。 */
 ipcMain.on('pet:panel-motion', (_e, key) => {
-  if (!key) return;
   if (key === '__idle__') { send('toidle', {}); return; }
   send('motion', { key });
 });
 
 /* ═══════════ 大脑 / 嘴巴：给设置面板的补充接口 ═══════════ */
-const MODELS_DIR = path.join(USER_DIR, 'models', 'qwen-tts');
-const VOICES_DIR = path.join(USER_DIR, 'voices');
+const MODELS_DIR = path.join(USER_DIR, 'models', 'qwen-customvoice');
 
 ipcMain.handle('pet:brain-info', () => ({
   providers: config.PROVIDERS,
+  catalogs: Object.fromEntries(['workbuddy', ...config.PROVIDERS.map(p => p.id)].map(id => [id, require('./model-catalog').get(id)])),
   thinkingLevels: config.THINKING_LEVELS,
   workbuddyModels: config.listWorkBuddyModels(),
+  workbuddyThinking: config.thinkingOptions('workbuddy', 'hy3'),
+  thinkingByModel: Object.fromEntries(config.PROVIDERS.flatMap((p) => p.models.map((m) => [m, config.thinkingOptions(p.id, m)]))),
 }));
 
+ipcMain.handle('pet:workbuddy-open', async () => {
+  try { await require('./workbuddy').openApplication(); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('pet:brain-models', async (_e, brain) => {
+  const L = config.resolveLLM(config.preview({ brain: brain || {} }));
+  try {
+    const catalog = await require('./model-catalog').refresh(L.provider, L.apiKey);
+    return { ok: true, provider: L.provider, catalog };
+  } catch (e) { return { ok: false, provider: L.provider, error: e.message }; }
+});
+
+ipcMain.handle('pet:brain-test', async (_e, brain) => {
+  const c = config.preview({ brain: brain || {} });
+  const L = config.resolveLLM(c), t0 = Date.now();
+  if (L.transport !== 'workbuddy' && !L.apiKey) return { ok: false, error: '请先填写这个服务商的 API Key。' };
+  try {
+    const r = await llm.chat({ ...L, messages: [{ role: 'user', content: '只回复“连接成功”。' }] });
+    return { ok: true, provider: L.provider, model: r.model || L.model, text: r.text,
+      ms: Date.now() - t0, credit: r.usage?.credit };
+  } catch (e) { return { ok: false, error: e.message, ms: Date.now() - t0 }; }
+});
+
 ipcMain.handle('pet:tts-info', () => {
-  const c = config.load();
+  let c = config.load();
   const dir = (c.tts.qwen && c.tts.qwen.dir) || MODELS_DIR;
+  const normalized = voiceFiles.normalize(c.tts.qwen);
+  if (JSON.stringify(normalized) !== JSON.stringify(c.tts.qwen)) {
+    c = config.save({ tts: { qwen: normalized } }); ttsChanged(c);
+  }
+  const downloaded = tts.qwenReady(dir), hasRuntime = !!tts.findSpeechRuntime();
+  const voices = tts.qwenVoices({ ...c.tts.qwen, dir });
+  if (voices.length && (!c.tts.qwen.ready || c.tts.qwen.dir !== dir || !voices.some((v) => v.id === c.tts.qwen.voice))) {
+    c = config.save({ tts: { qwen: { dir, ready: true,
+      voice: voices.some((v) => v.id === c.tts.qwen.voice) ? c.tts.qwen.voice : voices[0].id } } });
+    ttsChanged(c);
+  }
   return {
+    config: config.publicConfig(c),
     engines: config.TTS_ENGINES,
     systemVoices: tts.systemVoices(),
+    chp: require('./chp-tts').cached(c.tts),
     qwen: {
       dir,
-      ready: tts.qwenReady(dir),
-      hasRuntime: !!tts.findLlamaTTS(),
+      ready: downloaded && hasRuntime,
+      downloaded,
+      hasRuntime,
       files: tts.QWEN_FILES.map((f) => f.name),
-      voices: tts.QWEN_VOICES,
+      voices,
+      hasFiles: tts.QWEN_FILES.some((f) => fs.existsSync(path.join(dir, f.name)) || fs.existsSync(path.join(dir, f.name + '.part'))),
+      runtime: tts.runtimeStatus(),
     },
     dl: tts.downloadState(),
   };
 });
+
+ipcMain.handle('pet:chp-discover', async (_e, patch) => {
+  const t = config.preview({ tts: patch || {} }).tts;
+  try { return { ok: true, catalog: await require('./chp-tts').discover(t) }; }
+  catch (e) { log(`[chp] 获取失败 ${e.code || ''} ${e.message}`); return { ok: false, error: e.message }; }
+});
+ipcMain.on('pet:chp-help', () => shell.openExternal('https://github.com/zhyuzh3d/haminn-chp'));
 
 ipcMain.handle('pet:tts-download', () => {
   try { fs.mkdirSync(MODELS_DIR, { recursive: true }); } catch {}
@@ -1346,7 +1527,11 @@ ipcMain.handle('pet:tts-download', () => {
       const st = tts.downloadState();
       if (!st.running) {
         clearInterval(watch);
-        if (!st.err) config.save({ tts: { qwen: { dir: MODELS_DIR, ready: tts.qwenReady(MODELS_DIR) } } });
+        if (!st.err) {
+          config.save({ tts: { qwen: { dir: MODELS_DIR, ready: tts.qwenReady(MODELS_DIR) } } });
+          synthCache.clear();
+          tts.reset(); syncQwenRuntime(); sendConfig();
+        }
       }
     }, 1500);
   }
@@ -1354,40 +1539,65 @@ ipcMain.handle('pet:tts-download', () => {
 });
 ipcMain.handle('pet:tts-dl-state', () => tts.downloadState());
 ipcMain.on('pet:tts-cancel', () => tts.cancelDownload());
-
-/* 上传参考音色（≤2MB）。挑文件这事交给系统对话框：
- * 面板窗口里塞一个 file input，样式跟整页不搭，还得自己处理沙箱路径。 */
-ipcMain.handle('pet:tts-pick-ref', async () => {
-  const r = await dialog.showOpenDialog({
-    title: '挑一段她的声音（≤2MB）',
-    filters: [{ name: '音频', extensions: ['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg'] }],
-    properties: ['openFile'],
+ipcMain.handle('pet:tts-delete', async () => {
+  const result = await dialog.showMessageBox(panels.get('settings') || win, {
+    type: 'warning', message: '删除本地语音模型？',
+    detail: '将删除约 1.33GB 的 CustomVoice 模型文件，并停止正在进行的下载。再次使用本地语音需要重新下载。原有用户文件会保留。',
+    buttons: ['取消', '删除模型'], defaultId: 0, cancelId: 0, noLink: true,
   });
-  if (r.canceled || !r.filePaths || !r.filePaths[0]) return { ok: false };
-  const src = r.filePaths[0];
-  const MAX = 2 * 1024 * 1024;
+  if (result.response !== 1) return { ok: false, cancelled: true };
   try {
-    const st = fs.statSync(src);
-    if (st.size > MAX) return { ok: false, error: `这个文件 ${(st.size / 1048576).toFixed(1)}MB，超过了 2MB。` };
-    fs.mkdirSync(VOICES_DIR, { recursive: true });
-    const dest = path.join(VOICES_DIR, 'ref' + path.extname(src).toLowerCase());
-    fs.copyFileSync(src, dest);
-    config.save({ tts: { qwen: { refFile: dest, refName: path.basename(src), voice: 'clone' } } });
-    return { ok: true, file: dest, name: path.basename(src), bytes: st.size };
-  } catch (e) {
-    return { ok: false, error: e.message };
+    tts.shutdown();
+    const c = config.load(), dir = c.tts.qwen.dir || MODELS_DIR;
+    const removed = await tts.deleteQwen(dir);
+    ttsSession.useSystem('本地语音模型已删除', 'qwen', tts.pickSystemVoice());
+    const updated = config.save({ tts: { qwen: { ready: false, voice: 'serena', activeTrack: null } } });
+    ttsChanged(updated);
+    return removed;
+  } catch (e) { return { ok: false, error: '删除模型失败：' + e.message }; }
+});
+ipcMain.handle('pet:tts-check', async () => {
+  const c = config.load(), dir = c.tts.qwen?.dir || MODELS_DIR;
+  const result = await tts.checkQwen(dir);
+  if (!result.ok) {
+    ttsSession.useSystem(result.error, 'qwen', tts.pickSystemVoice());
+    return result;
   }
+  if (!tts.findSpeechRuntime()) {
+    const error = '模型完整，但本地语音引擎缺失，请重新安装应用。';
+    ttsSession.useSystem(error, 'qwen', tts.pickSystemVoice());
+    return { ...result, ok: false, error };
+  }
+  config.save({ tts: { qwen: { dir, ready: true } } });
+  synthCache.clear();
+  return result;
 });
 
 /* 试听：真的合成一句，交给角色窗口播出来 —— 主人听的是真嗓子，不是"设置已保存"。
  * 顺手把用的哪个引擎、哪个音色回给面板，日志和界面都能自证。 */
 ipcMain.handle('pet:tts-test', async () => {
   const c = config.load();
+  stopSpeaking();
+  const gen = speechGen;
+  speaking = true;
+  send('speaking', { on: true, text: '' });
+  speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(); }, c.tts.engine === 'qwen' ? 145000 : c.tts.engine === 'remote' ? 90000 : 30000);
   try {
-    const r = await tts.synthesize('让我试试这个声音，你觉得顺耳吗？', c.tts);
-    send('audio', { buffer: r.buffer, text: '' });
-    return { ok: true, engine: r.engine, voice: r.voice, ms: r.ms, bytes: r.buffer.length };
+    const text = '让我试试这个声音，你觉得顺耳吗？';
+    const playback = streamingPlayback(c, gen, text);
+    const r = await ttsSession.synthesize(text, c.tts, playback.options);
+    if (gen !== speechGen) return { ok: false, error: '试听已停止' };
+    clearTimeout(speakWatchdog);
+    if (!playback.finish(r)) {
+      noteSpoken(text);
+      if (asr && !asr.aec) muteAsr('开始试听');
+      send('audio', { buffer: r.buffer, text: '' });
+    }
+    speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(); }, Math.max(1500, ((r.buffer.length - 44) / 48000) * 1000) + 2500);
+    return { ok: true, engine: r.engine, voice: r.voice, ms: r.ms, bytes: r.buffer.length,
+      degraded: r.degraded, reason: r.reason };
   } catch (e) {
+    if (gen === speechGen) finishSpeech();
     return { ok: false, error: e.message };
   }
 });
@@ -1546,6 +1756,7 @@ if (!lock) {
 
   app.whenReady().then(() => {
     createWindow();
+    syncQwenRuntime();
 
     app.on('child-process-gone', (_e, d) => {
       log('[child-gone] ' + JSON.stringify({ type: d.type, name: d.name, reason: d.reason, exitCode: d.exitCode }));
@@ -1553,7 +1764,7 @@ if (!lock) {
     app.on('gpu-process-crashed', () => log('[gpu] 进程崩了（会自己恢复，只是画面会顿一下）'));
     try {
       tray = new Tray(trayImage());
-      tray.setToolTip('workbaby · 你的桌面伙伴');
+      tray.setToolTip('workbunny · 你的桌面伙伴');
       tray.setContextMenu(buildTrayMenu());
       tray.on('click', () => (win && win.isVisible() ? hideWindow() : showWindow()));
     } catch (e) {
@@ -1564,7 +1775,7 @@ if (!lock) {
     // 为什么：TCC 记授权，记的是"谁去要的"。让 bin/asr 去要，责任进程可能
     // 被解析成那个裸可执行文件，于是授权记在一个既没有 bundle id、路径又随
     // 打包变化的身份上 —— 表现就是每次启动都重新弹框。
-    // 应用自己 askForMediaAccess 一次，授权就牢牢记在 cn.haminn.workbaby 上；
+    // 应用自己 askForMediaAccess 一次，授权就牢牢记在 cn.haminn.workbunny 上；
     // 再配合固定证书签名（tools/make-signing-cert.sh），重打包多少次都不会再问。
     (async () => {
       try {
@@ -1591,6 +1802,7 @@ if (!lock) {
     /** 静默查一次状态：不采集、默认不弹窗（SpeechAnalyzer 不需要 Siri/听写） */
     let firstProbe = true;
     async function refreshAsrStatus({ timeoutMs = 4000, requestMic = false } = {}) {
+      if (asr?.installing && !requestMic) return asrStatus;
       if (!fs.existsSync(ASR_BIN)) {
         return applyStatus({ speech: -1, mic: false, note: '缺少 bin/asr' });
       }
@@ -1629,9 +1841,18 @@ if (!lock) {
       }
     });
     asr.on('ready', () => {
+      applyStatus({ captureReady: true, note: 'ok', error: '' });
+      if (mutedSince) asr.mute();
       log('[asr] ready' + (alwaysOn ? ' (always)' : ''));
       if (alwaysOn) send('listen', { on: true, ready: true });
       else send('record', { state: 'listening' });
+    });
+    asr.on('capture', message => {
+      if (message.t === 'tap') log(`[asr] 已收到真实音频输入（${message.frames} 帧）`);
+    });
+    asr.on('installing', ({ locale }) => {
+      applyStatus({ speech: 1, mic: true, locale, captureReady: false, note: 'installing', error: '' });
+      log('[asr] 正在准备本机语音资源 ' + locale);
     });
     asr.on('audioPlan', (plan) => {
       log('[asr] 音频链路就绪（方案：' + (plan || '?') + '）');
@@ -1655,13 +1876,10 @@ if (!lock) {
         lastPartialLogAt = now0;
         log('[asr] 半句: ' + String(t).slice(0, 40));
       }
-      // 常驻监听时把"半句话"实时显示在胶囊里，主人能看到自己被听清了
+      // 一秒停顿即可预请求，无需等待原生识别器最终收句。
       if (!alwaysOn) return;
-      const now = Date.now();
-      if (now - lastLiveAt < 110 || t === lastLiveText) return;
-      lastLiveAt = now;
       lastLiveText = t;
-      send('asrLive', { text: t });
+      if (!echoLike(t) || Date.now() - lastSpokeAt >= 2600) voiceTurns.partial(t);
     });
     asr.on('level', (v) => {
       send('asrLevel', { v });
@@ -1683,8 +1901,9 @@ if (!lock) {
     });
     asr.on('utterance', (t) => {
       lastLiveText = '';
-      send('asrLive', { text: '' });
-      handleUtterance(t);
+      if (!alwaysOn) return;
+      log(`[asr] 收句确认 ${String(t).length} 字`);
+      if (!echoLike(t) || Date.now() - lastSpokeAt >= 2600) voiceTurns.final(t);
     });
     asr.on('final', (t) => {
       log('[asr] final', t);
@@ -1696,9 +1915,14 @@ if (!lock) {
       }
     });
     asr.on('recycle', (n) => log('[asr] recycled after ' + n + ' utterances'));
-    asr.on('error', (m) => { log('[asr] error', m); send('asrError', { message: m }); });
+    asr.on('error', (m) => {
+      applyStatus({ captureReady: false, note: 'reconnecting', error: m });
+      log('[asr] error', m); send('asrError', { message: m });
+    });
     asr.on('end', () => { if (!alwaysOn) send('record', { state: 'idle' }); });
     asr.on('exit', () => {
+      applyStatus({ captureReady: false, note: alwaysOn ? 'reconnecting' : 'off' });
+      voiceTurns.recognizerStopped();
       if (!alwaysOn) { send('record', { state: 'idle' }); return; }
       // 起来 3 秒内就死的算一次失败。连续失败就退避，否则「授权没了」这种情况
       // 会每 1.2 秒刷一次日志、把 CPU 白烧掉。
@@ -1708,7 +1932,7 @@ if (!lock) {
         const wait = Math.min(60000, 4000 * asrFailStreak);
         log(`[listen] 连续失败 ${asrFailStreak} 次，${Math.round(wait / 1000)} 秒后再试`);
         if (asrFailStreak === 3) {
-          send('asrError', { message: '我听不见了（麦克风可能被系统关掉），去「系统设置 → 隐私与安全性 → 麦克风」把 workbaby 勾上。' });
+          send('asrError', { message: '我听不见了（麦克风可能被系统关掉），去「系统设置 → 隐私与安全性 → 麦克风」把 workbunny 勾上。' });
         }
         scheduleListenRestart(wait);
       } else {
@@ -1721,7 +1945,6 @@ if (!lock) {
     /* ── 心跳自愈：每 20 秒检查自己有没有坏掉 ─────────────────────────
      * 桌宠没人看着。坏了就自己修，别等主人发现"它又不理我了"。
      * 检查项都只看"该在的东西还在不在"，不做昂贵操作。 */
-    let lastHealAt = 0;
     selfHealTimer = setInterval(() => {
       try {
         const now = Date.now();
@@ -1745,13 +1968,12 @@ if (!lock) {
           return;
         }
         // 4) 闭麦卡住：说了半分钟还没开麦 → 强制开
-        if (speaking && now - lastHealAt > 45000) unmuteAsr('心跳超时');
+        if (mutedSince && now - mutedSince > 30000) unmuteAsr('心跳超时');
 
         // 5) 看门狗自己掉队了 → 补一个。它和我们是互相兜底的关系：
         //    它看着我崩了就拉我，我看着它没了就重布防。
         ensureWatchdog();
 
-        lastHealAt = now;
       } catch (e) {
         log('[heal] 自检出错（忽略，继续跑）：' + e.message);
       }
@@ -1798,7 +2020,9 @@ app.on('before-quit', () => {
   markCleanExit();
   closePanels();          // 面板是普通窗口，不关会拖住退出
   if (monitor) monitor.stop();
+  voiceTurns.reset();
   if (asr) asr.kill();
+  tts.shutdown();
   globalShortcut.unregisterAll();
 });
 
