@@ -1006,13 +1006,18 @@ let lastActivityAt = 0;
  * 同时可能有好几件事在跑（WorkBuddy 一次开几个任务很常见），一条横幅放不下，
  * 就让这些行自己上下轮播：每 3.8 秒往上顶一行，新行从下方滑进来。 */
 const ACT_ROLL_MS = 3800;
-let actLines = [];        // 当前要轮播的全部行
+let actLines = [];        // 当前要轮播的全部行：{ key, text }
 let actSig = '';          // 这些行的"身份"（不含耗时，避免每分钟重置到第一行）
 let actIdx = 0;
 let actTimer = null;
 let actTextMode = false;  // 临时提示语抢占时暂停轮播
+/* 被主人点 ✓ 收起的那几条：${sessionId}#${taskId}。
+ * 同一个任务从「在干活」变成「做完了」也不再冒出来 —— 他点的是"这个任务别显示了"。
+ * 任务重新开始会换新的 taskId，所以不会被旧记录挡住。 */
+const actSeen = new Set();
 
 const actTextEl = () => document.getElementById('activityText');
+const actKey = (t) => `${t.sessionId || ''}#${t.taskId || 0}`;
 
 function actNode(t, i, n) {
   const mins = Math.floor((t.durationMs || 0) / 60000);
@@ -1031,10 +1036,13 @@ function actNode(t, i, n) {
 
 function activityLines(snap) {
   const tasks = (snap && snap.tasks) || [];
-  const running = tasks.filter((t) => t.status === 'running');
+  const running = tasks.filter((t) => t.status === 'running' && !actSeen.has(actKey(t)));
   const out = [];
-  running.forEach((t, i) => out.push(actNode(t, i, running.length)));
-  for (const t of tasks) if (t.status !== 'running') out.push(actNode(t, 0, 0));
+  running.forEach((t, i) => out.push({ key: actKey(t), text: actNode(t, i, running.length) }));
+  for (const t of tasks) {
+    if (t.status === 'running' || actSeen.has(actKey(t))) continue;
+    out.push({ key: actKey(t), text: actNode(t, 0, 0) });
+  }
   return out.slice(0, 4);
 }
 
@@ -1074,35 +1082,68 @@ function startRoll() {
     if (actTextMode || !actLines.length) return;
     if (activity.classList.contains('hidden')) return;
     actIdx = (actIdx + 1) % actLines.length;
-    slideLine(actLines[actIdx]);
+    slideLine(actLines[actIdx].text);
   }, ACT_ROLL_MS);
+}
+
+/** 没任务了不消失，改成「空闲中」——让主人知道是真没事，而不是条被吞了 */
+function paintIdle() {
+  stopRoll();
+  actLines = []; actSig = ''; actIdx = 0;
+  activity.classList.remove('hidden');
+  activity.classList.add('idle');
+  setActLine('空闲中');
 }
 
 /** 状态条只说"在做什么/做完了没"，绝不显示命令、路径、工具名。多任务时轮播。 */
 function paintActivity(snap) {
   lastWorkSnap = snap;
   lastActivityAt = Date.now();
+  if (!snap) { activity.classList.add('hidden'); actLines = []; actSig = ''; stopRoll(); return; }
   const lines = activityLines(snap);
-  if (!lines.length) {
-    activity.classList.add('hidden');
-    actLines = []; actSig = ''; actIdx = 0; stopRoll();
-    return;
-  }
-  const sig = ((snap && snap.tasks) || []).map((t) => `${t.sessionId}:${t.status}:${t.name}`).join('|');
+  if (!lines.length) { paintIdle(); return; }
+  const sig = lines.map((l) => l.key).join('|');
   actLines = lines;
   activity.classList.remove('hidden');
+  activity.classList.remove('idle');
   actTextMode = false;
   if (sig !== actSig) {
-    // 任务集合变了：从第一条重新开始（这时候换行是合理的）
+    // 任务集合变了（新任务 / 被点掉一条）：从第一条重新开始
     actSig = sig;
     actIdx = 0;
-    setActLine(lines[0]);
+    setActLine(lines[0].text);
   } else {
     // 只是耗时在涨：原地更新当前这一行，别把轮播打回第一行
-    setActLine(lines[actIdx % lines.length]);
+    setActLine(lines[actIdx % lines.length].text);
   }
   startRoll();
 }
+
+/** ✓：把当前显示的那一条收起来，剩下还有就继续轮到下一条 */
+function dismissCurrent() {
+  if (!actLines.length) return;
+  const cur = actLines[actIdx % actLines.length];
+  actSeen.add(cur.key);
+  if (actSeen.size > 60) {
+    // 只留最近的一批，别无限长
+    const keep = [...actSeen].slice(-40);
+    actSeen.clear();
+    for (const k of keep) actSeen.add(k);
+  }
+  const el = actTextEl();
+  for (const a of el.getAnimations()) a.cancel();
+  paintActivity(lastWorkSnap || {});
+}
+document.getElementById('actDone').addEventListener('click', dismissCurrent);
+/* 调试用：看轮播队列此刻的真实状态 */
+window.__act = () => ({
+  keys: actLines.map((l) => l.key),
+  texts: actLines.map((l) => l.text),
+  idx: actIdx,
+  seen: [...actSeen],
+  text: actTextEl() ? actTextEl().textContent : null,
+  cls: activity.className,
+});
 
 /** 临时提示语（"看着呢"之类）：占住横幅，过一会儿自动回到轮播 */
 function paintActivityText(txt) {
@@ -1116,8 +1157,10 @@ function paintActivityText(txt) {
     actTextMode = false;
     if (actLines.length) {
       actIdx = 0;
-      setActLine(actLines[0]);
+      setActLine(actLines[0].text);
       startRoll();
+    } else if (lastWorkSnap) {
+      paintIdle();
     } else {
       activity.classList.add('hidden');
     }

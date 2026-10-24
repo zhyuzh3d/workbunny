@@ -777,6 +777,7 @@ function snapshotForUi(v) {
     : { primary: v, running: v.task && v.task.status === 'running' ? [v] : [], done: v.task && v.task.status !== 'running' ? [v] : [], count: 0 };
   const one = (s) => ({
     sessionId: s.sessionId,
+    taskId: s.task ? s.task.id : 0,     // 界面「✓ 这条看过了」靠它认人
     title: s.sessionTitle || (s.task && s.task.title) || '',
     name: s.task ? taskName(s.task) : '',
     status: s.task ? s.task.status : 'idle',

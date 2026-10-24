@@ -73,6 +73,38 @@ app.whenReady().then(async () => {
     // 所以面板的验收以 DOM 断言为准（dbg 里的 btnCount/classes/settingsCls），别只看图。
   }
 
+  if (want === 'dismiss') {
+    // ✓ 逐条收起 → 最后「空闲中」：一条一条点掉，每一步都记下横幅文字和 class
+    await win.webContents.executeJavaScript(`window.__emit({
+      type: 'monitor', sessionId: 's1', phase: 'running', runningCount: 2,
+      tasks: [
+        { sessionId: 's1', taskId: 11, name: '改一下登录页的样式', status: 'running', durationMs: 380000 },
+        { sessionId: 's2', taskId: 12, name: '把测试全跑一遍', status: 'running', durationMs: 125000 },
+        { sessionId: 's3', taskId: 13, name: '修好打包脚本', status: 'ok', durationMs: 96000 },
+      ],
+    })`);
+    await new Promise((r) => setTimeout(r, 600));
+    const shot = async (n) => {
+      const st = await win.webContents.executeJavaScript(`({
+        text: document.getElementById('activityText').textContent,
+        cls: document.getElementById('activity').className,
+        dot: getComputedStyle(document.querySelector('#activity .dot')).animationName,
+        act: window.__act ? window.__act() : null,
+      })`);
+      console.log(`   [${n}] ${st.text}  · class="${st.cls}" dot=${st.dot}`);
+      if (st.act) console.log(`        keys=${JSON.stringify(st.act.keys)} idx=${st.act.idx} seen=${JSON.stringify(st.act.seen)}`);
+      fs.mkdirSync(OUT, { recursive: true });
+      fs.writeFileSync(path.join(OUT, `dismiss-${n}.png`), (await win.capturePage()).toPNG());
+      return st;
+    };
+    await shot(0);
+    for (const i of [1, 2, 3]) {
+      await win.webContents.executeJavaScript(`document.getElementById('actDone').click()`);
+      await new Promise((r) => setTimeout(r, 450));
+      await shot(i);
+    }
+  }
+
   if (want === 'activity') {
     // 三件同时在跑：状态条应该自己轮播，隔 4 秒拍两张看是不是换了行
     await win.webContents.executeJavaScript(`window.__emit({

@@ -119,6 +119,23 @@ html, body {
   flex: 0 0 auto;
   animation: pulse 1.25s ease-in-out infinite;
 }
+/* ✓：这条我看过了 —— 点掉当前显示的那条 */
+#activity #actDone {
+  flex: 0 0 auto;
+  width: 17px; height: 17px; margin-left: 1px;
+  display: grid; place-items: center;
+  border: 0; border-radius: 6px; padding: 0;
+  background: rgba(60, 50, 40, .07);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background .14s, color .14s, transform .1s;
+}
+#activity #actDone:hover { background: var(--ink); color: #fff; }
+#activity #actDone:active { transform: scale(.9); }
+/* 空闲中：不闪、不显示 ✓ */
+#activity.idle { color: var(--muted); }
+#activity.idle .dot { animation: none; background: #cfc7b8; }
+#activity.idle #actDone { display: none; }
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: .35; transform: scale(.8); }

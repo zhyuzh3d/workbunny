@@ -26,10 +26,14 @@
   <div id="bubbleTail"></div>
 </div>
 
-<!-- 干活状态条：多任务时这一行会上下轮播 -->
+<!-- 干活状态条：多任务时这一行会上下轮播；右边 ✓ = 这条我看过了 -->
 <div id="activity" class="hidden">
   <span class="dot"></span>
   <span class="actRoll"><span id="activityText">在干活</span></span>
+  <button id="actDone" title="这条我看过了" aria-label="这条我看过了">
+    <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor"
+         stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2.2 6.4l2.4 2.4 5.2-5.4"/></svg>
+  </button>
 </div>
 
 <!-- 录制律动 -->
