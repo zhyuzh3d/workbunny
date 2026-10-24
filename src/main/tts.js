@@ -158,7 +158,11 @@ async function synthesize(text, cfg) {
     try {
       buffer = await systemTTS(clean, voice);
       cache.set(hash, buffer);
-      return { buffer, ms: Date.now() - t0, cached: false, fallback: true, reason: lastErr && lastErr.message };
+      return {
+        buffer, ms: Date.now() - t0, cached: false,
+        fallback: true, voice: voice || '系统默认',   // 记下用的哪个音色，日志能自证
+        reason: lastErr && lastErr.message,
+      };
     } catch (e) {
       throw new Error((lastErr ? lastErr.message + ' / ' : '') + '系统语音也失败：' + e.message);
     }
@@ -166,7 +170,7 @@ async function synthesize(text, cfg) {
 
   if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
   cache.set(hash, buffer);
-  return { buffer, ms: Date.now() - t0, cached: false };
+  return { buffer, ms: Date.now() - t0, cached: false, engine: 'a1x' };
 }
 
 async function probe(cfg) {

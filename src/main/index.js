@@ -412,10 +412,12 @@ function synthBuffer(text, emo) {
   const c = config.load();
   const ttsCfg = { ...c.tts, instructions: voiceFor(emo, c.tts.instructions) };
   const p = tts.synthesize(text, ttsCfg).then((r) => {
-    if (r.ms > 900) log(`[tts] 合成 ${r.ms}ms（${text.length} 字${r.cached ? '，缓存' : ''}）`);
+    // 每次都说清嗓子是谁：A1X 的设计音色，还是系统兜底（并且用了哪个音色）
+    const src = r.fallback ? `系统·${r.voice || '默认'}` : 'A1X';
+    if (r.ms > 900) log(`[tts] 合成 ${r.ms}ms（${text.length} 字 · ${src}${r.cached ? ' · 缓存' : ''}）`);
     if (r.fallback && r.reason !== fallbackLogged) {
       fallbackLogged = r.reason || '';
-      log('[tts] A1X 合成不可用（' + fallbackLogged + '），改用它自带的系统语音');
+      log('[tts] A1X 合成不可用（' + fallbackLogged + '），改用系统语音 ' + (r.voice || '默认'));
     }
     return r.buffer;
   });
