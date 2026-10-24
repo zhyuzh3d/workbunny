@@ -8,25 +8,20 @@
 </head>
 <body data-p="settings">
 
-<!-- ══ 动作列表 ══
-     独立窗口，不再挤在角色窗口里 —— 92 条动作摊开来看，角色那边也清静。
-     点一下就让她演一遍（动作在角色窗口里播，这边只负责挑）。 -->
-<div id="motions" class="pane">
-  <div class="pHead">
-    <b>动作库</b>
-    <span class="cnt" id="mCount"></span>
-    <span class="sp"></span>
-    <input id="mSearch" type="text" placeholder="找动作…" spellcheck="false" />
-  </div>
-  <div class="pb" id="motionList"></div>
-  <div class="pFoot">
-    <button id="mIdle" class="mini">回到待机</button>
-  </div>
-</div>
-
-<!-- ══ 设置 ══ -->
+<!-- ══ 设置：四个 tab ══
+     按"她身上哪一部分"分，不按技术模块分 —— 主人脑子里想的是"她的脸/她的耳朵/
+     她的脑子/她的嘴"，不是"llm 配置 / tts 配置"。
+     每页只显示当前选择需要的控件：选了系统语音就不会冒出一大片 API 地址吓人。 -->
 <div id="settings" class="pane">
-  <div class="pb">
+  <div class="tabs" id="tabs">
+    <button data-t="look">外貌</button>
+    <button data-t="ear">耳朵</button>
+    <button data-t="brain">大脑</button>
+    <button data-t="mouth">嘴巴</button>
+  </div>
+
+  <!-- 外貌 -->
+  <div class="pb" data-page="look">
     <label class="row"><span>名字</span><input id="setName" type="text" /></label>
 
     <div class="group">形象</div>
@@ -34,16 +29,15 @@
 
     <div class="group">大小</div>
     <div class="segRow" id="sizeRow">
-      <button data-k="0.5">50%</button>
-      <button data-k="1">100%</button>
-      <button data-k="1.5">150%</button>
+      <button data-k="0.5">50% 半身</button>
+      <button data-k="1">100% 全身</button>
+      <button data-k="1.5">150% 放大</button>
     </div>
+    <div class="note">50% 只露上半身，头压在画面上方；100% 和 150% 是全身，150% 会把窗口一起撑大。</div>
+  </div>
 
-    <div class="group">动作</div>
-    <div class="permBtns" style="margin-top:0">
-      <button id="openMotions" class="mini">打开动作列表</button>
-    </div>
-
+  <!-- 耳朵 -->
+  <div class="pb" data-page="ear">
     <div class="group">听见你</div>
     <div class="permBox">
       <div class="permLine"><span>语音识别</span><b id="permSpeech" class="pill">—</b></div>
@@ -55,32 +49,102 @@
       </div>
       <div id="permTip" class="permTip"></div>
     </div>
+    <div class="group">一直听着</div>
+    <label class="row"><span>常驻监听</span><input id="setAlways" type="checkbox" /></label>
+    <label class="row"><span>先判断是不是在跟我说话</span><input id="setJudge" type="checkbox" /></label>
+    <div class="note">关掉"常驻监听"就只剩 ⌘⇧Space 按住说话。开着的时候她说完话会自动闭麦，不会有回声。</div>
+  </div>
 
-    <div class="group">模型</div>
-    <label class="row"><span>接口</span><input id="setUrl" type="text" placeholder="https://…/v1" /></label>
-    <label class="row"><span>模型</span><input id="setModel" type="text" /></label>
-    <label class="row"><span>Key</span><input id="setKey" type="password" placeholder="留空则用 WorkBuddy 的" /></label>
+  <!-- 大脑 -->
+  <div class="pb" data-page="brain">
+    <div class="group">用谁的额度</div>
+    <div class="segRow" id="brainSrc">
+      <button data-s="workbuddy">WorkBuddy（默认）</button>
+      <button data-s="apikey">自己的 API Key</button>
+    </div>
 
-    <div class="group">声音</div>
-    <label class="row"><span>说话</span><input id="setTtsOn" type="checkbox" /></label>
-    <label class="row"><span>TTS 地址</span><input id="setTtsUrl" type="text" /></label>
-    <label class="row"><span>TTS Key</span><input id="setTtsKey" type="password" /></label>
-    <label class="row"><span>音色描述</span><textarea id="setTtsInstr" rows="2"></textarea></label>
+    <!-- WorkBuddy 模式 -->
+    <div id="brainWb" class="sub">
+      <div class="note">直接用你 WorkBuddy 里的账号额度，模型和 Key 都从那边读，这里一行都不用填。</div>
+      <label class="row"><span>模型</span><select id="wbModel"></select></label>
+      <label class="row"><span>思考强度</span><select id="wbThink"></select></label>
+    </div>
 
-    <div class="group">盯 WorkBuddy</div>
-    <label class="row"><span>任务做完就播报</span><input id="setOnDone" type="checkbox" /></label>
-    <label class="row"><span>拖太久时提醒</span><input id="setOnLong" type="checkbox" /></label>
-    <label class="row"><span>卡住时提醒</span><input id="setOnStall" type="checkbox" /></label>
-    <label class="row"><span>连着干太久劝歇</span><input id="setOnRest" type="checkbox" /></label>
-    <label class="row"><span>最短间隔(秒)</span><input id="setGap" type="number" min="10" step="5" /></label>
+    <!-- API Key 模式 -->
+    <div id="brainKey" class="sub">
+      <label class="row"><span>服务商</span><select id="bkProvider"></select></label>
+      <div class="note" id="bkHint"></div>
+      <label class="row"><span>API Key</span><input id="bkKey" type="password" placeholder="sk-…" /></label>
+      <label class="row"><span>模型</span><select id="bkModel"></select></label>
+      <label class="row" id="bkCustomRow"><span>模型 id</span><input id="bkCustom" type="text" placeholder="自己填模型 id" /></label>
+      <label class="row"><span>思考强度</span><select id="bkThink"></select></label>
+    </div>
+  </div>
+
+  <!-- 嘴巴 -->
+  <div class="pb" data-page="mouth">
+    <div class="group">用什么嗓子</div>
+    <div class="segRow" id="ttsEngine"></div>
+    <div class="note" id="ttsHint"></div>
+
+    <!-- 系统语音 -->
+    <div id="ttsSystem" class="sub">
+      <label class="row"><span>音色</span><select id="sysVoice"></select></label>
+      <label class="row"><span>语速</span>
+        <input id="sysRate" type="range" min="120" max="280" step="10" />
+        <b class="val" id="sysRateVal">200</b>
+      </label>
+    </div>
+
+    <!-- 本地大模型 -->
+    <div id="ttsQwen" class="sub">
+      <div id="qwenBox" class="permBox">
+        <div class="permLine"><span>Qwen3-TTS 1.7B · 最小量化</span><b id="qwenPill" class="pill">—</b></div>
+        <div class="bar"><i id="qwenBar"></i></div>
+        <div class="permTip" id="qwenTip"></div>
+        <div class="permBtns">
+          <button id="qwenGo" class="mini">下载模型</button>
+          <button id="qwenStop" class="mini">取消</button>
+        </div>
+      </div>
+      <label class="row"><span>音色</span><select id="qwenVoice"></select></label>
+      <div class="permBtns">
+        <button id="qwenRef" class="mini">上传我的音色（≤2MB）</button>
+      </div>
+      <div class="note" id="qwenRefName"></div>
+    </div>
+
+    <!-- 远程 API -->
+    <div id="ttsRemote" class="sub">
+      <label class="row"><span>地址</span><input id="rmUrl" type="text" placeholder="http://…:8020" /></label>
+      <label class="row"><span>Key</span><input id="rmKey" type="password" /></label>
+      <label class="row"><span>模型</span><input id="rmModel" type="text" /></label>
+      <label class="row"><span>音色描述</span><textarea id="rmInstr" rows="2"></textarea></label>
+    </div>
+
+    <label class="row" style="margin-top:14px"><span>说话</span><input id="setTtsOn" type="checkbox" /></label>
   </div>
 
   <div class="sf">
-    <pre id="probeOut" class="hidden"></pre>
     <div class="actions">
-      <button id="probeBtn" class="wide">连通性自检</button>
+      <button id="testBtn" class="wide">试听一句</button>
       <button id="saveBtn" class="wide primary">保存</button>
     </div>
+    <div class="sfNote" id="sfNote"></div>
+  </div>
+</div>
+
+<!-- ══ 动作库（独立窗口，只在屏幕右上角菜单里打开） ══ -->
+<div id="motions" class="pane">
+  <div class="pHead">
+    <b>动作库</b>
+    <span class="cnt" id="mCount"></span>
+    <span class="sp"></span>
+    <input id="mSearch" type="text" placeholder="找动作…" spellcheck="false" />
+  </div>
+  <div class="pb" id="motionList"></div>
+  <div class="pFoot">
+    <button id="mIdle" class="mini">回到待机</button>
   </div>
 </div>
 

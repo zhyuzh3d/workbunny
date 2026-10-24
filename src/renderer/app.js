@@ -904,7 +904,6 @@ let hintTimer = setTimeout(() => {
 }, 1800);
 
 document.getElementById('gearBtn').addEventListener('click', () => openSettings());
-document.getElementById('motionBtn').addEventListener('click', openMotions);
 document.getElementById('muteBtn').addEventListener('click', async () => {
   const on = !cfg.voice.enabled;
   cfg = await pet.config({ voice: { enabled: on } });
@@ -1546,6 +1545,8 @@ setInterval(() => {
   const run = async () => {
     const init = await pet.init();
     cfg = init.config;
+    const ver = document.getElementById('ver');
+    if (ver) ver.textContent = 'v' + ((init.versions && init.versions.app) || '');
     setAvatarList(init.avatars);
     MOTIONS = Array.isArray(init.motions) ? init.motions : [];
     if (Array.isArray(init.motionGroups) && init.motionGroups.length) MOTION_GROUPS = init.motionGroups;
@@ -1558,7 +1559,7 @@ setInterval(() => {
     loadAvatar(AVATARS[init.avatar] ? init.avatar : AVATAR_LIST[0].key);
     fab.classList.remove('hidden');
     setTimeout(() => fab.classList.add('show'), 300);
-    // 耳朵状态：配置里开着就先点亮，真实状态等主进程回报
+      // 耳朵状态：配置里开着就先点亮，真实状态等主进程回报
     listening = !!(cfg.voice && cfg.voice.alwaysListen);
     paintListen();
     setTimeout(async () => {

@@ -505,6 +505,8 @@ const synthCache = new Map();
 const SYNTH_CACHE_MAX = 8;
 
 let fallbackLogged = '';
+const cfgEngineName = (t) => (t && t.engine === 'qwen' ? '本地大模型' : (t && t.engine === 'remote' ? '远程 TTS' : '系统语音'));
+
 function synthBuffer(text, emo) {
   const key = (emo || '') + '\u0000' + text;
   const hit = synthCache.get(key);
@@ -512,12 +514,12 @@ function synthBuffer(text, emo) {
   const c = config.load();
   const ttsCfg = { ...c.tts, instructions: voiceFor(emo, c.tts.instructions) };
   const p = tts.synthesize(text, ttsCfg).then((r) => {
-    // 每次都说清嗓子是谁：A1X 的设计音色，还是系统兜底（并且用了哪个音色）
-    const src = r.fallback ? `系统·${r.voice || '默认'}` : 'A1X';
+    // 每次都说清嗓子是谁 + 用的哪个音色：主人抱怨"声音不对"时，日志能自证到底走的哪条路
+    const src = r.engine === 'remote' ? '远程' : (r.engine === 'qwen' ? '本地大模型' : `系统·${r.voice || '默认'}`);
     if (r.ms > 900) log(`[tts] 合成 ${r.ms}ms（${text.length} 字 · ${src}${r.cached ? ' · 缓存' : ''}）`);
-    if (r.fallback && r.reason !== fallbackLogged) {
+    if (r.degraded && r.reason !== fallbackLogged) {
       fallbackLogged = r.reason || '';
-      log('[tts] A1X 合成不可用（' + fallbackLogged + '），改用系统语音 ' + (r.voice || '默认'));
+      log(`[tts] ${cfgEngineName(c.tts)} 合成不可用（${fallbackLogged}），退回系统语音 ${r.voice || '默认'}`);
     }
     return r.buffer;
   });
@@ -663,8 +665,10 @@ const HISTORY_TURNS = 6;   // 只带最近 3 轮对话，够接话又不撑爆�
 
 async function think({ userText, internal = false, allowSpeech = true, judge = false }) {
   const c = config.load();
-  if (!c.llm.apiKey) {
-    send('chat', { role: 'assistant', text: '（还没配好模型：在设置里填 API Key，或先让 WorkBuddy 里配好模型）' });
+  // 大脑的配置在 brain 里，这里折算成真正能发请求的那三个字段
+  const L = config.resolveLLM(c);
+  if (!L.apiKey) {
+    send('chat', { role: 'assistant', text: '（还没配好大脑：去设置里看看 —— 默认用 WorkBuddy 的额度，一行都不用填）' });
     return null;
   }
   const ctx = nowLine() + '\n' + (monitor ? monitor.context() : '');
@@ -698,7 +702,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
 
   try {
     const r = await llm.chat({
-      ...c.llm,
+      ...L,
       messages: msgs,
       onDelta: (d) => {
         if (!internal && !judge) send('delta', { text: d });
@@ -941,7 +945,7 @@ function buildTrayMenu() {
     { label: '说句话', click: () => { showWindow(); send('ask', { focus: true }); } },
     { label: '按住说话  ⌘⇧Space', click: () => toggleRecord() },
     { type: 'separator' },
-    { label: '动作库…', click: () => { showWindow(); openPanel('motions'); } },
+    { label: '动作列表…', click: () => { showWindow(); openPanel('motions'); } },
     {
       label: '形象',
       submenu: avatars.scan().map((a) => ({
@@ -1186,7 +1190,7 @@ ipcMain.handle('pet:init', async () => {
     avatars: list,
     monitor: monitor ? snapshotForUi(monitor.view) : null,
     asrAvailable: hasAsr,
-    versions: { electron: process.versions.electron, chrome: process.versions.chrome },
+    versions: { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome },
     paths: { userData: USER_DIR },
   };
 });
@@ -1237,7 +1241,7 @@ ipcMain.handle('pet:probe', async () => {
   const t0 = Date.now();
   try {
     const r = await llm.chat({
-      ...c.llm, messages: [{ role: 'user', content: '回一个字：好' }], maxTokens: 12, timeoutMs: 20000,
+      ...config.resolveLLM(c), messages: [{ role: 'user', content: '回一个字：好' }], maxTokens: 12, timeoutMs: 20000,
     });
     out.llm = { ok: true, ms: Date.now() - t0, text: (r.text || '').slice(0, 40) };
   } catch (e) {
@@ -1305,6 +1309,88 @@ ipcMain.on('pet:panel-motion', (_e, key) => {
   if (key === '__idle__') { send('toidle', {}); return; }
   send('motion', { key });
 });
+
+/* ═══════════ 大脑 / 嘴巴：给设置面板的补充接口 ═══════════ */
+const MODELS_DIR = path.join(USER_DIR, 'models', 'qwen-tts');
+const VOICES_DIR = path.join(USER_DIR, 'voices');
+
+ipcMain.handle('pet:brain-info', () => ({
+  providers: config.PROVIDERS,
+  thinkingLevels: config.THINKING_LEVELS,
+  workbuddyModels: config.listWorkBuddyModels(),
+}));
+
+ipcMain.handle('pet:tts-info', () => {
+  const c = config.load();
+  const dir = (c.tts.qwen && c.tts.qwen.dir) || MODELS_DIR;
+  return {
+    engines: config.TTS_ENGINES,
+    systemVoices: tts.systemVoices(),
+    qwen: {
+      dir,
+      ready: tts.qwenReady(dir),
+      hasRuntime: !!tts.findLlamaTTS(),
+      files: tts.QWEN_FILES.map((f) => f.name),
+      voices: tts.QWEN_VOICES,
+    },
+    dl: tts.downloadState(),
+  };
+});
+
+ipcMain.handle('pet:tts-download', () => {
+  try { fs.mkdirSync(MODELS_DIR, { recursive: true }); } catch {}
+  const r = tts.downloadQwen(MODELS_DIR);
+  // 下完自动把目录和就绪状态写回配置，省得主人再点一次"应用"
+  if (r.started) {
+    const watch = setInterval(() => {
+      const st = tts.downloadState();
+      if (!st.running) {
+        clearInterval(watch);
+        if (!st.err) config.save({ tts: { qwen: { dir: MODELS_DIR, ready: tts.qwenReady(MODELS_DIR) } } });
+      }
+    }, 1500);
+  }
+  return r;
+});
+ipcMain.handle('pet:tts-dl-state', () => tts.downloadState());
+ipcMain.on('pet:tts-cancel', () => tts.cancelDownload());
+
+/* 上传参考音色（≤2MB）。挑文件这事交给系统对话框：
+ * 面板窗口里塞一个 file input，样式跟整页不搭，还得自己处理沙箱路径。 */
+ipcMain.handle('pet:tts-pick-ref', async () => {
+  const r = await dialog.showOpenDialog({
+    title: '挑一段她的声音（≤2MB）',
+    filters: [{ name: '音频', extensions: ['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg'] }],
+    properties: ['openFile'],
+  });
+  if (r.canceled || !r.filePaths || !r.filePaths[0]) return { ok: false };
+  const src = r.filePaths[0];
+  const MAX = 2 * 1024 * 1024;
+  try {
+    const st = fs.statSync(src);
+    if (st.size > MAX) return { ok: false, error: `这个文件 ${(st.size / 1048576).toFixed(1)}MB，超过了 2MB。` };
+    fs.mkdirSync(VOICES_DIR, { recursive: true });
+    const dest = path.join(VOICES_DIR, 'ref' + path.extname(src).toLowerCase());
+    fs.copyFileSync(src, dest);
+    config.save({ tts: { qwen: { refFile: dest, refName: path.basename(src), voice: 'clone' } } });
+    return { ok: true, file: dest, name: path.basename(src), bytes: st.size };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+/* 试听：真的合成一句，交给角色窗口播出来 —— 主人听的是真嗓子，不是"设置已保存"。
+ * 顺手把用的哪个引擎、哪个音色回给面板，日志和界面都能自证。 */
+ipcMain.handle('pet:tts-test', async () => {
+  const c = config.load();
+  try {
+    const r = await tts.synthesize('让我试试这个声音，你觉得顺耳吗？', c.tts);
+    send('audio', { buffer: r.buffer, text: '' });
+    return { ok: true, engine: r.engine, voice: r.voice, ms: r.ms, bytes: r.buffer.length };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
 ipcMain.handle('pet:resize', (_e, { w, h }) => {
   if (!win) return;
   const [x, y] = win.getPosition();
@@ -1357,9 +1443,16 @@ function scheduleSelfTest() {
   const tick = async () => {
     try {
       if (script[step]) {
-        const js = script[step];
+        // 以 "@panel:<kind>:" 开头的脚本在对应面板窗口里跑，用来验收设置/动作库面板
+        const m = /^@panel:([a-z]+):([\s\S]*)$/.exec(script[step]);
+        let js = script[step], target = win;
+        if (m) {
+          const pw = panels.get(m[1]);
+          if (!pw || pw.isDestroyed()) { log('[selftest] no panel ' + m[1]); }
+          else { js = m[2]; target = pw; }
+        }
         log('[selftest] eval: ' + js.slice(0, 120));
-        const r = await win.webContents.executeJavaScript(js, true).catch((e) => 'ERR:' + e.message);
+        const r = await target.webContents.executeJavaScript(js, true).catch((e) => 'ERR:' + e.message);
         if (r !== undefined) log('[selftest] => ' + JSON.stringify(r).slice(0, 900));
       }
       step++;
@@ -1369,6 +1462,17 @@ function scheduleSelfTest() {
       fs.writeFileSync(p, img.toPNG());
       const sz = img.getSize();
       log(`[selftest] shot ${p}  ${sz.width}x${sz.height}`);
+      // 开着的面板窗口也各拍一张：整屏截屏在显示器睡着时是全黑的，抓窗口内容永远有效
+      for (const [kind, pw] of panels) {
+        if (pw.isDestroyed() || !pw.isVisible()) continue;
+        try {
+          const pi = await pw.webContents.capturePage();
+          const pp = path.join(shotDir, `panel-${kind}-${String(step).padStart(2, '0')}.png`);
+          fs.writeFileSync(pp, pi.toPNG());
+          const ps = pi.getSize();
+          log(`[selftest] shot ${pp}  ${ps.width}x${ps.height}`);
+        } catch (e) { log(`[selftest] panel shot fail ${kind}: ${e.message}`); }
+      }
       if (step >= Math.max(script.length, 1) + extra) {
         log('[selftest] done');
         quitting = true;

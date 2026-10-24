@@ -61,7 +61,17 @@ function chat(opts) {
     baseURL, apiKey, model, messages,
     temperature = 0.8, maxTokens = 220, timeoutMs = 30000,
     onDelta, onSentence, signal,
+    // 思考强度：只有明确支持的服务商才发这个字段（doubao 用 thinking:{type}，
+    // nemotron 用 chat_template_kwargs.thinking）。auto = 什么都不发，让服务方自己定。
+    thinking = 'auto', thinkingSupported = false,
   } = opts;
+
+  const extra = {};
+  if (thinkingSupported && thinking && thinking !== 'auto') {
+    const on = thinking === 'high' || thinking === 'medium';
+    extra.thinking = { type: on ? 'enabled' : 'disabled' };
+    extra.chat_template_kwargs = { thinking: on };
+  }
 
   return new Promise((resolve, reject) => {
     let u;
@@ -79,6 +89,7 @@ function chat(opts) {
       stream: true,
       // 部分网关认这个；不认的会忽略
       stream_options: { include_usage: true },
+      ...extra,
     });
 
     const req = (isHttps ? https : http).request(

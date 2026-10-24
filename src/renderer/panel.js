@@ -1,9 +1,14 @@
 /**
- * 独立窗口（设置 / 动作列表）的逻辑。
+ * 独立窗口（设置 / 动作库）的逻辑。
  *
  * 为什么搬出来：以前这两个是角色窗口里的抽屉和侧栏 —— 设置表单一长就把娃娃的脸挡掉
- * 一半，动作列表摊开 92 条更是把画面挤成一条缝。它们本来就不是"表演的一部分"，
+ * 一半，动作库摊开 92 条更是把画面挤成一条缝。它们本来就不是"表演的一部分"，
  * 该有自己的窗口：娃娃在她的窗口里照常站着，主人在这边慢慢挑。
+ *
+ * ── 设置分四页 ──
+ * 按"她身上哪一部分"分，不按技术模块分：主人想的是"她的脸/耳朵/脑子/嘴"，
+ * 不是"llm 配置 / tts 配置"。每页只显示当前选择真正需要的控件 ——
+ * 选了系统语音，就不该同时冒出一大片 API 地址把人吓退。
  *
  * 这里不碰 3D。点一个动作是把 key 发给主进程，由主进程转给角色窗口去演。
  */
@@ -17,18 +22,29 @@ let MOTION_GROUPS = [];
 let avatarKey = '';
 let viewScale = 1;
 let curMotion = '';
+let BRAIN = { providers: [], thinkingLevels: [], workbuddyModels: [] };
+let TTSI = { engines: [], systemVoices: [], qwen: {}, dl: {} };
 
 const $ = (id) => document.getElementById(id);
 const log = (m) => { try { window.pet.log('[panel] ' + m); } catch {} };
 
-/* ── 权限 ── */
+/* ═══════════ tab 切换 ═══════════ */
+function showTab(t) {
+  for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('on', b.dataset.t === t);
+  for (const p of document.querySelectorAll('.pb[data-page]')) p.classList.toggle('on', p.dataset.page === t);
+}
+document.getElementById('tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-t]');
+  if (b) showTab(b.dataset.t);
+});
+
+/* ═══════════ 权限 ═══════════ */
 let asrStat = { speech: null, mic: null, note: '' };
 const SPEECH_ZH = { 0: '待授权', 1: '被限制', 2: '已拒绝', 3: '已授权' };
 const MIC_ZH = { granted: '已授权', denied: '已拒绝', restricted: '被限制', 'not-determined': '待授权', unknown: '未知' };
 function paintPerm(st) {
   if (st) asrStat = { ...asrStat, ...st };
-  const sEl = $('permSpeech');
-  const mEl = $('permMic');
+  const sEl = $('permSpeech'), mEl = $('permMic');
   const speech = asrStat.speech;
   const micOk = asrStat.mic === true || asrStat.micSystem === 'granted';
   const pending = asrStat.note === 'pending';
@@ -56,7 +72,7 @@ function paintPerm(st) {
   }
 }
 
-/* ── 设置 ── */
+/* ═══════════ 外貌 ═══════════ */
 function paintAvatars() {
   const row = $('avRow');
   if (!row) return;
@@ -84,9 +100,7 @@ async function pickAvatar(k) {
 }
 
 function paintScale() {
-  const row = $('sizeRow');
-  if (!row) return;
-  for (const b of row.children) b.classList.toggle('on', Math.abs(Number(b.dataset.k) - viewScale) < 0.01);
+  for (const b of $('sizeRow').children) b.classList.toggle('on', Math.abs(Number(b.dataset.k) - viewScale) < 0.01);
 }
 async function setScale(k) {
   viewScale = Number(k) || 1;
@@ -94,58 +108,195 @@ async function setScale(k) {
   await window.pet.scale(viewScale);
 }
 
+/* ═══════════ 大脑 ═══════════ */
+function fillSelect(el, items, cur) {
+  el.innerHTML = '';
+  for (const it of items) {
+    const o = document.createElement('option');
+    o.value = it.id;
+    o.textContent = it.label;
+    el.appendChild(o);
+  }
+  if (cur) el.value = cur;
+  if (el.selectedIndex < 0) el.selectedIndex = 0;
+}
+
+function paintBrain() {
+  const b = cfg.brain || {};
+  const src = b.source || 'workbuddy';
+  for (const x of $('brainSrc').children) x.classList.toggle('on', x.dataset.s === src);
+  $('brainWb').classList.toggle('on', src === 'workbuddy');
+  $('brainKey').classList.toggle('on', src === 'apikey');
+
+  // WorkBuddy：模型列表来自 ~/.workbuddy/models.json，第一项是「自动」
+  const wb = [{ id: '', label: '自动（挑最快的那个）' }].concat(
+    (BRAIN.workbuddyModels || []).map((m) => ({ id: m.id, label: m.label })));
+  fillSelect($('wbModel'), wb, b.model || '');
+  fillSelect($('wbThink'), BRAIN.thinkingLevels, b.thinking || 'auto');
+
+  // 自己的 key：只有四家
+  fillSelect($('bkProvider'), BRAIN.providers.map((p) => ({ id: p.id, label: p.label })), b.provider || 'deepseek');
+  paintProvider();
+}
+
+function paintProvider() {
+  const b = cfg.brain || {};
+  const p = (BRAIN.providers || []).find((x) => x.id === (b.provider || 'deepseek')) || BRAIN.providers[0];
+  if (!p) return;
+  $('bkHint').textContent = p.hint || '';
+  const models = p.models.map((m) => ({ id: m, label: m })).concat([{ id: '__custom__', label: '自己填模型 id…' }]);
+  const cur = b.modelId || '';
+  const known = p.models.includes(cur);
+  fillSelect($('bkModel'), models, known ? cur : '__custom__');
+  $('bkCustomRow').classList.toggle('on', !known);
+  if (!known) $('bkCustom').value = cur;
+  $('bkKey').value = b.apiKey ? '••••••••' : '';
+  // 不支持思考强度的那几家，就别摆一个没用的下拉
+  const th = $('bkThink');
+  fillSelect(th, BRAIN.thinkingLevels, b.thinking || 'auto');
+  th.parentElement.classList.toggle('dim', !p.thinking);
+  th.disabled = !p.thinking;
+}
+
+/* ═══════════ 嘴巴 ═══════════ */
+const ENGINE_HINT = {
+  system: 'macOS 自带，离线、立刻出声。嫌不好听就下载下面那个大模型。',
+  qwen: '下载 1.7B 的最小量化版（约 1.4GB），音色更像她，还能用你上传的一段声音克隆。',
+  remote: '自己有 TTS 服务时填这里。连不上会自动退回系统语音，不会哑。',
+};
+function paintTts() {
+  const t = cfg.tts || {};
+  const eng = t.engine || 'system';
+  const row = $('ttsEngine');
+  if (!row.childElementCount) {
+    for (const e of TTSI.engines) {
+      const b = document.createElement('button');
+      b.dataset.e = e.id;
+      b.textContent = e.label;
+      b.addEventListener('click', () => { ttsDraft.engine = e.id; paintTts(); });
+      row.appendChild(b);
+    }
+  }
+  for (const b of row.children) b.classList.toggle('on', b.dataset.e === ttsDraft.engine);
+  $('ttsHint').textContent = ENGINE_HINT[ttsDraft.engine] || '';
+  $('ttsSystem').classList.toggle('on', ttsDraft.engine === 'system');
+  $('ttsQwen').classList.toggle('on', ttsDraft.engine === 'qwen');
+  $('ttsRemote').classList.toggle('on', ttsDraft.engine === 'remote');
+
+  fillSelect($('sysVoice'), (TTSI.systemVoices || []).map((v) => ({ id: v.id, label: v.id + '　' + v.lang })), ttsDraft.voice);
+  $('sysRate').value = ttsDraft.rate;
+  $('sysRateVal').textContent = ttsDraft.rate;
+
+  paintQwen();
+}
+
+function paintQwen() {
+  const q = TTSI.qwen || {};
+  const pill = $('qwenPill');
+  const ready = !!q.ready;
+  pill.textContent = ready ? '已就绪' : (q.dir ? '未下载' : '未下载');
+  pill.className = 'pill ' + (ready ? 'ok' : 'wait');
+  const names = (TTSI.qwen && TTSI.qwen.voices) || [{ id: 'default', label: '默认' }];
+  fillSelect($('qwenVoice'), names, ttsDraft.qwenVoice || 'default');
+  if (!ready) $('qwenVoice').disabled = true;
+  else $('qwenVoice').disabled = false;
+  const ref = (cfg.tts && cfg.tts.qwen && cfg.tts.qwen.refName) || '';
+  $('qwenRefName').textContent = ref ? `当前参考音色：${ref}` : '还没上传。传一段她说话的声音（≤2MB），就能照着克隆。';
+  if (!q.hasRuntime) {
+    $('qwenTip').textContent = '注意：跑这个模型需要 llama.cpp 里的 llama-tts。没装的话下完也用不了，会退回系统语音。';
+  }
+}
+
+let dlTimer = null;
+function paintDl(st) {
+  const total = (TTSI.qwen && TTSI.dl && TTSI.dl.total) || 1;
+  const pct = st.running || st.done ? Math.min(100, Math.round((st.bytes / total) * 100)) : (TTSI.qwen.ready ? 100 : 0);
+  $('qwenBar').style.width = pct + '%';
+  $('qwenGo').textContent = st.running ? `下载中 ${pct}%` : (TTSI.qwen.ready ? '重新下载' : '下载模型');
+  $('qwenGo').disabled = !!st.running;
+  $('qwenStop').disabled = !st.running;
+  if (st.err) $('qwenTip').textContent = '下载中断：' + st.err;
+  else if (st.running) $('qwenTip').textContent = `正在下第 ${st.done + 1} 个文件：${st.file}`;
+  else if (TTSI.qwen.ready) $('qwenTip').textContent = '模型齐了，选个音色就能用。';
+  if (st.running) dlTimer = setTimeout(refreshDl, 1200);
+}
+async function refreshDl() {
+  const st = await window.pet.ttsDlState();
+  paintDl(st);
+  if (!st.running) {
+    const info = await window.pet.ttsInfo();
+    TTSI.qwen = info.qwen;
+    if (info.qwen.ready) cfg = await window.pet.config({ tts: { qwen: { dir: info.qwen.dir, ready: true } } });
+    paintQwen();
+  }
+}
+
+/* ═══════════ 保存 ═══════════ */
+/* 界面上的草稿：改了先记在这儿，点保存才真的写进配置。
+ * 这样主人来回切引擎试听，不会把半成品写进去。 */
+let ttsDraft = { engine: 'system', voice: 'Tingting', rate: 200, qwenVoice: 'default' };
+
 function fillForm() {
   const c = cfg;
   $('setName').value = c.buddy.name || '';
-  $('setUrl').value = c.llm.baseURL || '';
-  $('setModel').value = c.llm.model || '';
-  $('setKey').value = c.llm.apiKey ? '••••••••' : '';
+  $('setAlways').checked = !!(c.voice && c.voice.alwaysListen);
+  $('setJudge').checked = !(c.asr && c.asr.judge === false);
   $('setTtsOn').checked = !!c.tts.enabled;
-  $('setTtsUrl').value = c.tts.baseURL || '';
-  $('setTtsKey').value = c.tts.apiKey ? '••••••••' : '';
-  $('setTtsInstr').value = c.tts.instructions || '';
-  $('setOnDone').checked = !!c.monitor.speakOnDone;
-  $('setOnLong').checked = c.monitor.speakOnLong !== false;
-  $('setOnStall').checked = c.monitor.speakOnStall !== false;
-  $('setOnRest').checked = c.monitor.speakOnRest !== false;
-  $('setGap').value = Math.round((c.monitor.minGapMs || 40000) / 1000);
-  $('probeOut').classList.add('hidden');
+  const t = c.tts || {};
+  ttsDraft = {
+    engine: t.engine || 'system',
+    voice: t.voice || 'Tingting',
+    rate: t.rate || 200,
+    qwenVoice: (t.qwen && t.qwen.voice) || 'default',
+  };
+  $('rmUrl').value = t.baseURL || '';
+  $('rmKey').value = t.apiKey ? '••••••••' : '';
+  $('rmModel').value = t.model || '';
+  $('rmInstr').value = t.instructions || '';
   paintAvatars();
   paintScale();
+  paintBrain();
+  paintTts();
 }
 
 async function save() {
-  const keyEl = $('setKey');
-  const ttsKeyEl = $('setTtsKey');
+  const b = cfg.brain || {};
+  const src = b.source || 'workbuddy';
+  const keyEl = $('bkKey');
+  const rmKey = $('rmKey');
   const patch = {
     buddy: { name: $('setName').value.trim() || 'baby' },
-    llm: {
-      baseURL: $('setUrl').value.trim(),
-      model: $('setModel').value.trim(),
+    voice: { alwaysListen: $('setAlways').checked },
+    asr: { judge: $('setJudge').checked },
+    brain: {
+      source: src,
+      thinking: (src === 'workbuddy' ? $('wbThink') : $('bkThink')).value,
+      model: src === 'workbuddy' ? $('wbModel').value : b.model,
+      provider: src === 'apikey' ? $('bkProvider').value : b.provider,
+      modelId: src === 'apikey' ? (($('bkModel').value === '__custom__') ? $('bkCustom').value.trim() : $('bkModel').value) : b.modelId,
+      apiKey: src === 'apikey' && keyEl.value && !keyEl.value.includes('•') ? keyEl.value.trim() : b.apiKey,
     },
     tts: {
       enabled: $('setTtsOn').checked,
-      baseURL: $('setTtsUrl').value.trim(),
-      instructions: $('setTtsInstr').value.trim(),
-    },
-    monitor: {
-      speakOnDone: $('setOnDone').checked,
-      speakOnLong: $('setOnLong').checked,
-      speakOnStall: $('setOnStall').checked,
-      speakOnRest: $('setOnRest').checked,
-      minGapMs: Math.max(10, Number($('setGap').value) || 40) * 1000,
+      engine: ttsDraft.engine,
+      voice: ttsDraft.voice,
+      rate: Number(ttsDraft.rate) || 200,
+      qwen: { voice: ttsDraft.qwenVoice },
+      baseURL: $('rmUrl').value.trim(),
+      model: $('rmModel').value.trim(),
+      instructions: $('rmInstr').value.trim(),
     },
   };
-  if (keyEl.value && !keyEl.value.includes('•')) patch.llm.apiKey = keyEl.value.trim();
-  if (ttsKeyEl.value && !ttsKeyEl.value.includes('•')) patch.tts.apiKey = ttsKeyEl.value.trim();
+  if (rmKey.value && !rmKey.value.includes('•')) patch.tts.apiKey = rmKey.value.trim();
   cfg = await window.pet.config(patch);
-  const b = $('saveBtn');
-  const old = b.textContent;
-  b.textContent = '记下了 ✓';
-  setTimeout(() => { b.textContent = old; }, 1400);
+  const btn = $('saveBtn');
+  const old = btn.textContent;
+  btn.textContent = '记下了 ✓';
+  setTimeout(() => { btn.textContent = old; }, 1400);
+  log(`保存 engine=${patch.tts.engine} brain=${patch.brain.source}`);
 }
 
-/* ── 动作列表 ── */
+/* ═══════════ 动作库 ═══════════ */
 let filter = '';
 function buildMotionList() {
   const box = $('motionList');
@@ -203,7 +354,7 @@ function buildMotionList() {
   if (c) c.textContent = `共 ${MOTIONS.length} 条`;
 }
 
-/* ── 启动 ── */
+/* ═══════════ 启动 ═══════════ */
 (async function boot() {
   const init = await window.pet.panelInit();
   cfg = init.config;
@@ -214,38 +365,82 @@ function buildMotionList() {
   viewScale = (cfg.window && cfg.window.scale) || 1;
 
   if (which === 'settings') {
+    BRAIN = await window.pet.brainInfo();
+    TTSI = await window.pet.ttsInfo();
     fillForm();
     paintPerm(init.asr || null);
+    showTab('look');
+
     $('sizeRow').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-k]');
       if (b) setScale(Number(b.dataset.k));
     });
-    $('saveBtn').addEventListener('click', save);
-    $('probeBtn').addEventListener('click', async () => {
-      const out = $('probeOut');
-      out.classList.remove('hidden');
-      out.textContent = '自检中…';
-      const r = await window.pet.probe();
-      out.textContent = [
-        `模型  ${r.llm.ok ? '✓' : '✗'}  ${r.llm.ms}ms  ${r.llm.ok ? r.llm.text : r.llm.error}`,
-        `语音  ${r.tts.ok ? '✓' : '✗'}  ${r.tts.ms}ms  ${r.tts.ok ? Math.round(r.tts.bytes / 1024) + 'KB' : r.tts.error}`,
-        `识别  ${r.asr.ok ? '✓ 已就绪' : '✗ 缺少 bin/asr'}`,
-        `监控  ${r.monitor.file ? '✓ ' + (r.monitor.snap?.title || r.monitor.snap?.sessionId || '') : '✗ 没找到会话'}`,
-      ].join('\n');
+    $('brainSrc').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-s]');
+      if (!b) return;
+      cfg.brain = { ...(cfg.brain || {}), source: b.dataset.s };
+      paintBrain();
     });
+    $('bkProvider').addEventListener('change', () => {
+      cfg.brain = { ...(cfg.brain || {}), provider: $('bkProvider').value, modelId: '' };
+      paintProvider();
+    });
+    $('bkModel').addEventListener('change', () => {
+      const v = $('bkModel').value;
+      $('bkCustomRow').classList.toggle('on', v === '__custom__');
+    });
+    // 嘴巴：改了立刻同步到配置里，这样「试听」听到的就是刚选的那个
+    const live = (patch) => window.pet.config(patch).then((c) => { cfg = c; });
+    $('sysVoice').addEventListener('change', async () => {
+      ttsDraft.voice = $('sysVoice').value;
+      await live({ tts: { voice: ttsDraft.voice, engine: 'system' } });
+    });
+    $('sysRate').addEventListener('input', () => {
+      ttsDraft.rate = Number($('sysRate').value);
+      $('sysRateVal').textContent = ttsDraft.rate;
+    });
+    $('sysRate').addEventListener('change', () => live({ tts: { rate: ttsDraft.rate } }));
+    $('qwenVoice').addEventListener('change', async () => {
+      ttsDraft.qwenVoice = $('qwenVoice').value;
+      await live({ tts: { engine: 'qwen', qwen: { voice: ttsDraft.qwenVoice } } });
+    });
+    $('qwenGo').addEventListener('click', async () => {
+      const r = await window.pet.ttsDownload();
+      if (r.started) { paintDl({ running: true, done: 0, bytes: 0, file: TTSI.qwen.files[0] || '' }); refreshDl(); }
+      else $('qwenTip').textContent = r.reason || '没能开始下载';
+    });
+    $('qwenStop').addEventListener('click', async () => {
+      window.pet.ttsCancel();
+      $('qwenTip').textContent = '正在取消…';
+    });
+    $('qwenRef').addEventListener('click', async () => {
+      const r = await window.pet.ttsPickRef();
+      if (!r.ok) { $('qwenRefName').textContent = r.error ? ('没用上：' + r.error) : '没选文件。'; return; }
+      cfg = await window.pet.config({ tts: { engine: 'qwen', qwen: { voice: 'clone' } } });
+      ttsDraft.engine = 'qwen'; ttsDraft.qwenVoice = 'clone';
+      paintTts();
+    });
+
     $('permCheck').addEventListener('click', async () => {
       $('permTip').textContent = '正在请求权限…系统弹窗请点允许';
       paintPerm(await window.pet.asrStatus({ request: true }));
     });
     $('permOpenSpeech').addEventListener('click', () => window.pet.openPrivacy('speech'));
     $('permOpenMic').addEventListener('click', () => window.pet.openPrivacy('mic'));
-    $('openMotions').addEventListener('click', () => window.pet.open('motions'));
+
+    $('saveBtn').addEventListener('click', save);
+    $('testBtn').addEventListener('click', async () => {
+      $('sfNote').textContent = '正在试听…';
+      const r = await window.pet.ttsTest();
+      $('sfNote').textContent = r.ok
+        ? `用的是 ${r.engine === 'system' ? '系统语音' : r.engine}${r.voice ? ' · ' + r.voice : ''}（${r.ms}ms）`
+        : ('试听失败：' + r.error);
+    });
   } else {
     buildMotionList();
     $('mSearch').addEventListener('input', (e) => { filter = e.target.value || ''; buildMotionList(); });
     $('mIdle').addEventListener('click', () => { curMotion = ''; window.pet.panelMotion('__idle__'); buildMotionList(); });
   }
-  // 关掉窗口前把焦点还回去，别让输入框吞掉后面的按键
   addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.activeElement) document.activeElement.blur(); });
 })().catch((e) => {
   document.body.innerHTML = '<div class="empty">面板没起来：' + String((e && e.message) || e) + '</div>';

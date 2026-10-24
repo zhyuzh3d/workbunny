@@ -233,7 +233,9 @@ html, body {
   color: var(--ink-soft);
   cursor: pointer;
   backdrop-filter: blur(10px);
-  transition: background .14s, color .14s, transform .1s;
+  /* 和状态条同一个阴影：三处浮在画面上的东西必须像同一套东西 */
+  box-shadow: 0 4px 16px rgba(28, 22, 16, .1);
+  transition: background .14s, color .14s, transform .1s, box-shadow .14s;
 }
 #fab button:hover { background: #fff; color: var(--ink); }
 #fab button:active { transform: scale(.92); }
@@ -295,7 +297,25 @@ html, body {
   transition: width .26s cubic-bezier(.2, 1.1, .5, 1), background .2s, border-color .2s, color .2s;
 }
 #ear.hidden { display: none; }
-#ear:hover { background: rgba(255, 253, 250, .99); }
+
+/* 版本号：右下角一个安静的落款。z-index 压在脚下那条（24）下面 ——
+ * 她说起话来那条会伸过来，把版本号盖掉是应该的：那时候主人要看的是她说的话。 */
+#ver {
+  position: fixed;
+  right: 7px;
+  bottom: 3px;
+  z-index: 12;
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: .02em;
+  color: rgba(60, 52, 42, .3);
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#ear:hover { background: rgba(255, 253, 250, .99); box-shadow: 0 5px 20px rgba(28, 22, 16, .14); }
+/* 右上角圆钮：悬停时阴影抬一点，和状态条一个手感 */
+#fab button:hover { box-shadow: 0 5px 20px rgba(28, 22, 16, .14); }
 /* 有话说：宽度跟着文字涨（#ear 自身是 auto 宽），最长到窗口宽，超了就在 earWin 里横滚。
  * 以前是写死撑满整窗 —— 只听清一个「嗯」，底下也横一条满宽的条子，又吵又抢戏。
  * min-width 是给只有一两个字的时候留个像样的底座，免得缩成一颗药丸。 */

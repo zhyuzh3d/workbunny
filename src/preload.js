@@ -24,6 +24,14 @@ contextBridge.exposeInMainWorld('pet', {
   // 独立窗口（设置 / 动作列表）用：拿初始数据、把动作转给角色窗口演
   panelInit: () => ipcRenderer.invoke('pet:panel-init'),
   panelMotion: (key) => ipcRenderer.send('pet:panel-motion', key),
+  // 大脑 / 嘴巴
+  brainInfo: () => ipcRenderer.invoke('pet:brain-info'),
+  ttsInfo: () => ipcRenderer.invoke('pet:tts-info'),
+  ttsDownload: () => ipcRenderer.invoke('pet:tts-download'),
+  ttsDlState: () => ipcRenderer.invoke('pet:tts-dl-state'),
+  ttsCancel: () => ipcRenderer.send('pet:tts-cancel'),
+  ttsPickRef: () => ipcRenderer.invoke('pet:tts-pick-ref'),
+  ttsTest: () => ipcRenderer.invoke('pet:tts-test'),
   on: (cb) => {
     ipcRenderer.on('pet:ev', (_e, d) => cb(d));
   },

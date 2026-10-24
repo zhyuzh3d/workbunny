@@ -74,6 +74,84 @@ body[data-p="motions"]  #motions  { display: flex; }
   color: var(--muted);
 }
 .group:first-child { margin-top: 0; }
+.note {
+  margin: 7px 0 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: #8d8474;
+}
+/* 一页里按选择显/隐的那一段：隐藏时彻底不占位，页面不会突然矮一截 */
+.sub { display: none; margin-top: 10px; }
+.sub.on { display: block; }
+.pb[data-page] { display: none; }
+.pb[data-page].on { display: block; }
+.row.dim { opacity: .45; }
+
+/* tab：四个字一排，当前页下面一条线 */
+.tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  padding: 8px 10px 0;
+  border-bottom: 1px solid var(--line);
+  background: #fffdfa;
+}
+.tabs button {
+  flex: 1 1 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 12.5px;
+  padding: 8px 0 9px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color .14s, border-color .14s;
+}
+.tabs button:hover { color: var(--ink); }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
+
+/* 下拉：和输入框一个骨相，别让它看起来像另一个年代的控件 */
+select {
+  flex: 1 1 auto; min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-family: var(--font);
+  font-size: 12px;
+  background: #fffdfa;
+  color: var(--ink);
+  outline: 0;
+  cursor: pointer;
+}
+select:disabled { opacity: .5; cursor: default; }
+input[type="range"] { flex: 1 1 auto; min-width: 0; accent-color: #4a5058; cursor: pointer; }
+.val { flex: 0 0 34px; text-align: right; font-size: 11px; color: var(--muted); }
+
+/* 下载进度条：1.4GB 的事必须看得见走到哪了 */
+.bar {
+  height: 5px;
+  margin: 9px 0 6px;
+  border-radius: 3px;
+  background: #ece6db;
+  overflow: hidden;
+}
+.bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--ink);
+  transition: width .4s ease;
+}
+
+.sfNote {
+  margin-top: 7px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: #8d8474;
+  min-height: 15px;
+}
 .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .row > span { flex: 0 0 78px; color: var(--ink-soft); }
 .row > input[type="text"], .row > input[type="password"],
