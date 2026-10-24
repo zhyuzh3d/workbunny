@@ -88,12 +88,24 @@ test('type plans reject implicit newlines and controls, emit explicit soft break
   assert.match(source, /scalar\.value <= 0x1f && scalar\.value != 0x0a/);
   assert.match(source, /event\.flags = \.maskShift[\s\S]{0,180}event\.post\(tap: \.cghidEventTap\)/);
   assert.match(source, /guard !sessionLocked\(\) else \{ throw DesktopError\(message: "电脑已锁屏，请解锁后重试"\) \}/);
-  const run = spawnSync(defaultBinary(), ['--self-test-input-plan'], { encoding: 'utf8', timeout: 5000 });
+  const run = spawnSync(defaultBinary(), ['--self-test-native'], { encoding: 'utf8', timeout: 5000 });
   assert.equal(run.status, 0, run.stderr || run.stdout);
   const result = JSON.parse(run.stdout.trim());
-  assert.equal(result.selfTest, 'inputPlan');
+  assert.equal(result.selfTest, 'native');
+  assert.deepEqual(result.rectCases, ['CGWindowBounds', 'lowercase']);
+  assert.equal(result.invalidRectsRejected, 5);
   assert.deepEqual(result.multilineEvents, ['text:A', 'shiftEnter', 'text:B', 'shiftEnter', 'text:C']);
   assert.deepEqual(result.surrogateChunkSizes, [19, 3]);
+});
+
+test('rectFrom accepts CGWindowBounds casing and preserves dimension validation', () => {
+  const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
+  assert.match(source, /v\["x"\] \?\? v\["X"\]/);
+  assert.match(source, /v\["y"\] \?\? v\["Y"\]/);
+  assert.match(source, /v\["width"\] \?\? v\["Width"\]/);
+  assert.match(source, /v\["height"\] \?\? v\["Height"\]/);
+  assert.match(source, /\[x, y, w, h\]\.allSatisfy\(\{ \$0\.isFinite \}\)/);
+  assert.match(source, /w < 100_000, h < 100_000/);
 });
 
 test('close kills and waits; cancel kills, waits, and permits a later restart', async () => {

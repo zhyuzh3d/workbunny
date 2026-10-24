@@ -21,8 +21,8 @@ func rectObject(_ rect: CGRect) -> [String: Double] {
     ["x": rect.origin.x, "y": rect.origin.y, "width": rect.width, "height": rect.height]
 }
 func rectFrom(_ value: Any?) -> CGRect? {
-    guard let v = value as? [String: Any], let x = number(v["x"]), let y = number(v["y"]),
-          let w = number(v["width"]), let h = number(v["height"]), w > 0, h > 0,
+    guard let v = value as? [String: Any], let x = number(v["x"] ?? v["X"]), let y = number(v["y"] ?? v["Y"]),
+          let w = number(v["width"] ?? v["Width"]), let h = number(v["height"] ?? v["Height"]), w > 0, h > 0,
           [x, y, w, h].allSatisfy({ $0.isFinite }), w < 100_000, h < 100_000 else { return nil }
     return CGRect(x: x, y: y, width: w, height: h)
 }
@@ -368,8 +368,25 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
     }
 }
 
-func runInputPlanSelfTest() -> Never {
+func runNativeSelfTest() -> Never {
     do {
+        let capitalizedRect = rectFrom(["X": 12.0, "Y": 34.0, "Width": 560.0, "Height": 420.0])
+        guard capitalizedRect == CGRect(x: 12, y: 34, width: 560, height: 420) else {
+            throw DesktopError(message: "CGWindowBounds 大写矩形字段未被识别")
+        }
+        let lowercaseRect = rectFrom(["x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0])
+        guard lowercaseRect == CGRect(x: 1, y: 2, width: 3, height: 4) else {
+            throw DesktopError(message: "小写矩形字段回归失败")
+        }
+        let invalidRects: [[String: Any]] = [
+            ["X": 0.0, "Y": 0.0, "Width": 0.0, "Height": 10.0],
+            ["X": 0.0, "Y": 0.0, "Width": 10.0, "Height": -1.0],
+            ["X": Double.nan, "Y": 0.0, "Width": 10.0, "Height": 10.0],
+            ["X": 0.0, "Y": 0.0, "Height": 10.0],
+            ["X": 0.0, "Y": 0.0, "Width": 100_001.0, "Height": 10.0],
+        ]
+        guard invalidRects.allSatisfy({ rectFrom($0) == nil }) else { throw DesktopError(message: "非法矩形被接受") }
+
         let multiline = try makeInputPlan("A\r\nB\nC", lineBreak: "shiftEnter")
         let expected: [DesktopInputEvent] = [.text([65]), .softLineBreak, .text([66]), .softLineBreak, .text([67])]
         guard multiline == expected else { throw DesktopError(message: "CRLF/LF 软换行计划不匹配") }
@@ -385,7 +402,10 @@ func runInputPlanSelfTest() -> Never {
         do { _ = try makeInputPlan("a\nb"); throw DesktopError(message: "缺失 lineBreak 时接纳了换行") }
         catch let error as DesktopError where error.message == "缺失 lineBreak 时接纳了换行" { throw error }
         catch { /* Expected rejection of implicit newline. */ }
-        writeJSON(["ok": true, "selfTest": "inputPlan", "multilineEvents": ["text:A", "shiftEnter", "text:B", "shiftEnter", "text:C"], "surrogateChunkSizes": chunks.map(\.count)])
+        writeJSON(["ok": true, "selfTest": "native", "rectCases": ["CGWindowBounds", "lowercase"],
+                   "invalidRectsRejected": invalidRects.count,
+                   "multilineEvents": ["text:A", "shiftEnter", "text:B", "shiftEnter", "text:C"],
+                   "surrogateChunkSizes": chunks.map(\.count)])
         exit(0)
     } catch {
         writeJSON(["ok": false, "selfTest": "inputPlan", "error": error.localizedDescription])
@@ -393,7 +413,7 @@ func runInputPlanSelfTest() -> Never {
     }
 }
 
-if CommandLine.arguments.contains("--self-test-input-plan") { runInputPlanSelfTest() }
+if CommandLine.arguments.contains("--self-test-native") || CommandLine.arguments.contains("--self-test-input-plan") { runNativeSelfTest() }
 
 func handleLine(_ line: String) {
     guard let data = line.data(using: .utf8), let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

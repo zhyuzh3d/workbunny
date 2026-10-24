@@ -1,6 +1,7 @@
 import Foundation
 import SQLite3
 import CoreFoundation
+import Darwin
 
 let maxLineBytes = 16 * 1024 * 1024
 let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -15,6 +16,56 @@ func send(_ value: [String: Any]) {
     if data.count > maxLineBytes { payload=["id":value["id"] ?? NSNull(),"ok":false,"error":"response_too_large"]; data=json(payload) }
     data.append(10)
     FileHandle.standardOutput.write(data)
+}
+
+// This gate deliberately derives every identity from kernel process APIs.
+// It never accepts a caller-supplied PID or path and has no DB/key side effects.
+func executablePath(pid: pid_t) -> String? {
+    var bytes = [CChar](repeating: 0, count: 4096) // 4 * MAXPATHLEN from libproc's contract.
+    let count = proc_pidpath(pid, &bytes, UInt32(bytes.count))
+    guard count > 0 else { return nil }
+    return String(cString: bytes)
+}
+
+func processInfo(pid: pid_t) -> proc_bsdinfo? {
+    var info = proc_bsdinfo()
+    let count = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+    guard count == MemoryLayout<proc_bsdinfo>.size, info.pbi_pid == UInt32(pid) else { return nil }
+    return info
+}
+
+func verifyKeyParent() -> Bool {
+    let selfPID = getpid()
+    guard let selfPath = executablePath(pid: selfPID) else { return false }
+    let components = URL(fileURLWithPath: selfPath).standardizedFileURL.pathComponents
+    guard components.count >= 6,
+          components.last == "vault",
+          components.suffix(4).elementsEqual(["Contents", "Resources", "bin", "vault"]),
+          let appComponent = components.lastIndex(where: { $0.hasSuffix(".app") }),
+          appComponent + 1 < components.count,
+          Array(components[(appComponent + 1)...]) == ["Contents", "Resources", "bin", "vault"] else { return false }
+    let appPath = NSString.path(withComponents: Array(components[...appComponent]))
+    let expectedMain = URL(fileURLWithPath: appPath).appendingPathComponent("Contents/MacOS/workbunny").standardizedFileURL.path
+
+    guard let selfInfo = processInfo(pid: selfPID), selfInfo.pbi_ppid > 0 else { return false }
+    let helperPID = pid_t(selfInfo.pbi_ppid)
+    guard let helperInfo = processInfo(pid: helperPID), helperInfo.pbi_ppid > 0,
+          let helperPath = executablePath(pid: helperPID), helperPath == expectedMain else { return false }
+    let mainPID = pid_t(helperInfo.pbi_ppid)
+    guard let mainInfo = processInfo(pid: mainPID), mainInfo.pbi_pid == UInt32(mainPID),
+          let mainPath = executablePath(pid: mainPID), mainPath == expectedMain else { return false }
+    return true
+}
+
+if CommandLine.arguments.dropFirst().first == "--verify-key-parent" {
+    let authorized = verifyKeyParent()
+    if let data = try? JSONSerialization.data(withJSONObject: ["authorized": authorized], options: [.sortedKeys]),
+       let output = String(data: data, encoding: .utf8) {
+        FileHandle.standardOutput.write(Data((output + "\n").utf8))
+    } else {
+        FileHandle.standardOutput.write(Data("{\"authorized\":false}\n".utf8))
+    }
+    exit(0)
 }
 
 final class DB {

@@ -11,18 +11,24 @@ const textOf = x => String(x?.content || x?.text || '');
 const clipped = (s, n = 500) => String(s || '').slice(0, n);
 
 class MemoryService {
-  constructor({ dir, bin, safeStorage, getSettings = () => ({}), extract, onStatus = () => {}, clock = Date.now, random = Math.random }) {
-    Object.assign(this, { dir, bin, safeStorage, getSettings, extract, onStatus, clock, random });
-    this.db = null; this.key = null; this.error = ''; this.tail = Promise.resolve();
+  constructor({ dir, bin, safeStorage, openKey, getSettings = () => ({}), extract, onStatus = () => {}, onChange = () => {}, clock = Date.now, random = Math.random }) {
+    Object.assign(this, { dir, bin, safeStorage, openKey, getSettings, extract, onStatus, onChange, clock, random });
+    this.db = null; this.key = null; this.ready = false; this.opening = false; this.error = ''; this.tail = Promise.resolve();
     this.recent = []; this.epoch = 0; this.generation = 0; this.closed = false;
     this.extracting = false; this.extractTimer = null; this.lastExtractCount = 0;
     this.userMessagesSeen = 0;
     this.state = { mood: '平静', energy: 0.7, warmth: 0.7, updatedAt: clock(), interactions: 0 };
   }
   async init() {
+    const generation = this.generation;
+    this.opening = true;
     try {
       fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 }); fs.chmodSync(this.dir, 0o700);
-      this.key = vc.openKey(this.dir, this.safeStorage);
+      const key = await (this.openKey ? this.openKey() : vc.openKey(this.dir, this.safeStorage));
+      if (!Buffer.isBuffer(key) || key.length !== 32) throw new Error('记忆钥匙格式不合法');
+      if (this.closed || generation !== this.generation) { key.fill(0); throw new Error('记忆解锁已取消'); }
+      this.key = key;
+      this.error = '';
       this.db = new VaultDB({ bin: this.bin, file: path.join(this.dir, 'companion.db') });
       this.epoch = (await this.db.init()).epoch;
       this.recent = (await this.query('message', 40)).reverse();
@@ -34,8 +40,11 @@ class MemoryService {
       }
       this.userMessagesSeen = Math.max(this.userMessagesSeen, ...this.recent.map(r => Number.isSafeInteger(r.value.userOrdinal) ? r.value.userOrdinal : 0));
       await this.migrateLegacy();
+      if (this.closed || generation !== this.generation) throw new Error('记忆解锁已取消');
+      this.ready = true;
       this.onStatus({ ready: true });
-    } catch (e) { this.error = e.message; this.onStatus({ ready: false, error: this.error }); await this.db?.close(); this.db = null; }
+    } catch (e) { this.ready = false; this.error = e.message; this.onStatus({ ready: false, error: this.error }); await this.db?.close(); this.db = null; this.key?.fill(0); this.key = null; }
+    finally { this.opening = false; }
     return this;
   }
   check() { if (!this.db || !this.key || this.closed) throw new Error(this.error || '记忆尚未解锁'); }
@@ -51,9 +60,17 @@ class MemoryService {
         (record.kind === 'memory' && record.value.anniversary ? ` bunny_anniversary_${record.value.anniversary.calendar}_${record.value.anniversary.month}_${record.value.anniversary.day}` : '')), sources: record.value.sources || [] };
   }
   decode(record) { return { ...record, body: undefined, value: vc.unseal(this.key, record.body, record.id + ':' + record.kind) }; }
-  async write(records, epoch = this.epoch) {
+  async notifyChange() {
+    try {
+      // Invalidate the open view; do not scan/count the vault on every committed message.
+      await this.onChange({ type: 'memory-changed' });
+    } catch { /* Refresh notifications must not affect committed writes. */ }
+  }
+  async write(records, epoch = this.epoch, { notify = true } = {}) {
     const result = await this.db.request('write', { epoch, records: records.map(r => this.encode(r)) });
-    this.epoch = result.epoch; return records;
+    this.epoch = result.epoch;
+    if (notify && records.some(r => ['memory', 'message', 'summary', 'persona', 'task'].includes(r.kind))) await this.notifyChange();
+    return records;
   }
   async query(kind, limit = 50, cursor = {}) { this.check(); return (await this.db.request('query', { kind, limit, ...cursor })).rows.map(r => this.decode(r)); }
   async search(text, kinds = ['memory', 'summary', 'message'], limit = 30) {
@@ -291,7 +308,7 @@ class MemoryService {
     const rows = query ? await this.search(clipped(query, 300), [kind], 50) : await this.query(kind, 50, { before, beforeId });
     return rows.map(({ id, kind, ts, state, expiresAt, value }) => ({ id, kind, ts, state, expiresAt, ...value }));
   }
-  async stats() { await this.tail; if (!this.db) return { ready: false, locked: !!this.waitingForUnlock, error: this.error }; return { ready: true, ...(await this.db.request('stats')), extracting: this.extracting, state: this.state }; }
+  async stats() { await this.tail; if (!this.ready) return { ready: false, opening: this.opening, locked: !!this.waitingForUnlock, error: this.error }; return { ready: true, ...(await this.db.request('stats')), extracting: this.extracting, state: this.state }; }
   updateMemory(recordId, content) {
     this.cancelExtraction(); this.generation++; clearTimeout(this.extractTimer); this.extractTimer = null;
     return this.serial(async () => {
@@ -313,13 +330,14 @@ class MemoryService {
         this.epoch = result.epoch; removed += result.removed;
       }
       const corrected = content.trim(), sourceId = id();
-      await this.write([{ id: sourceId, kind: 'message', ts, value: { role: 'user', content: corrected, source: 'user-reviewed', sources: [] } }]);
+      await this.write([{ id: sourceId, kind: 'message', ts, value: { role: 'user', content: corrected, source: 'user-reviewed', sources: [] } }], this.epoch, { notify: false });
       await this.write([{ id: id(), kind: 'memory', ts, value: {
         content: corrected, key: r.value.key || '', memoryKind: r.value.memoryKind || 'fact',
         importance: r.value.importance || 0.7, status: 'confirmed', evidence: corrected,
         sources: [sourceId], origin: 'user-reviewed', correctedAt: ts,
-      } }]);
+      } }], this.epoch, { notify: false });
       this.recent = (await this.query('message', 40)).reverse();
+      await this.notifyChange();
       return { ok: true, removed, removedSources: originalMessages.length };
     });
   }
@@ -342,12 +360,13 @@ class MemoryService {
         this.epoch = result.epoch; removed += result.removed;
       }
       this.recent = (await this.query('message', 40)).reverse();
+      await this.notifyChange();
       return { removed, removedSources: decoded?.kind === 'memory' ? originalMessages.length : 0 };
     });
   }
   clear() {
     this.cancelExtraction(); this.generation++; clearTimeout(this.extractTimer); this.extractTimer = null;
-    return this.serial(async () => { this.epoch = (await this.db.request('clear')).epoch; this.recent = []; this.userMessagesSeen = 0; this.lastExtractCount = 0; this.state = { mood: '平静', energy: 0.7, warmth: 0.7, updatedAt: this.clock(), interactions: 0 }; return { ok: true }; });
+    return this.serial(async () => { this.epoch = (await this.db.request('clear')).epoch; this.recent = []; this.userMessagesSeen = 0; this.lastExtractCount = 0; this.state = { mood: '平静', energy: 0.7, warmth: 0.7, updatedAt: this.clock(), interactions: 0 }; await this.notifyChange(); return { ok: true }; });
   }
   async export(passphrase) {
     return this.serial(async () => {
@@ -378,7 +397,7 @@ class MemoryService {
         while (remaining.length) {
           const batch = remaining.filter(r => r.value.sources.every(s => written.has(s))).slice(0, 200);
           if (!batch.length) throw new Error('备份来源关系有循环');
-          await this.write(batch);
+          await this.write(batch, this.epoch, { notify: false });
           for (const r of batch) { written.add(r.id); remaining.splice(remaining.indexOf(r), 1); }
         }
       } catch (e) { this.epoch = (await this.db.request('clear')).epoch; throw e; }
@@ -387,9 +406,10 @@ class MemoryService {
       if (restoredState) this.state = restoredState;
       this.userMessagesSeen = Math.max(Number(restoredState?.userMessagesSeen) || 0, ...this.recent.map(r => Number(r.value.userOrdinal) || 0));
       this.lastExtractCount = Number(restoredState?.lastExtractCount) || 0;
+      await this.notifyChange();
       return { ok: true, records: written.size };
     });
   }
-  async close() { clearTimeout(this.extractTimer); this.cancelExtraction(); this.generation++; await this.tail; this.closed = true; await this.db?.close(); this.key?.fill(0); }
+  async close() { clearTimeout(this.extractTimer); this.cancelExtraction(); this.generation++; this.ready = false; await this.tail; this.closed = true; await this.db?.close(); this.key?.fill(0); }
 }
 module.exports = { MemoryService, SECRET };

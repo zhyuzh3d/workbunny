@@ -170,7 +170,7 @@ function startWatchdog() {  if (!app.isPackaged) return;
 /* RAM is only the current-session fallback. Durable history lives in the encrypted vault. */
 let memory = null;
 let desktop = null;
-let sessionGate = null, screenLocked = true;
+let sessionGate = null, screenLocked = true, vaultKeyAbort = null;
 let unlockMemory = async () => {};
 let history = [];
 const interactions = new Interactions();
@@ -397,6 +397,9 @@ function closePanels() {
 /* ── 鼠标穿透开关 ── */
 let interactive = false;
 function setInteractive(v) {
+  // A window-only screenshot cannot show the transparent pet overlay. Keep it from
+  // swallowing visual-task clicks that are meant for the locked target underneath.
+  if (desktop?.running) v = false;
   if (!win || v === interactive) return;
   interactive = v;
   win.setIgnoreMouseEvents(!v, { forward: true });
@@ -736,7 +739,7 @@ const HISTORY_TURNS = 6;   // 只带最近 3 轮对话，够接话又不撑爆�
 
 async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn }) {
   const c = config.load();
-  if (screenLocked || (c.memory.enabled && !memory?.db)) { if (!internal) send('toast', { text: '请先解锁电脑与记忆，再继续对话。' }); return null; }
+  if (screenLocked || (c.memory.enabled && !memory?.ready)) { if (!internal) send('toast', { text: '请先解锁电脑与记忆，再继续对话。' }); return null; }
   // 大脑的配置在 brain 里，这里折算成真正能发请求的那三个字段
   const L = config.resolveLLM(c);
   if (L.transport !== 'workbuddy' && !L.apiKey) {
@@ -882,7 +885,7 @@ let lastWorkSeenAt = 0;
 let restNoticedAt = 0;
 
 function proactiveAllowed() {
-  if (screenLocked || (config.load().memory.enabled && !memory?.db)) return false;
+  if (screenLocked || (config.load().memory.enabled && !memory?.ready)) return false;
   const c = config.load();
   if (!c.monitor.enabled) return false;
   if (busy) return false;
@@ -1186,7 +1189,7 @@ function asrOpts(always) {
 function startListen(reason) {
   if (!asr) return;
   const c = config.load();
-  if (screenLocked || (c.memory.enabled && !memory?.db)) return;
+  if (screenLocked || (c.memory.enabled && !memory?.ready)) return;
   if (!c.voice.alwaysListen) return;
   if (!fs.existsSync(ASR_BIN)) { send('listen', { on: false, error: '缺少 bin/asr' }); return; }
   alwaysOn = true;
@@ -1369,6 +1372,7 @@ ipcMain.handle('pet:task-status', e => { trustedCompanion(e, 'desktop'); return 
 ipcMain.handle('pet:desktop-permission', async e => { trustedCompanion(e, 'desktop'); const status = await desktop.requestPermission(); return status.permissions; });
 ipcMain.handle('pet:task-start', async (e, v) => {
   trustedCompanion(e, 'desktop');
+  if (!memory?.ready) return { ok: false, error: '请先在“记忆与关系”中解锁本地资料库，再启动桌面任务。' };
   try { voiceTurns.reset(); stopSpeaking(); memory?.cancelExtraction(); return await desktop.start(v); } catch (error) { return { ok: false, error: error.message }; }
 });
 ipcMain.handle('pet:task-stop', e => { trustedCompanion(e, 'desktop'); return desktop.stop(); });
@@ -1429,7 +1433,7 @@ ipcMain.on('pet:stop-speak', () => {
 ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
   const t = String(text || '').trim();
   if (!t) return { ok: false };
-  if (screenLocked || (config.load().memory.enabled && !memory?.db)) return { ok: false, error: '记忆尚未解锁，请在“记忆与关系”中解锁后继续。' };
+  if (screenLocked || (config.load().memory.enabled && !memory?.ready)) return { ok: false, error: '记忆尚未解锁，请在“记忆与关系”中解锁后继续。' };
   if (t.length > 12000) return { ok: false, error: '单次对话最多 12000 字，请分段发送。' };
   voiceTurns.reset();
   stopSpeaking();
@@ -1860,18 +1864,29 @@ if (!lock) {
   app.whenReady().then(async () => {
     memory = new MemoryService({ dir: path.join(USER_DIR, 'vault'),
       bin: app.isPackaged ? path.join(process.resourcesPath, 'bin', 'vault') : path.join(__dirname, '../../bin/vault'), safeStorage,
+      openKey: IS_DEV ? undefined : () => {
+        const controller = new AbortController(); vaultKeyAbort = controller;
+        memory.error = '等待 macOS 钥匙串解锁；请完成系统授权';
+        return require('./vault-key-broker').openKey({ execPath: process.execPath, appPath: app.getAppPath(),
+          dir: path.join(USER_DIR, 'vault'), signal: controller.signal }).finally(() => { if (vaultKeyAbort === controller) vaultKeyAbort = null; });
+      },
       getSettings: () => { const m = config.load().memory; return { ...m, extract: m.extract && !screenLocked && !busy && !speaking && !desktop?.running }; },
       extract: require('./workbuddy-free').extractMemories,
       onStatus: st => log('[memory] ' + (st.ready ? '已解锁加密资料库' : '锁定：' + st.error)),
+      onChange: event => {
+        const panel = panels.get('memory');
+        if (panel && !panel.isDestroyed()) panel.webContents.send('pet:ev', event);
+      },
     });
     desktop = new DesktopService({ emit: status => {
+      if (status.running) setInteractive(false);
       for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'desktop', ...status });
     }, imageResize: png => {
       const image = nativeImage.createFromBuffer(png), size = image.getSize();
       return size.width > 1536 ? image.resize({ width: 1536 }).toPNG() : png;
     }, persist: task => memory.serial(() => memory.write([{ id: task.id, kind: 'task', ts: task.startedAt, updatedAt: Date.now(), value: { ...task, content: task.goal + '\n' + task.note, sources: [] } }])) });
     async function restoreTask() {
-    if (memory.db && desktop) {
+    if (memory.ready && desktop) {
       const lastTask = (await memory.query('task', 1))[0]?.value;
       if (lastTask) {
         desktop.task = lastTask;
@@ -1884,13 +1899,13 @@ if (!lock) {
     }
     let vaultOpening = null;
     unlockMemory = () => {
-      if (memory.db) return Promise.resolve();
+      if (memory.ready) return Promise.resolve();
       if (vaultOpening) return vaultOpening;
       memory.waitingForUnlock = false;
       vaultOpening = memory.init().then(async () => {
         if (quitting || screenLocked) return;
-        if (!memory.db) { asrStatus = { ...asrStatus, captureReady: false, note: 'memory-locked' }; send('asrStatus', asrStatus); }
-        if (memory.db && config.load().memory.enabled) await memory.personaRevision(config.load().buddy);
+        if (!memory.ready) { asrStatus = { ...asrStatus, captureReady: false, note: 'memory-locked' }; send('asrStatus', asrStatus); }
+        if (memory.ready && config.load().memory.enabled) await memory.personaRevision(config.load().buddy);
         await restoreTask();
         for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'memory-ready' });
         startListen('memory-ready');
@@ -1900,11 +1915,16 @@ if (!lock) {
     sessionGate = new SessionGate({
       readLocked: async () => (await desktop.status()).permissions.sessionLocked,
       onLocked: () => {
-        screenLocked = true; stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.stop('电脑锁屏').catch(() => {});
+        screenLocked = true; vaultKeyAbort?.abort(); stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.stop('电脑锁屏').catch(() => {});
         asrStatus = { ...asrStatus, captureReady: false, note: 'locked' }; send('asrStatus', asrStatus);
-        if (!memory.db) { memory.waitingForUnlock = true; memory.error = '电脑已锁屏，解锁后自动载入记忆'; log('[memory] 屏幕锁定，延后钥匙串读取'); }
+        if (!memory.ready) { memory.waitingForUnlock = true; memory.error = '电脑已锁屏，解锁后自动载入记忆'; log('[memory] 屏幕锁定，延后钥匙串读取'); }
       },
-      onUnlocked: async () => { screenLocked = false; await unlockMemory(); if (!quitting) startListen('unlock'); },
+      onUnlocked: () => {
+        screenLocked = false;
+        // The helper may be waiting for an OS password dialog. Keep the UI, stop
+        // shortcut, and lock polling alive while it waits; never open a blank vault.
+        unlockMemory().then(() => { if (!quitting && !screenLocked) startListen('unlock'); }).catch(() => log('[memory] 解锁未完成，请在记忆面板重试'));
+      },
     });
     powerMonitor.on('lock-screen', () => sessionGate.lock());
     powerMonitor.on('unlock-screen', () => sessionGate.refresh().catch(() => {}));
@@ -1951,7 +1971,7 @@ if (!lock) {
     function applyStatus(st) {
       asrStatus = { ...asrStatus, ...st, checkedAt: Date.now() };
       if (screenLocked) asrStatus = { ...asrStatus, captureReady: false, note: 'locked' };
-      else if (config.load().memory.enabled && !memory.db) asrStatus = { ...asrStatus, captureReady: false, note: 'memory-locked' };
+      else if (config.load().memory.enabled && !memory.ready) asrStatus = { ...asrStatus, captureReady: false, note: 'memory-locked' };
       send('asrStatus', asrStatus);
       log('[asr] status', asrStatus);
       return asrStatus;
@@ -2176,6 +2196,7 @@ if (!lock) {
 let shutdownStarted = false, shutdownFlushed = false;
 app.on('before-quit', event => {
   quitting = true;
+  vaultKeyAbort?.abort();
   sessionGate?.close();
   markCleanExit();
   closePanels();          // 面板是普通窗口，不关会拖住退出

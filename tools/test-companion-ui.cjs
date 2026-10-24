@@ -31,6 +31,7 @@ let rows = [
 let settings = { memory: { enabled: true, extract: true } };
 let failConfig = false;
 let holdConfig = false, heldConfigResolve = null;
+let holdNextMemoryList = false, heldMemoryListResolve = null;
 let insertFinish = null;
 let status = {
   permissions: { accessibilityTrusted: true, screenCaptureAllowed: true, postEventAllowed: false },
@@ -43,7 +44,7 @@ fs.writeFileSync(preload, `
   const { contextBridge, ipcRenderer } = require('electron');
   const api = (name, ...args) => ipcRenderer.invoke('fixture:api', name, ...args);
   contextBridge.exposeInMainWorld('pet', {
-    on: cb => ipcRenderer.on('fixture:desktop', (_event, value) => cb(value)),
+    on: cb => ipcRenderer.on('fixture:event', (_event, value) => cb(value)),
     memoryStats: (...a) => api('memoryStats', ...a), memoryList: (...a) => api('memoryList', ...a),
     memoryUpdate: (...a) => api('memoryUpdate', ...a), memoryRemove: (...a) => api('memoryRemove', ...a),
     memoryClear: (...a) => api('memoryClear', ...a), memorySources: (...a) => api('memorySources', ...a),
@@ -55,7 +56,10 @@ fs.writeFileSync(preload, `
     __fixture: { failConfig: () => ipcRenderer.invoke('fixture:control', 'failConfig'),
       holdConfig: () => ipcRenderer.invoke('fixture:control', 'holdConfig'),
       releaseConfig: () => ipcRenderer.invoke('fixture:control', 'releaseConfig'),
+      holdNextMemoryList: () => ipcRenderer.invoke('fixture:control', 'holdNextMemoryList'),
+      releaseMemoryList: () => ipcRenderer.invoke('fixture:control', 'releaseMemoryList'),
       emitDesktop: value => ipcRenderer.invoke('fixture:control', 'emitDesktop', { type: 'desktop', ...value }),
+      emitMemoryChange: () => ipcRenderer.invoke('fixture:control', 'emitMemoryChange'),
       getCalls: () => ipcRenderer.invoke('fixture:control', 'getCalls') },
   });
 `);
@@ -66,7 +70,14 @@ ipcMain.handle('fixture:control', (_event, action, value) => {
   if (action === 'failConfig') { failConfig = true; return true; }
   if (action === 'holdConfig') { holdConfig = true; return true; }
   if (action === 'releaseConfig') { holdConfig = false; heldConfigResolve?.(); heldConfigResolve = null; return true; }
-  if (action === 'emitDesktop') { status = value; activeWindow?.webContents.send('fixture:desktop', value); return true; }
+  if (action === 'holdNextMemoryList') { holdNextMemoryList = true; return true; }
+  if (action === 'releaseMemoryList') { heldMemoryListResolve?.(); heldMemoryListResolve = null; return true; }
+  if (action === 'emitDesktop') { status = value; activeWindow?.webContents.send('fixture:event', value); return true; }
+  if (action === 'emitMemoryChange') {
+    rows.push({ id: `memory-live-${Date.now()}`, kind: 'memory', ts: Date.now(), content: '海边新记忆', status: 'pending', sources: [] });
+    activeWindow?.webContents.send('fixture:event', { type: 'memory-changed', counts: emptyCounts() });
+    return true;
+  }
   if (action === 'getCalls') return calls;
   return false;
 });
@@ -83,7 +94,12 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
     const options = args[0] || {};
     let found = rows.filter(row => row.kind === options.kind);
     if (options.query) found = found.filter(row => row.content.toLowerCase().includes(options.query.toLowerCase()));
-    return { rows: found, hasMore: true };
+    const result = { rows: found, hasMore: true };
+    if (holdNextMemoryList) {
+      holdNextMemoryList = false;
+      return new Promise(resolve => { heldMemoryListResolve = () => resolve(result); });
+    }
+    return result;
   }
   if (name === 'memoryUpdate') {
     const [id, content] = args, row = rows.find(item => item.id === id);
@@ -137,8 +153,37 @@ async function testMemory() {
   assert.equal(await evalIn(win, "document.querySelector('#memoryList .pending')?.textContent"), '待确认');
   assert.equal(await evalIn(win, "document.querySelector('#memoryList textarea')"), null);
   assert.equal(await evalIn(win, "document.getElementById('memoryMore').hidden"), false);
+  const listCallsBeforeRace = (calls.memoryList || []).length;
+  await evalIn(win, "window.pet.__fixture.holdNextMemoryList().then(()=>window.pet.__fixture.emitMemoryChange())");
+  await waitFor(() => Promise.resolve((calls.memoryList || []).length > listCallsBeforeRace), 'delayed refresh request');
+  await evalIn(win, "document.querySelector('#memoryTabs .tab[data-kind=message]').click()");
+  await waitFor(() => evalIn(win, "[...document.querySelectorAll('#memoryList .record-content')].some(el=>el.textContent==='你好')"), 'new tab result before delayed refresh');
+  await evalIn(win, 'window.pet.__fixture.releaseMemoryList()');
+  await delay(250);
+  assert.equal(await evalIn(win, "[...document.querySelectorAll('#memoryList .record-content')].some(el=>el.textContent==='你好')"), true, 'stale refresh cannot replace newer tab results');
+  await evalIn(win, "document.querySelector('#memoryTabs .tab[data-kind=memory]').click()");
+  await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .record').length").then(n => n >= 2), 'memory tab restored');
+  const rowCountBeforePageRace = await evalIn(win, "document.querySelectorAll('#memoryList .record').length");
+  const listCallsBeforePageRace = (calls.memoryList || []).length;
+  await evalIn(win, "window.pet.__fixture.holdNextMemoryList().then(()=>window.pet.__fixture.emitMemoryChange())");
+  await waitFor(() => Promise.resolve((calls.memoryList || []).length > listCallsBeforePageRace), 'delayed pagination refresh request');
+  await click(win, 'memoryMore');
+  await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .record').length").then(n => n > rowCountBeforePageRace), 'older page appended');
+  const rowCountAfterPage = await evalIn(win, "document.querySelectorAll('#memoryList .record').length");
+  await evalIn(win, 'window.pet.__fixture.releaseMemoryList()');
+  await delay(250);
+  assert.equal(await evalIn(win, "document.querySelectorAll('#memoryList .record').length"), rowCountAfterPage, 'stale refresh cannot replace paginated results');
+  const listCallsBeforeSearchRace = (calls.memoryList || []).length;
+  await evalIn(win, "window.pet.__fixture.holdNextMemoryList().then(()=>window.pet.__fixture.emitMemoryChange())");
+  await waitFor(() => Promise.resolve((calls.memoryList || []).length > listCallsBeforeSearchRace), 'delayed search refresh request');
+  await evalIn(win, "document.getElementById('memorySearch').value='音乐'; document.getElementById('memorySearchBtn').click()");
+  await waitFor(() => evalIn(win, "[...document.querySelectorAll('#memoryList .record-content')].some(el=>el.textContent==='安静的音乐')"), 'new search result before delayed refresh');
+  await evalIn(win, 'window.pet.__fixture.releaseMemoryList()');
+  await delay(250);
+  assert.equal(await evalIn(win, "document.querySelectorAll('#memoryList .record').length"), 1, 'stale refresh cannot replace newer search results');
   await evalIn(win, "document.getElementById('memorySearch').value='海边'; document.getElementById('memorySearch').dispatchEvent(new Event('input',{bubbles:true})); document.getElementById('memorySearchBtn').click()");
-  await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .record').length").then(n => n === 1), 'memory search');
+  const expectedSeaResults = rows.filter(row => row.kind === 'memory' && row.content.includes('海边')).length;
+  await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .record').length").then(n => n === expectedSeaResults), 'memory search');
   assert.equal(await evalIn(win, "document.getElementById('memoryMore').hidden"), true, 'search results do not paginate');
   await evalIn(win, "document.querySelector('#memoryTabs .tab[data-kind=memory]').click()");
   const beforeConfirm = (calls.memoryUpdate || []).length;
@@ -146,7 +191,7 @@ async function testMemory() {
   await waitFor(() => Promise.resolve((calls.memoryUpdate || []).length > beforeConfirm), 'pending confirmation');
   assert.equal(calls.memoryUpdate.at(-1)[0], 'memory-pending-1');
   assert.equal(calls.memoryUpdate.at(-1)[1], rows.find(r => r.id === 'memory-pending-1').content);
-  await waitFor(() => evalIn(win, "document.querySelector('#memoryList .pending') === null"), 'confirmed badge');
+  await waitFor(() => evalIn(win, "![...document.querySelectorAll('#memoryList .record')].find(card=>card.querySelector('.record-content')?.textContent.startsWith('我喜欢海边 <img'))?.querySelector('.pending')"), 'confirmed badge');
   const maxLength = await evalIn(win, "(() => { document.querySelector('#memoryList button').click(); return document.querySelector('#memoryList textarea')?.maxLength })()");
   assert.equal(maxLength, 1000);
   await evalIn(win, "document.getElementById('backupPassphrase').value='fixture-pass'; document.getElementById('memoryExport').click()");
@@ -166,6 +211,29 @@ async function testMemory() {
   await evalIn(win, 'window.pet.__fixture.releaseConfig()');
   await waitFor(() => evalIn(win, "document.getElementById('memoryConfigNote').textContent").then(t => t === '已保存'), 'setting write completes');
   assert.equal(settings.memory.extract, false);
+
+  // A delayed list response must not erase an editor opened while it is pending.
+  await evalIn(win, "document.querySelector('#memoryList .record button').click()");
+  const listCallsBeforeEditorRace = (calls.memoryList || []).length;
+  await evalIn(win, "window.pet.__fixture.holdNextMemoryList().then(()=>window.pet.__fixture.emitMemoryChange())");
+  await waitFor(() => Promise.resolve((calls.memoryList || []).length > listCallsBeforeEditorRace), 'delayed editor refresh request');
+  await evalIn(win, "document.querySelector('#memoryList .record button').click(); document.querySelector('#memoryList textarea').value='延迟期间打开的草稿'");
+  await evalIn(win, 'window.pet.__fixture.releaseMemoryList()');
+  await delay(150);
+  assert.equal(await evalIn(win, "document.querySelector('#memoryList textarea')?.value"), '延迟期间打开的草稿', 'stale refresh cannot erase a newly opened editor draft');
+  await evalIn(win, "document.querySelector('#memoryList .record button').click()");
+  await waitFor(() => evalIn(win, "[...document.querySelectorAll('#memoryList .record-content')].some(el=>el.textContent==='海边新记忆')"), 'deferred editor refresh');
+
+  // While an editor is already open, later notifications still preserve its draft and query.
+  await evalIn(win, "document.querySelector('#memoryList .record button').click()");
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList textarea') !== null"), 'memory editor open');
+  await evalIn(win, "document.querySelector('#memoryList textarea').value='编辑中的草稿'; window.pet.__fixture.emitMemoryChange()");
+  const expectedMemoryCount = rows.filter(r => r.kind === 'memory').length;
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryCounts').textContent").then(text => text.includes(String(expectedMemoryCount))), 'memory changed count');
+  assert.equal(await evalIn(win, "document.querySelector('#memoryList textarea').value"), '编辑中的草稿', 'change event preserves editor draft');
+  assert.equal(await evalIn(win, "document.getElementById('memorySearch').value"), '海边', 'change event preserves search text');
+  await evalIn(win, "document.querySelector('#memoryList .record button').click()");
+  await waitFor(() => evalIn(win, "[...document.querySelectorAll('#memoryList .record-content')].some(el=>el.textContent==='海边新记忆')"), 'deferred memory list refresh');
   win.hide();
 }
 

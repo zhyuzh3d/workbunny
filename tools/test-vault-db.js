@@ -13,6 +13,13 @@ async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'workbunny-vault-test-'));
   const dbFile = path.join(temp, 'vault.sqlite3');
   const bin = path.join(root, 'bin', 'vault');
+  for (const args of [
+    ['--verify-key-parent'],
+    ['--verify-key-parent', '--parent-pid=1', '--parent-path=/Applications/Forged.app/Contents/MacOS/workbunny'],
+  ]) {
+    const result = execFileSync(bin, args, { cwd: root, encoding: 'utf8' });
+    assert.equal(result, '{"authorized":false}\n');
+  }
   const vault = new VaultDB({ bin, file: dbFile, timeoutMs: 10000 });
   const row = (id, kind, ts, tokens, sources = [], extra = {}) => ({
     id, kind, ts, updatedAt: ts, state: 'active', body: `ciphertext:${id}`,

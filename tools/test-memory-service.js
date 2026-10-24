@@ -48,10 +48,53 @@ function createService(dir, safeStorage, options = {}) {
   const service = new MemoryService({
     dir, bin, safeStorage, getSettings: () => settings,
     clock: options.clock || makeClock(), random: () => 0,
-    extract: options.extract,
+    extract: options.extract, onChange: options.onChange, openKey: options.openKey,
   });
   activeServices.add(service);
   return service;
+}
+
+async function testChangeNotifications(temp, safeStorage) {
+  const changes = [];
+  const service = await createService(path.join(temp, 'change-vault'), safeStorage, { onChange: change => changes.push(change) }).init();
+  await service.addMessage('user', '请记住我喜欢海边散步');
+  assert(changes.length > 0, 'writes should notify the companion panel');
+  const writeChange = changes.at(-1);
+  assert.equal(writeChange.type, 'memory-changed');
+  assert.deepEqual(Object.keys(writeChange), ['type']);
+  assert.equal(JSON.stringify(writeChange).includes('海边散步'), false, 'change event must not include private content');
+  const memory = (await service.list({ kind: 'memory' }))[0];
+  const beforeUpdate = changes.length;
+  await service.updateMemory(memory.id, '我喜欢安静的海边散步');
+  assert.equal(changes.length, beforeUpdate + 1, 'correction emits one notification after its writes');
+  const beforeRemove = changes.length;
+  const updated = (await service.list({ kind: 'memory' }))[0];
+  await service.remove(updated.id);
+  assert.equal(changes.length, beforeRemove + 1, 'remove emits one notification');
+  await service.clear();
+  assert.equal(changes.at(-1).type, 'memory-changed', 'clear invalidates the open view');
+  assert.equal((await service.db.request('stats')).counts.total, 0);
+  await service.close();
+}
+
+async function testAsyncKeyOpening(temp, safeStorage) {
+  let resolveKey;
+  const key = crypto.randomBytes(32);
+  const service = createService(path.join(temp, 'async-key-vault'), safeStorage, { openKey: () => new Promise(resolve => { resolveKey = resolve; }) });
+  const opening = service.init();
+  await delay(5); // Other requests must still complete while the OS prompt is pending.
+  assert.equal((await service.stats()).ready, false);
+  assert.equal(fs.existsSync(path.join(service.dir, 'companion.db')), false, 'pending key never creates an empty replacement vault');
+  resolveKey(key); await opening; assert.equal((await service.stats()).ready, true);
+  await service.close();
+
+  let resolveCancelled;
+  const lateKey = crypto.randomBytes(32);
+  const cancelled = createService(path.join(temp, 'cancelled-key-vault'), safeStorage, { openKey: () => new Promise(resolve => { resolveCancelled = resolve; }) });
+  const late = cancelled.init(); await cancelled.close(); resolveCancelled(lateKey); await late;
+  assert.equal(cancelled.db, null, 'closing while waiting cannot reopen the vault');
+  assert(lateKey.every(byte => byte === 0), 'late key is wiped');
+  assert.equal(fs.existsSync(path.join(cancelled.dir, 'companion.db')), false);
 }
 
 async function testSearchEncryptionRestartAndRemoval(temp, safeStorage) {
@@ -459,6 +502,8 @@ async function main() {
   const safeStorage = stubSafeStorage();
   try {
     await testSearchEncryptionRestartAndRemoval(temp, safeStorage);
+    await testChangeNotifications(temp, safeStorage);
+    await testAsyncKeyOpening(temp, safeStorage);
     await testAssistantLineageDeletionAndCorrection(temp, safeStorage);
     await testCorrectionInvalidatesSource(temp, safeStorage);
     await testOldExtractionCannotResurrectDeletedSource(temp, safeStorage);

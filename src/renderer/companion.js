@@ -37,9 +37,12 @@ function labelStatus(value) {
 }
 
 /* ── 记忆 ── */
-let memoryKind = 'memory', memoryQuery = '', memoryCursor = null, memoryHasMore = false;
+let memoryKind = 'memory', memoryQuery = '', memoryCursor = null, memoryHasMore = false, memoryPageCount = 0;
 let memoryRows = [], memoryStats = null, memoryCfg = {}, savedMemoryCfg = {}, memoryCfgWriting = false;
 let memoryCfgPending = false;
+let memoryRefreshPending = false, memoryRefreshTimer = null, memoryRefreshBusy = false;
+let memoryViewRevision = 0;
+let memoryListBusyRevision = 0;
 function countValue(value) { return typeof value === 'number' ? value : Number(value?.count ?? value?.total ?? 0) || 0; }
 function countsObject(stats) { return stats?.counts && typeof stats.counts === 'object' ? stats.counts : {}; }
 function setPill(id, text, tone = '') {
@@ -50,8 +53,9 @@ function paintMemoryStats(stats) {
   const counts = countsObject(memoryStats);
   const state = memoryStats.state && typeof memoryStats.state === 'object' ? memoryStats.state : null;
   const stateLabel = state ? [state.mood, Number.isFinite(state.energy) ? `精力 ${Math.round(state.energy <= 1 ? state.energy * 100 : state.energy)}%` : ''].filter(Boolean).join(' · ') : '';
-  $('memoryUnlock').hidden = memoryStats.ready !== false;
+  $('memoryUnlock').hidden = memoryStats.ready !== false || !!memoryStats.opening;
   if (memoryStats.locked) setPill('memoryStatus', '电脑解锁后载入记忆', 'warn');
+  else if (memoryStats.opening) setPill('memoryStatus', '正在解锁记忆 · 请留意 macOS 授权', 'warn');
   else if (memoryStats.error) setPill('memoryStatus', `读取失败 · ${memoryStats.error}`, 'bad');
   else if (memoryStats.ready === false) setPill('memoryStatus', '记忆服务未就绪', 'warn');
   else setPill('memoryStatus', stateLabel || '已就绪', 'ok');
@@ -141,7 +145,10 @@ function renderRecord(row) {
   let editBox = null;
   if (row.kind === 'memory') {
     addAction(actions, '编辑', () => {
-      if (editBox) { editBox.remove(); editBox = null; return; }
+      if (editBox) { editBox.remove(); editBox = null; if (memoryRefreshPending) void refreshMemoryView(); return; }
+      memoryViewRevision++;
+      if (memoryRefreshBusy || memoryListBusyRevision) memoryRefreshPending = true;
+      memoryListBusyRevision = 0;
       editBox = node('div', 'record-edit');
       const textarea = node('textarea'); textarea.rows = 3; textarea.maxLength = 1000; textarea.value = row.content || '';
       const saveRow = node('div', 'record-actions');
@@ -195,15 +202,22 @@ async function loadMemoryStats() {
   catch (error) { paintMemoryStats({ ready: false, error: error.message }); }
 }
 async function loadMemoryList(reset = false) {
+  const revision = ++memoryViewRevision;
   hideError();
-  if (reset) { memoryCursor = null; memoryRows = []; }
+  if (reset) { memoryCursor = null; memoryRows = []; memoryPageCount = 0; }
+  const view = { kind: memoryKind, query: memoryQuery, cursor: memoryCursor && { ...memoryCursor } };
+  memoryListBusyRevision = revision;
   $('memoryListNote').textContent = '正在读取…'; $('memoryMore').hidden = true;
   try {
-    const options = { kind: memoryKind, query: memoryQuery };
-    if (memoryCursor) { options.before = memoryCursor.ts; options.beforeId = memoryCursor.id; }
+    const options = { kind: view.kind, query: view.query };
+    if (view.cursor) { options.before = view.cursor.ts; options.beforeId = view.cursor.id; }
     const result = await api('memoryList', options);
+    if (memoryListBusyRevision === revision) memoryListBusyRevision = 0;
+    if (revision !== memoryViewRevision) return;
+    if (hasOpenMemoryEditor()) { memoryRefreshPending = true; return; }
     const rows = Array.isArray(result) ? result : (result?.rows || []);
     memoryRows = reset ? rows : memoryRows.concat(rows);
+    if (rows.length) memoryPageCount = reset ? 1 : memoryPageCount + 1;
     const target = $('memoryList'); target.replaceChildren(...memoryRows.map(renderRecord));
     const last = rows.at(-1);
     memoryCursor = last ? { ts: last.ts, id: last.id } : memoryCursor;
@@ -211,8 +225,54 @@ async function loadMemoryList(reset = false) {
     $('memoryMore').hidden = !memoryHasMore || !last;
     $('memoryListNote').textContent = rows.length ? `${memoryRows.length} 条内容` : (reset ? '没有找到内容' : '没有更多内容');
   } catch (error) {
+    if (memoryListBusyRevision === revision) memoryListBusyRevision = 0;
+    if (revision !== memoryViewRevision) return;
     $('memoryListNote').textContent = '';
     $('memoryList').replaceChildren(node('div', 'record', error.message || '读取失败'));
+  }
+}
+function hasOpenMemoryEditor() { return !!$('memoryList')?.querySelector('.record-edit textarea'); }
+function scheduleMemoryRefresh() {
+  clearTimeout(memoryRefreshTimer);
+  memoryRefreshTimer = setTimeout(() => { void refreshMemoryView(); }, 200);
+}
+async function refreshMemoryView() {
+  const revision = ++memoryViewRevision;
+  const view = { kind: memoryKind, query: memoryQuery, pageCount: memoryQuery ? 1 : Math.max(1, memoryPageCount) };
+  if (memoryRefreshBusy) { memoryRefreshPending = true; return; }
+  memoryRefreshBusy = true;
+  memoryRefreshPending = false;
+  const scrollHost = document.querySelector('.memory-main');
+  const scrollTop = scrollHost?.scrollTop || 0;
+  try {
+    await loadMemoryStats();
+    if (revision !== memoryViewRevision) return;
+    if (hasOpenMemoryEditor()) { memoryRefreshPending = true; return; }
+    let cursor = null, rows = [], hasMore = false;
+    for (let page = 0; page < view.pageCount; page++) {
+      const options = { kind: view.kind, query: view.query };
+      if (cursor) { options.before = cursor.ts; options.beforeId = cursor.id; }
+      const result = await api('memoryList', options);
+      if (revision !== memoryViewRevision) return;
+      if (hasOpenMemoryEditor()) { memoryRefreshPending = true; return; }
+      const batch = Array.isArray(result) ? result : (result?.rows || []);
+      rows.push(...batch);
+      const last = batch.at(-1);
+      if (last) cursor = { ts: last.ts, id: last.id };
+      hasMore = !view.query && (typeof result?.hasMore === 'boolean' ? result.hasMore : batch.length > 0);
+      if (!last || !hasMore) break;
+    }
+    memoryRows = rows;
+    memoryCursor = cursor;
+    memoryHasMore = hasMore;
+    $('memoryList').replaceChildren(...memoryRows.map(renderRecord));
+    $('memoryMore').hidden = !memoryHasMore || !memoryCursor;
+    $('memoryListNote').textContent = memoryRows.length ? `${memoryRows.length} 条内容` : '没有找到内容';
+    if (scrollHost) scrollHost.scrollTop = scrollTop;
+  } catch (error) { if (revision === memoryViewRevision) $('memoryListNote').textContent = error.message || '刷新失败'; }
+  finally {
+    memoryRefreshBusy = false;
+    if (memoryRefreshPending && !hasOpenMemoryEditor()) scheduleMemoryRefresh();
   }
 }
 function hasStoredMemory() {
@@ -387,7 +447,10 @@ addEventListener('beforeunload', () => {
 
 if (page === 'memory') {
   initMemory();
-  window.pet?.on?.(event => { if (event?.type === 'memory-ready') { loadMemoryStats(); loadMemoryList(true); } });
+  window.pet?.on?.(event => {
+    if (event?.type === 'memory-ready') { loadMemoryStats(); loadMemoryList(true); }
+    else if (event?.type === 'memory-changed') scheduleMemoryRefresh();
+  });
 }
 else {
   refreshDesktop();

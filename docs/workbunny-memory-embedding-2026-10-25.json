@@ -1,0 +1,938 @@
+{
+  "generatedAt": "2026-10-24T23:39:32.020Z",
+  "evaluator": "Apple NaturalLanguage NLEmbedding.sentenceEmbedding, local macOS models; no model downloads",
+  "dataset": {
+    "paraphraseCases": 27,
+    "syntheticDistractors": 1000,
+    "corpusTotal": 1027,
+    "noPersonalData": true,
+    "noModelServiceCalls": true,
+    "lexicalBaseline": {
+      "recallAt5": 0.7037037037037037,
+      "contextHitRate": 0.7407407407407407
+    }
+  },
+  "methods": {
+    "exactCosine": "Rank every same-language memory vector by exact cosine; no cross-language cosine.",
+    "lsh": "Fixed-seed random hyperplane LSH; 10 tables x 10 bits; probe each bucket and its 10 one-bit neighbors (110 bucket lookups/query); rank candidates by shared bucket count, keep top 50, exact-cosine rerank.",
+    "indexSimulation": "Synthetic bucket IDs; no real HMAC or SQLite writes. The vector-byte estimate assumes float32 plus 12-byte nonce and 16-byte GCM tag, then base64 text storage."
+  },
+  "quality": {
+    "exactOverall": {
+      "cases": 27,
+      "recallAt5": 0.7777777777777778,
+      "top1": 0.3333333333333333
+    },
+    "exactParaphrasesOnlyOverall": {
+      "cases": 27,
+      "recallAt5": 0.8148148148148148,
+      "top1": 0.3333333333333333
+    },
+    "lshRerankedOverall": {
+      "cases": 27,
+      "recallAt5": 0.18518518518518517,
+      "top1": 0.14814814814814814
+    },
+    "perLanguage": {
+      "zh": {
+        "language": "zh",
+        "dimension": 640,
+        "corpusRecords": 515,
+        "queries": 15,
+        "exact": {
+          "cases": 15,
+          "recallAt5": 0.7333333333333333,
+          "top1": 0.26666666666666666,
+          "meanTargetRankWhenFound": 5.8,
+          "targetFoundCount": 15
+        },
+        "exactParaphrasesOnly": {
+          "cases": 15,
+          "recallAt5": 0.7333333333333333,
+          "top1": 0.26666666666666666,
+          "meanTargetRankWhenFound": 4.866666666666666,
+          "targetFoundCount": 15
+        },
+        "lshRerankedTop50": {
+          "cases": 15,
+          "recallAt5": 0.2,
+          "top1": 0.13333333333333333,
+          "meanTargetRankWhenFound": 1.6666666666666667,
+          "targetFoundCount": 3
+        },
+        "lshCandidateRecall": 0.2,
+        "candidateCount": {
+          "mean": 515,
+          "p50": 515,
+          "p95": 515,
+          "min": 515,
+          "max": 515
+        },
+        "bucketHitsPerCandidateLead": {
+          "mean": 8.333333333333334,
+          "p50": 8,
+          "p95": 9
+        },
+        "exactHubness": {
+          "maxTop1Appearances": 4,
+          "maxTop5Appearances": 14,
+          "top5HubsAt20Percent": 10
+        },
+        "distinctSignaturesPerTable": [
+          6,
+          8,
+          4,
+          10,
+          9,
+          4,
+          5,
+          6,
+          6,
+          12
+        ],
+        "cases": [
+          {
+            "id": "cn_fact_archive_city",
+            "category": "fact",
+            "queryId": "query:cn_fact_archive_city",
+            "exactTargetRank": 16,
+            "exactParaphraseOnlyRank": 15,
+            "exactTop1Id": "memory:cn_promise_garden",
+            "exactTargetCosine": 0.9422162447078077,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "memory:cn_promise_manual"
+          },
+          {
+            "id": "cn_preference_train",
+            "category": "preference",
+            "queryId": "query:cn_preference_train",
+            "exactTargetRank": 4,
+            "exactParaphraseOnlyRank": 4,
+            "exactTop1Id": "memory:cn_promise_garden",
+            "exactTargetCosine": 0.9626478515556368,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "distractor-431"
+          },
+          {
+            "id": "cn_promise_manual",
+            "category": "promise",
+            "queryId": "query:cn_promise_manual",
+            "exactTargetRank": 3,
+            "exactParaphraseOnlyRank": 3,
+            "exactTop1Id": "memory:conflict_room_later",
+            "exactTargetCosine": 0.9648534115341619,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "distractor-201"
+          },
+          {
+            "id": "cn_fact_recipe",
+            "category": "fact",
+            "queryId": "query:cn_fact_recipe",
+            "exactTargetRank": 8,
+            "exactParaphraseOnlyRank": 8,
+            "exactTop1Id": "memory:cn_preference_train",
+            "exactTargetCosine": 0.9484994311138997,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "memory:conflict_room_later"
+          },
+          {
+            "id": "cn_preference_music",
+            "category": "preference",
+            "queryId": "query:cn_preference_music",
+            "exactTargetRank": 2,
+            "exactParaphraseOnlyRank": 2,
+            "exactTop1Id": "memory:cn_preference_light",
+            "exactTargetCosine": 0.9703545088744605,
+            "lshTargetRank": 1,
+            "lshTargetIn50": true,
+            "lshCandidates": 515,
+            "lshTop1Id": "memory:cn_preference_music"
+          },
+          {
+            "id": "cn_promise_garden",
+            "category": "promise",
+            "queryId": "query:cn_promise_garden",
+            "exactTargetRank": 1,
+            "exactParaphraseOnlyRank": 1,
+            "exactTop1Id": "memory:cn_promise_garden",
+            "exactTargetCosine": 0.971642955550141,
+            "lshTargetRank": 1,
+            "lshTargetIn50": true,
+            "lshCandidates": 515,
+            "lshTop1Id": "memory:cn_promise_garden"
+          },
+          {
+            "id": "cn_fact_map",
+            "category": "fact",
+            "queryId": "query:cn_fact_map",
+            "exactTargetRank": 3,
+            "exactParaphraseOnlyRank": 3,
+            "exactTop1Id": "memory:conflict_room_later",
+            "exactTargetCosine": 0.9628758749151056,
+            "lshTargetRank": 3,
+            "lshTargetIn50": true,
+            "lshCandidates": 515,
+            "lshTop1Id": "memory:conflict_room_later"
+          },
+          {
+            "id": "cn_preference_food",
+            "category": "preference",
+            "queryId": "query:cn_preference_food",
+            "exactTargetRank": 1,
+            "exactParaphraseOnlyRank": 1,
+            "exactTop1Id": "memory:cn_preference_food",
+            "exactTargetCosine": 0.9663942692781121,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "memory:cn_preference_train"
+          },
+          {
+            "id": "cn_promise_trip",
+            "category": "promise",
+            "queryId": "query:cn_promise_trip",
+            "exactTargetRank": 5,
+            "exactParaphraseOnlyRank": 5,
+            "exactTop1Id": "memory:cn_preference_light",
+            "exactTargetCosine": 0.9611592106622767,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "distractor-1"
+          },
+          {
+            "id": "cn_fact_plant",
+            "category": "fact",
+            "queryId": "query:cn_fact_plant",
+            "exactTargetRank": 27,
+            "exactParaphraseOnlyRank": 14,
+            "exactTop1Id": "memory:conflict_room_later",
+            "exactTargetCosine": 0.9272681376748051,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "distractor-131"
+          },
+          {
+            "id": "cn_preference_light",
+            "category": "preference",
+            "queryId": "query:cn_preference_light",
+            "exactTargetRank": 1,
+            "exactParaphraseOnlyRank": 1,
+            "exactTop1Id": "memory:cn_preference_light",
+            "exactTargetCosine": 0.9682097626638959,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "memory:cn_promise_garden"
+          },
+          {
+            "id": "cn_promise_photo",
+            "category": "promise",
+            "queryId": "query:cn_promise_photo",
+            "exactTargetRank": 8,
+            "exactParaphraseOnlyRank": 8,
+            "exactTop1Id": "memory:conflict_room_early",
+            "exactTargetCosine": 0.9465120680061606,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "distractor-487"
+          },
+          {
+            "id": "same_name_jordan_country_zh",
+            "category": "same_name",
+            "queryId": "query:same_name_jordan_country_zh",
+            "exactTargetRank": 3,
+            "exactParaphraseOnlyRank": 3,
+            "exactTop1Id": "memory:cn_promise_manual",
+            "exactTargetCosine": 0.9625313162051414,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "distractor-955"
+          },
+          {
+            "id": "conflict_room_early",
+            "category": "conflict",
+            "queryId": "query:conflict_room_early",
+            "exactTargetRank": 4,
+            "exactParaphraseOnlyRank": 4,
+            "exactTop1Id": "memory:cn_preference_train",
+            "exactTargetCosine": 0.9529500072189371,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "memory:cn_preference_train"
+          },
+          {
+            "id": "conflict_room_later",
+            "category": "conflict",
+            "queryId": "query:conflict_room_later",
+            "exactTargetRank": 1,
+            "exactParaphraseOnlyRank": 1,
+            "exactTop1Id": "memory:conflict_room_later",
+            "exactTargetCosine": 0.9788713711788181,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 515,
+            "lshTop1Id": "memory:cn_promise_manual"
+          }
+        ]
+      },
+      "en": {
+        "language": "en",
+        "dimension": 512,
+        "corpusRecords": 512,
+        "queries": 12,
+        "exact": {
+          "cases": 12,
+          "recallAt5": 0.8333333333333334,
+          "top1": 0.4166666666666667,
+          "meanTargetRankWhenFound": 45.25,
+          "targetFoundCount": 12
+        },
+        "exactParaphrasesOnly": {
+          "cases": 12,
+          "recallAt5": 0.9166666666666666,
+          "top1": 0.4166666666666667,
+          "meanTargetRankWhenFound": 2.5833333333333335,
+          "targetFoundCount": 12
+        },
+        "lshRerankedTop50": {
+          "cases": 12,
+          "recallAt5": 0.16666666666666666,
+          "top1": 0.16666666666666666,
+          "meanTargetRankWhenFound": 17.333333333333332,
+          "targetFoundCount": 3
+        },
+        "lshCandidateRecall": 0.25,
+        "candidateCount": {
+          "mean": 108.08333333333333,
+          "p50": 99,
+          "p95": 279,
+          "min": 3,
+          "max": 287
+        },
+        "bucketHitsPerCandidateLead": {
+          "mean": 1.8333333333333333,
+          "p50": 2,
+          "p95": 3
+        },
+        "exactHubness": {
+          "maxTop1Appearances": 4,
+          "maxTop5Appearances": 7,
+          "top5HubsAt20Percent": 9
+        },
+        "distinctSignaturesPerTable": [
+          21,
+          18,
+          15,
+          23,
+          17,
+          23,
+          44,
+          20,
+          19,
+          14
+        ],
+        "cases": [
+          {
+            "id": "en_fact_archive",
+            "category": "fact",
+            "queryId": "query:en_fact_archive",
+            "exactTargetRank": 2,
+            "exactParaphraseOnlyRank": 2,
+            "exactTop1Id": "memory:same_name_jordan_country",
+            "exactTargetCosine": 0.3240240767635557,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 119,
+            "lshTop1Id": "distractor-300"
+          },
+          {
+            "id": "en_preference_travel",
+            "category": "preference",
+            "queryId": "query:en_preference_travel",
+            "exactTargetRank": 1,
+            "exactParaphraseOnlyRank": 1,
+            "exactTop1Id": "memory:en_preference_travel",
+            "exactTargetCosine": 0.3087581852659336,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 92,
+            "lshTop1Id": "distractor-472"
+          },
+          {
+            "id": "en_promise_manual",
+            "category": "promise",
+            "queryId": "query:en_promise_manual",
+            "exactTargetRank": 1,
+            "exactParaphraseOnlyRank": 1,
+            "exactTop1Id": "memory:en_promise_manual",
+            "exactTargetCosine": 0.4205661090686192,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 99,
+            "lshTop1Id": "distractor-624"
+          },
+          {
+            "id": "en_fact_recipe",
+            "category": "fact",
+            "queryId": "query:en_fact_recipe",
+            "exactTargetRank": 4,
+            "exactParaphraseOnlyRank": 4,
+            "exactTop1Id": "memory:en_preference_travel",
+            "exactTargetCosine": 0.32333544752247756,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 6,
+            "lshTop1Id": "memory:en_preference_travel"
+          },
+          {
+            "id": "en_preference_music",
+            "category": "preference",
+            "queryId": "query:en_preference_music",
+            "exactTargetRank": 20,
+            "exactParaphraseOnlyRank": 9,
+            "exactTop1Id": "memory:same_name_jordan_country",
+            "exactTargetCosine": 0.08581736755930983,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 5,
+            "lshTop1Id": "memory:same_name_jordan_country"
+          },
+          {
+            "id": "en_promise_garden",
+            "category": "promise",
+            "queryId": "query:en_promise_garden",
+            "exactTargetRank": 1,
+            "exactParaphraseOnlyRank": 1,
+            "exactTop1Id": "memory:en_promise_garden",
+            "exactTargetCosine": 0.45188644750743906,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 151,
+            "lshTop1Id": "distractor-0"
+          },
+          {
+            "id": "en_fact_map",
+            "category": "fact",
+            "queryId": "query:en_fact_map",
+            "exactTargetRank": 3,
+            "exactParaphraseOnlyRank": 3,
+            "exactTop1Id": "memory:same_name_jordan_country",
+            "exactTargetCosine": 0.2901394491012911,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 287,
+            "lshTop1Id": "distractor-108"
+          },
+          {
+            "id": "en_preference_food",
+            "category": "preference",
+            "queryId": "query:en_preference_food",
+            "exactTargetRank": 2,
+            "exactParaphraseOnlyRank": 2,
+            "exactTop1Id": "memory:en_preference_travel",
+            "exactTargetCosine": 0.2824772490579343,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 123,
+            "lshTop1Id": "distractor-0"
+          },
+          {
+            "id": "en_promise_trip",
+            "category": "promise",
+            "queryId": "query:en_promise_trip",
+            "exactTargetRank": 4,
+            "exactParaphraseOnlyRank": 3,
+            "exactTop1Id": "memory:conflict_budget_new",
+            "exactTargetCosine": 0.2148652578103788,
+            "lshTargetRank": null,
+            "lshTargetIn50": false,
+            "lshCandidates": 3,
+            "lshTop1Id": "distractor-0"
+          },
+          {
+            "id": "same_name_jordan_country",
+            "category": "same_name",
+            "queryId": "query:same_name_jordan_country",
+            "exactTargetRank": 1,
+            "exactParaphraseOnlyRank": 1,
+            "exactTop1Id": "memory:same_name_jordan_country",
+            "exactTargetCosine": 0.44330749185093216,
+            "lshTargetRank": 1,
+            "lshTargetIn50": true,
+            "lshCandidates": 6,
+            "lshTop1Id": "memory:same_name_jordan_country"
+          },
+          {
+            "id": "conflict_budget_old",
+            "category": "conflict",
+            "queryId": "query:conflict_budget_old",
+            "exactTargetRank": 1,
+            "exactParaphraseOnlyRank": 1,
+            "exactTop1Id": "memory:conflict_budget_old",
+            "exactTargetCosine": 0.48050403139966424,
+            "lshTargetRank": 1,
+            "lshTargetIn50": true,
+            "lshCandidates": 127,
+            "lshTop1Id": "memory:conflict_budget_old"
+          },
+          {
+            "id": "conflict_budget_new",
+            "category": "conflict",
+            "queryId": "query:conflict_budget_new",
+            "exactTargetRank": 503,
+            "exactParaphraseOnlyRank": 3,
+            "exactTop1Id": "distractor-732",
+            "exactTargetCosine": 0.24156979925136374,
+            "lshTargetRank": 50,
+            "lshTargetIn50": true,
+            "lshCandidates": 279,
+            "lshTop1Id": "distractor-914"
+          }
+        ]
+      }
+    },
+    "perCategory": {
+      "fact": {
+        "cases": 7,
+        "exactRecallAt5": 0.5714285714285714,
+        "exactParaphrasesOnlyRecallAt5": 0.5714285714285714,
+        "exactTop1": 0,
+        "lshRecallAt5": 0.14285714285714285,
+        "lshTop1": 0
+      },
+      "preference": {
+        "cases": 7,
+        "exactRecallAt5": 0.8571428571428571,
+        "exactParaphrasesOnlyRecallAt5": 0.8571428571428571,
+        "exactTop1": 0.42857142857142855,
+        "lshRecallAt5": 0.14285714285714285,
+        "lshTop1": 0.14285714285714285
+      },
+      "promise": {
+        "cases": 7,
+        "exactRecallAt5": 0.8571428571428571,
+        "exactParaphrasesOnlyRecallAt5": 0.8571428571428571,
+        "exactTop1": 0.42857142857142855,
+        "lshRecallAt5": 0.14285714285714285,
+        "lshTop1": 0.14285714285714285
+      },
+      "same_name": {
+        "cases": 2,
+        "exactRecallAt5": 1,
+        "exactParaphrasesOnlyRecallAt5": 1,
+        "exactTop1": 0.5,
+        "lshRecallAt5": 0.5,
+        "lshTop1": 0.5
+      },
+      "conflict": {
+        "cases": 4,
+        "exactRecallAt5": 0.75,
+        "exactParaphrasesOnlyRecallAt5": 1,
+        "exactTop1": 0.5,
+        "lshRecallAt5": 0.25,
+        "lshTop1": 0.25
+      }
+    },
+    "paraphraseAndEntityRanks": [
+      {
+        "id": "same_name_jordan_country_zh",
+        "category": "same_name",
+        "queryId": "query:same_name_jordan_country_zh",
+        "exactTargetRank": 3,
+        "exactParaphraseOnlyRank": 3,
+        "exactTop1Id": "memory:cn_promise_manual",
+        "exactTargetCosine": 0.9625313162051414,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "distractor-955"
+      },
+      {
+        "id": "conflict_room_early",
+        "category": "conflict",
+        "queryId": "query:conflict_room_early",
+        "exactTargetRank": 4,
+        "exactParaphraseOnlyRank": 4,
+        "exactTop1Id": "memory:cn_preference_train",
+        "exactTargetCosine": 0.9529500072189371,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "memory:cn_preference_train"
+      },
+      {
+        "id": "conflict_room_later",
+        "category": "conflict",
+        "queryId": "query:conflict_room_later",
+        "exactTargetRank": 1,
+        "exactParaphraseOnlyRank": 1,
+        "exactTop1Id": "memory:conflict_room_later",
+        "exactTargetCosine": 0.9788713711788181,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "memory:cn_promise_manual"
+      },
+      {
+        "id": "same_name_jordan_country",
+        "category": "same_name",
+        "queryId": "query:same_name_jordan_country",
+        "exactTargetRank": 1,
+        "exactParaphraseOnlyRank": 1,
+        "exactTop1Id": "memory:same_name_jordan_country",
+        "exactTargetCosine": 0.44330749185093216,
+        "lshTargetRank": 1,
+        "lshTargetIn50": true,
+        "lshCandidates": 6,
+        "lshTop1Id": "memory:same_name_jordan_country"
+      },
+      {
+        "id": "conflict_budget_old",
+        "category": "conflict",
+        "queryId": "query:conflict_budget_old",
+        "exactTargetRank": 1,
+        "exactParaphraseOnlyRank": 1,
+        "exactTop1Id": "memory:conflict_budget_old",
+        "exactTargetCosine": 0.48050403139966424,
+        "lshTargetRank": 1,
+        "lshTargetIn50": true,
+        "lshCandidates": 127,
+        "lshTop1Id": "memory:conflict_budget_old"
+      },
+      {
+        "id": "conflict_budget_new",
+        "category": "conflict",
+        "queryId": "query:conflict_budget_new",
+        "exactTargetRank": 503,
+        "exactParaphraseOnlyRank": 3,
+        "exactTop1Id": "distractor-732",
+        "exactTargetCosine": 0.24156979925136374,
+        "lshTargetRank": 50,
+        "lshTargetIn50": true,
+        "lshCandidates": 279,
+        "lshTop1Id": "distractor-914"
+      }
+    ],
+    "failures": [
+      {
+        "id": "cn_fact_archive_city",
+        "category": "fact",
+        "queryId": "query:cn_fact_archive_city",
+        "exactTargetRank": 16,
+        "exactParaphraseOnlyRank": 15,
+        "exactTop1Id": "memory:cn_promise_garden",
+        "exactTargetCosine": 0.9422162447078077,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "memory:cn_promise_manual"
+      },
+      {
+        "id": "cn_preference_train",
+        "category": "preference",
+        "queryId": "query:cn_preference_train",
+        "exactTargetRank": 4,
+        "exactParaphraseOnlyRank": 4,
+        "exactTop1Id": "memory:cn_promise_garden",
+        "exactTargetCosine": 0.9626478515556368,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "distractor-431"
+      },
+      {
+        "id": "cn_promise_manual",
+        "category": "promise",
+        "queryId": "query:cn_promise_manual",
+        "exactTargetRank": 3,
+        "exactParaphraseOnlyRank": 3,
+        "exactTop1Id": "memory:conflict_room_later",
+        "exactTargetCosine": 0.9648534115341619,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "distractor-201"
+      },
+      {
+        "id": "cn_fact_recipe",
+        "category": "fact",
+        "queryId": "query:cn_fact_recipe",
+        "exactTargetRank": 8,
+        "exactParaphraseOnlyRank": 8,
+        "exactTop1Id": "memory:cn_preference_train",
+        "exactTargetCosine": 0.9484994311138997,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "memory:conflict_room_later"
+      },
+      {
+        "id": "cn_preference_food",
+        "category": "preference",
+        "queryId": "query:cn_preference_food",
+        "exactTargetRank": 1,
+        "exactParaphraseOnlyRank": 1,
+        "exactTop1Id": "memory:cn_preference_food",
+        "exactTargetCosine": 0.9663942692781121,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "memory:cn_preference_train"
+      },
+      {
+        "id": "cn_promise_trip",
+        "category": "promise",
+        "queryId": "query:cn_promise_trip",
+        "exactTargetRank": 5,
+        "exactParaphraseOnlyRank": 5,
+        "exactTop1Id": "memory:cn_preference_light",
+        "exactTargetCosine": 0.9611592106622767,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "distractor-1"
+      },
+      {
+        "id": "cn_fact_plant",
+        "category": "fact",
+        "queryId": "query:cn_fact_plant",
+        "exactTargetRank": 27,
+        "exactParaphraseOnlyRank": 14,
+        "exactTop1Id": "memory:conflict_room_later",
+        "exactTargetCosine": 0.9272681376748051,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "distractor-131"
+      },
+      {
+        "id": "cn_preference_light",
+        "category": "preference",
+        "queryId": "query:cn_preference_light",
+        "exactTargetRank": 1,
+        "exactParaphraseOnlyRank": 1,
+        "exactTop1Id": "memory:cn_preference_light",
+        "exactTargetCosine": 0.9682097626638959,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "memory:cn_promise_garden"
+      },
+      {
+        "id": "cn_promise_photo",
+        "category": "promise",
+        "queryId": "query:cn_promise_photo",
+        "exactTargetRank": 8,
+        "exactParaphraseOnlyRank": 8,
+        "exactTop1Id": "memory:conflict_room_early",
+        "exactTargetCosine": 0.9465120680061606,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "distractor-487"
+      },
+      {
+        "id": "same_name_jordan_country_zh",
+        "category": "same_name",
+        "queryId": "query:same_name_jordan_country_zh",
+        "exactTargetRank": 3,
+        "exactParaphraseOnlyRank": 3,
+        "exactTop1Id": "memory:cn_promise_manual",
+        "exactTargetCosine": 0.9625313162051414,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "distractor-955"
+      },
+      {
+        "id": "conflict_room_early",
+        "category": "conflict",
+        "queryId": "query:conflict_room_early",
+        "exactTargetRank": 4,
+        "exactParaphraseOnlyRank": 4,
+        "exactTop1Id": "memory:cn_preference_train",
+        "exactTargetCosine": 0.9529500072189371,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "memory:cn_preference_train"
+      },
+      {
+        "id": "conflict_room_later",
+        "category": "conflict",
+        "queryId": "query:conflict_room_later",
+        "exactTargetRank": 1,
+        "exactParaphraseOnlyRank": 1,
+        "exactTop1Id": "memory:conflict_room_later",
+        "exactTargetCosine": 0.9788713711788181,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 515,
+        "lshTop1Id": "memory:cn_promise_manual"
+      },
+      {
+        "id": "en_fact_archive",
+        "category": "fact",
+        "queryId": "query:en_fact_archive",
+        "exactTargetRank": 2,
+        "exactParaphraseOnlyRank": 2,
+        "exactTop1Id": "memory:same_name_jordan_country",
+        "exactTargetCosine": 0.3240240767635557,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 119,
+        "lshTop1Id": "distractor-300"
+      },
+      {
+        "id": "en_preference_travel",
+        "category": "preference",
+        "queryId": "query:en_preference_travel",
+        "exactTargetRank": 1,
+        "exactParaphraseOnlyRank": 1,
+        "exactTop1Id": "memory:en_preference_travel",
+        "exactTargetCosine": 0.3087581852659336,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 92,
+        "lshTop1Id": "distractor-472"
+      },
+      {
+        "id": "en_promise_manual",
+        "category": "promise",
+        "queryId": "query:en_promise_manual",
+        "exactTargetRank": 1,
+        "exactParaphraseOnlyRank": 1,
+        "exactTop1Id": "memory:en_promise_manual",
+        "exactTargetCosine": 0.4205661090686192,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 99,
+        "lshTop1Id": "distractor-624"
+      },
+      {
+        "id": "en_fact_recipe",
+        "category": "fact",
+        "queryId": "query:en_fact_recipe",
+        "exactTargetRank": 4,
+        "exactParaphraseOnlyRank": 4,
+        "exactTop1Id": "memory:en_preference_travel",
+        "exactTargetCosine": 0.32333544752247756,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 6,
+        "lshTop1Id": "memory:en_preference_travel"
+      },
+      {
+        "id": "en_preference_music",
+        "category": "preference",
+        "queryId": "query:en_preference_music",
+        "exactTargetRank": 20,
+        "exactParaphraseOnlyRank": 9,
+        "exactTop1Id": "memory:same_name_jordan_country",
+        "exactTargetCosine": 0.08581736755930983,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 5,
+        "lshTop1Id": "memory:same_name_jordan_country"
+      },
+      {
+        "id": "en_promise_garden",
+        "category": "promise",
+        "queryId": "query:en_promise_garden",
+        "exactTargetRank": 1,
+        "exactParaphraseOnlyRank": 1,
+        "exactTop1Id": "memory:en_promise_garden",
+        "exactTargetCosine": 0.45188644750743906,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 151,
+        "lshTop1Id": "distractor-0"
+      },
+      {
+        "id": "en_fact_map",
+        "category": "fact",
+        "queryId": "query:en_fact_map",
+        "exactTargetRank": 3,
+        "exactParaphraseOnlyRank": 3,
+        "exactTop1Id": "memory:same_name_jordan_country",
+        "exactTargetCosine": 0.2901394491012911,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 287,
+        "lshTop1Id": "distractor-108"
+      },
+      {
+        "id": "en_preference_food",
+        "category": "preference",
+        "queryId": "query:en_preference_food",
+        "exactTargetRank": 2,
+        "exactParaphraseOnlyRank": 2,
+        "exactTop1Id": "memory:en_preference_travel",
+        "exactTargetCosine": 0.2824772490579343,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 123,
+        "lshTop1Id": "distractor-0"
+      },
+      {
+        "id": "en_promise_trip",
+        "category": "promise",
+        "queryId": "query:en_promise_trip",
+        "exactTargetRank": 4,
+        "exactParaphraseOnlyRank": 3,
+        "exactTop1Id": "memory:conflict_budget_new",
+        "exactTargetCosine": 0.2148652578103788,
+        "lshTargetRank": null,
+        "lshTargetIn50": false,
+        "lshCandidates": 3,
+        "lshTop1Id": "distractor-0"
+      },
+      {
+        "id": "conflict_budget_new",
+        "category": "conflict",
+        "queryId": "query:conflict_budget_new",
+        "exactTargetRank": 503,
+        "exactParaphraseOnlyRank": 3,
+        "exactTop1Id": "distractor-732",
+        "exactTargetCosine": 0.24156979925136374,
+        "lshTargetRank": 50,
+        "lshTargetIn50": true,
+        "lshCandidates": 279,
+        "lshTop1Id": "distractor-914"
+      }
+    ]
+  },
+  "storageEstimatePerMemory": {
+    "zh": {
+      "dimension": 640,
+      "rawFloat32Bytes": 2560,
+      "encryptedBinaryBytesWithNonceAndTag": 2588,
+      "encryptedBase64CharactersApprox": 3452,
+      "lshBucketTokensPerMemory": 10,
+      "indexedTokenTextCharactersApprox": 220
+    },
+    "en": {
+      "dimension": 512,
+      "rawFloat32Bytes": 2048,
+      "encryptedBinaryBytesWithNonceAndTag": 2076,
+      "encryptedBase64CharactersApprox": 2768,
+      "lshBucketTokensPerMemory": 10,
+      "indexedTokenTextCharactersApprox": 220
+    }
+  },
+  "elapsedMs": 12065,
+  "decisionEvidence": "Compare exact sentence-vector recall with the existing lexical baseline, then measure LSH target-candidate and reranked recall plus hubness before considering indexing."
+}
