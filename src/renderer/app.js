@@ -21,36 +21,104 @@ function setAvatarList(list) {
   AVATARS = {};
   for (const a of AVATAR_LIST) AVATARS[a.key] = a;
 }
-/* 动作文件：文件名即 key，丢一个 .vrma 进来就在这里加一行。
+/* ═══════════ 动作库 · 92 条 ═══════════
+ * 文件名即 key，规则是「槽位_变体」（全小写下划线）。
+ * 中文名 / 怎么用 / 原素材出处都记在主进程 config.js 的 MOTIONS 里，启动时随 pet:init 送过来。
+ * 素材：VRoid Project Motion Pack（pixiv Inc.）、VRM Viewer、desktop-homunculus(Apache-2.0)、
+ *   Reika 待机集、Cipher Stage、MayaVE、ai-tuber、chatter-agent、mocopi 样例、desktop-waifu。
  *
- * ── 两批来源 ──
- * vrm-viewer（11 条）＋ idle_loop：早期就有，每条 3.9 秒，循环呼吸/情绪定式。
- * VRoid Project Motion Pack（10 条，pixiv 免费配布，用时须署名 pixiv Inc.）
- *   VRMA_07 greeting greeting2 hello model_pose motion_pose peace_sign shoot
- *   show_full_body spin
- * not-elm/desktop-homunculus（3 条，Apache-2.0）
- *   grabbed idle-maid idle-sitting
+ * ── 槽位制：模型只给类名，代码在类里随机挑 ──
+ * 92 个动作名全塞进提示词是一堵墙，而且模型只会挑它听熟的那三四个，剩下的轮不上。
+ * 所以提示词里只有十几个槽位名（cheer / think / shy …），模型输出 <m>cheer</m>，
+ * pickSlotKey() 再从 cheer 这一槽的 9 条里随机挑一条，并避开上一次挑中的 ——
+ * 主人连着夸她两次，两次的动作不一样，这才像活的。
  *
- * 带窗口的动作只取其中一段（见 MOTION_WINDOWS）：这批是 8~20 秒的展示动作，
- * 整条播会把娃娃钉在原地十几秒，所以按语义切一段。 */
+ * 超过 6.5 秒的一次性动作在 motion-cut.js 里切了段（窗口由能量曲线自动算出）。 */
 const MOTION_FILES = [
-  'idle_loop', 'LookAround', 'Relax', 'Thinking', 'Sleepy',
-  'Goodbye', 'Clapping', 'Jump', 'Surprised', 'Angry', 'Sad', 'Blush',
-  // VRoid Project Motion Pack
-  'VRMA_07', 'greeting', 'greeting2', 'hello', 'model_pose',
-  'motion_pose', 'peace_sign', 'shoot', 'show_full_body', 'spin',
-  // desktop-homunculus
-  'grabbed', 'idle-maid', 'idle-sitting',
+  // idle
+  'idle_look', 'idle_breath', 'idle_stand', 'idle_stand2', 'idle_lalala', 'idle_shift',
+  'idle_pose', 'idle_loop', 'idle_walk_mocopi',
+
+  // work
+  'work_maid', 'work_sit',
+
+  // greet
+  'greet_yeah', 'greet_wave', 'greet_turn', 'greet_hand',
+
+  // bye
+  'bye_goodbye', 'bye_wave', 'bye_wave_maya',
+
+  // cheer
+  'cheer_clap_vr', 'cheer_jump_vr', 'cheer_hop', 'cheer_yay', 'cheer_clap_cipher',
+  'cheer_clap_maya', 'cheer_arms', 'cheer_cross', 'cheer_joy',
+
+  // praise
+  'praise_shoot', 'praise_snap', 'praise_thumb',
+
+  // sign
+  'sign_peace',
+
+  // dance
+  'dance_excited', 'dance_excited_maya', 'dance_macarena',
+
+  // tease
+  'tease_cat', 'tease_scare', 'tease_zombie', 'tease_headbutt', 'tease_catwalk', 'tease_punch',
+  'tease_stand', 'tease_peek',
+
+  // refuse
+  'refuse_head', 'refuse_reject', 'refuse_shrug', 'refuse_waving', 'refuse_fear', 'refuse_no',
+  'refuse_startle',
+
+  // angry
+  'angry_pout', 'angry_tsundere', 'angry_hip', 'angry_arms', 'angry_stomp',
+
+  // shy
+  'shy_face', 'shy_cute', 'shy_bashful', 'shy_sway',
+
+  // think
+  'think_lady', 'think_idea', 'think_cute', 'think_ultra', 'think_dw',
+
+  // sorry
+  'sorry_sad', 'sorry_grab', 'sorry_cry', 'sorry_sigh', 'sorry_droop',
+
+  // tired
+  'tired_stretch_vr', 'tired_sleep', 'tired_reach', 'tired_sitnap', 'tired_nod', 'tired_yawn',
+  'tired_armstretch',
+
+  // thanks
+  'thanks_bow_reika', 'thanks_cipher', 'thanks_maya',
+
+  // surprise
+  'surprise_scratch', 'surprise_vr', 'surprise_cipher',
+
+  // pose
+  'pose_model', 'pose_show', 'pose_spin',
+
+  // motion
+  'motion_cute', 'motion_spinjump', 'motion_walk', 'motion_run', 'motion_situp2',
+  'motion_situp', 'motion_spin',
+
+  // talk
+  'talk_talk',
 ];
 
-/* 切段表在 motion-cut.js（和裁剪函数放一起，dev-anim.html 校验时用同一份）。
- * 带窗口的动作只取其中一段：这批是 8~20 秒的展示动作，整条播会把娃娃钉在原地
- * 十几秒，所以按语义切一段。 */
+/* 待机。idle 槽里挑一条循环站姿；主人在干活时换成 work 槽的安静站姿。 */
 const IDLE = 'idle_loop';
-/* 第二待机：主人在专注干活时用的安静站姿。手交叠在身前，几乎不动 ——
- * 「她在旁边陪着，但不打扰」。idle_loop 那张望的待机留给闲着的时候。 */
-const IDLE_QUIET = 'idle-maid';
+/* 第二待机：主人在干活时用的待命站姿。手交叠在身前，几乎不动 ——
+ * 「她在旁边陪着，但不打扰」。会张望的那种待机留给主人闲着的时候。 */
+const IDLE_QUIET = 'work_maid';
+/* 空闲时允许轮换的循环待机（都是原地站姿，不会走开）。 */
+const IDLE_POOL = ['idle_loop', 'idle_breath', 'idle_stand', 'idle_stand2', 'idle_shift', 'idle_pose', 'idle_lalala'];
+/* 空闲自娱自乐抽的槽位：以安静的为主，穿插一点俏皮。
+ * 不抽 pose / motion / dance 那种大动作 —— 无缘无故转圈显得神经。 */
+const AMBIENT_SLOTS = ['idle', 'idle', 'idle', 'tired', 'tease', 'praise', 'sign', 'shy', 'think', 'cheer'];
 const FADE = 0.26;
+
+/* 动作表（中文名 / 槽位 / 什么场合用）由主进程在 pet:init 时一起送过来 ——
+ * 唯一的真相源是 src/main/config.js 的 MOTIONS，渲染层不另存一份。
+ * 槽位随机（pickSlotKey）和动作列表窗口都读它。 */
+let MOTIONS = [];
+let MOTION_GROUPS = [];
 
 /* ═══════════ 状态 ═══════════ */
 let cfg = null;
@@ -140,11 +208,9 @@ let modelX = 0;
 let lastGxPx = 1e9;
 const groundEl = document.getElementById('ground');
 
+/* 设置和动作列表都搬去自己的窗口了（见 panel.html），所以这里常年为 0：
+ * 她不用再为了给面板腾地方而挪位置，永远站在画面正中。影子也就不用跟着跑。 */
 function panelInsetPx() {
-  const open = (el) => el && !el.classList.contains('hidden');
-  // 只有动作面板是右侧抽屉（主人这时候是来看她动的）；设置是底部抽屉，不占横向。
-  // +14 是面板和她之间的呼吸，不然袖子会贴着面板边缘。
-  if (open(document.getElementById('motions'))) return 154 + 10 + 14;
   return 0;
 }
 
@@ -287,18 +353,47 @@ function playMotion(key, { loop = false, fade = FADE } = {}) {
   paintMotionActive();
 }
 
+/* ═══════════ 槽位 → 具体动作 ═══════════
+ * 模型给的是槽位名（cheer / think / shy …），这里在同一槽里随机挑一条。
+ * 两个讲究：
+ *   1. 避开这一槽上一次挑中的那条 —— 连着夸她两次，不能两次都是同一个鼓掌；
+ *   2. 只挑真正载入成功的（clips.has），某条 .vrma 坏了也不至于演空。
+ * 传进来的若已经是具体动作 key（含下划线），直接照播。 */
+const slotLast = new Map();
+function pickSlotKey(slot) {
+  const pool = MOTIONS.filter((m) => m.slot === slot && clips.has(m.key));
+  if (!pool.length) return null;
+  const last = slotLast.get(slot);
+  const fresh = pool.length > 1 ? pool.filter((m) => m.key !== last) : pool;
+  const m = fresh[Math.floor(Math.random() * fresh.length)];
+  slotLast.set(slot, m.key);
+  return m.key;
+}
+/** 槽位名或具体 key 都吃：有 key 就播 key，否则当槽位随机。 */
+function resolveMotion(name) {
+  if (!name) return null;
+  if (clips.has(name)) return name;
+  return pickSlotKey(name);
+}
+function playSlot(slot, fade = 0.22) {
+  const k = resolveMotion(slot);
+  if (!k) return null;
+  playOneShot(k, fade);
+  return k;
+}
+
 function playOneShot(key, fade = 0.2) {
   if (!clips.has(key)) return;
   playMotion(key, { loop: false, fade });
 }
 
 const AWAY_MS = 30 * 60e3;
-/** 主人开口了。隔了半小时以上再开口 → 起身迎接（greeting 是"从蹲姿站起来挥手"）。 */
+/** 主人开口了。隔了半小时以上再开口 → 起身迎接（greet 槽里那几条的共性是「从蹲姿站起来」）。 */
 function noteMaster() {
   const now = performance.now();
   const away = now - lastMasterAt;
   lastMasterAt = now;
-  if (away > AWAY_MS && !speakingNow && !thinkingNow) playOneShot('greeting', 0.5);
+  if (away > AWAY_MS && !speakingNow && !thinkingNow) playSlot('greet', 0.5);
 }
 
 /* 待机有两种：
@@ -311,6 +406,16 @@ function currentIdle() {
 }
 function toIdle(fade = 0.32) {
   playMotion(currentIdle(), { loop: true, fade });
+}
+/** 换一种站姿。idle 槽有 9 条循环站姿，一直用同一条，看着像贴图不动。
+ * 主人在干活时不换 —— 那时她该是待命站姿，不是在那儿换重心玩。 */
+function rotateIdle() {
+  if (phase === 'work') return;
+  const pool = IDLE_POOL.filter((k) => clips.has(k) && k !== idleKey);
+  if (!pool.length) return;
+  idleKey = pool[Math.floor(Math.random() * pool.length)];
+  toIdle(0.7);
+  pet.log(`[idle] 换站姿 ${idleKey}`);
 }
 
 /* ═══════════ 表情 / 口型 ═══════════ */
@@ -391,7 +496,9 @@ function stopAudio(keepQuiet) {
 
 /* ═══════════ 加载 ═══════════ */
 function loadMotions() {
-  return Promise.all(MOTION_FILES.map((k) => new Promise((res) => {
+  // 以主进程送来的表为准（那张表带中文名和槽位）；还没拿到就退回本地常量
+  const keys = MOTIONS.length ? MOTIONS.map((m) => m.key) : MOTION_FILES;
+  return Promise.all(keys.map((k) => new Promise((res) => {
     animLoader.load(`./assets/motions/${k}.vrma`, (g) => {
       const a = g.userData.vrmAnimations && g.userData.vrmAnimations[0];
       if (a) rawAnims.set(k, a);
@@ -544,11 +651,11 @@ addEventListener('mousemove', (e) => {
   pointer.y = -((e.clientY / innerHeight) * 2 - 1);
   updateHit(e);
 });
-addEventListener('mouseup', () => {
+addEventListener('mouseup', (e) => {
   if (dragging) {
     dragging = false;
     if (dragMoved) pet.drag('end');
-    else onPetClick();
+    else onPetClick(e);
     dragMoved = false;
     document.body.style.cursor = 'default';
   }
@@ -687,8 +794,56 @@ function closeDock() {
   dock.classList.add('hidden');
 }
 
-function onPetClick() {
+/* ═══════════ 摸她：点不同部位有不同反应 ═══════════
+ * 点脑袋 → 多半摇头拒绝（"别闹"）；点上身 → 害羞；点下身 → 不高兴。
+ * 每处都留了三条别的出路，概率错开 —— 同一个动作连点三次就穿帮了，
+ * 那不是活物，是个按钮。
+ *
+ * 分区用骨头投影出来的横向分界线（脖子 / 胯），不猜模型比例：
+ * 换任何一个 VRM 都照样分得对。 */
+const POKE = {
+  head:  [['refuse', .46], ['surprise', .2], ['tease', .18], ['shy', .16]],
+  upper: [['shy', .44], ['tease', .22], ['thanks', .18], ['greet', .16]],
+  lower: [['angry', .44], ['refuse', .22], ['sorry', .18], ['surprise', .16]],
+};
+function pokeSlot(list) {
+  let r = Math.random();
+  for (const [slot, p] of list) { if ((r -= p) <= 0) return slot; }
+  return list[0][0];
+}
+function bodyRegionAt(x, y) {
+  if (!vrm || !vrm.humanoid) return null;
+  const yOf = (bone) => {
+    const n = vrm.humanoid.getRawBoneNode(bone) || vrm.humanoid.getNormalizedBoneNode(bone);
+    if (!n) return null;
+    n.getWorldPosition(_v);
+    _v.project(camera);
+    if (!isFinite(_v.y)) return null;
+    return (-_v.y * 0.5 + 0.5) * innerHeight;
+  };
+  const head = yOf('head');
+  const hips = yOf('hips');
+  if (head === null || hips === null) return null;
+  const neck = yOf('neck');
+  const neckY = neck !== null ? neck : (head + hips) / 2;
+  if (y < neckY) return 'head';
+  if (y < hips) return 'upper';
+  return 'lower';
+}
+
+function onPetClick(e) {
   hideBubble();
+  const r = lastHit;
+  const onBody = !!(r && e && vrm &&
+    e.clientX >= r.x0 && e.clientX <= r.x1 && e.clientY >= r.y0 && e.clientY <= r.y1);
+  if (onBody) {
+    const region = bodyRegionAt(e.clientX, e.clientY) || 'upper';
+    const slot = pokeSlot(POKE[region]);
+    const k = playSlot(slot, 0.28);
+    ambientTimer = 26;
+    if (k) pet.log(`[poke] ${region} → ${slot} / ${k}`);
+    return;
+  }
   if (dockMode === 'open') closeDock();
   else openDock();
 }
@@ -749,7 +904,7 @@ let hintTimer = setTimeout(() => {
 }, 1800);
 
 document.getElementById('gearBtn').addEventListener('click', () => openSettings());
-document.getElementById('motionBtn').addEventListener('click', () => toggleMotions());
+document.getElementById('motionBtn').addEventListener('click', openMotions);
 document.getElementById('muteBtn').addEventListener('click', async () => {
   const on = !cfg.voice.enabled;
   cfg = await pet.config({ voice: { enabled: on } });
@@ -777,7 +932,7 @@ function stopRecordUI() {
   recEl.style.setProperty('--lvl', 0.2);
 }
 addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') { closeSettings(); closeDock(); }
+  if (e.key === 'Escape') closeDock();
 });
 
 /* ═══════════ 常驻聆听 ═══════════ */
@@ -848,8 +1003,16 @@ document.getElementById('permCheck')?.addEventListener('click', async () => {
 document.getElementById('permOpenSpeech')?.addEventListener('click', () => pet.openPrivacy('speech'));
 document.getElementById('permOpenMic')?.addEventListener('click', () => pet.openPrivacy('mic'));
 
-/* ═══════════ 设置面板 ═══════════ */
-const settings = document.getElementById('settings');
+/* ═══════════ 设置 / 动作列表 ═══════════
+ * 这两个都是独立窗口了（见 panel.html / panel.js）。
+ * 以前它们塞在角色窗口里：设置表单一铺开就把她的脸挡掉一半，92 条动作列表
+ * 更是把画面挤成一条缝。搬出去之后，这里只负责"喊一声把窗口开出来"。 */
+function openSettings() { pet.open('settings'); }
+function openMotions() { pet.open('motions'); }
+/* 动作列表窗口自己管高亮（它有自己的列表），这里只是留个同名的空实现，
+ * 免得播放路径上到处判空。 */
+function paintMotionActive() { /* 面板已搬到独立窗口 */ }
+function closeSettings() { /* 同上：设置不在本窗口里了 */ }
 
 /* 形象切换：点一下立刻换，不用等「保存」；换完顺手写回配置 */
 function paintAvatars() {
@@ -922,175 +1085,9 @@ async function refreshAvatars() {
   } catch {}
 }
 
-function openSettings() {
-  const c = cfg;
-  closeMotions();
-  closeDock();
-  document.getElementById('setName').value = c.buddy.name || '';
-  paintAvatars();
-  paintScale();
-  refreshAvatars();
-  document.getElementById('setUrl').value = c.llm.baseURL || '';
-  document.getElementById('setModel').value = c.llm.model || '';
-  document.getElementById('setKey').value = c.llm.apiKey ? '••••••••' : '';
-  document.getElementById('setTtsOn').checked = !!c.tts.enabled;
-  document.getElementById('setTtsUrl').value = c.tts.baseURL || '';
-  document.getElementById('setTtsKey').value = c.tts.apiKey ? '••••••••' : '';
-  document.getElementById('setTtsInstr').value = c.tts.instructions || '';
-  document.getElementById('setOnDone').checked = !!c.monitor.speakOnDone;
-  document.getElementById('setOnLong').checked = c.monitor.speakOnLong !== false;
-  document.getElementById('setOnStall').checked = c.monitor.speakOnStall !== false;
-  document.getElementById('setOnRest').checked = c.monitor.speakOnRest !== false;
-  document.getElementById('setGap').value = Math.round((c.monitor.minGapMs || 40000) / 1000);
-  document.getElementById('probeOut').classList.add('hidden');
-  paintPerm();
-  settings.classList.remove('hidden');
-  pet.hit(true);
-  interactiveState = true;
-}
-function closeSettings() {
-  settings.classList.add('hidden');
-}
-
-document.getElementById('closeSettings').addEventListener('click', closeSettings);
-
-document.getElementById('saveBtn').addEventListener('click', async () => {
-  const keyEl = document.getElementById('setKey');
-  const ttsKeyEl = document.getElementById('setTtsKey');
-  const patch = {
-    buddy: { name: document.getElementById('setName').value.trim() || 'baby' },
-    llm: {
-      baseURL: document.getElementById('setUrl').value.trim(),
-      model: document.getElementById('setModel').value.trim(),
-    },
-    tts: {
-      enabled: document.getElementById('setTtsOn').checked,
-      baseURL: document.getElementById('setTtsUrl').value.trim(),
-      instructions: document.getElementById('setTtsInstr').value.trim(),
-    },
-    monitor: {
-      speakOnDone: document.getElementById('setOnDone').checked,
-      speakOnLong: document.getElementById('setOnLong').checked,
-      speakOnStall: document.getElementById('setOnStall').checked,
-      speakOnRest: document.getElementById('setOnRest').checked,
-      minGapMs: Math.max(10, Number(document.getElementById('setGap').value) || 40) * 1000,
-    },
-  };
-  if (keyEl.value && !keyEl.value.includes('•')) patch.llm.apiKey = keyEl.value.trim();
-  if (ttsKeyEl.value && !ttsKeyEl.value.includes('•')) patch.tts.apiKey = ttsKeyEl.value.trim();
-  cfg = await pet.config(patch);
-  showBubble('记下了。', 1800);
-  closeSettings();
-});
-
-document.getElementById('probeBtn').addEventListener('click', async () => {
-  const out = document.getElementById('probeOut');
-  out.classList.remove('hidden');
-  out.textContent = '自检中…';
-  const r = await pet.probe();
-  const lines = [];
-  lines.push(`模型  ${r.llm.ok ? '✓' : '✗'}  ${r.llm.ms}ms  ${r.llm.ok ? r.llm.text : r.llm.error}`);
-  lines.push(`语音  ${r.tts.ok ? '✓' : '✗'}  ${r.tts.ms}ms  ${r.tts.ok ? Math.round(r.tts.bytes / 1024) + 'KB' : r.tts.error}`);
-  lines.push(`识别  ${r.asr.ok ? '✓ 已就绪' : '✗ 缺少 bin/asr'}`);
-  lines.push(`监控  ${r.monitor.file ? '✓ ' + (r.monitor.snap?.title || r.monitor.snap?.sessionId || '') : '✗ 没找到会话'}`);
-  out.textContent = lines.join('\n');
-});
-
-/* ═══════════ 动作列表 ═══════════
- * 入口两个：顶部菜单（托盘）里的「动作列表…」、右上那颗 ▶。
- * 面板只占右侧一条，角色被挤到左边继续演 —— 点一个动作就地播，
- * 主人能完整看见整段动作，不用来回切窗口。 */
-let MOTIONS = [];
-let MOTION_GROUPS = [{ id: 'idle', label: '待机' }];
-const motionsPanel = document.getElementById('motions');
-let motionBuilt = 0;
+/* 动作列表在独立窗口里（panel.html），这里只留一个开关。
+ * 主人从那边点一个动作，主进程把 key 转成 'motion' 事件送回来，playOneShot 照播。 */
 let motionOpenFlag = false;
-
-function buildMotionList() {
-  const box = document.getElementById('motionList');
-  if (!box) return;
-  if (motionBuilt === MOTIONS.length + 1) return;   // 已经按同一份表建过
-  box.innerHTML = '';
-
-  const back = document.createElement('button');
-  back.className = 'mBack';
-  back.textContent = '回到待机';
-  back.addEventListener('click', () => {
-    toIdle(0.3);
-    ambientTimer = 26;
-    paintMotionActive();
-  });
-  box.appendChild(back);
-
-  const groups = MOTION_GROUPS && MOTION_GROUPS.length
-    ? MOTION_GROUPS
-    : [{ id: '', label: '' }];
-  for (const g of groups) {
-    const items = MOTIONS.filter((m) => (m.group || '') === g.id);
-    if (!items.length) continue;
-    const h = document.createElement('div');
-    h.className = 'mGroup';
-    h.textContent = g.label;
-    box.appendChild(h);
-    for (const m of items) {
-      const b = document.createElement('button');
-      b.className = 'mItem';
-      b.dataset.key = m.key;
-      b.title = m.use ? `${m.label} · ${m.use}` : (m.label || m.key);
-      const name = document.createElement('span');
-      name.textContent = m.label || m.key;
-      b.appendChild(name);
-      if (m.loop) {
-        const lp = document.createElement('span');
-        lp.className = 'lp';
-        lp.textContent = '↻';
-        b.appendChild(lp);
-      }
-      b.addEventListener('click', () => playFromList(m));
-      box.appendChild(b);
-    }
-  }
-  motionBuilt = MOTIONS.length + 1;
-  paintMotionActive();
-}
-
-function paintMotionActive() {
-  const box = document.getElementById('motionList');
-  if (!box || motionsPanel.classList.contains('hidden')) return;
-  for (const b of box.querySelectorAll('button.mItem')) {
-    b.classList.toggle('on', b.dataset.key === currentMotion);
-  }
-}
-
-function playFromList(m) {
-  if (!clips.has(m.key)) { showBubble(`「${m.label || m.key}」没载进来。`, 1800); return; }
-  // 主人正在看动作：这段时间别让空闲自娱自乐插一脚，别把动作抢掉
-  ambientTimer = 40;
-  if (m.loop) playMotion(m.key, { loop: true, fade: 0.3 });
-  else playOneShot(m.key, 0.22);
-  pet.log(`[motion] 手动 ${m.key}`);
-  paintMotionActive();
-}
-
-function openMotions() {
-  closeSettings();
-  closeDock();
-  buildMotionList();
-  motionsPanel.classList.remove('hidden');
-  motionOpenFlag = true;
-  ambientTimer = 40;
-  pet.log('[motion] 打开动作列表');
-}
-function closeMotions() {
-  motionsPanel.classList.add('hidden');
-  motionOpenFlag = false;
-}
-function toggleMotions() {
-  if (motionsPanel.classList.contains('hidden')) openMotions();
-  else closeMotions();
-}
-document.getElementById('closeMotions').addEventListener('click', closeMotions);
-document.getElementById('openMotions').addEventListener('click', openMotions);
 
 /* ═══════════ 主循环 ═══════════ */
 let ambientTimer = 22 + Math.random() * 16;
@@ -1179,11 +1176,16 @@ function frame() {
     if (!speakingNow && !thinkingNow && !recording && dockMode !== 'open' && !emoActive() && !motionOpenFlag) {
       ambientTimer -= dt;
       if (ambientTimer <= 0) {
-        // 都是"一眼看得出什么意思"的短段：挥手、比耶、扶脸、张望、伸懒腰。
-        // 不放 spin / show_full_body —— 那两个是仪式感动作，随便乱转显得宅。
-        const pool = ['LookAround', 'Relax', 'Sleepy', 'Clapping', 'greeting2', 'peace_sign', 'VRMA_07', 'hello'];
-        const pick = pool.filter((k) => clips.has(k));
-        playOneShot(pick[Math.floor(Math.random() * pick.length)], 0.45);
+        // 抽一个槽位，槽内随机。抽到 idle 且抽中循环站姿 → 换一种站法站着；
+        // 其余按一次性动作播，播完 mixer 的 finished 会自己回待机。
+        // 不抽 pose / motion / dance —— 无缘无故转圈、做仰卧起坐，显得神经。
+        const slot = AMBIENT_SLOTS[Math.floor(Math.random() * AMBIENT_SLOTS.length)];
+        const k = pickSlotKey(slot);
+        if (k) {
+          const m = MOTIONS.find((x) => x.key === k);
+          if (m && m.loop) { idleKey = k; toIdle(0.7); }
+          else playOneShot(k, 0.45);
+        }
         ambientTimer = 18 + Math.random() * 20;
       }
     }
@@ -1221,9 +1223,12 @@ function wire() {
         break;
       case 'delta':
         break;
-      case 'motion':
-        if (ev.key) playOneShot(ev.key, 0.18);
+      case 'motion': {
+        // 模型给的是槽位名（cheer），也可能是具体 key（手动列表复用这条路）
+        const k = resolveMotion(ev.key);
+        if (k) playOneShot(k, 0.18);
         break;
+      }
       case 'emo':
         if (ev.key) applyEmo(ev.key, 1, 2800);
         break;
@@ -1232,8 +1237,12 @@ function wire() {
         thinkingNow = !!ev.on;
         if (thinkingNow) {
           ambientTimer = 30;
-          if (!speakingNow && clips.has('Thinking')) playMotion('Thinking', { loop: true, fade: 0.22 });
-          else if (!speakingNow) playOneShot('LookAround', 0.3);
+          if (!speakingNow) {
+            // think 槽 5 条轮换；一条都没载入就退回张望
+            const k = resolveMotion('think');
+            if (k) playOneShot(k, 0.3);
+            else if (clips.has('idle_look')) playOneShot('idle_look', 0.3);
+          }
         } else if (!speakingNow) {
           toIdle(0.42);
         }
@@ -1292,6 +1301,11 @@ function wire() {
         break;
       case 'motions':
         openMotions();
+        break;
+      case 'toidle':
+        // 动作列表窗口里的「回到待机」
+        ambientTimer = 26;
+        toIdle(0.3);
         break;
       case 'record':
         if (ev.state === 'listening') { startRecordUI(); document.getElementById('recText').textContent = '在听…'; }
@@ -1416,6 +1430,12 @@ function slideLine(txt, up = true) {
   };
 }
 
+/* 鼠标停在状态条上 = 主人正在读这一条：立刻停住，别在他眼皮底下把字滚走。
+ * 移开之后不是接着滚，而是重新等满一个周期 —— 他可能只是顺手划过去看看。 */
+let actHover = false;
+activity.addEventListener('pointerenter', () => { actHover = true; stopRoll(); });
+activity.addEventListener('pointerleave', () => { actHover = false; startRoll(); });
+
 function stopRoll() {
   if (actTimer) clearInterval(actTimer);
   actTimer = null;
@@ -1423,6 +1443,7 @@ function stopRoll() {
 
 function startRoll() {
   stopRoll();
+  if (actHover) return;                 // 鼠标还停在上面，等它移开再重新开始计时
   if (actLines.length < 2 || actTextMode) return;
   actTimer = setInterval(() => {
     if (actTextMode || !actLines.length) return;
@@ -1565,13 +1586,8 @@ window.__away = (ms) => { lastMasterAt = performance.now() - ms; return ms; };
 window.__avatar = (k) => { switchAvatar(k); return k; };
 window.__avatars = () => Object.keys(AVATARS);
 window.__openSettings = () => { openSettings(); return true; };
-window.__motions = () => ({ open: !motionsPanel.classList.contains('hidden'), built: motionBuilt });
-window.__openMotions = () => { openMotions(); return true; };
-window.__motionPlay = (k) => {
-  const m = MOTIONS.find((x) => x.key === k);
-  if (m) playFromList(m);
-  return currentMotion;
-};
+window.__motions = () => ({ count: MOTIONS.length, groups: MOTION_GROUPS.length, slots: [...new Set(MOTIONS.map((m) => m.slot))] });
+window.__playSlot = (slot) => playSlot(slot, 0.2);
 window.__scale = (k) => { setScale(k); return viewScale; };
 window.__light = () => ({
   ambient: +ambient.intensity.toFixed(2),

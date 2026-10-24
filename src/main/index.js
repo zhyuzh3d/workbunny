@@ -271,6 +271,9 @@ function createWindow() {
     const tag = ['log', 'warn', 'error', 'debug'][level] || 'log';
     const msg = String(message);
     if (msg.includes('DevTools')) return;
+    // three-vrm 对每个没写 specVersion 的 VRMA 都会喊一句。素材是第三方导的，
+    // 改不动；让它在日志里刷 92 遍只会把真正的报错埋掉。
+    if (msg.includes('specVersion of the VRMA')) return;
     if (!IS_DEV && level < 2) return;
     log(`[renderer:${tag}] ${msg}  (${String(sourceId || '').split('/').pop()}:${line})`);
   });
@@ -311,6 +314,66 @@ function createWindow() {
     const [px, py] = win.getPosition();
     config.save({ window: { x: px, y: py } });
   });
+}
+
+/* ── 独立窗口：设置 / 动作列表 ──
+ * 这两个以前是角色窗口里的抽屉和侧栏。问题是：设置表单一铺开就把她的脸挡掉一半，
+ * 92 条动作列表更是把画面挤成一条缝。它们本来就不是"表演的一部分"，
+ * 所以给它们各自一个正经窗口 —— 娃娃在自己的窗口里照常站着，主人在这边慢慢挑。
+ *
+ * 同一个窗口只开一个：再点一次就把它提到前台，不叠出一排一样的窗。 */
+const panels = new Map();
+const PANEL_SIZE = {
+  settings: { w: 380, h: 620, title: 'workbaby · 设置' },
+  motions: { w: 340, h: 660, title: 'workbaby · 动作库' },
+};
+
+function openPanel(kind) {
+  const spec = PANEL_SIZE[kind] || PANEL_SIZE.settings;
+  const old = panels.get(kind);
+  if (old && !old.isDestroyed()) {
+    if (old.isMinimized()) old.restore();
+    old.focus();
+    return old;
+  }
+  const w = new BrowserWindow({
+    width: spec.w,
+    height: spec.h,
+    title: spec.title,
+    autoHideMenuBar: true,
+    minimizable: false,
+    maximizable: false,
+    resizable: true,
+    show: false,
+    backgroundColor: '#f7f3ec',
+    webPreferences: {
+      preload: path.join(__dirname, '..', 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      // 面板窗口可以被降帧：主人不在这边操作时，别和娃娃抢 CPU
+      backgroundThrottling: true,
+    },
+  });
+  w.setMenuBarVisibility(false);
+  // 面板的报错也得进日志：新窗口一旦白屏，日志里没字就等于无从查起
+  w.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    const tag = ['log', 'warn', 'error', 'debug'][level] || 'log';
+    const msg = String(message);
+    if (msg.includes('DevTools')) return;
+    if (!IS_DEV && level < 2) return;
+    log(`[panel:${kind}:${tag}] ${msg}  (${String(sourceId || '').split('/').pop()}:${line})`);
+  });
+  w.webContents.on('did-fail-load', (_e, code, desc) => log(`[panel:${kind}] did-fail-load ${code} ${desc}`));
+  w.loadFile(path.join(__dirname, '..', 'renderer', 'panel.html'), { query: { p: kind } });
+  w.once('ready-to-show', () => w.show());
+  w.on('closed', () => panels.delete(kind));
+  panels.set(kind, w);
+  return w;
+}
+
+function closePanels() {
+  for (const [, w] of panels) { try { if (!w.isDestroyed()) w.close(); } catch {} }
+  panels.clear();
 }
 
 /* ── 鼠标穿透开关 ── */
@@ -878,7 +941,7 @@ function buildTrayMenu() {
     { label: '说句话', click: () => { showWindow(); send('ask', { focus: true }); } },
     { label: '按住说话  ⌘⇧Space', click: () => toggleRecord() },
     { type: 'separator' },
-    { label: '动作列表…', click: () => { showWindow(); send('motions', {}); } },
+    { label: '动作库…', click: () => { showWindow(); openPanel('motions'); } },
     {
       label: '形象',
       submenu: avatars.scan().map((a) => ({
@@ -922,12 +985,12 @@ function buildTrayMenu() {
       ],
     },
     { type: 'separator' },
-    { label: '打开设置…', click: () => { showWindow(); send('settings', {}); } },
+    { label: '打开设置…', click: () => openPanel('settings') },
     {
       label: (asrStatus.speech === 3 && (asrStatus.mic === true || asrStatus.micSystem === 'granted'))
         ? '语音权限 ✓ 正常'
         : '语音权限 ✗ 未就绪（点这里修）',
-      click: () => { showWindow(); send('settings', {}); },
+      click: () => openPanel('settings'),
     },
     { label: '打开数据目录', click: () => shell.openPath(USER_DIR) },
     { type: 'separator' },
@@ -1214,8 +1277,33 @@ ipcMain.on('pet:open-privacy', (_e, kind) => {
 ipcMain.on('pet:vis', (_e, v) => (v ? showWindow() : hideWindow()));
 ipcMain.on('pet:quit', () => { quitting = true; app.quit(); });
 ipcMain.on('pet:open', (_e, what) => {
-  if (what === 'workbuddy') shell.openPath('/Applications/WorkBuddy.app');
+  if (what === 'settings') openPanel('settings');
+  else if (what === 'motions') openPanel('motions');
+  else if (what === 'workbuddy') shell.openPath('/Applications/WorkBuddy.app');
   else if (what === 'userData') shell.openPath(USER_DIR);
+});
+
+/* 独立面板的初始数据。和 pet:init 分开：那边还要带监控快照、ASR 就绪状态，
+ * 面板只要配置和动作表就够了，别把一堆无关的东西塞进一个新窗口。 */
+ipcMain.handle('pet:panel-init', async () => {
+  const c = config.load();
+  const list = avatars.scan();
+  return {
+    config: c,
+    avatars: list,
+    motions: config.MOTIONS,
+    motionGroups: config.MOTION_GROUPS,
+    avatar: avatars.resolve(c.avatar, list),
+    asr: asrStatus,
+  };
+});
+
+/* 面板点了一个动作 → 转给角色窗口去演。
+ * 面板自己没有 3D，也不该有：演的地方永远只有一处。 */
+ipcMain.on('pet:panel-motion', (_e, key) => {
+  if (!key) return;
+  if (key === '__idle__') { send('toidle', {}); return; }
+  send('motion', { key });
 });
 ipcMain.handle('pet:resize', (_e, { w, h }) => {
   if (!win) return;
@@ -1604,6 +1692,7 @@ if (!lock) {
 app.on('before-quit', () => {
   quitting = true;
   markCleanExit();
+  closePanels();          // 面板是普通窗口，不关会拖住退出
   if (monitor) monitor.stop();
   if (asr) asr.kill();
   globalShortcut.unregisterAll();

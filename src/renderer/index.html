@@ -91,78 +91,8 @@
 </div>
 
 <!-- 首次提示 -->
-<div id="hint" class="hidden">点我说话 · ⌘⇧Space 开关我的耳朵</div>
+<div id="hint" class="hidden">点我说话 · 摸摸她 · ⌘⇧Space 开关我的耳朵</div>
 
-<!-- ═══ 动作列表（顶部菜单「动作列表…」或右上 ▶ 打开） ═══
-     点一下就在原地演一遍，角色始终在画面里（面板只占右侧一条） -->
-<div id="motions" class="panel hidden">
-  <div class="ph"><b>动作</b><button id="closeMotions" title="关闭">✕</button></div>
-  <div class="pb" id="motionList"></div>
-</div>
-
-<!-- 设置面板 -->
-<div id="settings" class="panel hidden">
-  <div class="ph">
-    <b>workbaby · baby 的设置</b>
-    <button id="closeSettings" title="关闭">✕</button>
-  </div>
-  <div class="sb">
-    <label class="row"><span>名字</span><input id="setName" type="text" /></label>
-
-    <div class="group">形象</div>
-    <div class="avRow" id="avRow"></div>
-
-    <div class="group">大小</div>
-    <div class="segRow" id="sizeRow">
-      <button data-k="0.5">50%</button>
-      <button data-k="1">100%</button>
-      <button data-k="1.5">150%</button>
-    </div>
-
-    <div class="group">动作</div>
-    <div class="permBtns" style="margin-top:0">
-      <button id="openMotions" class="mini">打开动作列表</button>
-    </div>
-
-    <div class="group">听见你</div>
-    <div class="permBox">
-      <div class="permLine"><span>语音识别</span><b id="permSpeech" class="pill">—</b></div>
-      <div class="permLine"><span>麦克风</span><b id="permMic" class="pill">—</b></div>
-      <div class="permBtns">
-        <button id="permCheck" class="mini">检查权限</button>
-        <button id="permOpenSpeech" class="mini">开语音识别</button>
-        <button id="permOpenMic" class="mini">开麦克风</button>
-      </div>
-      <div id="permTip" class="permTip"></div>
-    </div>
-
-    <div class="group">模型</div>
-    <label class="row"><span>接口</span><input id="setUrl" type="text" placeholder="https://…/v1" /></label>
-    <label class="row"><span>模型</span><input id="setModel" type="text" /></label>
-    <label class="row"><span>Key</span><input id="setKey" type="password" placeholder="留空则用 WorkBuddy 的" /></label>
-
-    <div class="group">声音</div>
-    <label class="row"><span>说话</span><input id="setTtsOn" type="checkbox" /></label>
-    <label class="row"><span>TTS 地址</span><input id="setTtsUrl" type="text" /></label>
-    <label class="row"><span>TTS Key</span><input id="setTtsKey" type="password" /></label>
-    <label class="row"><span>音色描述</span><textarea id="setTtsInstr" rows="2"></textarea></label>
-
-    <div class="group">盯 WorkBuddy</div>
-    <label class="row"><span>任务做完就播报</span><input id="setOnDone" type="checkbox" /></label>
-    <label class="row"><span>拖太久时提醒</span><input id="setOnLong" type="checkbox" /></label>
-    <label class="row"><span>卡住时提醒</span><input id="setOnStall" type="checkbox" /></label>
-    <label class="row"><span>连着干太久劝歇</span><input id="setOnRest" type="checkbox" /></label>
-    <label class="row"><span>最短间隔(秒)</span><input id="setGap" type="number" min="10" step="5" /></label>
-  </div>
-
-  <div class="sf">
-    <pre id="probeOut" class="hidden"></pre>
-    <div class="actions">
-      <button id="probeBtn" class="wide">连通性自检</button>
-      <button id="saveBtn" class="wide primary">保存</button>
-    </div>
-  </div>
-</div>
 
 <script type="module" src="./app.js"></script>
 </body>

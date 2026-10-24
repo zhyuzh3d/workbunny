@@ -296,8 +296,10 @@ html, body {
 }
 #ear.hidden { display: none; }
 #ear:hover { background: rgba(255, 253, 250, .99); }
-/* 撑满整窗：给文字区留地方，长了就在里面滚 */
-#ear.expand { width: calc(100vw - 16px); }
+/* 有话说：宽度跟着文字涨（#ear 自身是 auto 宽），最长到窗口宽，超了就在 earWin 里横滚。
+ * 以前是写死撑满整窗 —— 只听清一个「嗯」，底下也横一条满宽的条子，又吵又抢戏。
+ * min-width 是给只有一两个字的时候留个像样的底座，免得缩成一颗药丸。 */
+#ear.expand { min-width: 92px; }
 /* 在听：整条转成中性墨色，点灯是绿的 */
 #ear.on { color: var(--ink-soft); border-color: rgba(62, 138, 92, .34); background: rgba(250, 253, 250, .95); }
 #ear.off { color: #b3aa9a; }

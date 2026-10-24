@@ -31,11 +31,46 @@ import { cutClip, MOTION_WINDOWS } from './motion-cut.js';
 
 const W = 420, H = 660;
 const MOTIONS = [
-  'idle_loop', 'LookAround', 'Relax', 'Thinking', 'Sleepy', 'Goodbye', 'Clapping', 'Jump', 'Surprised', 'Angry', 'Sad', 'Blush',
-  // VRoid Project Motion Pack（10）
-  'VRMA_07', 'greeting', 'greeting2', 'hello', 'model_pose', 'motion_pose', 'peace_sign', 'shoot', 'show_full_body', 'spin',
-  // not-elm/desktop-homunculus（3）
-  'grabbed', 'idle-maid', 'idle-sitting',
+  // idle
+  'idle_look', 'idle_breath', 'idle_stand', 'idle_stand2', 'idle_lalala', 'idle_shift', 'idle_pose', 'idle_loop', 'idle_walk_mocopi'
+  // work
+  'work_maid', 'work_sit'
+  // greet
+  'greet_yeah', 'greet_wave', 'greet_turn', 'greet_hand'
+  // bye
+  'bye_goodbye', 'bye_wave', 'bye_wave_maya'
+  // cheer
+  'cheer_clap_vr', 'cheer_jump_vr', 'cheer_hop', 'cheer_yay', 'cheer_clap_cipher', 'cheer_clap_maya', 'cheer_arms', 'cheer_cross', 'cheer_joy'
+  // praise
+  'praise_shoot', 'praise_snap', 'praise_thumb'
+  // sign
+  'sign_peace'
+  // dance
+  'dance_excited', 'dance_excited_maya', 'dance_macarena'
+  // tease
+  'tease_cat', 'tease_scare', 'tease_zombie', 'tease_headbutt', 'tease_catwalk', 'tease_punch', 'tease_stand', 'tease_peek'
+  // refuse
+  'refuse_head', 'refuse_reject', 'refuse_shrug', 'refuse_waving', 'refuse_fear', 'refuse_no', 'refuse_startle'
+  // angry
+  'angry_pout', 'angry_tsundere', 'angry_hip', 'angry_arms', 'angry_stomp'
+  // shy
+  'shy_face', 'shy_cute', 'shy_bashful', 'shy_sway'
+  // think
+  'think_lady', 'think_idea', 'think_cute', 'think_ultra', 'think_dw'
+  // sorry
+  'sorry_sad', 'sorry_grab', 'sorry_cry', 'sorry_sigh', 'sorry_droop'
+  // tired
+  'tired_stretch_vr', 'tired_sleep', 'tired_reach', 'tired_sitnap', 'tired_nod', 'tired_yawn', 'tired_armstretch'
+  // thanks
+  'thanks_bow_reika', 'thanks_cipher', 'thanks_maya'
+  // surprise
+  'surprise_scratch', 'surprise_vr', 'surprise_cipher'
+  // pose
+  'pose_model', 'pose_show', 'pose_spin'
+  // motion
+  'motion_cute', 'motion_spinjump', 'motion_walk', 'motion_run', 'motion_situp2', 'motion_situp', 'motion_spin'
+  // talk
+  'talk_talk'
 ];
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });

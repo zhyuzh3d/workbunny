@@ -15,13 +15,15 @@ const MODELS_DIR = path.join(__dirname, '..', 'renderer', 'assets', 'models');
  * 念出来是一串片假名，摆在设置里主人也认不出谁是谁。这里给每个文件起一个
  * 中文名：按「她看起来是什么样」起，不按原名的音译。
  *
- * 键是文件名去掉 .vrm 再小写；丢一个新文件进来、没配名字就退回 meta 里的原名。 */
+ * 键是文件名去掉 .vrm 再小写；丢一个新文件进来、没配名字就退回 meta 里的原名。
+ *
+ * 名字是主人定的，顺序按设置列表里出现的先后（58 → D → E → F → G）。 */
 const NAMES = {
-  '58': '小枫',                 // メープル = 枫，棕发女仆装
-  'avatarsample_d': '阿凛',      // 黑发、话少、酷
-  'avatarsample_e': '可可',      // 粉发、活泼
-  'avatarsample_f': '小南',      // 浅色、安静
-  'avatarsample_g': '薇琪',      // 金发白裙
+  '58': '婷婷',
+  'avatarsample_d': '可可',
+  'avatarsample_e': '阿雅',
+  'avatarsample_f': '琪琪',
+  'avatarsample_g': '美莉',
 };
 
 /* 灯光系数：这几只官方样例的贴图本身就偏亮（白裙子 + 金发在 1.0 的光下会洗白），

@@ -9,60 +9,175 @@ const os = require('os');
 
 const HOME = os.homedir();
 
-/* 动作目录。tag = 'llm' 的才会出现在提示词的可用列表里；
- * tag = 'event' 的由代码在具体事件上播（点击、收工、切场景），不交给模型挑 ——
- * 一次给模型二十几个选项，它只会挑那几个听熟了的，多出来的全浪费。
- * tag = 'off' 的不接入逻辑，只在动作列表里手动播（主人想看就看得见）。
+/* ═══════════ 动作库 · 92 条 ═══════════
+ * 全部重命名成「槽位_变体」（全小写下划线）。src 记着原素材包 / 原文件名，随时能回查核对。
+ * 素材来源：VRoid Project Motion Pack（pixiv Inc.）、VRM Viewer、desktop-homunculus(Apache-2.0)、
+ *   Reika 待机集、Cipher Stage、MayaVE、ai-tuber、chatter-agent、mocopi 样例、desktop-waifu。
  *
- * group 只管「动作列表弹窗」怎么分类，和 AI 怎么挑没关系 ——
- * 二十几个动作平铺成一列，主人根本找不到想看的那个。 */
-const MOTION_GROUPS = [
-  { id: 'idle', label: '待机' },
-  { id: 'greet', label: '打招呼' },
-  { id: 'emo', label: '情绪' },
-  { id: 'cheer', label: '庆祝' },
-  { id: 'pose', label: '姿态' },
-];
+ * ── 为什么不把 92 个名字都给模型 ──
+ * 同类动作有 3~9 条（cheer 光鼓掌欢呼就 9 种），全列进提示词是一堵墙，
+ * 而且模型只会挑它听熟的那三四个，剩下的永远轮不上。
+ * 所以改成槽位制：提示词里只出现十几个槽位名，模型输出 <m>cheer</m>，
+ * 代码再在 cheer 这一槽里随机挑一条具体动作 —— 上下文不冗余，同类还能轮换。
+ *
+ * tag：llm   = 这一槽交给模型挑（提示词里只列槽位名）
+ *      event = 代码在具体事件上播（主人在干活时的待命站姿）
+ *      off   = 不接入任何逻辑，只在动作列表里手动点着看（坐姿会把裙子顶穿）
+ *
+ * loop = true 的可以当待机循环播；false 的是一次性动作，播完回待机。 */
+
+/* 槽位的中文名：既给提示词用，也当动作列表弹窗的分组标题。 */
+const SLOT_LABEL = {
+  idle: '待机', work: '待命', greet: '打招呼', bye: '告别', cheer: '欢呼',
+  praise: '夸奖', sign: '比手势', dance: '跳舞', tease: '逗你玩', refuse: '拒绝',
+  angry: '生气', shy: '害羞', think: '思考', sorry: '抱歉', tired: '累了',
+  thanks: '道谢', surprise: '惊讶', pose: '亮相', motion: '活动身体', talk: '说话',
+};
+const SLOT_ORDER = ['idle', 'work', 'greet', 'bye', 'cheer', 'praise', 'sign', 'dance',
+  'tease', 'refuse', 'angry', 'shy', 'think', 'sorry', 'tired', 'thanks', 'surprise',
+  'pose', 'motion', 'talk'];
+
+/* 动作列表弹窗的分类 = 槽位。二十个槽位，主人一眼能找到「逗你玩」那一堆。 */
+const MOTION_GROUPS = SLOT_ORDER.map((id) => ({ id, label: SLOT_LABEL[id] }));
 
 const MOTIONS = [
-  { key: 'idle_loop', label: '待机呼吸', group: 'idle', loop: true, tag: 'llm', use: '默认待机，什么都不说时用' },
-  { key: 'LookAround', label: '四处张望', group: 'idle', loop: true, tag: 'llm', use: '好奇、找东西、等回应' },
-  { key: 'Relax', label: '放松', group: 'idle', loop: true, tag: 'llm', use: '闲下来、陪伴、无事发生' },
-  { key: 'Thinking', label: '思考', group: 'idle', loop: true, tag: 'llm', use: '正在想、正在查、不确定' },
-  { key: 'Sleepy', label: '困了', group: 'idle', loop: true, tag: 'llm', use: '主人很久没理我、深夜' },
-  { key: 'idle-maid', label: '安静站姿', group: 'idle', loop: true, tag: 'event', use: '主人在专注干活时的待机' },
-  { key: 'idle-sitting', label: '并腿站姿', group: 'idle', loop: true, tag: 'off', use: '不接入待机：并腿会把裙子顶穿，只能手动看' },
+  // ── idle · 待机 ──
+  { key: 'idle_look', slot: 'idle', label: '四处张望', loop: true, tag: 'llm', use: '好奇、找东西、等回应', src: 'vrm-viewer / LookAround.vrma' },
+  { key: 'idle_breath', slot: 'idle', label: '呼吸待机', loop: true, tag: 'llm', use: '什么事都没有时的默认站姿', src: 'chuckynuttys__timeline / reika_KA_Idle01_breathing.vrma' },
+  { key: 'idle_stand', slot: 'idle', label: '站姿待机一', loop: true, tag: 'llm', use: '安静站着，偶尔小动作', src: 'Enigma-EE__Cipher_Stage / StandingIdle.vrma' },
+  { key: 'idle_stand2', slot: 'idle', label: '站姿待机二', loop: true, tag: 'llm', use: '安静站着，另一种站法', src: 'Enigma-EE__Cipher_Stage / StandingIdle01.vrma' },
+  { key: 'idle_lalala', slot: 'idle', label: '哼歌撒娇', loop: true, tag: 'llm', use: '心情不错、轻轻晃着等主人', src: 'gitphilosopher__MayaVE / idle_lalala.vrma' },
+  { key: 'idle_shift', slot: 'idle', label: '换脚站', loop: true, tag: 'llm', use: '站着把重心从一只脚换到另一只', src: 'gitphilosopher__MayaVE / weight_shift.vrma' },
+  { key: 'idle_pose', slot: 'idle', label: '待机姿势', loop: true, tag: 'llm', use: '标准站姿，最不抢戏', src: 'LongbowXXX__ai-tuber / idle_pose.vrma' },
+  { key: 'idle_loop', slot: 'idle', label: '循环待机', loop: true, tag: 'llm', use: '最省事的循环站姿，兜底用', src: 'schwarz9791__chatter-agent / idle_loop.vrma' },
+  { key: 'idle_walk_mocopi', slot: 'idle', label: '原地走动', loop: true, tag: 'llm', use: '原地走两步转个圈，动捕质感', src: 'tfuru__vrma-loader-sample / MCPM_20230806_154241.vrma' },
 
-  // ── VRoid Project Motion Pack（切段后接入，见 app.js MOTION_WINDOWS）──
-  { key: 'greeting2', label: '抬手打招呼', group: 'greet', loop: false, tag: 'llm', use: '主人刚回来、早安、轻一点的招呼（比 Goodbye 含蓄）' },
-  { key: 'greeting', label: '起身迎接', group: 'greet', loop: false, tag: 'event', use: '主人离开很久回来时的正式迎接（从蹲姿站起来挥手）' },
-  { key: 'Goodbye', label: '挥手再见', group: 'greet', loop: false, tag: 'llm', use: '打招呼、告别、任务交付' },
-  { key: 'shoot', label: '举手致意', group: 'greet', loop: false, tag: 'event', use: '招呼主人过来看' },
-  { key: 'hello', label: '伸懒腰', group: 'greet', loop: false, tag: 'llm', use: '坐太久、催主人起来动一动、刚睡醒' },
+  // ── work · 待命 ──
+  { key: 'work_maid', slot: 'work', label: '安静站姿', loop: true, tag: 'event', use: '主人在干活时的待命站姿，手交叠几乎不动', src: 'homunculus / idle-maid.vrma' },
+  { key: 'work_sit', slot: 'work', label: '坐姿待命', loop: true, tag: 'off', use: '坐姿待命（裙子会被顶穿，只在动作列表里手动看）', src: 'homunculus / idle-sitting.vrma' },
 
-  { key: 'Surprised', label: '惊讶', group: 'emo', loop: false, tag: 'llm', use: '意外、发现问题、惊讶' },
-  { key: 'Angry', label: '生气', group: 'emo', loop: false, tag: 'llm', use: '被亏待、抱怨（仅玩笑级别）' },
-  { key: 'Sad', label: '难过', group: 'emo', loop: false, tag: 'llm', use: '抱歉、失败、遗憾' },
-  { key: 'Blush', label: '害羞', group: 'emo', loop: false, tag: 'llm', use: '被夸、被感谢' },
-  { key: 'grabbed', label: '低头认错', group: 'emo', loop: false, tag: 'llm', use: '抱歉、认错、被主人说了一句（整个人弯下去低头）' },
+  // ── greet · 打招呼 ──
+  { key: 'greet_yeah', slot: 'greet', label: '起身 yeah', loop: false, tag: 'llm', use: '从蹲姿站起来举双手，主人离开很久回来时的迎接', src: 'vroid-project / greeting.vrma' },
+  { key: 'greet_wave', slot: 'greet', label: '挥手打招呼', loop: false, tag: 'llm', use: '主人刚回来、早安、轻一点的招呼', src: 'vroid-project / greeting2.vrma' },
+  { key: 'greet_turn', slot: 'greet', label: '转身打招呼', loop: false, tag: 'llm', use: '背对着你再转过来打招呼', src: 'vroid-project / hello.vrma' },
+  { key: 'greet_hand', slot: 'greet', label: '高举挥手', loop: false, tag: 'llm', use: '远远看见你、用力挥手', src: 'gitphilosopher__MayaVE / hand_raise.vrma' },
 
-  { key: 'Clapping', label: '鼓掌', group: 'cheer', loop: false, tag: 'llm', use: '称赞、成功、恭喜' },
-  { key: 'Jump', label: '跳一下', group: 'cheer', loop: false, tag: 'llm', use: '好消息、兴奋、提醒主人' },
-  { key: 'spin', label: '转圈庆祝', group: 'cheer', loop: false, tag: 'llm', use: '大成功、被夸到飞起' },
-  { key: 'peace_sign', label: '比耶', group: 'cheer', loop: false, tag: 'llm', use: '得意、办成了、卖萌' },
+  // ── bye · 告别 ──
+  { key: 'bye_goodbye', slot: 'bye', label: '说话式告别', loop: false, tag: 'llm', use: '边说边摆手，任务交付完的收尾', src: 'vrm-viewer / Goodbye.vrma' },
+  { key: 'bye_wave', slot: 'bye', label: '轻轻挥手', loop: false, tag: 'llm', use: '轻声告别，byebye', src: 'gitphilosopher__MayaVE / greeting.vrma' },
+  { key: 'bye_wave_maya', slot: 'bye', label: '留恋挥手', loop: false, tag: 'llm', use: '舍不得地挥手', src: 'gitphilosopher__MayaVE / wave.vrma' },
 
-  { key: 'model_pose', label: '摆拍', group: 'pose', loop: false, tag: 'event', use: '被盯着看时的摆姿势' },
-  { key: 'motion_pose', label: '迈步走近', group: 'pose', loop: false, tag: 'event', use: '走过去看看' },
-  { key: 'show_full_body', label: '展示自己', group: 'pose', loop: false, tag: 'llm', use: '被问长什么样、被问是什么' },
-  { key: 'VRMA_07', label: '扶脸', group: 'pose', loop: false, tag: 'event', use: '害羞、整理仪表' },
-];
+  // ── cheer · 欢呼 ──
+  { key: 'cheer_clap_vr', slot: 'cheer', label: '鼓掌一', loop: false, tag: 'llm', use: '称赞、恭喜、干得漂亮', src: 'vrm-viewer / Clapping.vrma' },
+  { key: 'cheer_jump_vr', slot: 'cheer', label: '轻松跳', loop: false, tag: 'llm', use: '活动身体、准备开工', src: 'vrm-viewer / Jump.vrma' },
+  { key: 'cheer_hop', slot: 'cheer', label: '高兴地跳', loop: false, tag: 'llm', use: '好消息、兴奋', src: 'chuckynuttys__timeline / reika_KA_Idle06_JumpAround.vrma' },
+  { key: 'cheer_yay', slot: 'cheer', label: '举双手欢呼', loop: false, tag: 'llm', use: '非常高兴，庆祝 + 爱心', src: 'chuckynuttys__timeline / reika_KA_Idle36_Yay.vrma' },
+  { key: 'cheer_clap_cipher', slot: 'cheer', label: '鼓掌二', loop: false, tag: 'llm', use: '称赞、恭喜（另一种鼓掌）', src: 'Enigma-EE__Cipher_Stage / clapping.vrma' },
+  { key: 'cheer_clap_maya', slot: 'cheer', label: '鼓掌三', loop: false, tag: 'llm', use: '有点高冷的鼓掌', src: 'gitphilosopher__MayaVE / clapping.vrma' },
+  { key: 'cheer_arms', slot: 'cheer', label: '举双手胜利', loop: false, tag: 'llm', use: '举双手庆祝胜利', src: 'schwarz9791__chatter-agent / cheer.vrma' },
+  { key: 'cheer_cross', slot: 'cheer', label: '来回跳', loop: false, tag: 'llm', use: '高兴地左右跳，也可以是无聊时的活动', src: 'yv-was-taken__desktop-waifu / Cross Jumps.vrma' },
+  { key: 'cheer_joy', slot: 'cheer', label: '萌妹跳', loop: false, tag: 'llm', use: '扮可爱的高兴，成功的时候', src: 'yv-was-taken__desktop-waifu / Joyful Jump.vrma' },
 
+  // ── praise · 夸奖 ──
+  { key: 'praise_shoot', slot: 'praise', label: '开枪命中', loop: false, tag: 'llm', use: '对着你比枪，bingo，夸你或挑逗', src: 'vroid-project / shoot.vrma' },
+  { key: 'praise_snap', slot: 'praise', label: '响指', loop: false, tag: 'llm', use: '优雅挑逗：小意思、不在话下', src: 'chuckynuttys__timeline / reika_KA_Idle35_FingerSnap.vrma' },
+  { key: 'praise_thumb', slot: 'praise', label: '坐姿点赞', loop: false, tag: 'llm', use: '坐着翘大拇指：你可真不错', src: 'Enigma-EE__Cipher_Stage / sittingThumbsUp.vrma' },
+
+  // ── sign · 手势 ──
+  { key: 'sign_peace', slot: 'sign', label: '比耶', loop: false, tag: 'llm', use: '胜利、卖萌、办成了', src: 'vroid-project / peace_sign.vrma' },
+
+  // ── dance · 跳舞 ──
+  { key: 'dance_excited', slot: 'dance', label: '原地扭动一', loop: false, tag: 'llm', use: '高兴地原地扭动', src: 'Enigma-EE__Cipher_Stage / excited.vrma' },
+  { key: 'dance_excited_maya', slot: 'dance', label: '原地扭动二', loop: false, tag: 'llm', use: '小幅度扭动跳舞', src: 'gitphilosopher__MayaVE / excited.vrma' },
+  { key: 'dance_macarena', slot: 'dance', label: '尬舞', loop: false, tag: 'llm', use: '有趣地跳舞，逗主人开心', src: 'gitphilosopher__MayaVE / macarena_dance.vrma' },
+
+  // ── tease · 逗你玩 ──
+  { key: 'tease_cat', slot: 'tease', label: '小猫扭屁股', loop: false, tag: 'llm', use: '学小猫弯腰，被夸奖时用，很调皮', src: 'chuckynuttys__timeline / reika_KA_Idle14_Dance02.vrma' },
+  { key: 'tease_scare', slot: 'tease', label: '吓你一跳', loop: false, tag: 'llm', use: '顽皮地轻轻吓你', src: 'chuckynuttys__timeline / reika_KA_Idle47_Scaring.vrma' },
+  { key: 'tease_zombie', slot: 'tease', label: '学僵尸', loop: false, tag: 'llm', use: '伸着手学僵尸逗你', src: 'Enigma-EE__Cipher_Stage / ZombieNeckBite.vrma' },
+  { key: 'tease_headbutt', slot: 'tease', label: '假装对打', loop: false, tag: 'llm', use: '冲上来假装要和你对打，顽皮', src: 'Enigma-EE__Cipher_Stage / headbutt.vrma' },
+  { key: 'tease_catwalk', slot: 'tease', label: '学猫步', loop: false, tag: 'llm', use: '夸张猫步走上前再走回去，很高兴很满意', src: 'gitphilosopher__MayaVE / catwalk.vrma' },
+  { key: 'tease_punch', slot: 'tease', label: '伸手戳你', loop: false, tag: 'llm', use: '伸手戳你一下，挑逗', src: 'LongbowXXX__ai-tuber / punch_pose.vrma' },
+  { key: 'tease_stand', slot: 'tease', label: '挑逗站姿', loop: false, tag: 'llm', use: '超可爱的挑逗站姿', src: 'yv-was-taken__desktop-waifu / Female Standing Pose.vrma' },
+  { key: 'tease_peek', slot: 'tease', label: '藏猫猫', loop: false, tag: 'llm', use: '背对着你再转头偷看', src: 'yv-was-taken__desktop-waifu / Femme Peek Around Corner.vrma' },
+
+  // ── refuse · 拒绝 ──
+  { key: 'refuse_head', slot: 'refuse', label: '摇头否认', loop: false, tag: 'llm', use: '轻轻摇头，不强烈', src: 'gitphilosopher__MayaVE / head_shake.vrma' },
+  { key: 'refuse_reject', slot: 'refuse', label: '夸张失望', loop: false, tag: 'llm', use: '哎呀不要了，夸张的失望', src: 'gitphilosopher__MayaVE / rejected.vrma' },
+  { key: 'refuse_shrug', slot: 'refuse', label: '摊手无奈', loop: false, tag: 'llm', use: '还能怎么办呢', src: 'gitphilosopher__MayaVE / shrug.vrma' },
+  { key: 'refuse_waving', slot: 'refuse', label: '挥手拒绝', loop: false, tag: 'llm', use: '不要了不要了', src: 'gitphilosopher__MayaVE / waving.vrma' },
+  { key: 'refuse_fear', slot: 'refuse', label: '慌忙否认', loop: false, tag: 'llm', use: '匆忙摆手否认', src: 'LongbowXXX__ai-tuber / fear_pose.vrma' },
+  { key: 'refuse_no', slot: 'refuse', label: '拒绝手势', loop: false, tag: 'llm', use: '摆手表示不', src: 'LongbowXXX__ai-tuber / no_pose.vrma' },
+  { key: 'refuse_startle', slot: 'refuse', label: '吓一跳拒绝', loop: false, tag: 'llm', use: '被吓到然后拒绝', src: 'schwarz9791__chatter-agent / startle.vrma' },
+
+  // ── angry · 生气 ──
+  { key: 'angry_pout', slot: 'angry', label: '御姐生气', loop: false, tag: 'llm', use: '被亏待、抱怨（玩笑级别）', src: 'vrm-viewer / Angry.vrma' },
+  { key: 'angry_tsundere', slot: 'angry', label: '傲娇不理你', loop: false, tag: 'llm', use: '责怪你、闹别扭', src: 'chuckynuttys__timeline / reika_KA_Idle37_Tsundere.vrma' },
+  { key: 'angry_hip', slot: 'angry', label: '叉腰生气', loop: false, tag: 'llm', use: '叉腰，很有气势地生气', src: 'chuckynuttys__timeline / reika_KA_Idle90_HandsOnHipsConfident.vrma' },
+  { key: 'angry_arms', slot: 'angry', label: '抱胸跺脚', loop: false, tag: 'llm', use: '双手抱胸还跺脚，不开心', src: 'gitphilosopher__MayaVE / angry.vrma' },
+  { key: 'angry_stomp', slot: 'angry', label: '生气跺脚', loop: false, tag: 'llm', use: '跺脚扭头不理你', src: 'schwarz9791__chatter-agent / stomp.vrma' },
+
+  // ── shy · 害羞 ──
+  { key: 'shy_face', slot: 'shy', label: '扶脸', loop: false, tag: 'llm', use: '整理仪表、害羞', src: 'vroid-project / VRMA_07.vrma' },
+  { key: 'shy_cute', slot: 'shy', label: '可爱害羞', loop: false, tag: 'llm', use: '害羞得不敢看你', src: 'chuckynuttys__timeline / reika_KA_Idle41_CuteShyPose.vrma' },
+  { key: 'shy_bashful', slot: 'shy', label: '腼腆', loop: false, tag: 'llm', use: '有点不情愿又不说', src: 'gitphilosopher__MayaVE / bashful.vrma' },
+  { key: 'shy_sway', slot: 'shy', label: '害羞看你', loop: false, tag: 'llm', use: '害羞地晃着，期待你的反应', src: 'schwarz9791__chatter-agent / sway.vrma' },
+
+  // ── think · 思考 ──
+  { key: 'think_lady', slot: 'think', label: '淑女思考', loop: false, tag: 'llm', use: '低头想一想', src: 'vrm-viewer / Thinking.vrma' },
+  { key: 'think_idea', slot: 'think', label: '灵光一闪', loop: false, tag: 'llm', use: '优雅地想到好主意', src: 'chuckynuttys__timeline / reika_KA_Idle08_ComeUpWithAnIdea.vrma' },
+  { key: 'think_cute', slot: 'think', label: '萌妹思考', loop: false, tag: 'llm', use: '歪头想事情', src: 'gitphilosopher__MayaVE / cute_think.vrma' },
+  { key: 'think_ultra', slot: 'think', label: '奥特曼手势', loop: false, tag: 'llm', use: '无聊时的招牌手势', src: 'schwarz9791__chatter-agent / think.vrma' },
+  { key: 'think_dw', slot: 'think', label: '傲娇思考', loop: false, tag: 'llm', use: '让我想想呢', src: 'yv-was-taken__desktop-waifu / thinking.vrma' },
+
+  // ── sorry · 抱歉 ──
+  { key: 'sorry_sad', slot: 'sorry', label: '背手低头', loop: false, tag: 'llm', use: '不开心、遗憾', src: 'vrm-viewer / Sad.vrma' },
+  { key: 'sorry_grab', slot: 'sorry', label: '整个人垂下', loop: false, tag: 'llm', use: '无可奈何、被拎起来那种垂头', src: 'homunculus / grabbed.vrma' },
+  { key: 'sorry_cry', slot: 'sorry', label: '哭', loop: false, tag: 'llm', use: '伤心地哭，也可以是假装哭的恶作剧', src: 'gitphilosopher__MayaVE / crying.vrma' },
+  { key: 'sorry_sigh', slot: 'sorry', label: '叹气松懈', loop: false, tag: 'llm', use: '唉，不想再努力了', src: 'gitphilosopher__MayaVE / sigh.vrma' },
+  { key: 'sorry_droop', slot: 'sorry', label: '低头认错', loop: false, tag: 'llm', use: '做错了、低头不语', src: 'schwarz9791__chatter-agent / droop.vrma' },
+
+  // ── tired · 累了 ──
+  { key: 'tired_stretch_vr', slot: 'tired', label: '舒展身体', loop: false, tag: 'llm', use: '放松、伸个懒腰', src: 'vrm-viewer / Relax.vrma' },
+  { key: 'tired_sleep', slot: 'tired', label: '有点困', loop: false, tag: 'llm', use: '深夜、主人很久没理我', src: 'vrm-viewer / Sleepy.vrma' },
+  { key: 'tired_reach', slot: 'tired', label: '伸懒腰', loop: false, tag: 'llm', use: '刚睡醒、坐太久催主人动一动', src: 'chuckynuttys__timeline / reika_KA_Idle05_Stretch.vrma' },
+  { key: 'tired_sitnap', slot: 'tired', label: '坐着打瞌睡', loop: false, tag: 'llm', use: '坐着困得不行', src: 'Enigma-EE__Cipher_Stage / sittinglaughing.vrma' },
+  { key: 'tired_nod', slot: 'tired', label: '打瞌睡', loop: false, tag: 'llm', use: '困得点头', src: 'gitphilosopher__MayaVE / hard_nod.vrma' },
+  { key: 'tired_yawn', slot: 'tired', label: '打哈欠', loop: false, tag: 'llm', use: '慵懒、不太想理人', src: 'gitphilosopher__MayaVE / yawn.vrma' },
+  { key: 'tired_armstretch', slot: 'tired', label: '运动前拉伸', loop: false, tag: 'llm', use: '干活或运动前的准备拉伸', src: 'yv-was-taken__desktop-waifu / Arm Stretching.vrma' },
+
+  // ── thanks · 道谢 ──
+  { key: 'thanks_bow_reika', slot: 'thanks', label: '鞠躬拜托', loop: false, tag: 'llm', use: '拜托了！太感谢了！', src: 'chuckynuttys__timeline / reika_KA_Idle44_GreetingBow.vrma' },
+  { key: 'thanks_cipher', slot: 'thanks', label: '感谢臣服', loop: false, tag: 'llm', use: '非常感谢，或表示忠心', src: 'Enigma-EE__Cipher_Stage / thankful.vrma' },
+  { key: 'thanks_maya', slot: 'thanks', label: '衷心感谢', loop: false, tag: 'llm', use: '衷心地道谢', src: 'gitphilosopher__MayaVE / thankful.vrma' },
+
+  // ── surprise · 惊讶 ──
+  { key: 'surprise_scratch', slot: 'surprise', label: '抓抓头', loop: false, tag: 'llm', use: '好像忘了什么', src: 'vrm-viewer / Blush.vrma' },
+  { key: 'surprise_vr', slot: 'surprise', label: '小惊喜退避', loop: false, tag: 'llm', use: '哎呦呦，不要不要', src: 'vrm-viewer / Surprised.vrma' },
+  { key: 'surprise_cipher', slot: 'surprise', label: '惊讶比划', loop: false, tag: 'llm', use: '哎呦呦这么厉害，后仰比划', src: 'Enigma-EE__Cipher_Stage / Surprised.vrma' },
+
+  // ── pose · 亮相 ──
+  { key: 'pose_model', slot: 'pose', label: '单手叉腰', loop: false, tag: 'llm', use: '傲娇地摆个姿势', src: 'vroid-project / model_pose.vrma' },
+  { key: 'pose_show', slot: 'pose', label: '展示自己', loop: false, tag: 'llm', use: '被问长什么样、被问穿了什么', src: 'vroid-project / show_full_body.vrma' },
+  { key: 'pose_spin', slot: 'pose', label: '优雅亮相', loop: false, tag: 'llm', use: '登场、被夸到飞起', src: 'vroid-project / spin.vrma' },
+
+  // ── motion · 活动身体 ──
+  { key: 'motion_cute', slot: 'motion', label: '扮可爱', loop: false, tag: 'llm', use: '扮可爱吸引你注意', src: 'vroid-project / motion_pose.vrma' },
+  { key: 'motion_spinjump', slot: 'motion', label: '冲过来转圈', loop: false, tag: 'llm', use: '武术式冲过来再回去，无聊时偶发', src: 'chuckynuttys__timeline / reika_KA_Idle07_SpinningJump.vrma' },
+  { key: 'motion_walk', slot: 'motion', label: '模特步', loop: false, tag: 'llm', use: '原地走模特步', src: 'schwarz9791__chatter-agent / model-walk.vrma' },
+  { key: 'motion_run', slot: 'motion', label: '原地跑', loop: false, tag: 'llm', use: '有急事、或者做运动', src: 'yv-was-taken__desktop-waifu / Running.vrma' },
+  { key: 'motion_situp2', slot: 'motion', label: '起坐起身', loop: false, tag: 'llm', use: '做完仰卧起坐站起来', src: 'yv-was-taken__desktop-waifu / Situp To Idle.vrma' },
+  { key: 'motion_situp', slot: 'motion', label: '仰卧起坐', loop: false, tag: 'llm', use: '原地做仰卧起坐', src: 'yv-was-taken__desktop-waifu / Situps.vrma' },
+  { key: 'motion_spin', slot: 'motion', label: '转圈', loop: false, tag: 'llm', use: '跳起来转圈，无聊做运动或高兴', src: 'yv-was-taken__desktop-waifu / Spinning.vrma' },
+
+  // ── talk · 说话 ──
+  { key: 'talk_talk', slot: 'talk', label: '说话带手势', loop: false, tag: 'off', use: '站着说话，带手势', src: 'yv-was-taken__desktop-waifu / talking.vrma' },];
+
+/* 交给模型的槽位：只列槽位名 + 中文意思。具体动作由代码在槽内随机挑。 */
+const MOTION_SLOTS = [...new Set(MOTIONS.filter((m) => m.tag === 'llm').map((m) => m.slot))];
+const MOTION_HINT = MOTION_SLOTS.map((s) => s + '（' + (SLOT_LABEL[s] || s) + '）').join(' / ');
+/* 兼容旧引用：所有可被模型触发的具体动作键 */
 const MOTION_KEYS = MOTIONS.filter((m) => m.tag === 'llm').map((m) => m.key);
-/* 提示词里列给模型的清单：键 + 中文意思。只给英文键不行 ——
- * greeting2 / show_full_body 这种名字，模型猜不出差别，最后永远只挑 Jump 和 Blush。 */
-const MOTION_HINT = MOTIONS.filter((m) => m.tag === 'llm')
-  .map((m) => `${m.key}（${m.label}）`)
-  .join(' / ');
 
 const PERSONA = `你叫「{name}」，是住在主人 Mac 桌面角上的一只小精灵。主人正在用 WorkBuddy 干活，你贴着屏幕陪着他。
 
@@ -95,29 +210,31 @@ const PERSONA = `你叫「{name}」，是住在主人 Mac 桌面角上的一只�
 
 # 动作与表情
 可以在句子里插入标签，它们不会被念出来，指挥你的身体：
-- 动作：<m>动作名</m>　可用：${MOTION_HINT}
+- 动作：<m>类名</m>　可用：${MOTION_HINT}
+  写**类名**就行，别编具体动作名 —— 每一类里我有很多种，会自己挑一个、轮换着做。
 - 表情：<e>表情名</e>　可用：happy / sad / angry / relaxed / surprised
 一次最多一个动作、一个表情，只放在最贴切的那句上。
+没情绪可配就别硬塞：平铺直叙的陈述句（"文件在桌面上""已经改好了"）不加动作反而更像人。
 
 # 主人现在的状态
 {context}
 
 # 照着这个语感说（这是你的口吻，不是要你复述）
-主人："在吗" → 在呀<m>Goodbye</m>，一直蹲你屏幕角上呢。
-主人："讲个笑话" → 有只程序猿去买包子<m>Thinking</m>，老板问他打包还是带走，他说，我编译一下。
-主人："你叫什么" → 我叫{name}<m>Blush</m>，你给的这名字，我戴着挺合适。
-任务刚跑完 → 收工了<m>Jump</m><e>happy</e>，那三个文件都改成你要的样子了。
-主人问进度 → 还在改样式那块<m>Thinking</m>，已经二十分钟了，比预想的慢。
-主人问结果 → 成了<m>Jump</m>，你让它换的配色全换过来了。
-主人问"有什么建议" → 刚才那两件都是小改动<m>Thinking</m>，攒到一次跑，能省你半小时。
-主人夸你 → 嘿，你这么一夸<m>Blush</m><e>happy</e>，我尾巴都要翘起来了。
+主人："在吗" → 在呀<m>greet</m>，一直蹲你屏幕角上呢。
+主人："讲个笑话" → 有只程序猿去买包子<m>think</m>，老板问他打包还是带走，他说，我编译一下。
+主人："你叫什么" → 我叫{name}<m>shy</m>，你给的这名字，我戴着挺合适。
+任务刚跑完 → 收工了<m>cheer</m><e>happy</e>，那三个文件都改成你要的样子了。
+主人问进度 → 还在改样式那块<m>think</m>，已经二十分钟了，比预想的慢。
+主人问结果 → 成了<m>cheer</m>，你让它换的配色全换过来了。
+主人问"有什么建议" → 刚才那两件都是小改动<m>think</m>，攒到一次跑，能省你半小时。
+主人夸你 → 嘿，你这么一夸<m>shy</m><e>happy</e>，我尾巴都要翘起来了。
 主人问技术问题 → 这堆配置里，第二段最可疑，先把它注释掉试试。
-主人："给我一句鼓励" → 从早上折腾到现在<m>Jump</m><e>happy</e>，你手上的活没一件是轻松的，还在往下推。
-主人："好累" → 那就别硬撑了<m>Relax</m>，趴一会儿，我替你看着进度条。
-主人："怎么办" → 先别急着改代码<m>Thinking</m>，把报错从第一行读一遍，答案基本在里面。
-主人一口气交付了三件 → 三件全过了<m>spin</m><e>happy</e>，你今天手挺顺的。
-主人坐了三小时 → 你这椅子都快烧了<m>hello</m>，站起来抻一下再坐回去。
-主人："你长什么样" → 就这个样子呀<m>show_full_body</m>，小是小了点，站得挺稳。
+主人："给我一句鼓励" → 从早上折腾到现在<m>cheer</m><e>happy</e>，你手上的活没一件是轻松的，还在往下推。
+主人："好累" → 那就别硬撑了<m>tired</m>，趴一会儿，我替你看着进度条。
+主人："怎么办" → 先别急着改代码<m>think</m>，把报错从第一行读一遍，答案基本在里面。
+主人一口气交付了三件 → 三件全过了<m>pose</m><e>happy</e>，你今天手挺顺的。
+主人坐了三小时 → 你这椅子都快烧了<m>tired</m>，站起来抻一下再坐回去。
+主人："你长什么样" → 就这个样子呀<m>pose</m>，小是小了点，站得挺稳。
 `;
 
 
@@ -260,6 +377,6 @@ function buildSystemPrompt(extraContext) {
 
 module.exports = {
   load, save, setPath, buildSystemPrompt,
-  MOTIONS, MOTION_GROUPS, MOTION_KEYS, MOTION_HINT,
+  MOTIONS, MOTION_GROUPS, MOTION_KEYS, MOTION_SLOTS, MOTION_HINT, SLOT_LABEL,
   readWorkBuddyLLM, DEFAULTS,
 };

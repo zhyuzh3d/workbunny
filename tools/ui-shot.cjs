@@ -301,33 +301,16 @@ app.whenReady().then(async () => {
     await js('window.__scale(1)');
     await wait(800);
 
-    // ⑤ 动作面板：分类、条目数、点一条真播
-    await js('window.__openMotions()');
-    await wait(500);
-    const list = await js(`(() => {
-      const box = document.getElementById('motionList');
-      return {
-        open: !document.getElementById('motions').classList.contains('hidden'),
-        groups: [...box.querySelectorAll('.mGroup')].map(e => e.textContent),
-        items: box.querySelectorAll('button.mItem').length,
-        w: Math.round(document.getElementById('motions').getBoundingClientRect().width),
-      };
-    })()`);
-    console.log(`   动作面板：开=${list.open} 宽 ${list.w}px · 分组 ${JSON.stringify(list.groups)} · ${list.items} 个动作`);
-    await js("window.__motionPlay('spin')");
-    await wait(900);
+    // ⑤ 动作库（独立窗口）：这边只能验"槽位随机能不能挑出真动作"，
+    //    面板本身的渲染要看 panel.html，不在本窗口里。
+    const slots = await js('window.__motions()');
+    console.log(`   动作库：${slots.count} 条 · ${slots.groups} 组 · 槽位 ${slots.slots.length} 个`);
+    const picked = [];
+    for (const sl of ['cheer', 'think', 'shy']) picked.push(await js(`window.__playSlot('${sl}')`));
+    await wait(700);
     const playing = await js('window.__pet().currentMotion');
-    const onBtn = await js(`document.querySelector('#motionList button.mItem.on')?.textContent || null`);
-    console.log(`   点「转圈庆祝」→ currentMotion=${playing} · 面板高亮=${onBtn}`);
-    await frame('面板开着');
-    const clear = await js(`(() => {
-      const p = document.getElementById('motions').getBoundingClientRect();
-      const r = window.__pet().hit;
-      return { panelLeft: Math.round(p.left), bodyRight: Math.round(r.x1), bodyLeft: Math.round(r.x0),
-               gap: Math.round(p.left - r.x1), modelX: +window.__frame().modelX.toFixed(3) };
-    })()`);
-    console.log(`   让位检查：身体 ${clear.bodyLeft}..${clear.bodyRight} · 面板左沿 ${clear.panelLeft} · 间隙 ${clear.gap}px · modelX=${clear.modelX}`);
-    await shotPanel('motions-panel');
+    console.log(`   槽位随机 cheer/think/shy → ${JSON.stringify(picked)} · 当前播 ${playing}`);
+    await shot('slot-random');
 
     // ⑥ 设置面板：底部抽屉，头必须露在上面
     await js('window.__openSettings()');

@@ -17,32 +17,41 @@ import * as THREE from 'three';
 const EPS = 1e-4;
 
 /* 切段表：key → [起, 止]（秒）。没写的整条播。
- * 每条边界都是"肉眼看定帧"定的，不是猜的（shots/anim 里留着证据）：
- *   greeting       1.7 站起来 → 5.6 挥完手（0~1.7 是蹲在地上，不要）
- *   greeting2      1.2~3.6 含蓄的单手挥（两头是静止站姿）
- *   hello          8.0 双手抱到脑后伸懒腰 → 13.0 张开手臂
- *   peace_sign     1.2~5.0 举手比耶
- *   spin           0.6~7.6 转一圈并摆姿势
- *   show_full_body 1.2~5.2 张开手把自己展示一遍
- *   model_pose     1.0~4.2 手抬到胸前的摆拍位
- *   motion_pose    11.5~15.5 迈步走近的一段（整条 20 秒太散）
- *   VRMA_07        3.6~6.4 扶脸/整理衣领 —— 第 7 秒会还原成 T-pose，必须躲开
- *   shoot          6.0~9.2 手举到头侧张开（招呼 / 敬礼）
- *   grabbed        0.15~3.2 被拎起来缩一下
- * idle-maid 整条循环（实测竖直振幅 0.00cm，钉死的站姿）
- * idle-sitting 不接入：并腿姿势把裙子顶穿（大腿从裙摆里穿出来） */
+ *
+ * 92 条里超过 6.5 秒的一次性动作（跳过 idle_/work_ 这种循环待机）全部切一刀 ——
+ * 这批是「展示用」素材：转圈、猫步、展示自己，整条 8~20 秒。
+ * 娃娃说一句话只有 4 秒，给她放一条 20 秒的动作，她就得卡在那儿僵 16 秒。
+ *
+ * 窗口不是猜的：tools/motion-window.cjs 把每条动作的所有骨骼旋转（四元数角差）
+ * 加位移，按 0.1 秒分箱累加成一条「忙不忙」曲线，再滑一个 4.5 秒的窗取最忙的那段 ——
+ * 也就是"这段里动作最密"，切出来最不像站着发呆。
+ * 列在下面的是实测值（原时长注在后面）。 */
 export const MOTION_WINDOWS = {
-  greeting: [1.7, 5.6],
-  greeting2: [1.2, 3.6],
-  hello: [8.0, 13.0],
-  peace_sign: [1.2, 5.0],
-  spin: [0.6, 7.6],
-  show_full_body: [1.2, 5.2],
-  model_pose: [1.0, 4.2],
-  motion_pose: [11.5, 15.5],
-  VRMA_07: [3.6, 6.4],
-  shoot: [6.0, 9.2],
-  grabbed: [0.15, 3.2],
+  angry_arms: [14.7, 19.17],   // 原 19.17s
+  angry_hip: [2.2, 6.7],   // 原 7.33s
+  angry_tsundere: [0, 4.5],   // 原 8.33s
+  dance_excited: [0.1, 4.6],   // 原 6.53s
+  dance_excited_maya: [0.1, 4.6],   // 原 6.57s
+  dance_macarena: [0.1, 4.6],   // 原 8.23s
+  greet_turn: [7.4, 11.9],   // 原 15.77s
+  greet_yeah: [1.5, 6],   // 原 7.27s
+  motion_cute: [4.7, 9.2],   // 原 19.97s
+  pose_model: [0, 4.5],   // 原 7.52s
+  pose_show: [3.6, 8.1],   // 原 11.80s
+  pose_spin: [0.7, 5.2],   // 原 9.32s
+  praise_shoot: [0.2, 4.7],   // 原 9.60s
+  shy_bashful: [0.1, 4.6],   // 原 11.00s
+  shy_cute: [0, 4.5],   // 原 8.33s
+  shy_face: [0.5, 5],   // 原 11.52s
+  sign_peace: [6.9, 11.4],   // 原 11.68s
+  tease_cat: [0.6, 5.1],   // 原 8.33s
+  tease_catwalk: [8.7, 13.2],   // 原 15.13s
+  tease_scare: [0, 4.5],   // 原 7.67s
+  thanks_bow_reika: [1.6, 6.1],   // 原 7.00s
+  think_idea: [3.8, 8.3],   // 原 9.33s
+  tired_armstretch: [1, 5.5],   // 原 8.88s
+  tired_sitnap: [1, 5.5],   // 原 8.30s
+  tired_yawn: [3.2, 7.7],   // 原 8.33s
 };
 
 export function cutClip(clip, t0, t1) {
