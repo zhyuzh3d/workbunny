@@ -10,13 +10,15 @@ const { URL } = require('url');
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 4 });
 const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 4 });
 
-/** 从文本里剥出 <m>x</m> / <e>x</e>，返回干净文本与标签 */
+/** 从文本里剥出 <m>x</m> / <e>x</e>，返回干净文本与标签
+ * 动作名允许数字/连字符：greeting2、show_full_body 这类名字真实存在，
+ * 只认字母的话标签剥不掉，会被原样念出来（"greeting二"）。 */
 function extractTags(raw) {
   const motions = [];
   const emos = [];
   const clean = raw
-    .replace(/<m>\s*([A-Za-z_]+)\s*<\/m>/g, (_, k) => (motions.push(k), ''))
-    .replace(/<e>\s*([A-Za-z_]+)\s*<\/e>/g, (_, k) => (emos.push(k), ''))
+    .replace(/<m>\s*([A-Za-z0-9_-]+)\s*<\/m>/g, (_, k) => (motions.push(k), ''))
+    .replace(/<e>\s*([A-Za-z0-9_-]+)\s*<\/e>/g, (_, k) => (emos.push(k), ''))
     .replace(/<\/?[me]>/g, '')
     .replace(/[ \t]{2,}/g, ' ');
   return { clean, motions, emos };

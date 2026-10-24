@@ -9,22 +9,60 @@ const os = require('os');
 
 const HOME = os.homedir();
 
-const MOTIONS = [
-  { key: 'idle_loop', label: '待机呼吸', loop: true, use: '默认待机，什么都不说时用' },
-  { key: 'LookAround', label: '四处张望', loop: true, use: '好奇、找东西、等回应' },
-  { key: 'Relax', label: '放松', loop: true, use: '闲下来、陪伴、无事发生' },
-  { key: 'Thinking', label: '思考', loop: true, use: '正在想、正在查、不确定' },
-  { key: 'Sleepy', label: '困了', loop: true, use: '主人很久没理我、深夜' },
-  { key: 'Goodbye', label: '挥手再见', loop: false, use: '打招呼、告别、任务交付' },
-  { key: 'Clapping', label: '鼓掌', loop: false, use: '称赞、成功、恭喜' },
-  { key: 'Jump', label: '跳一下', loop: false, use: '好消息、兴奋、提醒主人' },
-  { key: 'Surprised', label: '惊讶', loop: false, use: '意外、发现问题、惊讶' },
-  { key: 'Angry', label: '生气', loop: false, use: '被亏待、抱怨（仅玩笑级别）' },
-  { key: 'Sad', label: '难过', loop: false, use: '抱歉、失败、遗憾' },
-  { key: 'Blush', label: '害羞', loop: false, use: '被夸、被感谢' },
+/* 动作目录。tag = 'llm' 的才会出现在提示词的可用列表里；
+ * tag = 'event' 的由代码在具体事件上播（点击、收工、切场景），不交给模型挑 ——
+ * 一次给模型二十几个选项，它只会挑那几个听熟了的，多出来的全浪费。
+ * tag = 'off' 的不接入逻辑，只在动作列表里手动播（主人想看就看得见）。
+ *
+ * group 只管「动作列表弹窗」怎么分类，和 AI 怎么挑没关系 ——
+ * 二十几个动作平铺成一列，主人根本找不到想看的那个。 */
+const MOTION_GROUPS = [
+  { id: 'idle', label: '待机' },
+  { id: 'greet', label: '打招呼' },
+  { id: 'emo', label: '情绪' },
+  { id: 'cheer', label: '庆祝' },
+  { id: 'pose', label: '姿态' },
 ];
 
-const MOTION_KEYS = MOTIONS.map((m) => m.key);
+const MOTIONS = [
+  { key: 'idle_loop', label: '待机呼吸', group: 'idle', loop: true, tag: 'llm', use: '默认待机，什么都不说时用' },
+  { key: 'LookAround', label: '四处张望', group: 'idle', loop: true, tag: 'llm', use: '好奇、找东西、等回应' },
+  { key: 'Relax', label: '放松', group: 'idle', loop: true, tag: 'llm', use: '闲下来、陪伴、无事发生' },
+  { key: 'Thinking', label: '思考', group: 'idle', loop: true, tag: 'llm', use: '正在想、正在查、不确定' },
+  { key: 'Sleepy', label: '困了', group: 'idle', loop: true, tag: 'llm', use: '主人很久没理我、深夜' },
+  { key: 'idle-maid', label: '安静站姿', group: 'idle', loop: true, tag: 'event', use: '主人在专注干活时的待机' },
+  { key: 'idle-sitting', label: '并腿站姿', group: 'idle', loop: true, tag: 'off', use: '不接入待机：并腿会把裙子顶穿，只能手动看' },
+
+  // ── VRoid Project Motion Pack（切段后接入，见 app.js MOTION_WINDOWS）──
+  { key: 'greeting2', label: '抬手打招呼', group: 'greet', loop: false, tag: 'llm', use: '主人刚回来、早安、轻一点的招呼（比 Goodbye 含蓄）' },
+  { key: 'greeting', label: '起身迎接', group: 'greet', loop: false, tag: 'event', use: '主人离开很久回来时的正式迎接（从蹲姿站起来挥手）' },
+  { key: 'Goodbye', label: '挥手再见', group: 'greet', loop: false, tag: 'llm', use: '打招呼、告别、任务交付' },
+  { key: 'shoot', label: '举手致意', group: 'greet', loop: false, tag: 'event', use: '招呼主人过来看' },
+  { key: 'hello', label: '伸懒腰', group: 'greet', loop: false, tag: 'llm', use: '坐太久、催主人起来动一动、刚睡醒' },
+
+  { key: 'Surprised', label: '惊讶', group: 'emo', loop: false, tag: 'llm', use: '意外、发现问题、惊讶' },
+  { key: 'Angry', label: '生气', group: 'emo', loop: false, tag: 'llm', use: '被亏待、抱怨（仅玩笑级别）' },
+  { key: 'Sad', label: '难过', group: 'emo', loop: false, tag: 'llm', use: '抱歉、失败、遗憾' },
+  { key: 'Blush', label: '害羞', group: 'emo', loop: false, tag: 'llm', use: '被夸、被感谢' },
+  { key: 'grabbed', label: '低头认错', group: 'emo', loop: false, tag: 'llm', use: '抱歉、认错、被主人说了一句（整个人弯下去低头）' },
+
+  { key: 'Clapping', label: '鼓掌', group: 'cheer', loop: false, tag: 'llm', use: '称赞、成功、恭喜' },
+  { key: 'Jump', label: '跳一下', group: 'cheer', loop: false, tag: 'llm', use: '好消息、兴奋、提醒主人' },
+  { key: 'spin', label: '转圈庆祝', group: 'cheer', loop: false, tag: 'llm', use: '大成功、被夸到飞起' },
+  { key: 'peace_sign', label: '比耶', group: 'cheer', loop: false, tag: 'llm', use: '得意、办成了、卖萌' },
+
+  { key: 'model_pose', label: '摆拍', group: 'pose', loop: false, tag: 'event', use: '被盯着看时的摆姿势' },
+  { key: 'motion_pose', label: '迈步走近', group: 'pose', loop: false, tag: 'event', use: '走过去看看' },
+  { key: 'show_full_body', label: '展示自己', group: 'pose', loop: false, tag: 'llm', use: '被问长什么样、被问是什么' },
+  { key: 'VRMA_07', label: '扶脸', group: 'pose', loop: false, tag: 'event', use: '害羞、整理仪表' },
+];
+
+const MOTION_KEYS = MOTIONS.filter((m) => m.tag === 'llm').map((m) => m.key);
+/* 提示词里列给模型的清单：键 + 中文意思。只给英文键不行 ——
+ * greeting2 / show_full_body 这种名字，模型猜不出差别，最后永远只挑 Jump 和 Blush。 */
+const MOTION_HINT = MOTIONS.filter((m) => m.tag === 'llm')
+  .map((m) => `${m.key}（${m.label}）`)
+  .join(' / ');
 
 const PERSONA = `你叫「{name}」，是住在主人 Mac 桌面角上的一只小精灵。主人正在用 WorkBuddy 干活，你贴着屏幕陪着他。
 
@@ -57,7 +95,7 @@ const PERSONA = `你叫「{name}」，是住在主人 Mac 桌面角上的一只�
 
 # 动作与表情
 可以在句子里插入标签，它们不会被念出来，指挥你的身体：
-- 动作：<m>动作名</m>　可用：${MOTION_KEYS.join(' / ')}
+- 动作：<m>动作名</m>　可用：${MOTION_HINT}
 - 表情：<e>表情名</e>　可用：happy / sad / angry / relaxed / surprised
 一次最多一个动作、一个表情，只放在最贴切的那句上。
 
@@ -77,6 +115,9 @@ const PERSONA = `你叫「{name}」，是住在主人 Mac 桌面角上的一只�
 主人："给我一句鼓励" → 从早上折腾到现在<m>Jump</m><e>happy</e>，你手上的活没一件是轻松的，还在往下推。
 主人："好累" → 那就别硬撑了<m>Relax</m>，趴一会儿，我替你看着进度条。
 主人："怎么办" → 先别急着改代码<m>Thinking</m>，把报错从第一行读一遍，答案基本在里面。
+主人一口气交付了三件 → 三件全过了<m>spin</m><e>happy</e>，你今天手挺顺的。
+主人坐了三小时 → 你这椅子都快烧了<m>hello</m>，站起来抻一下再坐回去。
+主人："你长什么样" → 就这个样子呀<m>show_full_body</m>，小是小了点，站得挺稳。
 `;
 
 
@@ -129,7 +170,9 @@ const DEFAULTS = {
     speakOnAsk: false,      // 每条新指令都搭话太吵，默认关
     minGapMs: 40000,
   },
-  window: { w: 400, h: 620, x: null, y: null, alwaysOnTop: true, clickThrough: true },
+  /* w/h 永远是「100% 大小」时的基准窗口；角色放大时窗口按倍数临时放大，
+   * 基准不跟着变 —— 否则 150% 存过一次，退回 100% 就回不到原尺寸了。 */
+  window: { w: 400, h: 620, x: null, y: null, alwaysOnTop: true, clickThrough: true, scale: 1 },
 };
 
 let cfgPath = null;
@@ -215,4 +258,8 @@ function buildSystemPrompt(extraContext) {
   return PERSONA.replace(/\{name\}/g, c.buddy.name).replace('{context}', ctx);
 }
 
-module.exports = { load, save, setPath, buildSystemPrompt, MOTIONS, MOTION_KEYS, readWorkBuddyLLM, DEFAULTS };
+module.exports = {
+  load, save, setPath, buildSystemPrompt,
+  MOTIONS, MOTION_GROUPS, MOTION_KEYS, MOTION_HINT,
+  readWorkBuddyLLM, DEFAULTS,
+};

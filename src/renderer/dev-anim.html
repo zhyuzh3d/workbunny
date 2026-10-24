@@ -27,9 +27,16 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip, VRMLookAtQuaternionProxy } from '@pixiv/three-vrm-animation';
 import { makeRig, groundClip, soleHeight } from './ground.js';
+import { cutClip, MOTION_WINDOWS } from './motion-cut.js';
 
 const W = 420, H = 660;
-const MOTIONS = ['idle_loop', 'LookAround', 'Relax', 'Thinking', 'Sleepy', 'Goodbye', 'Clapping', 'Jump', 'Surprised', 'Angry', 'Sad', 'Blush'];
+const MOTIONS = [
+  'idle_loop', 'LookAround', 'Relax', 'Thinking', 'Sleepy', 'Goodbye', 'Clapping', 'Jump', 'Surprised', 'Angry', 'Sad', 'Blush',
+  // VRoid Project Motion Pack（10）
+  'VRMA_07', 'greeting', 'greeting2', 'hello', 'model_pose', 'motion_pose', 'peace_sign', 'shoot', 'show_full_body', 'spin',
+  // not-elm/desktop-homunculus（3）
+  'grabbed', 'idle-maid', 'idle-sitting',
+];
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setPixelRatio(2);
@@ -126,8 +133,11 @@ async function boot() {
   const rig = makeRig(vrm);
   const soles = new Map();
   for (const [k, a] of anims) {
-    sets.raw.set(k, createVRMAnimationClip(a, vrm));
-    const c2 = createVRMAnimationClip(a, vrm);
+    const whole = createVRMAnimationClip(a, vrm);
+    sets.raw.set(k, whole);
+    // ik 这套走和应用完全一样的路径：先切段，再冻位移/统一地面/锁脚
+    const w = MOTION_WINDOWS[k];
+    const c2 = w ? cutClip(createVRMAnimationClip(a, vrm), w[0], w[1]) : createVRMAnimationClip(a, vrm);
     soles.set(k, soleHeight(c2, rig));
     sets.ik.set(k, c2);
   }
@@ -159,6 +169,110 @@ window.__shot = (name, t, mode = 'ik') => {
   for (let i = 0; i < 90; i++) vrm.update(1 / 60);
   renderer.render(scene, camera);
   return true;
+};
+
+/* 竖直轨迹：一条动作播一遍，逐帧记下头/髋/脚的世界高度。
+ * 「上下抖动」到底抖在哪一节骨头，靠这张表判决，不靠眼睛猜。 */
+window.__trace = (name, mode = 'ik') => {
+  const clip = (sets[mode] || sets.ik).get(name);
+  if (!clip) return { error: 'no clip' };
+  const bone = (n) => vrm.humanoid.getNormalizedBoneNode(n);
+  const nodes = {
+    head: bone('head'), hips: bone('hips'),
+    lf: bone('leftFoot'), rf: bone('rightFoot'),
+    lt: bone('leftToes'), rt: bone('rightToes'),
+  };
+  mixer.stopAllAction();
+  const act = mixer.clipAction(clip);
+  act.reset();
+  act.play();
+  act.paused = true;
+  const fps = 60, n = Math.max(2, Math.round(clip.duration * fps) + 1);
+  const out = {};
+  for (const k of Object.keys(nodes)) out[k] = [];
+  const v = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    act.time = Math.min(clip.duration, i / fps);
+    mixer.update(0.0001);
+    vrm.update(1 / 60);
+    for (const [k, nd] of Object.entries(nodes)) {
+      if (!nd) { out[k].push(null); continue; }
+      nd.getWorldPosition(v);
+      out[k].push(+v.y.toFixed(4));
+    }
+  }
+  const stat = (a) => {
+    const b = a.filter((x) => x != null);
+    if (!b.length) return null;
+    const lo = Math.min(...b), hi = Math.max(...b);
+    let step = 0;
+    for (let i = 1; i < b.length; i++) step = Math.max(step, Math.abs(b[i] - b[i - 1]));
+    return { lo: +lo.toFixed(4), hi: +hi.toFixed(4), amp: +(hi - lo).toFixed(4), stepMax: +step.toFixed(4) };
+  };
+  const summary = {};
+  for (const k of Object.keys(out)) summary[k] = stat(out[k]);
+  return { name, dur: +clip.duration.toFixed(2), n, summary, series: { head: out.head, hips: out.hips, lf: out.lf, rf: out.rf } };
+};
+
+/* 复刻动作库浏览页（vrma-library/index.html）的逐帧贴地回路，看它到底抖不抖。
+ * 那段代码是：mixer.update → 量最低一只脚 → hips.position.y -= minY*0.5 → vrm.update。
+ * 每帧都被动画轨道重写 hips，所以这其实是一个「改→被覆盖→再改」的反馈环。 */
+window.__libLoop = (name, seconds = 3) => {
+  const clip = (sets.raw).get(name) || (sets.ik).get(name);
+  if (!clip) return { error: 'no clip' };
+  mixer.stopAllAction();
+  const act = mixer.clipAction(clip);
+  act.reset();
+  act.enabled = true;
+  act.setEffectiveWeight(1);
+  act.setLoop(THREE.LoopRepeat, Infinity);
+  act.clampWhenFinished = true;
+  act.play();
+  const hips = vrm.humanoid.getNormalizedBoneNode('hips');
+  const feet = ['leftToes', 'rightToes', 'leftFoot', 'rightFoot'].map((b) => vrm.humanoid.getNormalizedBoneNode(b)).filter(Boolean);
+  const head = vrm.humanoid.getNormalizedBoneNode('head');
+  const v = new THREE.Vector3();
+  const ys = [];
+  const fps = 60, n = Math.round(seconds * fps);
+  for (let i = 0; i < n; i++) {
+    mixer.update(1 / fps);
+    let minY = Infinity;
+    for (const f of feet) { f.getWorldPosition(v); minY = Math.min(minY, v.y); }
+    if (hips && isFinite(minY) && Math.abs(minY) < 2) hips.position.y -= minY * 0.5;
+    vrm.update(1 / fps);
+    head.getWorldPosition(v);
+    ys.push(+v.y.toFixed(4));
+  }
+  let lo = Infinity, hi = -Infinity, step = 0;
+  for (let i = 0; i < ys.length; i++) { lo = Math.min(lo, ys[i]); hi = Math.max(hi, ys[i]); if (i) step = Math.max(step, Math.abs(ys[i] - ys[i - 1])); }
+  return { name, lo, hi, amp: +(hi - lo).toFixed(4), stepMax: +step.toFixed(4), tail: ys.slice(-12) };
+};
+
+/* 手臂长度探针：动作播放时「肩→手」的世界距离有没有超过静止姿态。
+ * 超过 = 骨头被拉开了（网格会被拉成管子），不是姿势问题。 */
+window.__reach = (name, mode = 'ik') => {
+  const clip = (sets[mode] || sets.ik).get(name);
+  if (!clip) return { error: 'no clip' };
+  const up = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
+  const hand = vrm.humanoid.getNormalizedBoneNode('leftHand');
+  const a = new THREE.Vector3(), b = new THREE.Vector3();
+  mixer.stopAllAction();
+  const act = mixer.clipAction(clip);
+  act.reset(); act.play(); act.paused = true;
+  const n = Math.max(2, Math.round(clip.duration * 60));
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i <= n; i++) {
+    act.time = Math.min(clip.duration, i / 60);
+    mixer.update(0.0001);
+    up.getWorldPosition(a); hand.getWorldPosition(b);
+    const d = a.distanceTo(b);
+    lo = Math.min(lo, d); hi = Math.max(hi, d);
+  }
+  mixer.stopAllAction();
+  vrm.humanoid.resetNormalizedPose();
+  vrm.update(0.016);
+  up.getWorldPosition(a); hand.getWorldPosition(b);
+  return { name, rest: +a.distanceTo(b).toFixed(3), lo: +lo.toFixed(3), hi: +hi.toFixed(3) };
 };
 
 boot().catch((e) => { window.__error = String(e && e.message || e); });

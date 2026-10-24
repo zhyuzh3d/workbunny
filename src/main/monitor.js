@@ -54,6 +54,7 @@ const NOT_A_TASK = /<conversation_history_summary>|<compact-summary>|This sessio
 function stripSystemReminders(s) {
   return String(s || '')
     .replace(/<system-reminder[\s\S]*?<\/system-reminder>/g, '')
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
     .replace(/<user_info>[\s\S]*?<\/user_info>/g, '')
     .replace(/<current_time>[\s\S]*?<\/current_time>/g, '')
     .replace(/<memory_and_skills_reminder>[\s\S]*?<\/memory_and_skills_reminder>/g, '')
@@ -61,15 +62,22 @@ function stripSystemReminders(s) {
     .trim();
 }
 
-function textOf(content) {
-  if (typeof content === 'string') return stripSystemReminders(content);
+/** 把 content 拼成原始文本（不洗） */
+function rawOf(content) {
+  if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
-  return stripSystemReminders(
-    content
-      .map((p) => (typeof p === 'string' ? p : (p && (p.text || (p.type === 'text' ? p.text : ''))) || ''))
-      .filter(Boolean)
-      .join('\n')
-  );
+  return content
+    .map((p) => (typeof p === 'string' ? p : (p && (p.text || (p.type === 'text' ? p.text : ''))) || ''))
+    .filter(Boolean)
+    .join('\n');
+}
+
+function textOf(content) {
+  const raw = rawOf(content);
+  // 后台任务完成通知是运行时自己塞进来的（<task-notification>…），不是主人说的话：
+  // 整条都不算新指令，也不该拿去当任务名 —— 否则状态条上会出现一堆尖括号标签。
+  if (/<task-notification>/i.test(raw)) return '';
+  return stripSystemReminders(raw);
 }
 
 /** 这条 user 消息是不是"主人在下一个新指令" */

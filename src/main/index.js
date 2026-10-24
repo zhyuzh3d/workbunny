@@ -186,9 +186,46 @@ function defaultPos(w, h) {
   };
 }
 
+/* ── 角色大小 ────────────────────────────────────────────────
+ * 三档：50% / 100% / 150%。窗口的 w/h 永远是 100% 的基准，
+ * 只是「放大时」把窗口按倍数撑开（她在屏幕上也真的变大了）；
+ * 缩小时窗口一点不动 —— 只是她自己在窗口中变小，绝不能把窗口缩到 UI 挤成一团。
+ * 缩放以窗口中心为锚点：角色一直站在同一个地方。 */
+const SCALES = [0.5, 1, 1.5];
+function clampScale(v) {
+  const n = Number(v);
+  if (!isFinite(n)) return 1;
+  return SCALES.reduce((a, b) => (Math.abs(b - n) < Math.abs(a - n) ? b : a), 1);
+}
+const winFactor = (k) => Math.max(1, clampScale(k));
+
+function windowSizeFor(k) {
+  const c = config.load();
+  const f = winFactor(k);
+  return { w: Math.round(c.window.w * f), h: Math.round(c.window.h * f) };
+}
+
+function applyWindowScale(k) {
+  if (!win || win.isDestroyed()) return null;
+  const { w, h } = windowSizeFor(k);
+  const b = win.getBounds();
+  const cx = b.x + b.width / 2;
+  const cy = b.y + b.height / 2;
+  const wa = screen.getDisplayNearestPoint({ x: Math.round(cx), y: Math.round(cy) }).workArea;
+  const nw = Math.min(w, wa.width - 8);
+  const nh = Math.min(h, wa.height - 8);
+  const nx = Math.max(wa.x + 4, Math.min(Math.round(cx - nw / 2), wa.x + wa.width - nw - 4));
+  const ny = Math.max(wa.y + 4, Math.min(Math.round(cy - nh / 2), wa.y + wa.height - nh - 4));
+  win.setBounds({ x: nx, y: ny, width: nw, height: nh });
+  log(`[window] 角色 ${Math.round(clampScale(k) * 100)}%（窗口 ${nw}×${nh}）`);
+  return { x: nx, y: ny, w: nw, h: nh };
+}
+
 function createWindow() {
   const c = config.load();
-  const { w, h } = c.window;
+  const size = windowSizeFor(c.window.scale);
+  const w = size.w;
+  const h = size.h;
   let { x, y } = c.window;
   const disp = screen.getPrimaryDisplay().workArea;
   if (typeof x !== 'number' || typeof y !== 'number' ||
@@ -841,11 +878,24 @@ function buildTrayMenu() {
     { label: '说句话', click: () => { showWindow(); send('ask', { focus: true }); } },
     { label: '按住说话  ⌘⇧Space', click: () => toggleRecord() },
     { type: 'separator' },
+    { label: '动作列表…', click: () => { showWindow(); send('motions', {}); } },
     {
       label: '形象',
       submenu: avatars.scan().map((a) => ({
         label: `${a.label}${c.avatar === a.key ? '  ✓' : ''}`,
         click: () => { config.save({ avatar: a.key }); send('avatar', { key: a.key }); },
+      })),
+    },
+    {
+      label: '角色大小',
+      submenu: SCALES.map((k) => ({
+        label: `${Math.round(k * 100)}%${clampScale(c.window.scale) === k ? '  ✓' : ''}`,
+        click: () => {
+          config.save({ window: { scale: k } });
+          applyWindowScale(k);
+          send('scale', { scale: k });
+          rebuildTray();
+        },
       })),
     },
     {
@@ -1068,6 +1118,7 @@ ipcMain.handle('pet:init', async () => {
   return {
     config: c,
     motions: config.MOTIONS,
+    motionGroups: config.MOTION_GROUPS,
     avatar: current,
     avatars: list,
     monitor: monitor ? snapshotForUi(monitor.view) : null,
@@ -1075,6 +1126,15 @@ ipcMain.handle('pet:init', async () => {
     versions: { electron: process.versions.electron, chrome: process.versions.chrome },
     paths: { userData: USER_DIR },
   };
+});
+
+/* 角色大小三档：只改取景倍数与（放大时的）窗口尺寸，UI 一律不动 */
+ipcMain.handle('pet:scale', (_e, { scale } = {}) => {
+  const k = clampScale(scale);
+  config.save({ window: { scale: k } });
+  applyWindowScale(k);
+  rebuildTray();
+  return { scale: k };
 });
 
 /* 重扫形象目录：主人往 assets/models/ 丢一个 .vrm，打开设置就能看见，不用重启 */

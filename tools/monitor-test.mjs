@@ -37,6 +37,12 @@ function check(name, ok, detail) {
 reset();
 const fileA = writeSession('proj-a', 'sessA', [run(now - 90e3, '改一下登录页的样式'), call(now - 80e3), call(now - 70e3)]);
 const fileB = writeSession('proj-b', 'sessB', [run(now - 40e3, '把测试全跑一遍'), call(now - 30e3)]);
+/* 后台任务完成通知（系统注入的 user 消息）不能算新任务，也不能拿去当任务名 */
+const notice = {
+  type: 'message', role: 'user', timestamp: now - 35e3,
+  content: '<task-notification>\n<task-id>Py8wwg</task-id>\n<status>completed</status>\n<summary>Background command done</summary>\n</task-notification>\n\nUse the TaskOutput tool with task_id="Py8wwg"',
+};
+fs.appendFileSync(fileA, JSON.stringify(notice) + '\n');
 
 const m = new Monitor();
 m.start(ROOT);
@@ -45,6 +51,9 @@ const v1 = m.view;
 check('两个会话都挂上了', m.sessions.size === 2, `sessions=${m.sessions.size}`);
 check('两个任务都在跑', v1.running.length === 2, `running=${v1.running.length}`);
 check('primary 是最新动过的那个', v1.primary && v1.primary.sessionId === 'sessB', v1.primary && v1.primary.sessionId);
+const aSnap = [...m.sessions.values()].find((e) => e.snap.sessionId === 'sessA').snap;
+check('后台任务通知没被当成新任务', !!aSnap.task && aSnap.task.userText.includes('改一下登录页'), aSnap.task ? aSnap.task.userText.slice(0, 20) : '-');
+check('任务名里没有尖括号标签', !taskName(aSnap.task).includes('<'), taskName(aSnap.task));
 
 const ctx1 = m.context();
 check('战况里两件事都写了', ctx1.includes('改一下登录页') && ctx1.includes('把测试全跑一遍'));

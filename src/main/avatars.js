@@ -10,6 +10,28 @@ const path = require('path');
 
 const MODELS_DIR = path.join(__dirname, '..', 'renderer', 'assets', 'models');
 
+/* ── 叫法 ──────────────────────────────────────────────────────────
+ * VRM 里自带的是日文名（メープル / ビビ / ヴィクトリア・ルービン …），
+ * 念出来是一串片假名，摆在设置里主人也认不出谁是谁。这里给每个文件起一个
+ * 中文名：按「她看起来是什么样」起，不按原名的音译。
+ *
+ * 键是文件名去掉 .vrm 再小写；丢一个新文件进来、没配名字就退回 meta 里的原名。 */
+const NAMES = {
+  '58': '小枫',                 // メープル = 枫，棕发女仆装
+  'avatarsample_d': '阿凛',      // 黑发、话少、酷
+  'avatarsample_e': '可可',      // 粉发、活泼
+  'avatarsample_f': '小南',      // 浅色、安静
+  'avatarsample_g': '薇琪',      // 金发白裙
+};
+
+/* 灯光系数：这几只官方样例的贴图本身就偏亮（白裙子 + 金发在 1.0 的光下会洗白），
+ * 载入时按角色单独压一下主光与 Ambient，裙子才看得见褶皱而不是一片白。 */
+const LIGHT = {
+  'avatarsample_g': 0.76,
+};
+
+const baseOf = (file) => String(file).replace(/\.vrm$/i, '').toLowerCase();
+
 /* GLB 头：12 字节 + 第一个 chunk 就是 JSON。只解出 meta，不解整棵树。 */
 function readMeta(file) {
   let buf;
@@ -59,10 +81,14 @@ function scan(dir = MODELS_DIR) {
   names.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
   return names.map((file) => {
     const m = readMeta(path.join(dir, file));
+    const base = baseOf(file);
     return {
       key: file,
       file,
-      label: m.title || file.replace(/\.vrm$/i, ''),
+      label: NAMES[base] || m.title || file.replace(/\.vrm$/i, ''),
+      // 原来的名字留着做 tooltip：主人想知道「这是哪只官方样例」还查得到
+      title: m.title || '',
+      light: LIGHT[base] || 1,
       author: m.author || '',
       vrmVersion: m.vrmVersion || '',
       redistribute: m.redistribute || false,
