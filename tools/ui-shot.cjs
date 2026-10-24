@@ -68,6 +68,9 @@ app.whenReady().then(async () => {
 
   if (want === 'settings') {
     await win.webContents.executeJavaScript('window.__openSettings && window.__openSettings()');
+    // 注意：这个环境里，一旦 WebGL 画布画出过东西，capturePage 有时拿不到
+    // 压在画布上的大面积面板（软件渲染 + backdrop-filter 的老毛病，真机没有）。
+    // 所以面板的验收以 DOM 断言为准（dbg 里的 btnCount/classes/settingsCls），别只看图。
   }
 
   if (want === 'activity') {

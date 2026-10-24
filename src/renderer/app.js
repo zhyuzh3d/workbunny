@@ -1171,6 +1171,8 @@ window.__play = (k) => { playOneShot(k, 0.18); return k; };
 window.__avatar = (k) => { switchAvatar(k); return k; };
 window.__avatars = () => Object.keys(AVATARS);
 window.__openSettings = () => { openSettings(); return true; };
+/* 截图用：停掉渲染循环，否则软件渲染下截图会漏掉带 backdrop-filter 的面板 */
+window.__freeze = (v) => { renderer.setAnimationLoop(v === false ? frame : null); return true; };
 addEventListener('error', (e) => { window.__err = String(e.message || e.error || e); });
 // 自检钩子：直接驱动底部胶囊的三种形态
 window.__dock = (m) => {
