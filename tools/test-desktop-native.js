@@ -68,6 +68,10 @@ test('capture disables shadows and cursor and writes screenshot files with no-fo
   assert.match(source, /config\.showsCursor = false/);
   assert.match(source, /config\.ignoreShadowsSingleWindow = true/);
   assert.match(source, /config\.ignoreShadowsDisplay = true/);
+  assert.match(source, /filter\.pointPixelScale/);
+  assert.match(source, /config\.scalesToFit = true/);
+  assert.match(source, /config\.preservesAspectRatio = true/);
+  assert.match(source, /func capturePixelSize\(rect: CGRect, pointPixelScale: CGFloat\)/);
   assert.match(source, /open\(\$0, O_RDONLY \| O_DIRECTORY \| O_NOFOLLOW\)/);
   assert.match(source, /O_WRONLY \| O_CREAT \| O_EXCL \| O_NOFOLLOW, 0o600/);
 });
@@ -76,7 +80,7 @@ test('locked-session guard covers capture, activate, and all input actions; perm
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   assert.match(source, /session\["CGSSessionScreenIsLocked"\]/);
   assert.match(source, /"sessionLocked": sessionLocked\(\)/);
-  assert.equal((source.match(/guard !sessionLocked\(\) else \{ throw DesktopError\(message: "电脑已锁屏，请解锁后重试"\) \}/g) || []).length, 4);
+  assert.equal((source.match(/guard !sessionLocked\(\) else \{ throw DesktopError\(message: "电脑已锁屏，请解锁后重试"\) \}/g) || []).length, 5);
   assert.match(source, /DispatchQueue\.global\(qos: \.userInitiated\)\.async/);
   assert.match(source, /RunLoop\.main\.run\(mode: \.default, before: Date\(timeIntervalSinceNow: 0\.1\)\)/);
 });
@@ -92,6 +96,8 @@ test('type plans reject implicit newlines and controls, emit explicit soft break
   assert.equal(run.status, 0, run.stderr || run.stdout);
   const result = JSON.parse(run.stdout.trim());
   assert.equal(result.selfTest, 'native');
+  assert.deepEqual(result.capturePixelSize, [840, 630]);
+  assert.equal(result.windowFit, true);
   assert.deepEqual(result.rectCases, ['CGWindowBounds', 'lowercase']);
   assert.equal(result.invalidRectsRejected, 5);
   assert.deepEqual(result.multilineEvents, ['text:A', 'shiftEnter', 'text:B', 'shiftEnter', 'text:C']);
@@ -106,6 +112,63 @@ test('rectFrom accepts CGWindowBounds casing and preserves dimension validation'
   assert.match(source, /v\["height"\] \?\? v\["Height"\]/);
   assert.match(source, /\[x, y, w, h\]\.allSatisfy\(\{ \$0\.isFinite \}\)/);
   assert.match(source, /w < 100_000, h < 100_000/);
+});
+
+test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bounded controls', () => {
+  const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
+  const context = source.slice(source.indexOf('func workBuddyControls('), source.indexOf('func workBuddyInspect('));
+  assert.ok(context.indexOf('validateWorkBuddyContext(request)') < context.indexOf('AXUIElementCreateApplication'));
+  assert.match(source, /workBuddyBundleAllowed\(front\.bundleIdentifier\)/);
+  assert.match(source, /let workBuddyBundleID = "com\.tencent\.workbuddy\.mac"/);
+  assert.match(source, /abs\(lhs\.minX-rhs\.minX\) <= 2/);
+  assert.match(source, /AXUIElementSetMessagingTimeout\(element, 0\.2\)/);
+  assert.match(source, /visited >= 2000/);
+  assert.match(source, /depth >= 25/);
+  assert.match(source, /2_000_000_000/);
+  assert.match(source, /role == kAXTextAreaRole/);
+  assert.match(source, /description\.hasPrefix\("Select model:"\)/);
+  assert.match(source, /role == kAXHeadingRole[\s\S]{0,260}workBuddyHomeReady\(title: heading\)/);
+  assert.match(source, /== "发送"/);
+  assert.match(source, /description == "发送"/);
+  assert.match(source, /workBuddyReadbackFlags\(actual: finalReadback, expected: expectedText\)\.matches/);
+  assert.match(source, /func workBuddyDraftIsEmpty\(_ raw: String\?/);
+  assert.match(source, /raw == "\\u\{FEFF\}"/);
+  assert.match(source, /if !expected\.hasPrefix\("\\u\{FEFF\}"\) && comparable\.hasPrefix\("\\u\{FEFF\}"\) \{ comparable\.removeFirst\(\) \}/);
+  assert.match(source, /workBuddyDraftIsEmpty\(controls\.draft, sendButtonCount:/);
+  assert.match(source, /workBuddyTextMatches\(controls\.draft, expected: text\)/);
+  assert.match(source, /raw == workBuddyRTEEmptyValue && sendButtonCount == 1 && !sendEnabled/);
+  assert.match(source, /workBuddyDraftPlan\(current: workBuddyRTEEmptyValue, requested: "task text", sendButtonCount: 1, sendEnabled: false\)/);
+  assert.match(source, /draftMatchesRequest = available && controls\.homeReady && controls\.selectedModel == workBuddyUIModel/);
+  assert.match(source, /components\(separatedBy: "\\n"\)/);
+  assert.match(source, /expectedLine\.isEmpty && actualLine == "\\u\{FEFF\}"/);
+  const textMatch = source.slice(source.indexOf('func workBuddyTextMatches('), source.indexOf('func workBuddyDraftPlan('));
+  assert.doesNotMatch(textMatch, /trimmingCharacters/);
+  assert.doesNotMatch(source, /func canonicalWorkBuddyText/);
+  assert.match(source, /makeInputPlan\(text, lineBreak: "shiftEnter"\)/);
+  assert.match(source, /func postUnicodeText\(_ units: \[UInt16\]\)/);
+  assert.match(source, /func postShiftReturn\(\)/);
+  assert.match(source, /AXUIElementSetAttributeValue\(editor, kAXFocusedAttribute/);
+  assert.match(source, /kAXFocusedUIElementAttribute/);
+  assert.match(source, /waitDeadline = DispatchTime\.now\(\)\.uptimeNanoseconds \+ 800_000_000/);
+  assert.doesNotMatch(source, /AXUIElementSetAttributeValue\(editor, kAXValueAttribute[^\n]*text/);
+  assert.match(source, /AXUIElementPerformAction\(button, kAXPressAction as CFString\)/);
+  assert.match(source, /case "workbuddyInspect"/);
+  assert.match(source, /case "workbuddyFill"/);
+  assert.match(source, /case "workbuddySend"/);
+  const run = spawnSync(defaultBinary(), ['--self-test-workbuddy'], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(run.status, 0, run.stderr || run.stdout);
+  assert.equal(JSON.parse(run.stdout.trim()).workBuddyGuards, true);
+  assert.equal(JSON.parse(run.stdout.trim()).workBuddyReadbackGuards, true);
+  assert.equal(JSON.parse(run.stdout.trim()).workBuddySerializedMatch, true);
+  const rejected = spawnSync(defaultBinary(), [], {
+    encoding: 'utf8', timeout: 5000,
+    input: `${JSON.stringify({ id: 'wrong-bundle', op: 'workbuddyInspect', windowId: 1,
+      expected: { pid: 1, bundleId: 'com.tencent.wechat' }, sentAtMs: Date.now(), timeoutMs: 1000 })}\n`,
+  });
+  assert.equal(rejected.status, 0, rejected.stderr || rejected.stdout);
+  const response = JSON.parse(rejected.stdout.trim());
+  assert.equal(response.ok, false);
+  assert.match(response.error, /仅允许目标应用 com\.tencent\.workbuddy\.mac/);
 });
 
 test('close kills and waits; cancel kills, waits, and permits a later restart', async () => {

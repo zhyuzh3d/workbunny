@@ -374,11 +374,40 @@ function paintDesktopStatus(status) {
   if (typeof shot === 'string' && shot.startsWith('data:image/')) { image.src = shot; preview.hidden = false; }
   else { image.removeAttribute('src'); preview.hidden = true; }
 }
+function paintWorkBuddyMonitor(snapshot) {
+  const target = $('workbuddyMonitorTasks');
+  if (!target) return;
+  target.replaceChildren();
+  const tasks = Array.isArray(snapshot?.tasks) ? snapshot.tasks : [];
+  if (!tasks.length) { target.append(node('div', 'inline-note', '暂未发现 WorkBuddy 会话任务')); return; }
+  for (const task of tasks.slice(0, 6)) {
+    const status = task.status === 'running' ? '进行中' : task.status === 'failed' ? '未完成' : task.status === 'abandoned' ? '已中断' : ['done', 'ok'].includes(task.status) ? '已完成' : labelStatus(task.status);
+    target.append(node('div', 'task-detail', `${task.name || task.title || 'WorkBuddy 任务'} · ${status}`));
+  }
+}
 async function refreshDesktop() {
   try { hideError(); paintDesktopStatus(await api('taskStatus')); }
   catch (error) { setPill('desktopStatus', '状态读取失败', 'bad'); showError(error); }
 }
 $('desktopRefresh').addEventListener('click', refreshDesktop);
+$('taskTarget').addEventListener('change', () => {
+  const workbuddy = $('taskTarget').value === 'workbuddy';
+  $('workModelRow').hidden = !workbuddy;
+  $('workbuddyMonitorCard').hidden = !workbuddy;
+  $('taskGoalLabel').textContent = workbuddy ? '交给 WorkBuddy 的任务' : '想在微信做什么';
+  $('taskGoal').placeholder = workbuddy ? '写下要原文交给 WorkBuddy 的任务' : '写下希望在微信文件传输助手完成的操作';
+  $('taskStart').textContent = workbuddy ? '发送给 WorkBuddy' : '开始代办';
+});
+$('workModelRow').hidden = $('taskTarget').value !== 'workbuddy';
+$('workbuddyOpen').addEventListener('click', async () => {
+  $('workbuddyOpen').disabled = true;
+  try {
+    const result = await api('workbuddyOpen');
+    if (result === false || result?.ok === false) throw new Error(result?.error || 'WorkBuddy 没有打开');
+    setNote('desktopActionNote', '已请求打开 WorkBuddy');
+  } catch (error) { showError(error); }
+  finally { $('workbuddyOpen').disabled = false; }
+});
 $('desktopPermission').addEventListener('click', async () => {
   $('desktopPermission').disabled = true;
   setNote('permissionNote', '正在打开系统权限请求…');
@@ -391,18 +420,19 @@ $('desktopPermission').addEventListener('click', async () => {
   finally { $('desktopPermission').disabled = false; }
 });
 $('taskStart').addEventListener('click', async () => {
-  const goal = $('taskGoal').value.trim();
-  if (!goal) { showError(new Error('请先写下任务内容')); $('taskGoal').focus(); return; }
+  const goal = $('taskGoal').value;
+  if (!goal.trim()) { showError(new Error('请先写下任务内容')); $('taskGoal').focus(); return; }
   try {
     hideError(); $('taskStart').disabled = true;
-    const result = await api('taskStart', { goal, target: $('taskTarget').value });
+    const target = $('taskTarget').value;
+    const result = await api('taskStart', { goal, target, workModel: $('workModel').value });
     if (!result?.ok) throw new Error(result?.error || '任务没有开始');
-    setNote('desktopActionNote', '任务已开始'); await refreshDesktop();
+    setNote('desktopActionNote', target === 'workbuddy' ? '正在向 WorkBuddy 填入并提交任务…' : '微信代理已开始'); await refreshDesktop();
   } catch (error) { showError(error); }
   finally { $('taskStart').disabled = !!desktopStatus?.running; }
 });
 $('taskStop').addEventListener('click', async () => {
-  try { const result = await api('taskStop'); if (result === false || result?.ok === false) throw new Error(result?.error || '任务没有停止'); setNote('desktopActionNote', '已请求停止任务'); await refreshDesktop(); }
+  try { const result = await api('taskStop'); if (result === false || result?.ok === false) throw new Error(result?.error || '代理操作没有暂停'); setNote('desktopActionNote', '已暂停代理操作'); await refreshDesktop(); }
   catch (error) { showError(error); }
 });
 $('taskAccept').addEventListener('click', async () => {
@@ -454,5 +484,10 @@ if (page === 'memory') {
 }
 else {
   refreshDesktop();
-  if (typeof window.pet?.on === 'function') window.pet.on((event) => { if (event?.type === 'desktop') paintDesktopStatus(event); });
+  $('workbuddyMonitorCard').hidden = $('taskTarget').value !== 'workbuddy';
+  if (typeof window.pet?.init === 'function') Promise.resolve(window.pet.init()).then(result => paintWorkBuddyMonitor(result?.monitor)).catch(() => {});
+  if (typeof window.pet?.on === 'function') window.pet.on((event) => {
+    if (event?.type === 'desktop') paintDesktopStatus(event);
+    else if (event?.type === 'monitor') paintWorkBuddyMonitor(event);
+  });
 }

@@ -33,6 +33,7 @@ let failConfig = false;
 let holdConfig = false, heldConfigResolve = null;
 let holdNextMemoryList = false, heldMemoryListResolve = null;
 let insertFinish = null;
+let monitorSnapshot = { tasks: [{ name: 'Fixture 正在整理', status: 'running' }] };
 let status = {
   permissions: { accessibilityTrusted: true, screenCaptureAllowed: true, postEventAllowed: false },
   running: false, task: { id: 'task-1', status: 'paused', goal: 'fixture paused task', note: '可以继续检查' },
@@ -45,6 +46,7 @@ fs.writeFileSync(preload, `
   const api = (name, ...args) => ipcRenderer.invoke('fixture:api', name, ...args);
   contextBridge.exposeInMainWorld('pet', {
     on: cb => ipcRenderer.on('fixture:event', (_event, value) => cb(value)),
+    init: (...a) => api('init', ...a), workbuddyOpen: (...a) => api('workbuddyOpen', ...a),
     memoryStats: (...a) => api('memoryStats', ...a), memoryList: (...a) => api('memoryList', ...a),
     memoryUpdate: (...a) => api('memoryUpdate', ...a), memoryRemove: (...a) => api('memoryRemove', ...a),
     memoryClear: (...a) => api('memoryClear', ...a), memorySources: (...a) => api('memorySources', ...a),
@@ -59,6 +61,7 @@ fs.writeFileSync(preload, `
       holdNextMemoryList: () => ipcRenderer.invoke('fixture:control', 'holdNextMemoryList'),
       releaseMemoryList: () => ipcRenderer.invoke('fixture:control', 'releaseMemoryList'),
       emitDesktop: value => ipcRenderer.invoke('fixture:control', 'emitDesktop', { type: 'desktop', ...value }),
+      emitMonitor: value => ipcRenderer.invoke('fixture:control', 'emitMonitor', value),
       emitMemoryChange: () => ipcRenderer.invoke('fixture:control', 'emitMemoryChange'),
       getCalls: () => ipcRenderer.invoke('fixture:control', 'getCalls') },
   });
@@ -73,6 +76,7 @@ ipcMain.handle('fixture:control', (_event, action, value) => {
   if (action === 'holdNextMemoryList') { holdNextMemoryList = true; return true; }
   if (action === 'releaseMemoryList') { heldMemoryListResolve?.(); heldMemoryListResolve = null; return true; }
   if (action === 'emitDesktop') { status = value; activeWindow?.webContents.send('fixture:event', value); return true; }
+  if (action === 'emitMonitor') { monitorSnapshot = value; activeWindow?.webContents.send('fixture:event', { type: 'monitor', ...value }); return true; }
   if (action === 'emitMemoryChange') {
     rows.push({ id: `memory-live-${Date.now()}`, kind: 'memory', ts: Date.now(), content: '海边新记忆', status: 'pending', sources: [] });
     activeWindow?.webContents.send('fixture:event', { type: 'memory-changed', counts: emptyCounts() });
@@ -83,6 +87,8 @@ ipcMain.handle('fixture:control', (_event, action, value) => {
 });
 ipcMain.handle('fixture:api', async (_event, name, ...args) => {
   called(name, ...args);
+  if (name === 'init') return { monitor: monitorSnapshot };
+  if (name === 'workbuddyOpen') return { ok: true };
   if (name === 'memoryStats') return { ready: true, counts: emptyCounts(), state: { mood: '愉快', energy: 72, interactions: 5 } };
   if (name === 'config') {
     if (failConfig) { failConfig = false; return { ok: false, error: 'fixture write failure' }; }
@@ -113,7 +119,7 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
   if (name === 'memoryRestore') return { canceled: true };
   if (name === 'taskStatus') return status;
   if (name === 'desktopPermission') return status.permissions;
-  if (name === 'taskStart') { status = { ...status, running: true, task: { status: 'running', goal: args[0].goal, note: '运行中' } }; return { ok: true }; }
+  if (name === 'taskStart') { status = { ...status, running: true, task: { status: 'running', goal: args[0].goal, target: args[0].target, workModel: args[0].workModel, thinking: args[0].workModel === 'hy3' ? 'low' : 'high', note: '运行中' } }; return { ok: true }; }
   if (name === 'taskStop') {
     status = { ...status, running: false, task: { ...(status.task || {}), status: 'stopped', note: '已停止' } };
     if (insertFinish) { const done = insertFinish; insertFinish = null; done({ ok: false, error: '输入已取消' }); }
@@ -242,8 +248,15 @@ async function testDesktop() {
     task: { id: 'task-2', status: 'paused', goal: 'fixture paused task', note: '可以继续检查' }, screenshot: null };
   const win = await loadPage('desktop');
   await waitFor(() => Promise.resolve((calls.taskStatus || []).length > 0), 'initial task status');
+  await waitFor(() => evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent").then(text => text.includes('Fixture 正在整理')), 'initial WorkBuddy monitor snapshot');
   assert.match(await evalIn(win, "document.querySelector('#permissionList').textContent"), /辅助功能.*屏幕录制.*输入控制/);
   assert.equal(await evalIn(win, "document.getElementById('taskAccept').disabled"), true, 'paused tasks cannot be accepted');
+  await evalIn(win, "window.pet.__fixture.emitMonitor({tasks:[{name:'Monitor 实际进展',status:'running'}]})");
+  await waitFor(() => evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent").then(text => text.includes('Monitor 实际进展')), 'WorkBuddy monitor event refresh');
+  await evalIn(win, "window.pet.__fixture.emitMonitor({tasks:[{name:'Monitor 实际交付',status:'ok'}]})");
+  await waitFor(() => evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent").then(text => text.includes('Monitor 实际交付 · 已完成')), 'native monitor completion status');
+  await click(win, 'workbuddyOpen');
+  await waitFor(() => Promise.resolve((calls.workbuddyOpen || []).length === 1), 'open WorkBuddy');
   const initialStatusCalls = (calls.taskStatus || []).length;
   await evalIn(win, `window.pet.__fixture.emitDesktop({permissions:{accessibilityTrusted:true,screenCaptureAllowed:true,postEventAllowed:true},running:false,task:{id:'task-3',status:'review',goal:'review this',note:'视觉结果已完成'},screenshot:${JSON.stringify(pixel)}})`);
   await waitFor(() => evalIn(win, "document.getElementById('taskAccept').disabled").then(disabled => !disabled), 'review state event');
@@ -260,8 +273,20 @@ async function testDesktop() {
   await waitFor(() => Promise.resolve((calls.desktopPermission || []).length === permissionCalls + 1), 'permission prompt');
   assert.equal((calls.desktopPermission || []).length, permissionCalls + 1, 'permission is requested once per button press');
 
-  await evalIn(win, "document.getElementById('taskGoal').value='fixture task'; document.getElementById('taskStart').click()");
+  assert.equal(await evalIn(win, "document.getElementById('workModel').value"), 'deepseek-v4.1-flash', 'Flash high is the default task profile');
+  assert.equal(await evalIn(win, "document.getElementById('workbuddyMonitorCard').hidden"), false);
+  await evalIn(win, "document.getElementById('taskTarget').value='wechat'; document.getElementById('taskTarget').dispatchEvent(new Event('change',{bubbles:true}))");
+  assert.equal(await evalIn(win, "document.getElementById('workModelRow').hidden"), true, 'WorkBuddy profile is hidden for other targets');
+  assert.equal(await evalIn(win, "document.getElementById('workbuddyMonitorCard').hidden"), true, 'WorkBuddy monitor is hidden for the WeChat route');
+  assert.equal(await evalIn(win, "document.getElementById('taskGoalLabel').textContent"), '想在微信做什么');
+  assert.equal(await evalIn(win, "document.getElementById('taskStart').textContent"), '开始代办');
+  await evalIn(win, "document.getElementById('taskTarget').value='workbuddy'; document.getElementById('taskTarget').dispatchEvent(new Event('change',{bubbles:true}))");
+
+  await evalIn(win, "document.getElementById('taskGoal').value='  原样交给 WorkBuddy\\n保留第二行  '; document.getElementById('taskStart').click()");
   await waitFor(() => Promise.resolve((calls.taskStart || []).length === 1), 'task start');
+  assert.equal(calls.taskStart[0][0].workModel, 'deepseek-v4.1-flash', 'selected execution profile is passed to main');
+  assert.equal(calls.taskStart[0][0].goal, '  原样交给 WorkBuddy\n保留第二行  ', 'the entered WorkBuddy request reaches main unchanged');
+  assert.equal(status.task.thinking, 'high');
   await evalIn(win, "window.dispatchEvent(new Event('beforeunload',{cancelable:true}))");
   assert.equal((calls.taskStop || []).length, 0, 'closing UI does not cancel a background task');
   await click(win, 'taskStop');

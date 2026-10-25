@@ -39,7 +39,7 @@ if (!process.versions.electron) {
         const c=document.getElementById('c'),x=c.getContext('2d');
         x.fillStyle='#fff';x.fillRect(0,0,1000,360);x.fillStyle='#111';
         x.font='bold 48px -apple-system, sans-serif';
-        x.fillText('文件传输助手',40,90);x.fillText('Hy3',40,190);x.fillText('workbunny 你好',40,290);
+        x.fillText('文件传输助手',40,90);x.fillText('Hy3',40,190);x.fillText('0.00x',300,190);x.fillText('workbunny 你好',40,290);
       </script>`;
     await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
     await win.webContents.executeJavaScript('document.fonts.ready.then(() => new Promise(requestAnimationFrame))');
@@ -56,6 +56,12 @@ if (!process.versions.electron) {
     for (const text of ['文件传输助手', 'Hy3', 'workbunny', '你好']) {
       assert.ok(joined.toLowerCase().includes(text.toLowerCase()), `OCR missing ${text}; got: ${joined}`);
     }
+    const modelRow = result.texts.find(item => /^Hy3$/i.test(item.text.trim()));
+    const freePrice = result.texts.find(item => /^0\.00x$/i.test(item.text.trim()));
+    assert.ok(modelRow, `OCR missing exact Hy3 model label; got: ${joined}`);
+    assert.ok(freePrice, `OCR missing exact 0.00x price; got: ${joined}`);
+    assert.ok(Math.abs((modelRow.y + modelRow.height / 2) - (freePrice.y + freePrice.height / 2)) < 0.03,
+      `Hy3 and 0.00x should map to the same original screenshot row: ${JSON.stringify({ modelRow, freePrice })}`);
     for (const item of result.texts) {
       assert.ok(item.confidence >= 0 && item.confidence <= 1);
       assert.ok(item.x >= 0 && item.y >= 0 && item.x + item.width <= 1.001 && item.y + item.height <= 1.001);

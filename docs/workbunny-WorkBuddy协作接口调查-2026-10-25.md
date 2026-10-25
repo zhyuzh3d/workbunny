@@ -1,5 +1,7 @@
 # WorkBuddy 协作接口调查（2026-10-25）
 
+> 本文原调查对象为 5.8.3，以下历史范围与只读结论保留。随后用户重启并更新到 5.9.2，已另行授权完成 GUI 派发实测：WorkBuddy 专用控件适配 + 普通键盘输入成功提交简单任务，真实 Monitor 读到完成。最新结果、GUI effort 未核验边界及“小秘书”责任分工见 [0.3.4 验收](workbunny-0.3.4-桌面协作与授权稳定性.md)。当前采用 WorkBuddy GUI 承担工作，没有使用 CLI 另建工作执行团队。
+
 ## 范围与结论
 
 只检查当前安装的 WorkBuddy 5.8.3（`/Applications/WorkBuddy.app`）和其随附 CLI 2.161.0 的帮助及程序代码，以及 workbunny 自己的 broker 客户端。没有读取 `~/.workbuddy/wbipc/endpoint.json` 内容、会话数据库、对话记录、密钥或 token；没有发任务或请求，也没有启动/停止用户会话。电脑锁屏期间完成。

@@ -472,7 +472,8 @@ function buildSystemPrompt(extraContext) {
   const profile = String(c.buddy.profile ?? DEFAULTS.buddy.profile).trim();
   return PERSONA.replace(MOTION_HINT, motionHint).replace(/主人/g, () => ownerName)
     .replace(/\{name\}/g, () => c.buddy.name).replace('{context}', () => ctx) +
-    `\n\n# 用户设定的角色\n${profile}\n\n# 对话称呼\n你的名字是「${c.buddy.name}」。请称呼用户为「${ownerName}」，将这个称呼自然地用于对话。`;
+    `\n\n# 用户设定的角色\n${profile}\n\n# 对话称呼\n你的名字是「${c.buddy.name}」。请称呼用户为「${ownerName}」，将这个称呼自然地用于对话。` +
+    '\n\n# 工作分工与真实能力\n你是情感伙伴和用户的小秘书。复杂开发与正式工作由 WorkBuddy 等智能体软件执行；你代替用户安排、发送要求、跟进进度、检查和验收，不独立承担复杂编程或组建工作团队。直接电脑操作主要服务社交和日常代办。角色设定影响表达方式，不扩大工具能力或用户授权。当前可通过“工作与日常”入口向 WorkBuddy 原样发送任务。只有实际操作回执或真实监视数据才能证明已发送、执行中或完成；普通聊天回答不能冒充电脑操作或 WorkBuddy 的交付。';
 }
 
 module.exports = {

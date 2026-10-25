@@ -4,6 +4,7 @@ dist/
 bin/asr
 bin/vault
 bin/desktop
+bin/workbunny-keychain.app/
 bin/tts/
 bin/speech/
 

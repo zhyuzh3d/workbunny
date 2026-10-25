@@ -45,20 +45,28 @@
 
   <main id="desktopPage" class="page" hidden>
     <header class="head">
-      <div><div class="eyebrow">WORKBUNNY</div><h1>桌面任务</h1></div>
+      <div><div class="eyebrow">WORKBUNNY</div><h1>工作与日常</h1></div>
       <span id="desktopStatus" class="status-pill">尚未读取</span>
     </header>
     <section class="main desktop-main">
       <div class="card task-card">
-        <label class="field-label" for="taskTarget">任务目标</label>
+        <label class="field-label" for="taskTarget">代理对象</label>
         <select id="taskTarget">
-          <option value="workbuddy">WorkBuddy</option>
-          <option value="wechat">微信文件传输助手</option>
+          <option value="workbuddy">工作代理 · WorkBuddy</option>
+          <option value="wechat">日常社交 · 微信文件传输助手</option>
         </select>
         <p class="inline-note">微信目标仅用于文件传输助手实验。</p>
-        <label class="field-label" for="taskGoal">要做什么</label>
-        <textarea id="taskGoal" rows="3" maxlength="1200" placeholder="用几句话描述希望完成的任务"></textarea>
-        <div class="button-row"><button id="desktopRefresh" class="button quiet">刷新状态</button></div>
+        <div id="workModelRow">
+          <label class="field-label" for="workModel">协作模型</label>
+          <select id="workModel">
+            <option value="deepseek-v4.1-flash">DeepSeek 4.1 Flash</option>
+            <option value="hy3">Hy3 · 简单会话</option>
+          </select>
+          <p class="inline-note">Flash 的代理操作使用 high；WorkBuddy 对话的思考强度以其自身设置为准。</p>
+        </div>
+        <label id="taskGoalLabel" class="field-label" for="taskGoal">交给 WorkBuddy 的任务</label>
+        <textarea id="taskGoal" rows="3" maxlength="1200" placeholder="写下要原文交给 WorkBuddy 的任务"></textarea>
+        <div class="button-row"><button id="desktopRefresh" class="button quiet">刷新状态</button><button id="workbuddyOpen" class="button quiet">查看 WorkBuddy</button></div>
       </div>
 
       <div class="card permissions-card">
@@ -68,19 +76,24 @@
       </div>
 
       <div class="card task-state-card">
-        <div class="section-heading"><div><h2>当前步骤</h2><p id="taskStateNote">没有正在运行的任务</p></div></div>
+        <div class="section-heading"><div><h2>Bunny 当前操作</h2><p id="taskStateNote">没有进行中的代理操作</p></div></div>
         <div id="taskDetails" class="task-details"></div>
         <figure id="taskPreview" class="preview" hidden><img id="taskScreenshot" alt="最近一次任务截图"><figcaption>最近任务截图</figcaption></figure>
       </div>
 
-      <div class="card insert-card">
-        <div class="section-heading"><div><h2>输入到当前窗口</h2><p>点击后有 3 秒切换输入焦点。</p></div></div>
+      <div id="workbuddyMonitorCard" class="card monitor-card">
+        <div class="section-heading"><div><h2>WorkBuddy 实际进度</h2><p>来自现有会话监视</p></div></div>
+        <div id="workbuddyMonitorTasks" class="task-details"></div>
+      </div>
+
+      <details class="card insert-card"><summary>输入辅助</summary>
+        <p class="inline-note">点击后有 3 秒切换输入焦点。</p>
         <textarea id="desktopInsertText" rows="2" maxlength="3500" placeholder="要输入的单段文字（3500 字以内）"></textarea>
         <div class="button-row"><button id="desktopInsert" class="button">倒计时输入</button><button id="desktopInsertCancel" class="button quiet" hidden>取消</button><span id="desktopInsertNote" class="inline-note" role="status"></span></div>
-      </div>
-      <p class="safety-note">截图只会随任务发送给 WorkBuddy 的免费视觉模型，不会常驻截屏。</p>
+      </details>
+      <p class="safety-note">截图只会随任务发送给所选模型，不会常驻截屏。</p>
     </section>
-    <footer class="sticky-actions"><div class="sticky-button-row"><button id="taskStart" class="button primary">开始任务</button><button id="taskStop" class="button danger" disabled>停止</button><button id="taskAccept" class="button quiet" disabled>验收完成</button></div><span id="desktopActionNote" class="inline-note" role="status"></span></footer>
+    <footer class="sticky-actions"><div class="sticky-button-row"><button id="taskStart" class="button primary">发送给 WorkBuddy</button><button id="taskStop" class="button danger" disabled>暂停代理操作</button><button id="taskAccept" class="button quiet" disabled>确认结果</button></div><span id="desktopActionNote" class="inline-note" role="status"></span></footer>
   </main>
 
   <footer id="pageError" class="global-note" role="status" hidden></footer>

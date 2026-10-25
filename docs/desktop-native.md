@@ -2,7 +2,15 @@
 
 `native/desktop.swift` 构建为 arm64 macOS 26 的 `bin/desktop`，通过标准输入/输出交换 JSONL；`src/main/desktop-native.js` 提供持续子进程客户端。桥接不接受 shell 命令或任意辅助功能路径。
 
-支持 `permissions`（AX、屏幕录制、事件权限和 macOS 锁屏状态）、`requestPermission`（仅在显式调用时请求系统授权）、`frontmost`（前台进程身份和 CGWindowList 窗口 ID/矩形）、`capture`（主显示器或指定 `windowId` 的 PNG）、`recognize`（对调用方传入的 PNG 做 Vision OCR）、`activate`（按 bundle ID 激活）以及带前台进程和窗口边界校验的 `click`、`move`、`scroll`、`key`、`type`。电脑锁屏时，截图、激活和输入操作都会拒绝执行；`recognize` 只处理请求中提供的 PNG，因此允许锁屏时对合成图像测试。OCR 限制为合法 PNG、最大 8 MiB 和 1600 万像素，返回简体中文/英文候选文字、置信度，以及左上原点的归一化坐标。它不读取辅助功能树，也不调用应用私有 API；对微信的任何处理都只基于显式传入的可见截图。`key` 只接受显式 ANSI 字母/数字、编辑键、方向键和 F1-F12 映射，修饰键名为 `command`、`shift`、`control`、`option`。`type` 默认只接受不含 ASCII 控制字符的单段文本；含 LF/CRLF 的文本必须由调用方显式传 `lineBreak: "shiftEnter"`，原生端会把每个换行计划成 Shift+Return 软换行，不发送裸 Return。Tab、单独 CR、NUL、DEL 等控制字符始终拒绝。每个文本块和软换行事件发出前都会重查锁屏、前台、目标窗口与截止时间。`bin/desktop --self-test-native` 只检查原生矩形解析和键盘输入计划，不创建 CGEvent；涵盖 CGWindowBounds 的 `X/Y/Width/Height` 键、无效矩形、软换行和 surrogate pair 分块。
+支持 `permissions`（AX、屏幕录制、事件权限和 macOS 锁屏状态）、`requestPermission`（仅在显式调用时请求系统授权）、`frontmost`（前台进程身份和 CGWindowList 窗口 ID/矩形）、`capture`（主显示器或指定 `windowId` 的 PNG）、`recognize`（对调用方传入的 PNG 做 Vision OCR）、`activate`（按 bundle ID 激活）以及带前台进程和窗口边界校验的 `click`、`move`、`scroll`、`key`、`type`。电脑锁屏时，截图、激活和输入操作都会拒绝执行；`recognize` 只处理请求中提供的 PNG，因此允许锁屏时对合成图像测试。OCR 限制为合法 PNG、最大 8 MiB 和 1600 万像素，返回简体中文/英文候选文字、置信度，以及左上原点的归一化坐标。通用接口不读取辅助功能树，也不调用应用私有 API；对微信的任何处理都只基于显式传入的可见截图。`key` 只接受显式 ANSI 字母/数字、编辑键、方向键和 F1-F12 映射，修饰键名为 `command`、`shift`、`control`、`option`。`type` 默认只接受不含 ASCII 控制字符的单段文本；含 LF/CRLF 的文本必须由调用方显式传 `lineBreak: "shiftEnter"`，原生端会把每个换行计划成 Shift+Return 软换行，不发送裸 Return。Tab、单独 CR、NUL、DEL 等控制字符始终拒绝。每个文本块和软换行事件发出前都会重查锁屏、前台、目标窗口与截止时间。`bin/desktop --self-test-native` 只检查原生矩形解析、键盘输入计划及 WorkBuddy 纯函数判定，不创建 CGEvent 或读取应用树。
+
+## WorkBuddy 专用控件适配（0.3.4）
+
+`workbuddyInspect`、`workbuddyFill`、`workbuddySend` 是只适配 `com.tencent.workbuddy.mac` 的三个操作。创建任何 AX 对象之前，必须先通过 bundle、前台 PID、锁屏和 CG 窗口归属检查；AX 窗口矩形还须与目标窗口匹配。扫描有节点数、深度及时间上限，不暴露通用树、任意控件路径或页面 URL。微信 bundle 在建树前即被拒绝。
+
+Inspect 只返回编辑器数量、空草稿状态、精确模型标签、发送按钮状态、首页状态，以及可选的任务原文匹配布尔值。Fill 和 Send 仅允许精确的 `deepseek-v4.1-flash` 与唯一首页编辑器。Fill 用 AX 确认焦点，再通过正常 Unicode 键盘事件和 Shift+Return 填入原文，随后回读校验；不直接修改富文本 AXValue。Send 要求原文一致且按钮可用，仅按一次发送。不同草稿不覆盖，相同草稿可幂等接续；任何写入不确定都停止，不重放输入。
+
+WorkBuddy 5.9.2 的空编辑器把提示文案包含在 AXValue 中，空段落会序列化为单个 FEFF。这里只识别已核实的完整空提示结构，并要求发送禁用；原文比较仅允许空行对应一个 FEFF 和可选首个 FEFF，不修剪用户文本、丢弃换行或放宽非空文字。生产调用仍需每次动作前检查新截图与窗口几何。其他模型或页面不满足此专用路径时，交给既有截图识别流程；它不创建独立工作执行引擎。
 
 窗口列表不返回标题或辅助功能元素。每个输入动作必须提供刚读取的 `{bundleId,pid}`、属于该进程的 `windowId`，并为鼠标动作提供窗口内的桌面点坐标。JS 调用方应在每次截图后自行维护截图 revision，检测窗口改变后重新读取前台信息和截图。客户端 `cancel()` 会终止并等待原生进程退出，供全局急停；`close()` 会终止并等待退出并永久关闭客户端。
 

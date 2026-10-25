@@ -343,7 +343,7 @@ const PANEL_SIZE = {
   settings: { w: 420, h: 760, title: 'workbunny · 设置' },
   motions: { w: 340, h: 660, title: 'workbunny · 动作库' },
   memory: { w: 560, h: 760, title: 'workbunny · 记忆与关系' },
-  desktop: { w: 560, h: 760, title: 'workbunny · 桌面任务' },
+  desktop: { w: 560, h: 760, title: 'workbunny · 工作与日常' },
 };
 
 function openPanel(kind) {
@@ -949,7 +949,12 @@ function startMonitor() {
     lastWorkSeenAt = Date.now();
     // 单会话事件（assistant 说话/工具调用）传进来的是 snap，汇总视图从 monitor 现取
     const view = v && v.running ? v : monitor.view;
-    send('monitor', snapshotForUi(view));
+    const snapshot = snapshotForUi(view);
+    send('monitor', snapshot);
+    const panel = panels.get('desktop');
+    if (panel && !panel.isDestroyed()) panel.webContents.send('pet:ev', {
+      type: 'monitor', phase: snapshot?.phase, runningCount: snapshot?.runningCount, tasks: snapshot?.tasks || [],
+    });
     // 状态映射到动作（只在空闲态跟随，避免打断正在播的动作）
     if (view && view.running && view.running.length) send('phase', { phase: 'work' });
     else if (view && view.primary && view.primary.phase === 'done') send('phase', { phase: 'done' });
@@ -1064,7 +1069,7 @@ function buildTrayMenu() {
     { type: 'separator' },
     { label: '动作列表…', click: () => { showWindow(); openPanel('motions'); } },
     { label: '记忆与关系…', click: () => openPanel('memory') },
-    { label: '桌面任务…', click: () => openPanel('desktop') },
+    { label: '工作与日常…', click: () => openPanel('desktop') },
     { label: '停止桌面操作  ⌘⇧Esc', click: () => desktop?.stop() },
     {
       label: '形象',
@@ -1866,9 +1871,15 @@ if (!lock) {
       bin: app.isPackaged ? path.join(process.resourcesPath, 'bin', 'vault') : path.join(__dirname, '../../bin/vault'), safeStorage,
       openKey: IS_DEV ? undefined : () => {
         const controller = new AbortController(); vaultKeyAbort = controller;
-        memory.error = '等待 macOS 钥匙串解锁；请完成系统授权';
-        return require('./vault-key-broker').openKey({ execPath: process.execPath, appPath: app.getAppPath(),
-          dir: path.join(USER_DIR, 'vault'), signal: controller.signal }).finally(() => { if (vaultKeyAbort === controller) vaultKeyAbort = null; });
+        memory.error = '正在解锁本地钥匙；首次迁移时请留意 macOS 授权';
+        const dir = path.join(USER_DIR, 'vault');
+        // Ordinary app updates preserve this helper's signed bytes and Keychain identity.
+        return require('./keychain-key-provider').openKey({ dir,
+          binary: path.join(process.resourcesPath, 'bin/workbunny-keychain.app/Contents/MacOS/workbunny-keychain'),
+          signal: controller.signal,
+          legacyOpen: () => require('./vault-key-broker').openKey({ execPath: process.execPath,
+            appPath: app.getAppPath(), dir, signal: controller.signal }),
+        }).finally(() => { if (vaultKeyAbort === controller) vaultKeyAbort = null; });
       },
       getSettings: () => { const m = config.load().memory; return { ...m, extract: m.extract && !screenLocked && !busy && !speaking && !desktop?.running }; },
       extract: require('./workbuddy-free').extractMemories,

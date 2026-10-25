@@ -74,6 +74,22 @@ func postMouse(_ type: CGEventType, _ point: CGPoint, _ button: CGMouseButton = 
     }
     event.post(tap: .cghidEventTap)
 }
+func postUnicodeText(_ units: [UInt16]) throws {
+    guard !units.isEmpty else { return }
+    for down in [true, false] {
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else { throw DesktopError(message: "无法创建文本事件") }
+        event.flags = []
+        event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+        event.post(tap: .cghidEventTap)
+    }
+}
+func postShiftReturn() throws {
+    for down in [true, false] {
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: down) else { throw DesktopError(message: "无法创建软换行事件") }
+        event.flags = .maskShift
+        event.post(tap: .cghidEventTap)
+    }
+}
 func keyCode(_ name: String) -> CGKeyCode? {
     let table: [String: UInt16] = [
         // ANSI physical key positions; letters use the standard US ANSI layout.
@@ -111,6 +127,336 @@ func validateActionContext(_ request: [String: Any]) throws -> (UInt32, CGRect) 
           Date().timeIntervalSince1970 * 1000 - began <= deadline else { throw DesktopError(message: "动作请求已超时") }
     try checkExpected(request)
     return try targetWindow(request)
+}
+
+let workBuddyBundleID = "com.tencent.workbuddy.mac"
+let workBuddyUIModel = "Deepseek-V4.1-Flash"
+let workBuddyRTEEmptyValue = "\u{FEFF}\n今天帮你做些什么？@ 添加上下文，/调用技能与指令"
+enum WorkBuddyDraftPlan { case write, alreadyFilled, reject }
+func workBuddyBundleAllowed(_ bundle: String?) -> Bool { bundle == workBuddyBundleID }
+func workBuddyModelAllowed(_ requestModel: String?, selectedModel: String?) -> Bool {
+    requestModel == "deepseek-v4.1-flash" && selectedModel == workBuddyUIModel
+}
+func workBuddyDraftIsEmpty(_ raw: String?, sendButtonCount: Int = 0, sendEnabled: Bool = true) -> Bool {
+    raw == "" || raw == "\u{FEFF}" ||
+        (raw == workBuddyRTEEmptyValue && sendButtonCount == 1 && !sendEnabled)
+}
+func workBuddyTextMatches(_ raw: String?, expected: String) -> Bool {
+    guard let raw else { return false }
+    if raw == expected { return true }
+    var comparable = raw
+    if !expected.hasPrefix("\u{FEFF}") && comparable.hasPrefix("\u{FEFF}") { comparable.removeFirst() }
+    if comparable == expected { return true }
+    let actualLines = comparable.components(separatedBy: "\n")
+    let expectedLines = expected.components(separatedBy: "\n")
+    guard actualLines.count == expectedLines.count else { return false }
+    for (actualLine, expectedLine) in zip(actualLines, expectedLines) {
+        if actualLine == expectedLine { continue }
+        if expectedLine.isEmpty && actualLine == "\u{FEFF}" { continue }
+        return false
+    }
+    return true
+}
+func workBuddyDraftPlan(current: String?, requested: String, sendButtonCount: Int = 0, sendEnabled: Bool = true) -> WorkBuddyDraftPlan {
+    guard current != nil else { return .reject }
+    if workBuddyDraftIsEmpty(current, sendButtonCount: sendButtonCount, sendEnabled: sendEnabled) { return .write }
+    if workBuddyTextMatches(current, expected: requested) { return .alreadyFilled }
+    return .reject
+}
+func workBuddyControlsUnique(editors: Int, combos: Int, sendButtons: Int, scanComplete: Bool) -> Bool {
+    scanComplete && editors == 1 && combos == 1 && sendButtons == 1
+}
+func workBuddyHomeReady(title: String?) -> Bool { title == "WorkBuddy, 我帮你" }
+
+struct WorkBuddyContext { let pid: pid_t; let windowID: UInt32; let rect: CGRect }
+struct WorkBuddyControls {
+    let application: AXUIElement?
+    let editors: [AXUIElement]
+    let editorFocusElements: [AXUIElement]
+    let combos: [(AXUIElement, String?)]
+    let sendButtons: [(AXUIElement, Bool)]
+    let draft: String?
+    let selectedModel: String?
+    let sendEnabled: Bool
+    let homeReady: Bool
+    let scanComplete: Bool
+}
+func validateWorkBuddyContext(_ request: [String: Any]) throws -> WorkBuddyContext {
+    guard let expected = request["expected"] as? [String: Any],
+          let bundle = expected["bundleId"] as? String, workBuddyBundleAllowed(bundle),
+          let pidValue = expected["pid"] as? Int, pidValue > 0 else {
+        throw DesktopError(message: "WorkBuddy AX 操作仅允许目标应用 com.tencent.workbuddy.mac")
+    }
+    guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
+    guard let front = currentFrontmost(), workBuddyBundleAllowed(front.bundleIdentifier),
+          Int(front.processIdentifier) == pidValue else { throw DesktopError(message: "当前前台不是预期 WorkBuddy 窗口") }
+    let (windowID, rect) = try validateActionContext(request)
+    return WorkBuddyContext(pid: pid_t(pidValue), windowID: windowID, rect: rect)
+}
+func revalidateWorkBuddyContext(_ request: [String: Any], _ original: WorkBuddyContext) throws {
+    let current = try validateWorkBuddyContext(request)
+    guard current.pid == original.pid, current.windowID == original.windowID,
+          abs(current.rect.minX - original.rect.minX) <= 1,
+          abs(current.rect.minY - original.rect.minY) <= 1,
+          abs(current.rect.width - original.rect.width) <= 1,
+          abs(current.rect.height - original.rect.height) <= 1 else {
+        throw DesktopError(message: "WorkBuddy 前台窗口或几何已变化")
+    }
+}
+func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+    return value
+}
+func axValueAttribute(_ element: AXUIElement, _ name: String) -> AXValue? {
+    guard let value = axAttribute(element, name) else { return nil }
+    return unsafeBitCast(value, to: AXValue.self)
+}
+func axElementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
+    guard let value = axAttribute(element, name) else { return nil }
+    return unsafeBitCast(value, to: AXUIElement.self)
+}
+func axWindowRect(_ window: AXUIElement) -> CGRect? {
+    guard let position = axValueAttribute(window, kAXPositionAttribute as String),
+          let size = axValueAttribute(window, kAXSizeAttribute as String) else { return nil }
+    var origin = CGPoint.zero; var dimensions = CGSize.zero
+    guard AXValueGetValue(position, .cgPoint, &origin), AXValueGetValue(size, .cgSize, &dimensions),
+          origin.x.isFinite, origin.y.isFinite, dimensions.width > 0, dimensions.height > 0 else { return nil }
+    return CGRect(origin: origin, size: dimensions)
+}
+func rectsMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+    abs(lhs.minX-rhs.minX) <= 2 && abs(lhs.minY-rhs.minY) <= 2 &&
+    abs(lhs.width-rhs.width) <= 2 && abs(lhs.height-rhs.height) <= 2
+}
+func workBuddyAXWindow(app: AXUIElement, targetRect: CGRect) -> AXUIElement? {
+    let focused = axElementAttribute(app, kAXFocusedWindowAttribute as String)
+    let main = axElementAttribute(app, kAXMainWindowAttribute as String)
+    for candidate in [focused, main].compactMap({ $0 }) {
+        AXUIElementSetMessagingTimeout(candidate, 0.2)
+        if let rect = axWindowRect(candidate), rectsMatch(rect, targetRect) { return candidate }
+    }
+    return nil
+}
+func scanWorkBuddyControls(_ root: AXUIElement, deadline: UInt64) -> WorkBuddyControls {
+    var editors: [AXUIElement] = []
+    var editorFocusElements: [AXUIElement] = []
+    var combos: [(AXUIElement, String?)] = []
+    var sends: [(AXUIElement, Bool)] = []
+    var queue: [(AXUIElement, Int, Bool)] = [(root, 0, false)]
+    var cursor = 0, visited = 0, complete = true
+    var draft: String?, selected: String?, homeHeadingFound = false
+    while cursor < queue.count {
+        if DispatchTime.now().uptimeNanoseconds > deadline || visited >= 2000 { complete = false; break }
+        let (element, depth, insideEditor) = queue[cursor]; cursor += 1; visited += 1
+        AXUIElementSetMessagingTimeout(element, 0.2)
+        guard let role = axAttribute(element, kAXRoleAttribute as String) as? String else { continue }
+        let isEditor = role == kAXTextAreaRole as String
+        if insideEditor || isEditor { editorFocusElements.append(element) }
+        if isEditor {
+            editors.append(element)
+            if let value = axAttribute(element, kAXValueAttribute as String) as? String { draft = value }
+        } else if role == kAXHeadingRole as String {
+            let heading = (axAttribute(element, kAXValueAttribute as String) as? String)
+                ?? (axAttribute(element, kAXTitleAttribute as String) as? String)
+            if workBuddyHomeReady(title: heading) { homeHeadingFound = true }
+        } else if role == kAXComboBoxRole as String,
+                  let description = axAttribute(element, kAXDescriptionAttribute as String) as? String,
+                  description.hasPrefix("Select model:") {
+            let value = axAttribute(element, kAXValueAttribute as String) as? String
+            combos.append((element, value)); selected = value
+        } else if role == kAXButtonRole as String {
+            let title = axAttribute(element, kAXTitleAttribute as String) as? String
+            let description = title == "发送" ? nil : axAttribute(element, kAXDescriptionAttribute as String) as? String
+            if title == "发送" || description == "发送" {
+                let enabled = (axAttribute(element, kAXEnabledAttribute as String) as? NSNumber)?.boolValue ?? false
+                sends.append((element, enabled))
+            }
+        }
+        if let children = axAttribute(element, kAXChildrenAttribute as String) as? [AXUIElement] {
+            if depth >= 25 {
+                if !children.isEmpty { complete = false; break }
+            } else {
+                queue.append(contentsOf: children.map { ($0, depth + 1, insideEditor || isEditor) })
+            }
+        }
+    }
+    return WorkBuddyControls(application: nil, editors: editors, editorFocusElements: editorFocusElements, combos: combos, sendButtons: sends, draft: draft,
+                             selectedModel: selected, sendEnabled: sends.count == 1 && sends[0].1,
+                             homeReady: homeHeadingFound, scanComplete: complete)
+}
+func workBuddyControls(_ request: [String: Any]) throws -> (WorkBuddyContext, WorkBuddyControls, Bool) {
+    let context = try validateWorkBuddyContext(request)
+    guard AXIsProcessTrusted() else { throw DesktopError(message: "缺少辅助功能权限") }
+    // The exact bundle/PID and matching visible CG window are checked before creating any AX element.
+    let app = AXUIElementCreateApplication(context.pid)
+    AXUIElementSetMessagingTimeout(app, 0.2)
+    guard let window = workBuddyAXWindow(app: app, targetRect: context.rect) else {
+        try revalidateWorkBuddyContext(request, context)
+        return (context, WorkBuddyControls(application: app, editors: [], editorFocusElements: [], combos: [], sendButtons: [], draft: nil,
+            selectedModel: nil, sendEnabled: false, homeReady: false, scanComplete: false), false)
+    }
+    let title = axAttribute(window, kAXTitleAttribute as String) as? String
+    let scanned = scanWorkBuddyControls(window, deadline: DispatchTime.now().uptimeNanoseconds + 2_000_000_000)
+    let controls = WorkBuddyControls(application: app, editors: scanned.editors, editorFocusElements: scanned.editorFocusElements,
+        combos: scanned.combos, sendButtons: scanned.sendButtons,
+        draft: scanned.draft, selectedModel: scanned.selectedModel, sendEnabled: scanned.sendEnabled,
+        homeReady: workBuddyHomeReady(title: title) || scanned.homeReady, scanComplete: scanned.scanComplete)
+    try revalidateWorkBuddyContext(request, context)
+    let available = workBuddyControlsUnique(editors: controls.editors.count, combos: controls.combos.count,
+                                             sendButtons: controls.sendButtons.count, scanComplete: controls.scanComplete)
+    return (context, controls, available)
+}
+func workBuddyInspect(_ request: [String: Any]) throws -> [String: Any] {
+    let (_, controls, available) = try workBuddyControls(request)
+    var draftMatchesRequest = false
+    if let expected = request["text"] {
+        guard let text = expected as? String, text.utf16.count <= 3500,
+              !text.unicodeScalars.contains(where: { $0.value == 0 }) else {
+            throw DesktopError(message: "WorkBuddy inspect 文本无效或超过 3500 个 UTF-16 单元")
+        }
+        draftMatchesRequest = available && controls.homeReady && controls.selectedModel == workBuddyUIModel &&
+            workBuddyTextMatches(controls.draft, expected: text)
+    }
+    return ["available": available, "editorCount": controls.editors.count,
+            "draftMatchesRequest": draftMatchesRequest,
+            "draftEmpty": workBuddyDraftIsEmpty(controls.draft, sendButtonCount: controls.sendButtons.count, sendEnabled: controls.sendEnabled),
+            "selectedModel": controls.selectedModel ?? "", "sendEnabled": controls.sendEnabled,
+            "homeReady": controls.homeReady]
+}
+func workBuddyPayload(_ request: [String: Any]) throws -> (String, String) {
+    guard let text = request["text"] as? String, !text.isEmpty, text.utf16.count <= 3500,
+          !text.unicodeScalars.contains(where: { $0.value == 0 }),
+          let model = request["model"] as? String else { throw DesktopError(message: "WorkBuddy 文本无效或超过 3500 个 UTF-16 单元") }
+    guard model == "deepseek-v4.1-flash" else { throw DesktopError(message: "AX 仅允许精确模型 deepseek-v4.1-flash") }
+    return (text, model)
+}
+func workBuddyReadbackFlags(actual: String?, expected: String) -> (matches: Bool, trailingNewline: Bool, whitespaceOnly: Bool, actualLength: Int) {
+    guard let actual else { return (false, false, false, -1) }
+    let withoutOneBOM = actual.hasPrefix("\u{FEFF}") ? String(actual.dropFirst()) : actual
+    let trailing = workBuddyTextMatches(actual, expected: expected + "\n")
+    let whitespaceOnly = withoutOneBOM != expected &&
+        withoutOneBOM.trimmingCharacters(in: .whitespacesAndNewlines) == expected.trimmingCharacters(in: .whitespacesAndNewlines)
+    return (workBuddyTextMatches(actual, expected: expected), trailing, whitespaceOnly, actual.utf16.count)
+}
+func workBuddyEditorFocused(_ controls: WorkBuddyControls) -> Bool {
+    guard let app = controls.application,
+          let focused = axElementAttribute(app, kAXFocusedUIElementAttribute as String) else { return false }
+    return controls.editorFocusElements.contains { CFEqual($0, focused) }
+}
+func focusWorkBuddyEditor(_ request: [String: Any], context: WorkBuddyContext, controls: WorkBuddyControls, editor: AXUIElement) throws {
+    guard CGPreflightPostEventAccess() else { throw DesktopError(message: "缺少输入控制权限，未向编辑器写入文本") }
+    AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    let focusDeadline = DispatchTime.now().uptimeNanoseconds + 250_000_000
+    while DispatchTime.now().uptimeNanoseconds < focusDeadline {
+        if workBuddyEditorFocused(controls) { return }
+        usleep(25_000)
+    }
+    guard let editorRect = axWindowRect(editor), editorRect.width > 0, editorRect.height > 0,
+          editorRect.minX >= context.rect.minX, editorRect.minY >= context.rect.minY,
+          editorRect.maxX <= context.rect.maxX, editorRect.maxY <= context.rect.maxY else {
+        throw DesktopError(message: "无法确认 WorkBuddy 编辑器焦点，且编辑框几何不在目标窗口内")
+    }
+    let center = CGPoint(x: editorRect.midX, y: editorRect.midY)
+    try revalidateWorkBuddyContext(request, context)
+    try postMouse(.leftMouseDown, center); try postMouse(.leftMouseUp, center)
+    try revalidateWorkBuddyContext(request, context)
+    let clickDeadline = DispatchTime.now().uptimeNanoseconds + 250_000_000
+    while DispatchTime.now().uptimeNanoseconds < clickDeadline {
+        if workBuddyEditorFocused(controls) { return }
+        usleep(25_000)
+    }
+    throw DesktopError(message: "无法确认 WorkBuddy 编辑器已获得焦点，未发送文本")
+}
+func workBuddyInputStillTargeted(_ request: [String: Any], context: WorkBuddyContext, controls: WorkBuddyControls, combo: AXUIElement) throws {
+    try revalidateWorkBuddyContext(request, context)
+    guard axAttribute(combo, kAXValueAttribute as String) as? String == workBuddyUIModel,
+          workBuddyEditorFocused(controls) else { throw DesktopError(message: "WorkBuddy 模型或输入焦点已变化，停止输入") }
+}
+func workBuddyFill(_ request: [String: Any]) throws -> [String: Any] {
+    let (text, model) = try workBuddyPayload(request)
+    let (context, controls, available) = try workBuddyControls(request)
+    guard available, controls.homeReady, controls.editors.count == 1,
+          workBuddyModelAllowed(model, selectedModel: controls.selectedModel), let editor = controls.editors.first else {
+        throw DesktopError(message: "WorkBuddy 编辑器、首页或 Flash 模型状态未确认")
+    }
+    let expectedText = text
+    switch workBuddyDraftPlan(current: controls.draft, requested: expectedText,
+                              sendButtonCount: controls.sendButtons.count, sendEnabled: controls.sendEnabled) {
+    case .alreadyFilled: return ["filled": true, "idempotent": true]
+    case .reject: throw DesktopError(message: "WorkBuddy 草稿非空且与请求不同，已保留原内容")
+    case .write: break
+    }
+    let plan = try makeInputPlan(text, lineBreak: "shiftEnter")
+    guard let combo = controls.combos.first?.0,
+          axAttribute(combo, kAXValueAttribute as String) as? String == workBuddyUIModel else {
+        throw DesktopError(message: "WorkBuddy 模型已变化，草稿未写入")
+    }
+    let latestSendEnabled = (controls.sendButtons.first.map { axAttribute($0.0, kAXEnabledAttribute as String) as? NSNumber } ?? nil)?.boolValue ?? true
+    switch workBuddyDraftPlan(current: axAttribute(editor, kAXValueAttribute as String) as? String, requested: expectedText,
+                              sendButtonCount: controls.sendButtons.count, sendEnabled: latestSendEnabled) {
+    case .alreadyFilled:
+        try revalidateWorkBuddyContext(request, context)
+        return ["filled": true, "idempotent": true]
+    case .reject: throw DesktopError(message: "WorkBuddy 草稿已变化且非空，已保留原内容")
+    case .write: break
+    }
+    try focusWorkBuddyEditor(request, context: context, controls: controls, editor: editor)
+    do {
+        for item in plan {
+            try workBuddyInputStillTargeted(request, context: context, controls: controls, combo: combo)
+            switch item {
+            case .text(let units): try postUnicodeText(units)
+            case .softLineBreak: try postShiftReturn()
+            }
+        }
+    } catch {
+        throw DesktopError(message: "WorkBuddy 输入中断，草稿可能部分更新；未自动重试或发送")
+    }
+    let waitDeadline = DispatchTime.now().uptimeNanoseconds + 800_000_000
+    var finalReadback: String?
+    repeat {
+        try revalidateWorkBuddyContext(request, context)
+        guard axAttribute(combo, kAXValueAttribute as String) as? String == workBuddyUIModel else {
+            throw DesktopError(message: "WorkBuddy 模型已变化，输入结束但不会发送")
+        }
+        finalReadback = axAttribute(editor, kAXValueAttribute as String) as? String
+        if workBuddyReadbackFlags(actual: finalReadback, expected: expectedText).matches { break }
+        if DispatchTime.now().uptimeNanoseconds >= waitDeadline { break }
+        usleep(50_000)
+    } while true
+    let readback = workBuddyReadbackFlags(actual: finalReadback, expected: expectedText)
+    guard readback.matches else {
+        return ["filled": false, "resultUncertain": true, "verified": false,
+                "expectedLength": expectedText.utf16.count, "actualLength": readback.actualLength,
+                "trailingNewlineDifference": readback.trailingNewline,
+                "whitespaceDifference": readback.whitespaceOnly]
+    }
+    try revalidateWorkBuddyContext(request, context)
+    return ["filled": true, "idempotent": false, "verified": true, "inputChunks": plan.count,
+            "readbackLength": readback.actualLength, "trailingNewlineDifference": false,
+            "whitespaceDifference": readback.whitespaceOnly]
+}
+func workBuddySend(_ request: [String: Any]) throws -> [String: Any] {
+    let (text, model) = try workBuddyPayload(request)
+    let (context, controls, available) = try workBuddyControls(request)
+    guard available, controls.homeReady, let editor = controls.editors.first,
+          controls.editors.count == 1, workBuddyModelAllowed(model, selectedModel: controls.selectedModel),
+          workBuddyTextMatches(controls.draft, expected: text),
+          controls.sendButtons.count == 1, controls.sendEnabled else {
+        throw DesktopError(message: "WorkBuddy 草稿、首页、Flash 模型或发送状态未确认")
+    }
+    guard let button = controls.sendButtons.first?.0, let combo = controls.combos.first?.0 else { throw DesktopError(message: "发送按钮或模型控件不可用") }
+    try revalidateWorkBuddyContext(request, context)
+    guard workBuddyTextMatches(axAttribute(editor, kAXValueAttribute as String) as? String, expected: text),
+          axAttribute(combo, kAXValueAttribute as String) as? String == workBuddyUIModel,
+          axAttribute(button, kAXEnabledAttribute as String) as? Bool == true else {
+        throw DesktopError(message: "WorkBuddy 草稿或发送状态已变化")
+    }
+    let pressStatus = AXUIElementPerformAction(button, kAXPressAction as CFString)
+    guard pressStatus == .success else { throw DesktopError(message: "WorkBuddy 发送调用结果不确定，不会重试") }
+    let postContextIsValid = (try? revalidateWorkBuddyContext(request, context)) != nil
+    guard postContextIsValid else { return ["pressed": true, "postContextValid": false] }
+    return ["pressed": true]
 }
 func unicodeChunks(_ value: String, limit: Int = 20) -> [[UInt16]] {
     var chunks: [[UInt16]] = []
@@ -202,6 +548,7 @@ func captureImage(_ windowId: UInt32?) async throws -> (CGImage, CGRect) {
     let rect: CGRect
     let width: Int
     let height: Int
+    var fitsWindow = false
     if let windowId {
         guard let window = content.windows.first(where: { $0.windowID == windowId }) else { throw DesktopError(message: "目标窗口已关闭或不可见") }
         guard let row = windowEntries().first(where: { ($0["windowId"] as? UInt32) == windowId }),
@@ -210,7 +557,11 @@ func captureImage(_ windowId: UInt32?) async throws -> (CGImage, CGRect) {
         // Use the same CGRect source exposed by frontmost.windows so callers can
         // map desktop points to the captured image without a second origin system.
         rect = cgRect
-        width = max(1, Int(rect.width * 2)); height = max(1, Int(rect.height * 2))
+        guard let size = capturePixelSize(rect: rect, pointPixelScale: CGFloat(filter.pointPixelScale)) else {
+            throw DesktopError(message: "目标窗口截图尺寸无效")
+        }
+        width = size.width; height = size.height
+        fitsWindow = true
     } else {
         guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first else {
             throw DesktopError(message: "找不到可用显示器")
@@ -219,12 +570,108 @@ func captureImage(_ windowId: UInt32?) async throws -> (CGImage, CGRect) {
         rect = CGDisplayBounds(display.displayID)
         width = display.width; height = display.height
     }
-    let config = SCStreamConfiguration()
-    config.width = width; config.height = height; config.capturesAudio = false; config.showsCursor = false
-    config.ignoreShadowsSingleWindow = true; config.ignoreShadowsDisplay = true
+    let config = makeCaptureConfiguration(width: width, height: height, fitWindow: fitsWindow)
     let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
     return (image, rect)
 }
+
+func capturePixelSize(rect: CGRect, pointPixelScale: CGFloat) -> (width: Int, height: Int)? {
+    guard rect.width.isFinite, rect.height.isFinite, rect.width > 0, rect.height > 0,
+          pointPixelScale.isFinite, pointPixelScale > 0 else { return nil }
+    let width = ceil(rect.width * pointPixelScale), height = ceil(rect.height * pointPixelScale)
+    guard width.isFinite, height.isFinite, width <= CGFloat(Int.max), height <= CGFloat(Int.max) else { return nil }
+    return (max(1, Int(width)), max(1, Int(height)))
+}
+
+func makeCaptureConfiguration(width: Int, height: Int, fitWindow: Bool) -> SCStreamConfiguration {
+    let config = SCStreamConfiguration()
+    config.width = width; config.height = height; config.capturesAudio = false; config.showsCursor = false
+    config.ignoreShadowsSingleWindow = true; config.ignoreShadowsDisplay = true
+    if fitWindow {
+        config.scalesToFit = true
+        config.preservesAspectRatio = true
+    }
+    return config
+}
+
+func recognize(_ image: CGImage, languages: [String]) throws -> [VNRecognizedTextObservation] {
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.recognitionLanguages = languages
+    request.usesLanguageCorrection = false
+    do { try VNImageRequestHandler(cgImage: image, options: [:]).perform([request]) }
+    catch { throw DesktopError(message: "图像文字识别失败：\(error.localizedDescription)") }
+    return request.results ?? []
+}
+
+func normalizedTopRect(_ observation: VNRecognizedTextObservation) -> CGRect {
+    let box = observation.boundingBox
+    return CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+}
+
+func refineHy3Rows(image: CGImage, bilingual: [VNRecognizedTextObservation], english: [VNRecognizedTextObservation]) -> [[String: Any]] {
+    let priceRegex = try! NSRegularExpression(pattern: "(?i)\\d+(?:\\.\\d+)?\\s*[x×]")
+    let prices = english.filter { observation in
+        guard let text = observation.topCandidates(1).first?.string else { return false }
+        return priceRegex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)) != nil
+    }
+    let labels = bilingual.filter { observation in
+        guard let text = observation.topCandidates(1).first?.string else { return false }
+        return text.range(of: "Hy3", options: .caseInsensitive) != nil
+    }
+    var regions: [CGRect] = []
+    for label in labels {
+        let labelRect = normalizedTopRect(label)
+        let labelCenter = labelRect.midY
+        for price in prices {
+            let priceRect = normalizedTopRect(price)
+            let rowTolerance = max(0.007, max(labelRect.height, priceRect.height) * 0.7)
+            guard abs(labelCenter - priceRect.midY) <= rowTolerance else { continue }
+            let lineHeight = max(labelRect.height, priceRect.height)
+            let minX = max(0, min(labelRect.minX, priceRect.minX) - lineHeight * 2)
+            let maxX = min(1, max(labelRect.maxX, priceRect.maxX) + lineHeight * 2)
+            let minY = max(0, min(labelRect.minY, priceRect.minY) - lineHeight * 0.8)
+            let maxY = min(1, max(labelRect.maxY, priceRect.maxY) + lineHeight * 0.8)
+            let region = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+            if region.width > 0, region.height > 0, !regions.contains(where: { abs($0.midY - region.midY) < 0.002 }) {
+                regions.append(region)
+            }
+            if regions.count >= 6 { break }
+        }
+        if regions.count >= 6 { break }
+    }
+    guard !regions.isEmpty else { return [] }
+    let context = CIContext(options: [.useSoftwareRenderer: true])
+    var additions: [[String: Any]] = []
+    for region in regions {
+        let pixelRect = CGRect(x: region.minX * CGFloat(image.width),
+                               y: region.minY * CGFloat(image.height),
+                               width: region.width * CGFloat(image.width),
+                               height: region.height * CGFloat(image.height)).integral
+        guard pixelRect.width > 0, pixelRect.height > 0,
+              let crop = image.cropping(to: pixelRect) else { continue }
+        let cropRegion = CGRect(x: pixelRect.minX / CGFloat(image.width), y: pixelRect.minY / CGFloat(image.height),
+                                width: pixelRect.width / CGFloat(image.width), height: pixelRect.height / CGFloat(image.height))
+        let scale: CGFloat = 3
+        let enlarged = CIImage(cgImage: crop).transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let enlargedImage = context.createCGImage(enlarged, from: enlarged.extent) else { continue }
+        for languages in [["zh-Hans", "en-US"], ["en-US"]] {
+            guard let observations = try? recognize(enlargedImage, languages: languages) else { continue }
+            for observation in observations {
+                guard let candidate = observation.topCandidates(1).first else { continue }
+                let box = observation.boundingBox
+                let globalX = cropRegion.minX + box.minX * cropRegion.width
+                let globalY = cropRegion.minY + (1 - box.maxY) * cropRegion.height
+                additions.append(["text": candidate.string, "confidence": Double(candidate.confidence),
+                                  "x": Double(max(0, globalX)), "y": Double(max(0, globalY)),
+                                  "width": Double(min(1 - globalX, box.width * cropRegion.width)),
+                                  "height": Double(min(1 - globalY, box.height * cropRegion.height))])
+            }
+        }
+    }
+    return additions
+}
+
 func capture(_ request: [String: Any]) throws -> [String: Any] {
     guard CGPreflightScreenCaptureAccess() else { throw DesktopError(message: "缺少屏幕录制权限；请在系统设置 → 隐私与安全性 → 屏幕录制中允许 workbunny") }
     let windowId = uint(request["windowId"])
@@ -264,20 +711,23 @@ func recognizePNG(_ request: [String: Any]) throws -> [String: Any] {
     }
     guard let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary),
           image.width == width, image.height == height else { throw DesktopError(message: "PNG 解码失败") }
-    let vision = VNRecognizeTextRequest()
-    vision.recognitionLevel = .accurate
-    vision.recognitionLanguages = ["zh-Hans", "en-US"]
-    vision.usesLanguageCorrection = false
-    do { try VNImageRequestHandler(cgImage: image, options: [:]).perform([vision]) }
-    catch { throw DesktopError(message: "图像文字识别失败：\(error.localizedDescription)") }
-    let observations = vision.results ?? []
-    let texts: [[String: Any]] = observations.compactMap { observation in
+    let bilingual = try recognize(image, languages: ["zh-Hans", "en-US"])
+    let english = try recognize(image, languages: ["en-US"])
+    var texts: [[String: Any]] = bilingual.compactMap { observation in
         guard let candidate = observation.topCandidates(1).first else { return nil }
         let box = observation.boundingBox
         let x = min(1, max(0, box.minX)), y = min(1, max(0, 1 - box.maxY))
         return ["text": candidate.string, "confidence": Double(candidate.confidence),
                 "x": Double(x), "y": Double(y), "width": Double(box.width), "height": Double(box.height)]
     }
+    texts.append(contentsOf: english.compactMap { observation in
+        guard let candidate = observation.topCandidates(1).first else { return nil }
+        let box = observation.boundingBox
+        return ["text": candidate.string, "confidence": Double(candidate.confidence),
+                "x": Double(max(0, box.minX)), "y": Double(max(0, 1 - box.maxY)),
+                "width": Double(min(box.width, 1 - box.minX)), "height": Double(min(box.height, box.maxY))]
+    })
+    texts.append(contentsOf: refineHy3Rows(image: image, bilingual: bilingual, english: english))
     return ["texts": texts, "width": width, "height": height]
 }
 func perform(_ request: [String: Any]) throws -> [String: Any] {
@@ -295,6 +745,9 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
                 "note": "若系統設定要求，請手動允許並重新啟動 workbunny"]
     case "frontmost": return ["application": appIdentity(currentFrontmost()), "windows": windowEntries()]
     case "recognize": return try recognizePNG(request)
+    case "workbuddyInspect": return try workBuddyInspect(request)
+    case "workbuddyFill": return try workBuddyFill(request)
+    case "workbuddySend": return try workBuddySend(request)
     case "capture":
         guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
         return try capture(request)
@@ -346,19 +799,8 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
             let (currentId, _) = try validateActionContext(request)
             guard currentId == windowId else { throw DesktopError(message: "目标窗口已变化，停止继续输入") }
             switch item {
-            case .text(let units):
-                for down in [true, false] {
-                    guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else { throw DesktopError(message: "无法创建文本事件") }
-                    event.flags = []
-                    event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-                    event.post(tap: .cghidEventTap)
-                }
-            case .softLineBreak:
-                for down in [true, false] {
-                    guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: down) else { throw DesktopError(message: "无法创建软换行事件") }
-                    event.flags = .maskShift
-                    event.post(tap: .cghidEventTap)
-                }
+            case .text(let units): try postUnicodeText(units)
+            case .softLineBreak: try postShiftReturn()
             }
         }
         return ["performed": true, "windowId": windowId, "utf16Units": value.utf16.count,
@@ -387,6 +829,77 @@ func runNativeSelfTest() -> Never {
         ]
         guard invalidRects.allSatisfy({ rectFrom($0) == nil }) else { throw DesktopError(message: "非法矩形被接受") }
 
+        guard let captureSize = capturePixelSize(rect: CGRect(x: 0, y: 0, width: 560, height: 420), pointPixelScale: 1.5),
+              captureSize.width == 840, captureSize.height == 630 else {
+            throw DesktopError(message: "窗口像素尺寸未按 pointPixelScale 计算")
+        }
+        guard capturePixelSize(rect: CGRect(x: 0, y: 0, width: 560, height: 420), pointPixelScale: .nan) == nil else {
+            throw DesktopError(message: "无效 pointPixelScale 被接受")
+        }
+        guard workBuddyBundleAllowed("com.tencent.workbuddy.mac"),
+              !workBuddyBundleAllowed("com.tencent.wework"),
+              !workBuddyBundleAllowed("com.tencent.xinWeChat"),
+              workBuddyModelAllowed("deepseek-v4.1-flash", selectedModel: "Deepseek-V4.1-Flash"),
+              !workBuddyModelAllowed("deepseek-v4.1-pro", selectedModel: "Deepseek-V4.1-Pro"),
+              !workBuddyControlsUnique(editors: 0, combos: 1, sendButtons: 1, scanComplete: true),
+              !workBuddyControlsUnique(editors: 2, combos: 1, sendButtons: 1, scanComplete: true),
+              !workBuddyControlsUnique(editors: 1, combos: 2, sendButtons: 1, scanComplete: true),
+              !workBuddyControlsUnique(editors: 1, combos: 1, sendButtons: 1, scanComplete: false),
+              workBuddyHomeReady(title: "WorkBuddy, 我帮你"),
+              !workBuddyHomeReady(title: "Other window") else {
+            throw DesktopError(message: "WorkBuddy bundle/model/control/home guard 失败")
+        }
+        guard case .write = workBuddyDraftPlan(current: "", requested: "task text"),
+              case .write = workBuddyDraftPlan(current: "\u{FEFF}", requested: "task text"),
+              case .write = workBuddyDraftPlan(current: workBuddyRTEEmptyValue, requested: "task text", sendButtonCount: 1, sendEnabled: false),
+              case .alreadyFilled = workBuddyDraftPlan(current: "task text", requested: "task text"),
+              case .alreadyFilled = workBuddyDraftPlan(current: "\u{FEFF}task text", requested: "task text"),
+              case .reject = workBuddyDraftPlan(current: "different nonempty draft", requested: "task text"),
+              case .reject = workBuddyDraftPlan(current: "\u{FEFF}task text ", requested: "task text"),
+              case .reject = workBuddyDraftPlan(current: workBuddyRTEEmptyValue, requested: "task text", sendButtonCount: 1, sendEnabled: true),
+              case .reject = workBuddyDraftPlan(current: workBuddyRTEEmptyValue, requested: "task text", sendButtonCount: 0, sendEnabled: false),
+              case .reject = workBuddyDraftPlan(current: workBuddyRTEEmptyValue + " ", requested: "task text", sendButtonCount: 1, sendEnabled: false),
+              workBuddyDraftIsEmpty(""), workBuddyDraftIsEmpty("\u{FEFF}"),
+              workBuddyDraftIsEmpty(workBuddyRTEEmptyValue, sendButtonCount: 1, sendEnabled: false),
+              !workBuddyDraftIsEmpty(workBuddyRTEEmptyValue, sendButtonCount: 1, sendEnabled: true),
+              !workBuddyDraftIsEmpty(workBuddyRTEEmptyValue + " ", sendButtonCount: 1, sendEnabled: false),
+              !workBuddyDraftIsEmpty("\u{FEFF}\u{FEFF}"), !workBuddyDraftIsEmpty(" \n"),
+              case .reject = workBuddyDraftPlan(current: nil, requested: "task text") else {
+            throw DesktopError(message: "WorkBuddy 草稿填充幂等策略失败")
+        }
+        let exactReadback = workBuddyReadbackFlags(actual: "line1\nline2", expected: "line1\nline2")
+        let bomReadback = workBuddyReadbackFlags(actual: "\u{FEFF}task", expected: "task")
+        let newlineReadback = workBuddyReadbackFlags(actual: "\u{FEFF}task\n", expected: "task")
+        let whitespaceReadback = workBuddyReadbackFlags(actual: "task ", expected: "task")
+        let paragraphExpected = "alpha\n\nbeta"
+        let paragraphSerialized = "alpha\n\u{FEFF}\nbeta"
+        let paragraphReadback = workBuddyReadbackFlags(actual: paragraphSerialized, expected: paragraphExpected)
+        let multipleEmptyExpected = "a\n\n\nb"
+        let multipleEmptySerialized = "a\n\u{FEFF}\n\u{FEFF}\nb"
+        guard exactReadback.matches, !exactReadback.trailingNewline, !exactReadback.whitespaceOnly,
+              bomReadback.matches, !bomReadback.trailingNewline, !bomReadback.whitespaceOnly,
+              !newlineReadback.matches, newlineReadback.trailingNewline, newlineReadback.whitespaceOnly,
+              !whitespaceReadback.matches, !whitespaceReadback.trailingNewline, whitespaceReadback.whitespaceOnly,
+              paragraphReadback.matches, !paragraphReadback.trailingNewline,
+              workBuddyTextMatches(paragraphSerialized, expected: paragraphExpected),
+              case .alreadyFilled = workBuddyDraftPlan(current: paragraphSerialized, requested: paragraphExpected),
+              workBuddyTextMatches("\u{FEFF}" + paragraphExpected, expected: paragraphExpected),
+              workBuddyTextMatches(multipleEmptySerialized, expected: multipleEmptyExpected),
+              !workBuddyTextMatches("alpha\u{FEFF}\n\nbeta", expected: paragraphExpected),
+              !workBuddyTextMatches("alpha\nx\u{FEFF}beta", expected: "alpha\nxbeta"),
+              !workBuddyTextMatches("alpha\n\u{FEFF}\u{FEFF}\nbeta", expected: paragraphExpected),
+              !workBuddyTextMatches("alpha\n\u{FEFF}\nbeta ", expected: paragraphExpected),
+              !workBuddyTextMatches("alpha\n\u{FEFF}\nbxta", expected: paragraphExpected),
+              !workBuddyTextMatches(paragraphSerialized + "\n", expected: paragraphExpected),
+              workBuddyTextMatches("alpha\n\u{FEFF}\nbeta\n\u{FEFF}\ngamma", expected: "alpha\n\nbeta\n\ngamma") else {
+            throw DesktopError(message: "WorkBuddy 读回规范化/差异标志失败")
+        }
+        let windowConfig = makeCaptureConfiguration(width: captureSize.width, height: captureSize.height, fitWindow: true)
+        guard windowConfig.scalesToFit, windowConfig.preservesAspectRatio,
+              windowConfig.ignoreShadowsSingleWindow, windowConfig.ignoreShadowsDisplay, !windowConfig.showsCursor else {
+            throw DesktopError(message: "窗口截图配置未启用适配、等比缩放及无阴影/光标")
+        }
+
         let multiline = try makeInputPlan("A\r\nB\nC", lineBreak: "shiftEnter")
         let expected: [DesktopInputEvent] = [.text([65]), .softLineBreak, .text([66]), .softLineBreak, .text([67])]
         guard multiline == expected else { throw DesktopError(message: "CRLF/LF 软换行计划不匹配") }
@@ -403,6 +916,8 @@ func runNativeSelfTest() -> Never {
         catch let error as DesktopError where error.message == "缺失 lineBreak 时接纳了换行" { throw error }
         catch { /* Expected rejection of implicit newline. */ }
         writeJSON(["ok": true, "selfTest": "native", "rectCases": ["CGWindowBounds", "lowercase"],
+                   "capturePixelSize": [captureSize.width, captureSize.height], "windowFit": true,
+                   "workBuddyGuards": true, "workBuddyReadbackGuards": true, "workBuddySerializedMatch": true,
                    "invalidRectsRejected": invalidRects.count,
                    "multilineEvents": ["text:A", "shiftEnter", "text:B", "shiftEnter", "text:C"],
                    "surrogateChunkSizes": chunks.map(\.count)])
@@ -413,7 +928,7 @@ func runNativeSelfTest() -> Never {
     }
 }
 
-if CommandLine.arguments.contains("--self-test-native") || CommandLine.arguments.contains("--self-test-input-plan") { runNativeSelfTest() }
+if CommandLine.arguments.contains("--self-test-native") || CommandLine.arguments.contains("--self-test-input-plan") || CommandLine.arguments.contains("--self-test-workbuddy") { runNativeSelfTest() }
 
 func handleLine(_ line: String) {
     guard let data = line.data(using: .utf8), let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

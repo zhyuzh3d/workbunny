@@ -2,6 +2,8 @@ import Foundation
 import SQLite3
 import CoreFoundation
 import Darwin
+import Security
+import CryptoKit
 
 let maxLineBytes = 16 * 1024 * 1024
 let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -34,6 +36,47 @@ func processInfo(pid: pid_t) -> proc_bsdinfo? {
     return info
 }
 
+func codeRequirement(identifier: String, leafSHA1: Data? = nil) -> SecRequirement? {
+    let text: String
+    if let leafSHA1 {
+        let hex = leafSHA1.map { String(format: "%02x", $0) }.joined()
+        text = "identifier \"\(identifier)\" and certificate leaf = H\"\(hex)\""
+    } else {
+        text = "identifier \"\(identifier)\""
+    }
+    var requirement: SecRequirement?
+    let status = SecRequirementCreateWithString(text as CFString, [], &requirement)
+    return status == errSecSuccess ? requirement : nil
+}
+
+func signingLeafSHA1(_ code: SecCode, identifier: String) -> Data? {
+    guard let requirement = codeRequirement(identifier: identifier),
+          SecCodeCheckValidity(code, [], requirement) == errSecSuccess else { return nil }
+    var staticCode: SecStaticCode?
+    var information: CFDictionary?
+    guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+          SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+          let values = information as? [String: Any],
+          values[kSecCodeInfoIdentifier as String] as? String == identifier,
+          let certificates = values[kSecCodeInfoCertificates as String] as? [SecCertificate],
+          let leaf = certificates.first else { return nil }
+    let der = SecCertificateCopyData(leaf) as Data
+    return Data(Insecure.SHA1.hash(data: der))
+}
+
+func guestCode(pid: pid_t) -> SecCode? {
+    let attributes = [kSecGuestAttributePid as String: NSNumber(value: pid)] as CFDictionary
+    var code: SecCode?
+    let status = SecCodeCopyGuestWithAttributes(nil, attributes, [], &code)
+    return status == errSecSuccess ? code : nil
+}
+
+func hasMatchingSignedIdentity(pid: pid_t, identifier: String, leafSHA1: Data) -> Bool {
+    guard let code = guestCode(pid: pid),
+          let requirement = codeRequirement(identifier: identifier, leafSHA1: leafSHA1) else { return false }
+    return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+}
+
 func verifyKeyParent() -> Bool {
     let selfPID = getpid()
     guard let selfPath = executablePath(pid: selfPID) else { return false }
@@ -54,6 +97,12 @@ func verifyKeyParent() -> Bool {
     let mainPID = pid_t(helperInfo.pbi_ppid)
     guard let mainInfo = processInfo(pid: mainPID), mainInfo.pbi_pid == UInt32(mainPID),
           let mainPath = executablePath(pid: mainPID), mainPath == expectedMain else { return false }
+
+    var selfCode: SecCode?
+    guard SecCodeCopySelf([], &selfCode) == errSecSuccess, let selfCode,
+          let selfLeaf = signingLeafSHA1(selfCode, identifier: "cn.haminn.workbunny.vault"),
+          hasMatchingSignedIdentity(pid: helperPID, identifier: "cn.haminn.workbunny", leafSHA1: selfLeaf),
+          hasMatchingSignedIdentity(pid: mainPID, identifier: "cn.haminn.workbunny", leafSHA1: selfLeaf) else { return false }
     return true
 }
 

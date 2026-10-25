@@ -23,6 +23,7 @@ for helper in vault desktop; do
     zsh "$ROOT/tools/build-$helper.sh"
   fi
 done
+zsh "$ROOT/tools/build-keychain.sh"
 
 echo "▸ 清理"
 rm -rf "$APP"
@@ -50,6 +51,7 @@ mkdir -p "$APP/Contents/Resources/bin"
 cp "$ROOT/bin/asr" "$APP/Contents/Resources/bin/asr"
 cp "$ROOT/bin/vault" "$APP/Contents/Resources/bin/vault"
 cp "$ROOT/bin/desktop" "$APP/Contents/Resources/bin/desktop"
+cp -R "$ROOT/bin/workbunny-keychain.app" "$APP/Contents/Resources/bin/"
 chmod +x "$APP/Contents/Resources/bin/asr"
 cp -R "$ROOT/bin/speech" "$APP/Contents/Resources/bin/speech"
 
@@ -103,6 +105,7 @@ if [ "$HAVE_ID" = "1" ]; then
   codesign --force --sign "$IDENTITY" "$APP/Contents/Resources/bin/speech/speech"
   codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.vault" "$APP/Contents/Resources/bin/vault"
   codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.desktop" "$APP/Contents/Resources/bin/desktop"
+  codesign --force --sign "$IDENTITY" "$APP/Contents/Resources/bin/workbunny-keychain.app"
   codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.asr" "$APP/Contents/Resources/bin/asr" 2>&1 | grep -v "replacing existing signature" || true
   codesign --force --deep --sign "$IDENTITY" "$APP" 2>&1 | grep -v "replacing existing signature" || true
 else
