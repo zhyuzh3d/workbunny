@@ -29,23 +29,78 @@ const cache = new Map(); // hash -> Buffer
 const CACHE_MAX = 40;
 
 /* ═══════════ 1. 系统语音 ═══════════ */
-function systemTTS(text, voice, rate) {
-  return new Promise((resolve, reject) => {
-    const out = path.join(os.tmpdir(), `wb-tts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.wav`);
-    const args = ['-r', String(rate || 200), '-o', out, '--data-format=LEI16@24000'];
-    if (voice) args.push('-v', voice);
-    args.push(text);
-    execFile('/usr/bin/say', args, { timeout: 20000 }, (err) => {
-      if (err) return reject(err);
-      fs.readFile(out, (e, buf) => {
-        fs.unlink(out, () => {});
-        if (e) return reject(e);
+function createSystemTTS({ execFileImpl = execFile, tmpdir = os.tmpdir, timeoutMs = 20000 } = {}) {
+  return function systemTTS(text, voice, rate, { signal } = {}) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(Object.assign(new Error('系统语音合成已停止'), { name: 'AbortError' }));
+      let dir, child, settled = false, inputFailed = false;
+      const abortError = () => Object.assign(new Error('系统语音合成已停止'), { name: 'AbortError' });
+      const cleanup = async () => {
+        if (!dir) return null;
+        try { await fs.promises.rm(dir, { recursive: true, force: true }); dir = null; return null; }
+        catch { return new Error('系统语音临时文件清理失败'); }
+      };
+      const finish = async (err, buf) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        // execFile's callback runs after the child has closed. Keep cleanup here
+        // so `say` can never recreate the file after we have removed it.
+        const cleanupError = await cleanup();
+        if (cleanupError) return reject(cleanupError);
+        if (signal?.aborted) return reject(abortError());
+        if (err) {
+          return reject(new Error(err.code === 'ETIMEDOUT'
+            ? '系统语音合成超时' : '系统语音合成失败'));
+        }
+        if (inputFailed) return reject(new Error('系统语音输入失败'));
+        if (!buf) return reject(new Error('系统语音输出读取失败'));
         if (buf.slice(0, 4).toString('ascii') !== 'RIFF') return reject(new Error('系统语音输出异常'));
         resolve(buf);
-      });
+      };
+      const onAbort = () => { try { child?.kill('SIGKILL'); } catch {} };
+      const onInputError = () => {
+        inputFailed = true;
+        try { child?.kill('SIGKILL'); } catch {}
+      };
+
+      try {
+        // A private directory also protects the WAV while `say` is writing it.
+        dir = fs.mkdtempSync(path.join(tmpdir(), 'wb-tts-'));
+        fs.chmodSync(dir, 0o700);
+      } catch {
+        return cleanup().then((cleanupError) => reject(cleanupError || new Error('无法创建系统语音临时目录')));
+      }
+      const out = path.join(dir, 'speech.wav');
+      const args = ['-r', String(rate || 200), '-o', out, '--data-format=LEI16@24000'];
+      if (voice) args.push('-v', voice);
+      args.push('-f', '-');
+      try {
+        child = execFileImpl('/usr/bin/say', args, { timeout: timeoutMs, killSignal: 'SIGKILL' }, async (err) => {
+          if (err) return finish(err);
+          let buf;
+          try { buf = await fs.promises.readFile(out); }
+          catch { return finish(new Error('read')); }
+          return finish(null, buf);
+        });
+        if (!child?.stdin) {
+          inputFailed = true;
+          try { child?.kill('SIGKILL'); } catch {}
+        } else {
+          child.stdin.on('error', onInputError);
+          try { child.stdin.end(text); }
+          catch { onInputError(); }
+        }
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+      } catch (err) {
+        // No child was successfully started, so there is no writer to wait for.
+        finish(err);
+      }
     });
-  });
+  };
 }
+const systemTTS = createSystemTTS();
 
 /** 系统里装了哪些中文音色（一次探测，缓存）。名字按好听程度排好，缺哪个就往下顺。 */
 let zhVoices = null;
@@ -151,8 +206,9 @@ async function synthesize(text, cfg, options = {}) {
   if (!buffer) {
     const voice = engine === 'system' ? pickSystemVoice(cfg.voice) : pickSystemVoice();
     try {
-      buffer = await systemTTS(clean, voice, cfg.rate);
+      buffer = await systemTTS(clean, voice, cfg.rate, { signal: options.signal });
     } catch (e) {
+      if (e.name === 'AbortError') throw e;
       throw new Error((lastErr ? lastErr.message + ' / ' : '') + '系统语音也失败：' + e.message);
     }
     const result = {
@@ -192,13 +248,15 @@ function qwenVoices(q = {}) {
   if (!qwenReady(q.dir) || !findSpeechRuntime()) return [];
   return voiceFiles.SPEAKERS;
 }
-function reset() { cache.clear(); }
+function clearSpeechCache() { cache.clear(); }
+function reset() { clearSpeechCache(); }
 
 module.exports = {
   synthesize, probe,
   systemVoices, pickSystemVoice,
   downloadQwen, downloadState, cancelDownload, qwenReady, QWEN_FILES, qwenVoices,
-  findSpeechRuntime, reset, prewarm,
+  findSpeechRuntime, reset, clearSpeechCache, prewarm,
+  createSystemTTS,
   runtimeStatus: qwenRuntime.status, cancel: () => { qwenRuntime.cancel(); chp.cancel(); }, shutdown: () => { qwenRuntime.close(); chp.cancel(); },
   deleteQwen: qwenDownload.deleteQwen,
   checkQwen: qwenDownload.checkQwen,

@@ -28,6 +28,12 @@ const tts = require('./tts');
 const { createTTSSession } = require('./tts-session');
 const voiceFiles = require('./qwen-voices');
 const replyPolicy = require('./reply-policy');
+const dialogueActions = require('./dialogue-actions');
+const { Secretary } = require('./secretary');
+const { observeWorkBuddy } = require('./workbuddy-observation');
+const { createTaskJournal } = require('./task-journal');
+const { prepareVisionPreview } = require('./vision-preview');
+const { randomUUID } = require('crypto');
 const { Monitor, taskName } = require('./monitor');
 const { Asr, probeAccess } = require('./asr');
 const avatars = require('./avatars');
@@ -170,6 +176,11 @@ function startWatchdog() {  if (!app.isPackaged) return;
 /* RAM is only the current-session fallback. Durable history lives in the encrypted vault. */
 let memory = null;
 let desktop = null;
+let secretary = null;
+let delegationMonitor = null;
+let currentRecall = [];
+const taskReports = [];
+let taskReportTimer = null;
 let sessionGate = null, screenLocked = true, vaultKeyAbort = null;
 let unlockMemory = async () => {};
 let history = [];
@@ -180,6 +191,36 @@ function pushHistory(role, content, details) {
   history.push({ role, content: String(content).slice(0, 12000) });
   if (history.length > 24) history = history.slice(-24);
   memory?.addMessage(role, content, details).catch(() => log('[memory] 写入失败，未降级明文'));
+}
+function publishRecall(entries = []) {
+  currentRecall = entries.filter(row => row && ['memory', 'summary'].includes(row.kind))
+    .slice(0, 16).map(row => ({ id: row.id, kind: row.kind, content: String(row.content || '').slice(0, 600),
+      ts: row.ts, sources: Array.isArray(row.sources) ? row.sources.slice(0, 30) : [] }));
+  send('recall', { entries: currentRecall });
+  const panel = panels.get('memory');
+  if (panel && !panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'recall', entries: currentRecall });
+}
+
+function queueTaskReport(report) {
+  if (report.epoch !== memory?.generation) return;
+  if (taskReports.some(item => item.taskId === report.taskId)) return;
+  taskReports.push(report);
+  if (taskReports.length > 8) taskReports.shift();
+  flushTaskReports();
+}
+function flushTaskReports() {
+  if (quitting || !taskReports.length) return;
+  clearTimeout(taskReportTimer);
+  if (screenLocked || !memory?.ready || busy || speaking || Date.now() - lastHeardAt < 3000) {
+    taskReportTimer = setTimeout(flushTaskReports, 500); taskReportTimer.unref?.(); return;
+  }
+  const report = taskReports.shift();
+  if (report.epoch !== memory?.generation) { flushTaskReports(); return; }
+  pushHistory('assistant', report.text, { delivery: 'task-receipt', taskId: report.taskId, sources: report.sources || [] });
+  send('chat', { role: 'assistant', text: report.text, final: true });
+  speak(report.text, { silent: Date.now() < quietUntil });
+  if (win && !win.isVisible()) notify(report.status === 'accepted' ? '这件事办好了' : '代办有进展', report.text.slice(0, 100));
+  if (taskReports.length) { taskReportTimer = setTimeout(flushTaskReports, 1000); taskReportTimer.unref?.(); }
 }
 
 /* ── 窗口 ── */
@@ -625,7 +666,7 @@ async function pumpSpeech() {
   const gen = speechGen;
   const c = config.load();
   // 合成期间继续识别；缺少 AEC 时只在即将播放音频时闭麦。
-  send('speaking', { on: true, text: item.text });
+  send('speaking', { on: true, text: item.text, interaction: item.interaction === true });
 
   if (c.tts.enabled && c.voice.enabled) {
     // 注意：不再要求 apiKey —— 远程 TTS 不可用时会自动退回系统语音，
@@ -705,9 +746,9 @@ function speak(text, { motion, emo, silent = false } = {}) {
 
 /* ── 大脑 ── */
 const PROMPT_TASK_DONE =
-  '（系统提示，不是主人说的话：主人刚在 WorkBuddy 里把一件事交付了，情况写在「主人现在的状态」里。' +
-  '用一到两句话告诉他这件事办完了：先说结果，再说一句你认为他该留意的地方。' +
-  '没办成就直说没办成、卡在哪。别复述他的原话，别说"任务已完成"这种空话，别列举过程。）';
+  '（系统提示，不是主人说的话：WorkBuddy 刚结束一轮并给出答复，情况写在「主人现在的状态」里。' +
+  '用一到两句话说明执行方实际报告的结果与需要留意的事项。结束一轮不代表工作成功；未独立检查的交付不能声称已验收。' +
+  '若只是分析报告就说已有分析；没办成就直说卡在哪。别复述主人原话，别列举过程。）';
 const PROMPT_TASK_LONG =
   '（系统提示，不是主人说的话：主人手上这件事已经做了好一阵子还没交付，情况写在「主人现在的状态」里。' +
   '用一到两句话给出你的判断：是正常的慢，还是可能在某个地方绕圈；然后给一个他能马上动手的建议。' +
@@ -739,10 +780,11 @@ const HISTORY_TURNS = 6;   // 只带最近 3 轮对话，够接话又不撑爆�
 
 async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn }) {
   const c = config.load();
+  const taskControl = internal ? null : dialogueActions.taskControl(userText, desktop?.task);
   if (screenLocked || (c.memory.enabled && !memory?.ready)) { if (!internal) send('toast', { text: '请先解锁电脑与记忆，再继续对话。' }); return null; }
   // 大脑的配置在 brain 里，这里折算成真正能发请求的那三个字段
   const L = config.resolveLLM(c);
-  if (L.transport !== 'workbuddy' && !L.apiKey) {
+  if (!taskControl && L.transport !== 'workbuddy' && !L.apiKey) {
     send('chat', { role: 'assistant', text: '（还没配好大脑：去设置里看看 —— 默认用 WorkBuddy 的额度，一行都不用填）' });
     return null;
   }
@@ -756,8 +798,10 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     : { text: nowLine(), messages: history.slice(-12) };
   if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return null;
   const memoryGeneration = memory?.generation;
-  const ctx = memoryContext.text + '\n' + (monitor ? monitor.context().slice(0, 2000) : '');
-  const sys = config.buildSystemPrompt(ctx) + (judge ? JUDGE_RULE : '');
+  const ctx = memoryContext.text + '\n' + (monitor ? monitor.context().slice(0, 2000) : '') +
+    '\n# Bunny 代理状态（真实状态数据）\n' + (secretary?.context() || '暂未初始化');
+  const sys = config.buildSystemPrompt(ctx) + (judge ? JUDGE_RULE : '') + '\n\n' +
+    (internal ? '这是内部观察，只能向用户汇报已知状态，不输出操作协议，不发起新的代办。' : dialogueActions.RULE);
   const msgs = [{ role: 'system', content: sys }];
   for (const h of memoryContext.messages) msgs.push(h);
   // 别把同一句主人话塞两遍。调用方有时已经 pushHistory('user') 过了，
@@ -777,9 +821,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
   let silenced = false;   // 已判定不该出声（命中 skip）
   let streamed = false;   // 已经有句子进了朗读队列
   const earlySentences = [];
-  const responseGate = replyPolicy.makeReplyGate((text) => {
-    if (!internal && !controller.signal.aborted) send('delta', { text });
-  });
+  let userRemembered = false;
   const enqueueSentence = (s) => {
     if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return;
     if (silenced || !allowSpeech) return;
@@ -792,10 +834,21 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     if (!speaking) pumpSpeech();
   };
   const saySentence = (s) => voiceTurn ? earlySentences.push(s) : enqueueSentence(s);
+  const splitter = llm.makeSentenceSplitter(saySentence);
+  let displayText = '', receivedDelta = false;
+  const responseGate = dialogueActions.makeActionGate((text) => {
+    if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return;
+    displayText += text;
+    if (!internal) send('delta', { text });
+    splitter.push(text);
+  });
 
   try {
-    const r = await llm.chat({
+    const r = taskControl ? { raw: JSON.stringify({ kind: 'action', intent: taskControl }), model: 'local-task-control', motions: [], emos: [] } : await llm.chat({
       ...L,
+      ...(!internal ? { extraBody: { ...L.extraBody,
+        ...(L.transport === 'workbuddy' && !Object.hasOwn(L.extraBody || {}, 'reasoning_effort') && ['low', 'high'].includes(L.thinking) ? { reasoning_effort: L.thinking } : {}),
+        response_format: { type: 'json_object' } } } : {}),
       // Hy3 的上限包含内部推理，压到 512 会截断到没有回答；
       // 简短口语由提示词约束，不能靠截断推理来冒充加速。
       maxTokens: L.maxTokens || 4096,
@@ -803,18 +856,19 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       messages: msgs,
       onDelta: (d) => {
         if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return;
-        if (judge) responseGate.push(d);
-        else if (!internal) send('delta', { text: d });
+        receivedDelta = true;
+        responseGate.push(d);
       },
-      onSentence: saySentence,
     });
     if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent()) || memoryGeneration !== memory?.generation) return null;
     log(`[brain] 完成 ${Date.now() - requestStarted}ms（一次请求 · ${L.provider}/${r.model || L.model}）`);
 
-    responseGate.flush();
-    const raw = (r.text || '').trim();
+    if (!receivedDelta) responseGate.push(r.raw || r.text || '');
+    responseGate.flush(); splitter.flush();
+    const raw = (displayText || '').trim();
     // 判官说「不是在跟我说话」→ 什么都不做，也不记进历史
-    if (judge && (responseGate.skipped || /^<\s*skip\s*\/?>/i.test(raw))) {
+    if (responseGate.skipped) {
+      r.text = '<skip>';
       voiceTurn?.skip();
       silenced = true;
       stopSpeaking();
@@ -831,11 +885,38 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       for (const sentence of earlySentences) enqueueSentence(sentence);
     }
 
-    const clean = raw.replace(/<\s*skip\s*\/?>/gi, '').trim();
+    let clean = llm.extractTags(raw).clean.replace(/<\s*skip\s*\/?>/gi, '').trim();
+    if (!internal) publishRecall(responseGate.controlled ? [] : memoryContext.references || []);
+    if (responseGate.controlled) {
+      if (internal) return null;
+      // Task text is data. Tags quoted inside a task cannot animate the pet.
+      r.motions = []; r.emos = [];
+      if (responseGate.error || !responseGate.intent) {
+        clean = '我没能完整确认这次操作，请再说清楚要办的事和目标。这次没有发起操作。';
+      } else {
+        if (judge && !voiceTurn) { pushHistory('user', userText); userRemembered = true; }
+        await memory?.tail;
+        if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent()) || memoryGeneration !== memory?.generation) return null;
+        const userRecord = memory?.recent?.findLast(row => row.value?.role === 'user' && row.value.content === userText);
+        const sources = [...new Set([userRecord?.id, ...(memoryContext.references || []).map(row => row.id)].filter(Boolean))];
+        const result = await secretary.dispatch(responseGate.intent, {
+          requestId: voiceTurn ? `voice-${voiceTurn.id}` : randomUUID(), userText,
+          source: voiceTurn ? 'voice' : 'text',
+          voiceTurn,
+          signal: controller.signal,
+          sources,
+          isCurrent: () => !controller.signal.aborted && (!voiceTurn || voiceTurn.isCurrent()),
+        });
+        if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return null;
+        clean = result.text;
+      }
+      r.text = clean; r.raw = clean;
+    }
+    r.text = clean;
     // 把她实际说的话记下来：回看时才知道"她到底说了什么蠢话"，否则无从优化
     if (clean) log(`[say] ${clean.length} 字`);
     if (clean) {
-      if (judge && !voiceTurn) pushHistory('user', userText);
+      if (judge && !voiceTurn && !userRemembered) pushHistory('user', userText);
       if (!internal) pushHistory('assistant', clean, { delivery: 'generated', sources: memoryContext.sourceIds || [] });
       if (!internal) {
         send('chat', { role: 'assistant', text: clean, final: true });
@@ -889,6 +970,7 @@ function proactiveAllowed() {
   const c = config.load();
   if (!c.monitor.enabled) return false;
   if (busy) return false;
+  if (desktop?.running || secretary?.verifying) return false;
   // 主人刚说了「别烦」→ 安静期内一声不吭（除非他先开口）
   if (Date.now() < quietUntil) return false;
   // 主人正在说话/刚说完 8 秒内不插话 —— 抢话是最掉好感的毛病
@@ -969,6 +1051,8 @@ function startMonitor() {
   });
 
   monitor.on('taskDone', (s) => {
+    // Secretary verifies and reports its own handoffs; don't announce completion twice.
+    if (s.task?.bunnyTaskId) return;
     const now = Date.now();
     if (!workSpanStart) workSpanStart = now;
     const c2 = config.load();
@@ -1323,7 +1407,20 @@ function trustedCompanion(event, kind) {
   if (!kind && (win?.webContents === event.sender || [...panels.values()].some(p => !p.isDestroyed() && p.webContents === event.sender))) return;
   throw new Error('此窗口无权执行该操作');
 }
-function invalidateMemoryContext() { voiceTurns.reset(); stopSpeaking(); history = []; }
+function invalidateMemoryContext() {
+  voiceTurns.reset(); stopSpeaking(); history = []; publishRecall(); taskReports.length = 0;
+  tts.clearSpeechCache?.();
+  secretary?.invalidate();
+  if (desktop?.task && ['starting', 'running', 'monitoring', 'awaiting', 'verifying', 'review'].includes(desktop.task.status)) {
+    desktop.stop('记忆内容已变更，代理已暂停').catch(() => {});
+  }
+}
+function clearTaskView() {
+  if (!desktop) return;
+  desktop.task = null; desktop.screenshot = null;
+  desktop.emit(desktop.publicStatus());
+  delegationMonitor?.stop(); delegationMonitor = null;
+}
 ipcMain.handle('pet:memory-stats', e => { trustedCompanion(e); return memory?.stats() || { ready: false }; });
 ipcMain.handle('pet:memory-unlock', async e => { trustedCompanion(e, 'memory'); if (screenLocked) throw new Error('请先解锁电脑'); await unlockMemory(); return memory.stats(); });
 ipcMain.handle('pet:memory-list', (e, options = {}) => {
@@ -1346,14 +1443,18 @@ ipcMain.handle('pet:memory-remove', async (e, id) => {
   const r = await dialog.showMessageBox(panels.get('memory'), { type: 'warning', buttons: ['取消', '删除'], defaultId: 0, cancelId: 0,
     message: '删除这条记忆？', detail: '关联的原始对话和派生摘要也会移除，避免以后重新想起。已导出的备份需另行管理。' });
   if (r.response !== 1) return { removed: 0, canceled: true };
-  invalidateMemoryContext(); return memory.remove(String(id || '').slice(0, 256));
+  invalidateMemoryContext();
+  const result = await memory.remove(String(id || '').slice(0, 256));
+  if (desktop?.task && !(await memory.db.request('get', { ids: [desktop.task.id] })).rows.length) clearTaskView();
+  return result;
 });
 ipcMain.handle('pet:memory-clear', async e => {
   trustedCompanion(e, 'memory');
   const r = await dialog.showMessageBox(panels.get('memory'), { type: 'warning', buttons: ['取消', '清空记忆'], defaultId: 0, cancelId: 0,
     message: '清空全部聊天和长期记忆？', detail: '也会清除对话摘要、人格修订与桌面任务记录。设置、模型和音色保留。请先导出加密备份。' });
   if (r.response !== 1) return { ok: false, canceled: true };
-  await desktop.stop('清空本地记忆'); invalidateMemoryContext(); return memory.clear();
+  await desktop.stop('清空本地记忆'); invalidateMemoryContext();
+  const result = await memory.clear(); clearTaskView(); return result;
 });
 ipcMain.handle('pet:memory-export', async (e, passphrase) => {
   trustedCompanion(e, 'memory');
@@ -1369,6 +1470,7 @@ ipcMain.handle('pet:memory-restore', async (e, passphrase) => {
   const file = r.filePaths[0]; if (fs.statSync(file).size > 256 * 1024 * 1024) throw new Error('备份过大，请使用分段迁移');
   invalidateMemoryContext();
   const result = await memory.restore(await fs.promises.readFile(file, 'utf8'), passphrase);
+  clearTaskView();
   const persona = (await memory.query('persona', 1))[0]?.value.setting;
   if (persona) { config.save({ buddy: { name: persona.name, ownerName: persona.ownerName, profile: persona.profile } }); sendConfig(); }
   return result;
@@ -1378,6 +1480,7 @@ ipcMain.handle('pet:desktop-permission', async e => { trustedCompanion(e, 'deskt
 ipcMain.handle('pet:task-start', async (e, v) => {
   trustedCompanion(e, 'desktop');
   if (!memory?.ready) return { ok: false, error: '请先在“记忆与关系”中解锁本地资料库，再启动桌面任务。' };
+  if (secretary?.verifying) return { ok: false, error: '正在核对上一件事的交付，请先暂停或等待结果。' };
   try { voiceTurns.reset(); stopSpeaking(); memory?.cancelExtraction(); return await desktop.start(v); } catch (error) { return { ok: false, error: error.message }; }
 });
 ipcMain.handle('pet:task-stop', e => { trustedCompanion(e, 'desktop'); return desktop.stop(); });
@@ -1385,7 +1488,9 @@ ipcMain.handle('pet:task-accept', e => { trustedCompanion(e, 'desktop'); return 
 ipcMain.handle('pet:desktop-insert', (e, text) => { trustedCompanion(e, 'desktop'); return desktop.insert(text); });
 ipcMain.handle('pet:interact', (e, region) => {
   if (e.sender !== win?.webContents) return null;
-  if (busy || speaking || Date.now() - lastSpokeAt < 1200 || desktop?.running) return null;
+  const operatingDesktop = desktop?.running && !(desktop.task?.target === 'workbuddy' && desktop.task.status === 'monitoring' && desktop.task.monitorSessionId);
+  // A long background WorkBuddy job should not take away ordinary companionship.
+  if (busy || speaking || Date.now() - lastSpokeAt < 1200 || operatingDesktop) return null;
   const reaction = interactions.pick(region, { quiet: Date.now() < quietUntil });
   if (!reaction) return null;
   send('motion', { key: reaction.slot, once: true }); send('emo', { key: reaction.emo }); send('say', { text: reaction.text });
@@ -1406,6 +1511,8 @@ ipcMain.handle('pet:init', async () => {
     avatar: current,
     avatars: list,
     monitor: monitor ? snapshotForUi(monitor.view) : null,
+    desktop: desktop?.publicStatus() || null,
+    currentRecall,
     asrAvailable: hasAsr,
     versions: { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome },
     paths: { userData: USER_DIR },
@@ -1891,20 +1998,33 @@ if (!lock) {
     });
     desktop = new DesktopService({ emit: status => {
       if (status.running) setInteractive(false);
+      send('desktop', status);
+      secretary?.onStatus(status);
+      if (['accepted', 'paused', 'stopped'].includes(status.task?.status)) { delegationMonitor?.stop(); delegationMonitor = null; }
       for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'desktop', ...status });
     }, imageResize: png => {
-      const image = nativeImage.createFromBuffer(png), size = image.getSize();
-      return size.width > 1536 ? image.resize({ width: 1536 }).toPNG() : png;
-    }, persist: task => memory.serial(() => memory.write([{ id: task.id, kind: 'task', ts: task.startedAt, updatedAt: Date.now(), value: { ...task, content: task.goal + '\n' + task.note, sources: [] } }])) });
+      return prepareVisionPreview(nativeImage.createFromBuffer(png));
+    }, observeWorkBuddy: task => {
+      let source = monitor?.enabled ? monitor : delegationMonitor;
+      if (!source) {
+        source = delegationMonitor = new Monitor();
+        source.start(config.load().monitor.root);
+      }
+      return observeWorkBuddy(source, task);
+    }, persist: createTaskJournal(memory) });
+    secretary = new Secretary({ desktop, ready: () => !quitting && !screenLocked && !!memory?.ready,
+      epoch: () => memory?.generation, report: queueTaskReport });
     async function restoreTask() {
     if (memory.ready && desktop) {
       const lastTask = (await memory.query('task', 1))[0]?.value;
       if (lastTask) {
         desktop.task = lastTask;
-        if (['starting', 'running'].includes(lastTask.status)) {
+        if (lastTask.privacyEpoch !== undefined) lastTask.privacyEpoch = memory.generation;
+        if (['starting', 'running', 'monitoring', 'awaiting', 'verifying', 'review'].includes(lastTask.status)) {
           desktop.task = { ...lastTask, status: 'paused', note: '应用已重启；未重复发送输入，请先查看原窗口的结果。', updatedAt: Date.now() };
           await desktop.journal();
         }
+        send('desktop', desktop.publicStatus());
       }
     }
     }
@@ -1926,6 +2046,8 @@ if (!lock) {
     sessionGate = new SessionGate({
       readLocked: async () => (await desktop.status()).permissions.sessionLocked,
       onLocked: () => {
+        publishRecall();
+        tts.clearSpeechCache?.();
         screenLocked = true; vaultKeyAbort?.abort(); stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.stop('电脑锁屏').catch(() => {});
         asrStatus = { ...asrStatus, captureReady: false, note: 'locked' }; send('asrStatus', asrStatus);
         if (!memory.ready) { memory.waitingForUnlock = true; memory.error = '电脑已锁屏，解锁后自动载入记忆'; log('[memory] 屏幕锁定，延后钥匙串读取'); }
@@ -2095,7 +2217,7 @@ if (!lock) {
       if (!echoLike(t) || Date.now() - lastSpokeAt >= 2600) voiceTurns.final(t);
     });
     asr.on('final', (t) => {
-      log('[asr] final', t);
+      log(`[asr] final ${String(t || '').length} 字`);
       send('asrFinal', { text: t });
       if (!alwaysOn && t && t.trim().length >= 1) {
         pushHistory('user', t.trim());
@@ -2207,6 +2329,7 @@ if (!lock) {
 let shutdownStarted = false, shutdownFlushed = false;
 app.on('before-quit', event => {
   quitting = true;
+  secretary?.close(); clearTimeout(taskReportTimer); delegationMonitor?.stop();
   vaultKeyAbort?.abort();
   sessionGate?.close();
   markCleanExit();

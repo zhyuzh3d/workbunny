@@ -84,7 +84,12 @@ function request(params, { signal, timeoutMs = 55000 } = {}) {
           } else if (v.type === 'session_hello_error' || v.type === 'pipe_revoked') {
             throw new Error('WorkBuddy 登录状态已变化，请重新连接。');
           } else if (v.error) {
-            throw new Error('WorkBuddy 请求失败：' + String(v.error.code || '未知错误'));
+            const code = String(v.error.code || '未知错误');
+            const error = new Error(code === 'E_PAYLOAD_TOO_LARGE'
+              ? 'WorkBuddy 本地转发的回答超过大小限制，请缩短本轮输出或推理预算。'
+              : 'WorkBuddy 请求失败：' + code);
+            error.code = code;
+            throw error;
           } else if (v.id === 1) {
             if (!v.result?.methods?.includes('http.fetch')) throw new Error('此 WorkBuddy 版本不支持账号接口。');
             send({ jsonrpc: '2.0', id: 2, method: v.result.channel + '/http.fetch', mode: 'call', params });
@@ -108,19 +113,23 @@ function request(params, { signal, timeoutMs = 55000 } = {}) {
 
 function chatPayload(opts) {
   const { model = 'hy3', messages, thinking = 'auto' } = opts;
-  const payload = { model, messages, stream: true, max_tokens: opts.maxTokens || 4096, ...opts.extraBody };
+  // The current WorkBuddy endpoint only accepts streaming chat. Its broker
+  // buffers the SSE response, so callers must bound reasoning/output budgets.
+  const payload = { model, messages, max_tokens: opts.maxTokens || 4096, ...opts.extraBody, stream: true };
   if (!opts.extraBody && (thinking === 'low' || thinking === 'high')) payload.reasoning_effort = thinking;
   return payload;
 }
-async function chat(opts) {
-  const { model = 'hy3', signal, onDelta, onSentence } = opts;
-  const payload = chatPayload(opts);
-  const r = await request({ method: 'POST', path: '/v2/chat/completions',
-    headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
-    body_b64: Buffer.from(JSON.stringify(payload)).toString('base64'),
-  }, { signal });
+function parseChatBody(body, model = 'hy3') {
   let raw = '', usedModel = model, usage = null;
-  for (const line of r.body.split('\n')) {
+  let object;
+  try { object = JSON.parse(body); } catch { /* Older brokers may still return SSE. */ }
+  if (object) {
+    const data = object.data?.choices ? object.data : object;
+    usedModel = data.model || model;
+    usage = data.usage || null;
+    const content = data.choices?.[0]?.message?.content;
+    raw = typeof content === 'string' ? content : '';
+  } else for (const line of body.split('\n')) {
     if (!line.startsWith('data:')) continue;
     const text = line.slice(5).trim();
     if (!text || text === '[DONE]') continue;
@@ -131,7 +140,21 @@ async function chat(opts) {
     if (data.usage) usage = data.usage;
     raw += data.choices?.[0]?.delta?.content || '';
   }
-  if (!raw.trim()) throw new Error('WorkBuddy 没有返回回答，请重试。');
+  if (!raw.trim()) {
+    const error = new Error('WorkBuddy 没有返回回答，请重试。');
+    error.code = 'E_EMPTY_RESPONSE';
+    throw error;
+  }
+  return { raw, model: usedModel, usage };
+}
+async function chat(opts) {
+  const { model = 'hy3', signal, onDelta, onSentence } = opts;
+  const payload = chatPayload(opts);
+  const r = await request({ method: 'POST', path: '/v2/chat/completions',
+    headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+    body_b64: Buffer.from(JSON.stringify(payload)).toString('base64'),
+  }, { signal });
+  const { raw, model: usedModel, usage } = parseChatBody(r.body, model);
   if (onDelta) onDelta(raw);
   const { extractTags, makeSentenceSplitter } = require('./llm');
   if (onSentence) { const split = makeSentenceSplitter(onSentence); split.push(raw); split.flush(); }
@@ -139,4 +162,4 @@ async function chat(opts) {
   return { ...parsed, text: parsed.clean.trim(), raw, model: usedModel, usage, provider: 'workbuddy' };
 }
 
-module.exports = { chat, request, discovery, chatPayload, openApplication };
+module.exports = { chat, request, discovery, chatPayload, parseChatBody, openApplication };

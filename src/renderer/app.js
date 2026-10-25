@@ -744,10 +744,19 @@ function showBubble(text, holdMs) {
   bubbleTimer = setTimeout(hideBubble, ms);
 }
 
+function paintRecallButton(entries) {
+  const button = document.getElementById('memoryBasis');
+  if (!button) return;
+  const count = Array.isArray(entries) ? entries.filter(entry => entry && ['memory', 'summary'].includes(entry.kind) && typeof entry.content === 'string').length : 0;
+  button.hidden = count === 0;
+  button.textContent = count ? `记忆依据 · ${count}` : '记忆依据';
+}
+
 function hideBubble() {
   document.getElementById('bubble').classList.add('hidden');
   if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
 }
+document.getElementById('memoryBasis')?.addEventListener('click', () => pet.open('memory'));
 
 /* ═══════════ 交互区 ═══════════ */
 const dock = document.getElementById('dock');
@@ -1308,6 +1317,9 @@ function wire() {
         if (ev.role === 'user') { noteMaster(); showBubble(ev.text, 3000); }
         else if (ev.role === 'assistant') showBubble(ev.text, 9000);
         break;
+      case 'recall':
+        paintRecallButton(ev.entries);
+        break;
       case 'delta':
         break;
       case 'motion': {
@@ -1341,7 +1353,7 @@ function wire() {
           if (shownHeard && shownState !== 'skip') shownState = 'ready';
           ambientTimer = 30;
           // 说话时身体回中性站姿：不要在"抱臂思考"这种姿势里讲话
-          if (currentMotion !== IDLE) toIdle(0.45);
+          if (currentMotion !== IDLE && !ev.interaction) toIdle(0.45);
         } else if (!thinkingNow && shownHeard && shownState !== 'skip') {
           shownState = 'done'; clearHeardLater();
         }
@@ -1381,6 +1393,9 @@ function wire() {
       }
       case 'monitor':
         paintActivity(ev);
+        break;
+      case 'desktop':
+        paintDesktopActivity(ev);
         break;
       case 'toast':
         paintActivityText(ev.text);
@@ -1455,7 +1470,10 @@ function wire() {
 
 let activityHideTimer = null;
 let lastWorkSnap = null;
+let lastDesktopEvent = null;
 let lastActivityAt = 0;
+let desktopRecentKey = '';
+let desktopRecentUntil = 0;
 
 /* ── 状态条轮播 ──
  * 同时可能有好几件事在跑（WorkBuddy 一次开几个任务很常见），一条横幅放不下，
@@ -1481,7 +1499,7 @@ function actNode(t, i, n) {
     t.status === 'running' ? `在干活 ${pos}`
       : t.status === 'failed' ? '这次没成 · '
         : t.status === 'abandoned' ? '没下文 · '
-          : '做完了 · ';
+          : '有结果 · ';
   const name = t.name || '一件事';
   const tail = mins >= 1 ? `（${mins} 分）` : '';
   // 一行能放多少字：状态条现在能用到窗口右侧（约 260px 文字区），中文 11px 一个字 ≈ 22 字
@@ -1493,12 +1511,52 @@ function activityLines(snap) {
   const tasks = (snap && snap.tasks) || [];
   const running = tasks.filter((t) => t.status === 'running' && !actSeen.has(actKey(t)));
   const out = [];
+  const desktopTask = lastDesktopEvent?.task;
+  if (desktopTask) {
+    const status = desktopTask.status;
+    const text = status === 'starting' ? 'Bunny 正在准备代理操作'
+      : status === 'running' ? (desktopTask.handoffSent ? 'WorkBuddy 已收到原文 · Bunny 正在观察' : 'Bunny 正在操作目标窗口')
+        : status === 'awaiting' ? '已提交，等待 WorkBuddy 开始处理'
+        : status === 'monitoring' ? 'Bunny 正在观察 WorkBuddy 会话'
+          : status === 'verifying' ? 'Bunny 正在核对可见结果'
+            : ['paused', 'stopped'].includes(status) ? (desktopTask.handoffSent ? 'Bunny 代理已暂停 · WorkBuddy 会话可能继续' : 'Bunny 代理已暂停')
+              : status === 'review' ? (desktopTask.origin === 'dialogue' ? '已有结果，Bunny 正在核对' : '代理结果待你确认')
+                : status === 'accepted' ? (desktopTask.automaticAccepted ? 'Bunny 已核对代理结果' : '你已确认代理结果')
+                  : status === 'failed' ? '代理任务未完成'
+                  : '';
+    const active = ['starting', 'running', 'awaiting', 'monitoring', 'verifying', 'review'].includes(status) || lastDesktopEvent.running === true;
+    const recentTerminal = ['paused', 'stopped', 'accepted', 'failed'].includes(status) && Date.now() < desktopRecentUntil;
+    const key = `desktop#${desktopTask.id || ''}#${status}`;
+    if (text && !actSeen.has(key) && (active || (recentTerminal && running.length === 0))) return [{ key, text }];
+  }
   running.forEach((t, i) => out.push({ key: actKey(t), text: actNode(t, i, running.length) }));
   for (const t of tasks) {
     if (t.status === 'running' || actSeen.has(actKey(t))) continue;
     out.push({ key: actKey(t), text: actNode(t, 0, 0) });
   }
   return out.slice(0, 4);
+}
+
+function paintDesktopActivity(event) {
+  const previousKey = lastDesktopEvent?.task ? `${lastDesktopEvent.task.id || ''}#${lastDesktopEvent.task.status || ''}` : '';
+  lastDesktopEvent = event || null;
+  const task = lastDesktopEvent?.task;
+  const key = task ? `${task.id || ''}#${task.status || ''}` : '';
+  const active = !!task && (lastDesktopEvent.running === true || ['starting', 'running', 'awaiting', 'monitoring', 'verifying', 'review'].includes(task.status));
+  if (active) { desktopRecentKey = ''; desktopRecentUntil = 0; }
+  else if (task && ['paused', 'stopped', 'accepted', 'failed'].includes(task.status) && key !== desktopRecentKey) {
+    desktopRecentKey = key;
+    desktopRecentUntil = Date.now() + 7000;
+    setTimeout(() => paintActivity(lastWorkSnap || { tasks: [] }), 7050);
+  } else if (key !== previousKey) { desktopRecentKey = ''; desktopRecentUntil = 0; }
+  paintActivity(lastWorkSnap || { tasks: [] });
+}
+
+function canOpenDesktopActivity() {
+  const task = lastDesktopEvent?.task;
+  if (!task) return false;
+  if (lastDesktopEvent.running === true || ['starting', 'running', 'awaiting', 'monitoring', 'verifying', 'review'].includes(task.status)) return true;
+  return Date.now() < desktopRecentUntil && actLines[actIdx % Math.max(1, actLines.length)]?.key === `desktop#${task.id || ''}#${task.status}`;
 }
 
 function setActLine(txt) {
@@ -1530,6 +1588,16 @@ function slideLine(txt, up = true) {
 let actHover = false;
 activity.addEventListener('pointerenter', () => { actHover = true; stopRoll(); });
 activity.addEventListener('pointerleave', () => { actHover = false; startRoll(); });
+activity.tabIndex = -1;
+activity.addEventListener('click', (event) => {
+  if (event.target.closest('#actDone') || !canOpenDesktopActivity()) return;
+  pet.open('desktop');
+});
+activity.addEventListener('keydown', (event) => {
+  if ((event.key === 'Enter' || event.key === ' ') && !event.target.closest('#actDone') && canOpenDesktopActivity()) {
+    event.preventDefault(); pet.open('desktop');
+  }
+});
 
 function stopRoll() {
   if (actTimer) clearInterval(actTimer);
@@ -1554,6 +1622,8 @@ function paintIdle() {
   actLines = []; actSig = ''; actIdx = 0;
   activity.classList.remove('hidden');
   activity.classList.add('idle');
+  activity.classList.remove('desktop-openable');
+  activity.tabIndex = -1;
   setActLine('空闲中');
 }
 
@@ -1568,6 +1638,8 @@ function paintActivity(snap) {
   actLines = lines;
   activity.classList.remove('hidden');
   activity.classList.remove('idle');
+  activity.classList.toggle('desktop-openable', canOpenDesktopActivity());
+  activity.tabIndex = canOpenDesktopActivity() ? 0 : -1;
   actTextMode = false;
   if (sig !== actSig) {
     // 任务集合变了（新任务 / 被点掉一条）：从第一条重新开始
@@ -1596,7 +1668,7 @@ function dismissCurrent() {
   for (const a of el.getAnimations()) a.cancel();
   paintActivity(lastWorkSnap || {});
 }
-document.getElementById('actDone').addEventListener('click', dismissCurrent);
+document.getElementById('actDone').addEventListener('click', (event) => { event.stopPropagation(); dismissCurrent(); });
 /* 调试用：看轮播队列此刻的真实状态 */
 window.__act = () => ({
   keys: actLines.map((l) => l.key),
@@ -1640,6 +1712,8 @@ setInterval(() => {
 (function boot() {
   const run = async () => {
     const init = await pet.init();
+    if (init?.desktop) paintDesktopActivity(init.desktop);
+    paintRecallButton(init?.currentRecall);
     cfg = init.config;
     const ver = document.getElementById('ver');
     if (ver) ver.textContent = 'v' + ((init.versions && init.versions.app) || '');

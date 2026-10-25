@@ -43,6 +43,7 @@ let memoryCfgPending = false;
 let memoryRefreshPending = false, memoryRefreshTimer = null, memoryRefreshBusy = false;
 let memoryViewRevision = 0;
 let memoryListBusyRevision = 0;
+let currentRecallEntries = [];
 function countValue(value) { return typeof value === 'number' ? value : Number(value?.count ?? value?.total ?? 0) || 0; }
 function countsObject(stats) { return stats?.counts && typeof stats.counts === 'object' ? stats.counts : {}; }
 function setPill(id, text, tone = '') {
@@ -134,6 +135,7 @@ function renderSources(card, rows) {
 }
 function renderRecord(row) {
   const card = node('article', 'record');
+  card.dataset.recordId = row.id || '';
   const top = node('div', 'record-top');
   top.append(node('span', 'record-date', formatTime(row.ts)));
   if (row.role) top.append(node('span', 'badge', row.role));
@@ -181,7 +183,10 @@ function renderRecord(row) {
         if (!list.length) region.textContent = '没有可显示的来源';
         else for (const source of list) region.append(node('div', '', [formatTime(source.ts), source.role || '', source.content || source.title || ''].filter(Boolean).join(' · ')));
         card.append(region);
-      } catch (error) { showError(error); }
+      } catch (error) {
+        const region = node('div', 'record-source details bad-text', `来源暂时无法读取：${error?.message || '请稍后重试'}`);
+        card.append(region);
+      }
     });
     addAction(actions, '删除', async () => {
       try {
@@ -196,6 +201,50 @@ function renderRecord(row) {
   }
   card.append(actions);
   return card;
+}
+function paintCurrentRecall(entries) {
+  currentRecallEntries = Array.isArray(entries) ? entries.filter(entry => entry &&
+    typeof entry.id === 'string' && ['memory', 'summary'].includes(entry.kind) && typeof entry.content === 'string') : [];
+  const card = $('currentRecallCard'), target = $('currentRecallList');
+  card.hidden = currentRecallEntries.length === 0;
+  $('currentRecallTitle').textContent = `本轮想起 · ${currentRecallEntries.length} 条`;
+  target.replaceChildren();
+  for (const entry of currentRecallEntries) {
+    const item = node('article', 'recall-entry');
+    item.append(node('div', 'record-date', `${entry.kind === 'memory' ? '长期记忆' : '对话摘要'} · ${formatTime(entry.ts)}`));
+    item.append(node('p', '', entry.content));
+    const actions = node('div', 'record-actions');
+    const ids = Array.isArray(entry.sources) ? entry.sources.map(source => typeof source === 'string' ? source : source?.id).filter(id => typeof id === 'string' && id) : [];
+    if (ids.length) addAction(actions, '查看来源', async event => {
+      const button = event?.currentTarget;
+      const existing = item.querySelector('.recall-source-list');
+      if (existing) { existing.remove(); return; }
+      if (button) button.disabled = true;
+      try {
+        const result = await api('memorySources', ids);
+        const sources = Array.isArray(result) ? result : (result?.rows || []);
+        const list = node('div', 'recall-source-list');
+        if (!sources.length) list.append(node('div', 'recall-source', '没有可显示的来源'));
+        else for (const source of sources) list.append(node('div', 'recall-source', [formatTime(source.ts), source.role || '', source.content || source.title || source.evidence || ''].filter(Boolean).join(' · ')));
+        item.append(list);
+      } catch (error) {
+        const region = node('div', 'recall-source-list');
+        region.append(node('div', 'recall-source bad-text', `来源暂时无法读取：${error?.message || '请稍后重试'}`));
+        item.append(region);
+      }
+      finally { if (button) button.disabled = false; }
+    });
+    addAction(actions, '查看记录', async () => {
+      memoryKind = entry.kind;
+      memoryQuery = memoryRows.some(row => row.id === entry.id) ? '' : entry.content.slice(0, 100).trim();
+      $('memorySearch').value = memoryQuery;
+      for (const tab of $('memoryTabs').querySelectorAll('.tab')) tab.classList.toggle('active', tab.dataset.kind === memoryKind);
+      await loadMemoryList(true);
+      document.querySelector('.memory-main').scrollTop = 0;
+      document.querySelector(`[data-record-id="${CSS.escape(entry.id)}"]`)?.scrollIntoView({ block: 'center' });
+    });
+    item.append(actions); target.append(item);
+  }
 }
 async function loadMemoryStats() {
   try { paintMemoryStats(await api('memoryStats')); }
@@ -331,10 +380,37 @@ $('memoryClear').addEventListener('click', async () => {
 });
 
 /* ── 桌面任务 ── */
-let desktopStatus = null, insertPending = false, insertPromise = null;
+let desktopStatus = null, insertPending = false, insertPromise = null, paintedTaskId = null;
+let resumePendingId = null, resumePreviousStatus = null, resumeTimer = null;
+let workBuddyMonitorSnapshot = null;
 const PERMISSION_NAMES = { accessibilityTrusted: '辅助功能', screenCaptureAllowed: '屏幕录制', postEventAllowed: '输入控制', accessibility: '辅助功能', screenRecording: '屏幕录制', automation: '自动化', inputMonitoring: '输入监控' };
-const TASK_STATUS_LABELS = { starting: '正在准备', running: '运行中', paused: '已暂停', stopped: '已停止', review: '等待验收', accepted: '已验收' };
+const TASK_STATUS_LABELS = { starting: '正在准备', running: '代理操作中', awaiting: '等待 WorkBuddy 开始处理', monitoring: '观察 WorkBuddy', verifying: '核对结果', paused: '代理已暂停', stopped: '代理已暂停', review: '待你确认', accepted: '你已确认', failed: '代理未完成' };
 function taskStatusLabel(status) { return TASK_STATUS_LABELS[status] || labelStatus(status); }
+function taskFieldValue(value) {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (!value || typeof value !== 'object') return '';
+  const parts = ['status', 'summary', 'result', 'note', 'evidence', 'message'].map(key => value[key]).filter(item => typeof item === 'string' && item.trim());
+  if (typeof value.passed === 'boolean') parts.unshift(value.passed ? '符合' : '未确认');
+  return parts.join(' · ');
+}
+function taskSourceLabel(task) {
+  if (task?.inputSource === 'voice') return '口头交代';
+  if (task?.inputSource === 'text') return '文字交代';
+  if (task?.inputSource === 'panel' || task?.origin === 'panel') return '手动交代';
+  return '对话交代';
+}
+function taskTargetLabel(target) {
+  return target === 'workbuddy' ? 'WorkBuddy' : target === 'wechat' ? '微信' : '';
+}
+function verificationValue(value) {
+  if (value && typeof value === 'object') {
+    const verdicts = { pass: '核对通过', revise: '需要 WorkBuddy 修改', need_user: '需要你确认' };
+    const label = verdicts[value.verdict];
+    if (label) return `${label}${typeof value.report === 'string' && value.report.trim() ? `：${value.report}` : ''}`;
+  }
+  return taskFieldValue(value);
+}
 function displayValue(value) {
   if (value === true) return '已授权';
   if (value === false) return '未授权';
@@ -344,14 +420,56 @@ function displayValue(value) {
 function paintDesktopStatus(status) {
   desktopStatus = status || {};
   const task = desktopStatus.task || null;
-  const running = !!desktopStatus.running;
-  const tone = running ? 'warn' : task?.status === 'paused' ? 'bad' : task?.status === 'review' ? 'warn' : 'ok';
-  setPill('desktopStatus', running ? '任务运行中' : task ? taskStatusLabel(task.status) : '空闲', tone);
+  const running = !!desktopStatus.running || ['starting', 'running', 'awaiting', 'monitoring', 'verifying'].includes(task?.status);
+  const tone = ['paused', 'stopped', 'failed'].includes(task?.status) ? 'bad' : ['starting', 'running', 'awaiting', 'monitoring', 'verifying', 'review'].includes(task?.status) ? 'warn' : 'ok';
+  const taskLabel = task?.status === 'accepted' && task.automaticAccepted ? 'Bunny 已核对代理结果'
+    : task?.status === 'review' && task.origin === 'dialogue' ? '已有结果，Bunny 正在核对' : task ? taskStatusLabel(task.status) : '';
+  const taskId = task?.id || null;
+  if (taskId !== paintedTaskId) {
+    $('taskEvidenceDetails').open = false;
+    $('taskPreview').open = false;
+    paintedTaskId = taskId;
+  }
+  let resumeFeedback = '';
+  if (resumePendingId && task?.id !== resumePendingId) {
+    clearResumePending(); resumeFeedback = '当前代办已变化；继续请求尚未确认。';
+  } else if (resumePendingId && task.status !== resumePreviousStatus) {
+    clearResumePending(); resumeFeedback = `状态已更新：${taskLabel || '当前代办状态已变化'}`;
+  }
+  setPill('desktopStatus', task ? taskLabel : running ? '代理操作中' : '空闲', tone);
+  const taskFormOpen = $('taskFormDetails').open;
+  const userReview = task?.status === 'review' && task.origin !== 'dialogue';
+  const resumable = !!task?.id && task.target === 'workbuddy' && ['paused', 'stopped', 'review'].includes(task.status);
   $('taskStop').disabled = !running;
+  $('taskStop').hidden = !running;
   $('taskStart').disabled = running;
-  $('taskAccept').disabled = task?.status !== 'review';
-  $('taskStateNote').textContent = running ? task?.note || '任务正在执行' : task ? [taskStatusLabel(task.status), task.note].filter(Boolean).join(' · ') : '没有正在运行的任务';
+  $('taskStart').hidden = !taskFormOpen;
+  $('taskAccept').disabled = !userReview;
+  $('taskAccept').hidden = !userReview;
+  $('taskResume').hidden = !resumable;
+  $('taskResume').disabled = resumePendingId === task?.id;
+  $('desktopActions').hidden = !running && !userReview && !resumable && !taskFormOpen;
+  const stateDetail = task?.status === 'verifying' ? ''
+    : task?.status === 'review' && task.origin === 'dialogue' && /正在(?:核对|检查)/.test(task.note || '') ? ''
+    : ['accepted', 'failed'].includes(task?.status) ? task.report || ''
+      : task?.note || (running ? '代理操作正在进行' : '');
+  const stateText = task ? [taskLabel, stateDetail && stateDetail !== taskLabel ? stateDetail : ''].filter(Boolean).join(' · ') : '没有正在进行的代理操作';
+  $('taskStateNote').textContent = stateText;
+  $('taskStateNote').title = stateText;
+  const pausableStates = ['starting', 'running', 'awaiting', 'monitoring', 'verifying', 'paused', 'stopped'];
+  const pauseNote = task?.target === 'workbuddy' && pausableStates.includes(task.status)
+    ? '暂停只停止 Bunny 的代理操作；WorkBuddy 已接收的会话可能仍在继续。'
+    : task?.target === 'wechat' && pausableStates.includes(task.status)
+      ? '暂停只停止 Bunny 的微信代理操作；微信中已发生的变化需要单独核对。' : '';
+  const pauseNoteEl = $('taskPauseNote');
+  pauseNoteEl.textContent = pauseNote;
+  pauseNoteEl.hidden = !pauseNote;
   const permissions = desktopStatus.permissions || {};
+  const requiredPermissions = ['accessibilityTrusted', 'screenCaptureAllowed', 'postEventAllowed'];
+  const permissionGranted = key => Array.isArray(permissions)
+    ? permissions.some(item => (item?.id || item?.name) === key && (item.granted === true || item.status === true))
+    : permissions[key] === true;
+  $('permissionsDetails').open = !requiredPermissions.every(permissionGranted);
   const permissionList = $('permissionList'); permissionList.replaceChildren();
   const entries = Array.isArray(permissions) ? permissions.map((item) => [item.name || item.id, item.granted ?? item.status]) : Object.entries(permissions);
   if (!entries.length) permissionList.append(node('div', 'inline-note', '尚未读取权限状态'));
@@ -365,23 +483,49 @@ function paintDesktopStatus(status) {
     permissionList.append(line);
   }
   const details = $('taskDetails'); details.replaceChildren();
+  $('taskEvidenceDetails').hidden = !task;
+  const meta = $('taskMeta'), summary = $('taskSummary');
+  meta.hidden = !task;
+  summary.hidden = !task;
   if (task) {
-    const fields = [['goal', '任务'], ['target', '目标'], ['step', '步骤'], ['currentStep', '当前步骤'], ['message', '说明'], ['result', '结果'], ['error', '状态说明']];
-    for (const [key, title] of fields) if (task[key]) details.append(node('div', 'task-detail', `${title}：${task[key]}`));
+    const source = taskSourceLabel(task), target = taskTargetLabel(task.target);
+    meta.textContent = [source, target].filter(Boolean).join(' · ');
+    const fullGoal = String(task.taskText || task.goal || '');
+    summary.textContent = fullGoal;
+    summary.title = fullGoal;
+    const fields = [['goal', '任务'], ['criteria', '验收条件'], ['step', '步骤'], ['currentStep', '当前步骤'], ['message', '说明'], ['report', '执行报告'], ['result', '结果'], ['error', '状态说明']];
+    for (const [key, title] of fields) { const value = taskFieldValue(task[key]); if (value) details.append(node('div', 'task-detail', `${title}：${value}`)); }
+    const verification = verificationValue(task.verification);
+    if (verification) details.append(node('div', 'task-detail', `核对结论：${verification}`));
+    if (typeof task.monitorSummary === 'string' && task.monitorSummary.trim()) {
+      const summary = node('details', 'task-monitor-summary');
+      summary.append(node('summary', '', '查看 WorkBuddy 回复摘要'), node('div', 'task-detail', task.monitorSummary));
+      details.append(summary);
+    }
   }
+  if (workBuddyMonitorSnapshot) paintWorkBuddyMonitor(workBuddyMonitorSnapshot);
   const shot = desktopStatus.screenshot || (typeof desktopStatus.lastScreenshot === 'string' ? desktopStatus.lastScreenshot : desktopStatus.lastScreenshot?.dataUrl);
   const preview = $('taskPreview'), image = $('taskScreenshot');
   if (typeof shot === 'string' && shot.startsWith('data:image/')) { image.src = shot; preview.hidden = false; }
-  else { image.removeAttribute('src'); preview.hidden = true; }
+  else { image.removeAttribute('src'); preview.hidden = true; preview.open = false; }
+  if (resumeFeedback) setNote('desktopActionNote', resumeFeedback);
+}
+function clearResumePending() {
+  if (resumeTimer) clearTimeout(resumeTimer);
+  resumeTimer = null; resumePendingId = null; resumePreviousStatus = null;
 }
 function paintWorkBuddyMonitor(snapshot) {
+  workBuddyMonitorSnapshot = snapshot || null;
   const target = $('workbuddyMonitorTasks');
   if (!target) return;
   target.replaceChildren();
-  const tasks = Array.isArray(snapshot?.tasks) ? snapshot.tasks : [];
+  const allTasks = Array.isArray(snapshot?.tasks) ? snapshot.tasks : [];
+  const sessionId = desktopStatus?.task?.monitorSessionId;
+  const tasks = sessionId ? allTasks.filter(task => task.sessionId === sessionId) : allTasks;
+  if (sessionId && !tasks.length) { target.append(node('div', 'inline-note', '正在等待该 WorkBuddy 会话的监视更新')); return; }
   if (!tasks.length) { target.append(node('div', 'inline-note', '暂未发现 WorkBuddy 会话任务')); return; }
   for (const task of tasks.slice(0, 6)) {
-    const status = task.status === 'running' ? '进行中' : task.status === 'failed' ? '未完成' : task.status === 'abandoned' ? '已中断' : ['done', 'ok'].includes(task.status) ? '已完成' : labelStatus(task.status);
+    const status = task.status === 'running' ? '进行中' : task.status === 'failed' ? '报告未完成' : task.status === 'abandoned' ? '已中断' : ['done', 'ok'].includes(task.status) ? '已有答复' : labelStatus(task.status);
     target.append(node('div', 'task-detail', `${task.name || task.title || 'WorkBuddy 任务'} · ${status}`));
   }
 }
@@ -390,12 +534,15 @@ async function refreshDesktop() {
   catch (error) { setPill('desktopStatus', '状态读取失败', 'bad'); showError(error); }
 }
 $('desktopRefresh').addEventListener('click', refreshDesktop);
+$('taskFormDetails').addEventListener('toggle', () => paintDesktopStatus(desktopStatus || {}));
 $('taskTarget').addEventListener('change', () => {
   const workbuddy = $('taskTarget').value === 'workbuddy';
   $('workModelRow').hidden = !workbuddy;
   $('workbuddyMonitorCard').hidden = !workbuddy;
   $('taskGoalLabel').textContent = workbuddy ? '交给 WorkBuddy 的任务' : '想在微信做什么';
   $('taskGoal').placeholder = workbuddy ? '写下要原文交给 WorkBuddy 的任务' : '写下希望在微信文件传输助手完成的操作';
+  $('taskCriteriaLabel').textContent = workbuddy ? '验收条件' : '如何确认完成';
+  $('taskCriteria').placeholder = workbuddy ? '写下可观察的验收条件' : '写下如何从微信画面确认操作结果';
   $('taskStart').textContent = workbuddy ? '发送给 WorkBuddy' : '开始代办';
 });
 $('workModelRow').hidden = $('taskTarget').value !== 'workbuddy';
@@ -422,14 +569,40 @@ $('desktopPermission').addEventListener('click', async () => {
 $('taskStart').addEventListener('click', async () => {
   const goal = $('taskGoal').value;
   if (!goal.trim()) { showError(new Error('请先写下任务内容')); $('taskGoal').focus(); return; }
+  const criteria = $('taskCriteria').value;
+  if (!criteria.trim()) { showError(new Error('请补充可观察的验收条件')); $('taskCriteria').focus(); return; }
   try {
     hideError(); $('taskStart').disabled = true;
     const target = $('taskTarget').value;
-    const result = await api('taskStart', { goal, target, workModel: $('workModel').value });
+    const result = await api('taskStart', { goal, criteria, target, workModel: $('workModel').value });
     if (!result?.ok) throw new Error(result?.error || '任务没有开始');
     setNote('desktopActionNote', target === 'workbuddy' ? '正在向 WorkBuddy 填入并提交任务…' : '微信代理已开始'); await refreshDesktop();
   } catch (error) { showError(error); }
   finally { $('taskStart').disabled = !!desktopStatus?.running; }
+});
+$('taskResume').addEventListener('click', async () => {
+  const task = desktopStatus?.task;
+  if (!task?.id || !['paused', 'stopped', 'review'].includes(task.status) || resumePendingId) return;
+  resumePendingId = task.id; resumePreviousStatus = task.status;
+  $('taskResume').disabled = true;
+  setNote('desktopActionNote', '继续请求已发出，等待实际状态更新…');
+  resumeTimer = setTimeout(async () => {
+    if (resumePendingId !== task.id) return;
+    clearResumePending();
+    await refreshDesktop();
+    if (desktopStatus?.task?.id === task.id && ['paused', 'stopped', 'review'].includes(desktopStatus.task.status)) {
+      setNote('desktopActionNote', `当前仍为${taskStatusLabel(desktopStatus.task.status)}，继续状态尚未确认。`);
+      $('taskResume').disabled = false;
+    }
+  }, 10000);
+  try {
+    const result = await api('say', '继续刚才的这件代办，请保留原任务，不重复发送。');
+    if (!result?.ok) throw new Error(result?.error || '继续请求没有发出');
+  } catch (error) {
+    if (resumePendingId === task.id) clearResumePending();
+    paintDesktopStatus(desktopStatus || {});
+    setNote('desktopActionNote', error.message || '继续请求失败', true);
+  }
 });
 $('taskStop').addEventListener('click', async () => {
   try { const result = await api('taskStop'); if (result === false || result?.ok === false) throw new Error(result?.error || '代理操作没有暂停'); setNote('desktopActionNote', '已暂停代理操作'); await refreshDesktop(); }
@@ -477,15 +650,23 @@ addEventListener('beforeunload', () => {
 
 if (page === 'memory') {
   initMemory();
+  let recallRevision = 0;
+  if (typeof window.pet?.init === 'function') Promise.resolve(window.pet.init()).then(result => {
+    if (recallRevision === 0) paintCurrentRecall(result?.currentRecall);
+  }).catch(() => {});
   window.pet?.on?.(event => {
     if (event?.type === 'memory-ready') { loadMemoryStats(); loadMemoryList(true); }
     else if (event?.type === 'memory-changed') scheduleMemoryRefresh();
+    else if (event?.type === 'recall') { recallRevision++; paintCurrentRecall(event.entries); }
   });
 }
 else {
   refreshDesktop();
   $('workbuddyMonitorCard').hidden = $('taskTarget').value !== 'workbuddy';
-  if (typeof window.pet?.init === 'function') Promise.resolve(window.pet.init()).then(result => paintWorkBuddyMonitor(result?.monitor)).catch(() => {});
+  if (typeof window.pet?.init === 'function') Promise.resolve(window.pet.init()).then(result => {
+    paintWorkBuddyMonitor(result?.monitor);
+    if (result?.desktop) paintDesktopStatus(result.desktop);
+  }).catch(() => {});
   if (typeof window.pet?.on === 'function') window.pet.on((event) => {
     if (event?.type === 'desktop') paintDesktopStatus(event);
     else if (event?.type === 'monitor') paintWorkBuddyMonitor(event);

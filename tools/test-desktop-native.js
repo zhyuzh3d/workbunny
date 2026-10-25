@@ -120,14 +120,25 @@ test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bo
   assert.ok(context.indexOf('validateWorkBuddyContext(request)') < context.indexOf('AXUIElementCreateApplication'));
   assert.match(source, /workBuddyBundleAllowed\(front\.bundleIdentifier\)/);
   assert.match(source, /let workBuddyBundleID = "com\.tencent\.workbuddy\.mac"/);
+  assert.match(source, /func workBuddyMarkerAllowed\(_ marker: String\?\)/);
+  assert.match(source, /func workBuddyTargetReady\(mode: String, homeReady: Bool, conversationMarkerPresent: Bool\)/);
+  assert.match(source, /mode == "conversation" && workBuddyMarkerAllowed\(marker\)/);
+  assert.match(source, /if !insideEditor && !isEditor, let associationMarker/);
+  assert.match(source, /let frame = axWindowRect\(element\)[\s\S]{0,180}rectIntersects\(frame, targetRect\)/);
+  assert.match(source, /"conversationReady": controls\.associationMarkerPresent/);
   assert.match(source, /abs\(lhs\.minX-rhs\.minX\) <= 2/);
   assert.match(source, /AXUIElementSetMessagingTimeout\(element, 0\.2\)/);
   assert.match(source, /visited >= 2000/);
-  assert.match(source, /depth >= 25/);
+  assert.match(source, /let workBuddyMaxAXDepth = 48/);
+  assert.match(source, /func workBuddyCanDescend\(depth: Int, childCount: Int/);
+  assert.match(source, /depthCutoff = true/);
+  assert.match(source, /"visitedNodes": controls\.visitedNodes/);
+  assert.match(source, /"markerFrameMissing": controls\.markerFrameMissing/);
+  assert.match(source, /"markerFrameOutsideTarget": controls\.markerFrameOutsideTarget/);
   assert.match(source, /2_000_000_000/);
   assert.match(source, /role == kAXTextAreaRole/);
   assert.match(source, /description\.hasPrefix\("Select model:"\)/);
-  assert.match(source, /role == kAXHeadingRole[\s\S]{0,260}workBuddyHomeReady\(title: heading\)/);
+  assert.match(source, /role == kAXHeadingRole[\s\S]{0,420}workBuddyHeadingHomeReady\(value: value, title: title, description: description\)/);
   assert.match(source, /== "发送"/);
   assert.match(source, /description == "发送"/);
   assert.match(source, /workBuddyReadbackFlags\(actual: finalReadback, expected: expectedText\)\.matches/);
@@ -138,7 +149,7 @@ test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bo
   assert.match(source, /workBuddyTextMatches\(controls\.draft, expected: text\)/);
   assert.match(source, /raw == workBuddyRTEEmptyValue && sendButtonCount == 1 && !sendEnabled/);
   assert.match(source, /workBuddyDraftPlan\(current: workBuddyRTEEmptyValue, requested: "task text", sendButtonCount: 1, sendEnabled: false\)/);
-  assert.match(source, /draftMatchesRequest = available && controls\.homeReady && controls\.selectedModel == workBuddyUIModel/);
+  assert.match(source, /draftMatchesRequest = available && workBuddyTargetReady\(mode: mode, homeReady: controls\.homeReady, conversationMarkerPresent: controls\.associationMarkerPresent\) && controls\.selectedModel == workBuddyUIModel/);
   assert.match(source, /components\(separatedBy: "\\n"\)/);
   assert.match(source, /expectedLine\.isEmpty && actualLine == "\\u\{FEFF\}"/);
   const textMatch = source.slice(source.indexOf('func workBuddyTextMatches('), source.indexOf('func workBuddyDraftPlan('));
@@ -158,6 +169,7 @@ test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bo
   const run = spawnSync(defaultBinary(), ['--self-test-workbuddy'], { encoding: 'utf8', timeout: 5000 });
   assert.equal(run.status, 0, run.stderr || run.stdout);
   assert.equal(JSON.parse(run.stdout.trim()).workBuddyGuards, true);
+  assert.equal(JSON.parse(run.stdout.trim()).workBuddyConversationGuard, true);
   assert.equal(JSON.parse(run.stdout.trim()).workBuddyReadbackGuards, true);
   assert.equal(JSON.parse(run.stdout.trim()).workBuddySerializedMatch, true);
   const rejected = spawnSync(defaultBinary(), [], {
@@ -169,6 +181,13 @@ test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bo
   const response = JSON.parse(rejected.stdout.trim());
   assert.equal(response.ok, false);
   assert.match(response.error, /仅允许目标应用 com\.tencent\.workbuddy\.mac/);
+  const invalidMarker = spawnSync(defaultBinary(), [], {
+    encoding: 'utf8', timeout: 5000,
+    input: `${JSON.stringify({ id: 'invalid-marker', op: 'workbuddyInspect', mode: 'conversation', marker: '[workbunny:invalid]', windowId: 1,
+      expected: { pid: 1, bundleId: 'com.tencent.workbuddy.mac' }, sentAtMs: Date.now(), timeoutMs: 1000 })}\n`,
+  });
+  assert.equal(invalidMarker.status, 0, invalidMarker.stderr || invalidMarker.stdout);
+  assert.match(JSON.parse(invalidMarker.stdout.trim()).error, /模式或会话关联标记无效/);
 });
 
 test('close kills and waits; cancel kills, waits, and permits a later restart', async () => {

@@ -1,7 +1,10 @@
 'use strict';
 
 const assert = require('assert/strict');
-const { DesktopService, WECHAT_RULE, validateAction, dispatchGuard, analyzeWorkBuddyOCR, selectedFlash, prepareOCR, promptOCR, preflightWorkModel } = require('../src/main/desktop-service');
+const { DesktopService, WECHAT_RULE, validateAction, dispatchGuard, analyzeWorkBuddyOCR, selectedFlash, prepareOCR, promptOCR, preflightWorkModel,
+  WORKBUDDY_TEXT_UTF16_LIMIT, workBuddyTextWithinLimit, validateWorkBuddyOutbound, makeWorkBuddyOutbound } = require('../src/main/desktop-service');
+const { Monitor } = require('../src/main/monitor');
+const { observeWorkBuddy } = require('../src/main/workbuddy-observation');
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate, timeoutMs = 8000) {
@@ -19,12 +22,14 @@ function deferred() {
 
 const rect = { x: 10, y: 20, width: 800, height: 600 };
 class FakeNative {
-  constructor({ bundleId = 'cn.haminn.workbunny.fixture', permissionsGate, activateGate, moveAfterCapture = false, events = [], modelMenu = false, selectedModel = 'hy3', workBuddyInspection = { available: false }, workBuddyInspectError = false, workBuddyFillError = false, workBuddySendError = false } = {}) {
+  constructor({ bundleId = 'cn.haminn.workbunny.fixture', permissionsGate, activateGate, clickGate, clickBehavior, moveAfterCapture = false, capturePNG, recognizedTexts, events = [], modelMenu = false, selectedModel = 'hy3', workBuddyInspection = { available: false }, workBuddyConversationInspection = null, workBuddyInspectError = false, workBuddyFillError = false, workBuddySendError = false } = {}) {
     this.app = { pid: 123, bundleId, name: 'Fixture' };
     this.rect = { ...rect }; this.permissionsGate = permissionsGate; this.activateGate = activateGate;
-    this.moveAfterCapture = moveAfterCapture; this.calls = []; this.cancelled = 0; this.events = events;
+    this.moveAfterCapture = moveAfterCapture; this.capturePNG = capturePNG || Buffer.from('test-image'); this.calls = []; this.cancelled = 0; this.events = events;
+    this.clickGate = clickGate; this.clickBehavior = clickBehavior; this.recognizedTexts = recognizedTexts;
     this.modelMenu = modelMenu; this.modelMenuOpen = modelMenu; this.selectedModel = selectedModel;
     this.workBuddyInspection = workBuddyInspection; this.workBuddyInspectError = workBuddyInspectError;
+    this.workBuddyConversationInspection = workBuddyConversationInspection;
     this.workBuddyFillError = workBuddyFillError; this.workBuddySendError = workBuddySendError;
     this.workBuddyFillResults = [];
   }
@@ -41,9 +46,10 @@ class FakeNative {
     if (op === 'capture') {
       const desktopRect = { ...this.rect };
       if (this.moveAfterCapture) this.rect = { ...this.rect, x: this.rect.x + 5 };
-      return { pngBase64: Buffer.from('test-image').toString('base64'), desktopRect };
+      return { pngBase64: this.capturePNG.toString('base64'), desktopRect };
     }
     if (op === 'recognize') {
+      if (this.recognizedTexts) return { texts: this.recognizedTexts };
       if (this.modelMenu) return this.modelMenuOpen ? { texts: [
         { text: 'Hy3', confidence: 0.95, x: 0.52, y: 0.49, width: 0.06, height: 0.018 }, { text: '0.00x', confidence: 0.95, x: 0.65, y: 0.49, width: 0.03, height: 0.018 },
         { text: 'DeepSeek R1', confidence: 0.92, x: 0.52, y: 0.56, width: 0.1, height: 0.018 }, { text: '配置自定义模型', confidence: 0.94, x: 0.30, y: 0.72, width: 0.12, height: 0.018 },
@@ -53,16 +59,22 @@ class FakeNative {
     }
     if (op === 'workbuddyInspect') {
       if (this.workBuddyInspectError) throw new Error('fixture inspect unavailable');
-      return this.workBuddyInspection;
+      return payload.mode === 'conversation' ? (this.workBuddyConversationInspection || this.workBuddyInspection) : this.workBuddyInspection;
     }
     if (op === 'workbuddyFill') {
       if (this.workBuddyFillError) throw new Error('fixture fill uncertainty');
-      const result = { filled: true, idempotent: this.workBuddyInspection.draftMatchesRequest === true };
+      const inspected = payload.mode === 'conversation' ? (this.workBuddyConversationInspection || this.workBuddyInspection) : this.workBuddyInspection;
+      const result = { filled: true, idempotent: inspected.draftMatchesRequest === true };
+      if (payload.mode === 'conversation' && this.workBuddyConversationInspection) Object.assign(this.workBuddyConversationInspection, { draftEmpty: false, draftMatchesRequest: true, sendEnabled: true });
       this.workBuddyFillResults.push(result); return result;
     }
     if (op === 'workbuddySend') {
       if (this.workBuddySendError) throw new Error('fixture send uncertainty');
       return { pressed: true };
+    }
+    if (op === 'click') {
+      if (this.clickGate) await this.clickGate.promise;
+      if (this.clickBehavior) this.clickBehavior(this, payload);
     }
     if (op === 'click' && this.modelMenu && this.modelMenuOpen && Math.abs(payload.y - (rect.y + 0.49 * rect.height)) < 20) this.modelMenuOpen = false;
     return { performed: true };
@@ -149,6 +161,76 @@ async function testWindowMotionAndStaleScreenshot() {
   assert.equal(expiredNative.calls.some(x => x.op === 'click'), false, 'expired screenshots cannot authorize input');
 }
 
+async function testTypeCanFocusAndInputUnderSameScreenshotGuards() {
+  const focusType = validateAction({ action: 'type', text: 'hello Alice', purpose: 'task', focus: { x: 0.45, y: 0.9 } });
+  assert.deepEqual(focusType.focus, { x: 0.45, y: 0.9 });
+  for (const focus of [{ x: -0.01, y: 0.9 }, { x: 1, y: 0.5 }, { x: 0.5, y: NaN }, { x: '0.5', y: 0.7 }, { x: 0.5, y: 0.8, extra: true }, [], null]) {
+    assert.throws(() => validateAction({ action: 'type', text: 'hello', focus }), /focus 必须包含截图归一化坐标/u);
+  }
+
+  const header = [{ text: 'Alice', confidence: 0.98, x: 0.4, y: 0.08, width: 0.08, height: 0.02 }];
+  assert.throws(() => dispatchGuard(focusType, 'wechat', { ocr: [{ ...header[0], text: 'Bob' }] }, false, 'hy3', 'Alice'), /尚未确认/u,
+    'focus does not bypass the screenshot recipient title guard');
+  assert.throws(() => dispatchGuard({ ...focusType, focus: { x: 0.5, y: 0.4 } }, 'wechat', { ocr: header }, false, 'hy3', 'Alice'), /下方编辑区域/u,
+    'focus cannot target the conversation body or header');
+  const events = [];
+  const native = new FakeNative({ recognizedTexts: header });
+  const svc = service(native, async (_goal, _shot, _signal, task) => task.steps.some(step => step.action === 'type')
+    ? { action: 'done', completed: true, evidence: '可见目标消息已发出' }
+    : { action: 'type', text: 'hello Alice', purpose: 'task', focus: { x: 0.45, y: 0.9 } }, events);
+  assert((await svc.start({ goal: '给 Alice 发问候', target: 'wechat', recipient: 'Alice', workModel: 'hy3' })).ok);
+  await until(() => svc.task.status === 'review');
+  const clickIndex = native.calls.findIndex(call => call.op === 'click');
+  const typeIndex = native.calls.findIndex(call => call.op === 'type');
+  const recheckIndex = native.calls.findIndex((call, index) => index > clickIndex && call.op === 'frontmost');
+  assert(clickIndex >= 0 && clickIndex < recheckIndex && recheckIndex < typeIndex,
+    'combined focus click rechecks the current foreground/window before any text event');
+  assert.equal(native.calls[clickIndex].payload.x, 370);
+  assert.equal(native.calls[clickIndex].payload.y, 560);
+  assert.equal('focus' in native.calls[typeIndex].payload, false, 'focus is a service-level gesture, not forwarded as a native command');
+  const typeStep = svc.task.steps.find(step => step.action === 'type');
+  assert.deepEqual(typeStep.focus, { x: 0.45, y: 0.9 }, 'journal keeps normalized focus coordinates for diagnosis');
+  assert.equal('text' in typeStep, false, 'action journal never stores input text');
+  await svc.close();
+
+  const movedNative = new FakeNative({ recognizedTexts: header, clickBehavior: current => { current.rect = { ...current.rect, x: current.rect.x + 4 }; } });
+  const movedSvc = service(movedNative, async () => ({ action: 'type', text: 'hello Alice', purpose: 'task', focus: { x: 0.45, y: 0.9 } }));
+  assert((await movedSvc.start({ goal: '给 Alice 发问候', target: 'wechat', recipient: 'Alice', workModel: 'hy3' })).ok);
+  await until(() => movedSvc.task.status === 'paused');
+  assert(movedNative.calls.some(call => call.op === 'click'));
+  assert.equal(movedNative.calls.some(call => call.op === 'type'), false, 'frame change after focus click pauses before typing');
+  await movedSvc.close();
+
+  const clickGate = deferred(), stoppedNative = new FakeNative({ recognizedTexts: header, clickGate });
+  const stoppedSvc = service(stoppedNative, async () => ({ action: 'type', text: 'hello Alice', purpose: 'task', focus: { x: 0.45, y: 0.9 } }));
+  assert((await stoppedSvc.start({ goal: '给 Alice 发问候', target: 'wechat', recipient: 'Alice', workModel: 'hy3' })).ok);
+  await until(() => stoppedNative.calls.some(call => call.op === 'click'));
+  await stoppedSvc.stop('focus click canceled');
+  clickGate.resolve();
+  await delay(30);
+  assert.equal(stoppedNative.calls.some(call => call.op === 'type'), false, 'stop after the click invalidates the pending type event');
+  await stoppedSvc.close();
+}
+
+async function testJPEGPreviewKeepsPNGForLargeImageOCR() {
+  const original = Buffer.alloc(8 * 1024 * 1024 + 1, 0x5a);
+  const scaledPNG = Buffer.from('scaled-png-for-vision');
+  const previewJPEG = Buffer.from('compressed-jpeg-preview');
+  const native = new FakeNative({ capturePNG: original });
+  const svc = new DesktopService({ native, planner: async () => ({ action: 'wait' }), imageResize: () => ({
+    ocr: scaledPNG, preview: previewJPEG, mime: 'image/jpeg',
+  }) });
+  svc.running = true; svc.generation = 1;
+  const shot = await svc.capture({ bundleId: native.app.bundleId, pid: native.app.pid, windowId: 7 }, 1);
+  assert.equal(shot.preview, `data:image/jpeg;base64,${previewJPEG.toString('base64')}`);
+  const recognize = native.calls.find(call => call.op === 'recognize');
+  assert.equal(Buffer.from(recognize.payload.pngBase64, 'base64').toString(), scaledPNG.toString(),
+    'oversized original images use the supplied scaled PNG for Vision rather than the JPEG preview');
+  assert.equal(shot.preview.startsWith('data:image/jpeg;base64,'), true,
+    'the verifier receives the compressed JPEG data URL without a filesystem artifact');
+  await svc.close();
+}
+
 async function testJournalBeforeActionScopeAndReview() {
   const events = [], native = new FakeNative({ events }); let turns = 0;
   const svc = service(native, async (goal, shot, signal, task) => {
@@ -183,6 +265,16 @@ async function testDoneWithoutVisibleCompletionPauses() {
 async function testWorkBuddyTypePurposeAndCurrentScope() {
   for (const [purpose, expectedRule] of [['navigation', false], ['task', true]]) {
     const native = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', modelMenu: true }); let turns = 0;
+    const monitor = new Monitor(); let seeded = false;
+    const observe = task => {
+      if (task.submitAttemptedAt && !seeded) {
+        const row = monitor.taskBlank(task.outboundText, task.draftInsertedAt);
+        row.bunnyTaskId = task.id; row.status = 'ok'; row.summary = 'typed WorkBuddy task accepted'; row.endedAt = row.startedAt + 1;
+        const snap = monitor.blank(); snap.sessionId = 'typed-task-session'; snap.task = row; snap.lastEventAt = row.endedAt;
+        monitor.sessions.set('typed-task-file', { snap }); seeded = true;
+      }
+      return observeWorkBuddy(monitor, task);
+    };
     const originalText = '  请检查当前任务进度\n保留第二行原文  ';
     let sentGoal;
     const svc = service(native, async (goal, shot, _signal, task) => {
@@ -197,17 +289,24 @@ async function testWorkBuddyTypePurposeAndCurrentScope() {
         assert.equal(task.taskText, originalText, 'the original user text is carried separately from the fixed UI-agent goal');
         return { action: 'type', purpose, text: purpose === 'navigation' ? 'inbox' : '请检查当前任务进度' };
       }
+      if (purpose === 'task' && turns === 2) return { action: 'key', key: 'enter', purpose: 'submit' };
       return { action: 'done', completed: true, evidence: '任务名称和状态清晰可见' };
-    });
+    }, [], { observeWorkBuddy: observe });
     assert((await svc.start({ goal: originalText, target: 'workbuddy', workModel: 'hy3' })).ok);
     await until(() => svc.task.status === 'review');
     const type = native.calls.find(x => x.op === 'type');
     assert(type);
     assert.equal(native.calls.filter(x => x.op === 'click').length, 1, 'the service clicks the unique free Hy3 row center before planning input');
     if (purpose === 'task') {
-      assert.equal(type.payload.text, originalText + '\n\n' + WECHAT_RULE, 'task typing is replaced by the exact original WorkBuddy request');
+      assert(type.payload.text.startsWith(originalText), 'task typing preserves the exact original WorkBuddy request');
+      assert(type.payload.text.includes(WECHAT_RULE));
+      assert(type.payload.text.includes(`[workbunny:${svc.task.id}]`));
+      assert(type.payload.text.includes('本轮唯一允许操作的微信会话：文件传输助手'));
       assert.match(sentGoal, /在 WorkBuddy 新建对话/);
       assert.doesNotMatch(sentGoal, /请检查当前任务进度/);
+      assert.equal(svc.task.handoffSent, true);
+      assert.equal(svc.task.sessionId, 'typed-task-session');
+      assert.equal(svc.task.monitorTaskId, 1);
     } else assert.equal(type.payload.text.includes(WECHAT_RULE), expectedRule);
   }
 
@@ -220,7 +319,8 @@ async function testWorkBuddyTypePurposeAndCurrentScope() {
   assert((await duplicate.start({ goal: duplicateText, target: 'workbuddy', workModel: 'hy3' })).ok);
   await until(() => duplicate.task.status === 'paused');
   assert.equal(duplicateNative.calls.filter(x => x.op === 'type').length, 1, 'a second WorkBuddy task type is blocked in the same run');
-  assert.equal(duplicateNative.calls.find(x => x.op === 'type').payload.text, duplicateText + '\n\n' + WECHAT_RULE);
+  assert(duplicateNative.calls.find(x => x.op === 'type').payload.text.startsWith(duplicateText + '\n\n'));
+  assert.match(duplicateNative.calls.find(x => x.op === 'type').payload.text, /\[workbunny:[0-9a-f-]+\]$/i);
   assert.throws(() => validateAction({ action: 'type', purpose: 'navigation', text: 'x'.repeat(81) }), /80 字/);
   assert.throws(() => validateAction({ action: 'type', purpose: 'navigation', text: 'line\nbreak' }), /单行/);
 
@@ -254,6 +354,7 @@ async function testWorkBuddyFlashProfile() {
   const svc = service(native, async (_goal, _shot, _signal, task) => {
     assert.equal(task.workModel, 'deepseek-v4.1-flash'); assert.equal(task.thinking, 'high');
     if (++turns === 1) return { action: 'type', text: '请检查当前任务进度' };
+    if (turns === 2) return { action: 'key', key: 'enter', purpose: 'submit' };
     return { action: 'done', completed: true, evidence: '任务状态可见' };
   });
   assert((await svc.start({ goal: 'flash fixture task', target: 'workbuddy', workModel: 'deepseek-v4.1-flash' })).ok);
@@ -273,6 +374,7 @@ async function testWorkBuddyAXHandoff() {
   const events = [];
   const native = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash', events,
     workBuddyInspection: { available: true, editorCount: 1, draftEmpty: true, selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: false, homeReady: true } });
+  const observeWorkBuddy = async () => ({ taskId: 'fixture-monitor-1', sessionId: 'fixture-session-1', status: 'ok', summary: 'synthetic monitor completion', updatedAt: Date.now(), model: 'deepseek-v4.1-flash' });
   const userText = '请在 WorkBuddy 中完成这项工作，保留原文。';
   let plannerCalls = 0;
   const svc = service(native, async (goal, _shot, _signal, task) => {
@@ -282,25 +384,33 @@ async function testWorkBuddyAXHandoff() {
     assert.equal(task.taskText, userText);
     assert.equal(task.submittedAt, svc.task.submittedAt);
     return { action: 'done', completed: true, evidence: 'WorkBuddy 回复在当前对话中可见' };
-  }, events);
+  }, events, { observeWorkBuddy });
   assert((await svc.start({ goal: userText, target: 'workbuddy', workModel: 'deepseek-v4.1-flash' })).ok);
   await until(() => svc.task.status === 'review');
   const fillCall = native.calls.find(call => call.op === 'workbuddyFill');
   const sendCall = native.calls.find(call => call.op === 'workbuddySend');
   assert(fillCall && sendCall, 'ready Flash editor uses the dedicated fill and send path');
-  assert.equal(fillCall.payload.text, userText + '\n\n' + WECHAT_RULE, 'fast path sends exact user text plus the existing safety policy');
+  assert(fillCall.payload.text.startsWith(userText + '\n\n'), 'fast path preserves exact user text');
+  assert(fillCall.payload.text.includes(WECHAT_RULE));
+  assert.match(fillCall.payload.text, new RegExp(`\\[workbunny:${svc.task.id}\\]`));
   assert.equal(fillCall.payload.model, 'deepseek-v4.1-flash');
   assert.deepEqual(fillCall.payload.expected, { bundleId: 'com.tencent.workbuddy.mac', pid: 234 });
   assert.equal(fillCall.payload.windowId, 7);
   assert.deepEqual(sendCall.payload.text, fillCall.payload.text);
   assert.equal(svc.task.draftInserted, true);
   assert.equal(svc.task.handoffSent, true);
+  assert.deepEqual(svc.task.workbuddyUi, { available: true, homeReady: true, editorCount: 1,
+    selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: false, draftEmpty: true, conversationReady: false },
+  'persisted WorkBuddy UI diagnostic exposes only bounded flags and model name');
   assert(Number.isFinite(svc.task.submittedAt));
-  assert.equal(plannerCalls, 1, 'planner resumes only after the handoff, to observe the reply');
-  assert.equal(native.calls.filter(call => call.op === 'capture').length, 3, 'fresh screenshot is captured after filling and another observes the reply');
+  assert.equal(plannerCalls, 0, 'a terminal Monitor record completes supervision without treating a screenshot planner as the monitor');
+  assert.equal(native.calls.filter(call => call.op === 'capture').length, 2, 'a fresh screenshot is captured before send');
+  assert.equal(svc.task.sessionId, 'fixture-session-1');
+  assert.match(svc.task.evidence, /synthetic monitor completion/);
+  assert.match(svc.task.evidence, /需独立复核/);
   assert.equal(native.calls.some(call => ['type', 'click', 'key'].includes(call.op)), false, 'fast path does not replay visual UI input');
   const inspect = native.calls.find(call => call.op === 'workbuddyInspect');
-  assert.equal(inspect.payload.text, userText + '\n\n' + WECHAT_RULE, 'Inspect compares against the exact same outbound payload');
+  assert.equal(inspect.payload.text, svc.task.outboundText, 'Inspect compares against the exact same persisted outbound payload');
   assert.deepEqual(inspect.payload.expected, fillCall.payload.expected);
   const fillIntent = events.findIndex(event => event.type === 'persist' && event.steps.some(step => step.action === 'workbuddyFill' && step.state === 'intent'));
   const fillIndex = events.findIndex(event => event.type === 'native' && event.op === 'workbuddyFill');
@@ -338,16 +448,13 @@ async function testWorkBuddyAXHandoff() {
   const sameText = '同一条已写入草稿';
   const matchingNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash',
     workBuddyInspection: { available: true, editorCount: 1, draftEmpty: false, draftMatchesRequest: true, selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: true, homeReady: true } });
-  const matchingSvc = service(matchingNative, async (_goal, _shot, _signal, task) => {
-    assert(task.handoffSent);
-    return { action: 'done', completed: true, evidence: 'WorkBuddy 回复可见' };
-  });
+  const matchingSvc = service(matchingNative, async () => { throw new Error('planner must not stand in for Monitor'); }, [], { observeWorkBuddy });
   assert((await matchingSvc.start({ goal: sameText, target: 'workbuddy', workModel: 'deepseek-v4.1-flash' })).ok);
   await until(() => matchingSvc.task.status === 'review');
   assert.deepEqual(matchingNative.workBuddyFillResults, [{ filled: true, idempotent: true }], 'native fill takes the idempotent path for the exact same draft');
-  assert.equal(matchingNative.calls.find(call => call.op === 'workbuddyInspect')?.payload.text, sameText + '\n\n' + WECHAT_RULE);
-  assert.equal(matchingNative.calls.find(call => call.op === 'workbuddyFill')?.payload.text, sameText + '\n\n' + WECHAT_RULE);
-  assert.equal(matchingNative.calls.find(call => call.op === 'workbuddySend')?.payload.text, sameText + '\n\n' + WECHAT_RULE);
+  assert(matchingNative.calls.find(call => call.op === 'workbuddyInspect')?.payload.text.startsWith(sameText));
+  assert(matchingNative.calls.find(call => call.op === 'workbuddyFill')?.payload.text.includes(`[workbunny:${matchingSvc.task.id}]`));
+  assert(matchingNative.calls.find(call => call.op === 'workbuddySend')?.payload.text.includes(WECHAT_RULE));
   assert.equal(matchingNative.calls.some(call => ['type', 'click', 'key'].includes(call.op)), false, 'an exact pre-existing draft is sent without visual retyping');
 
   const inspectFailureNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash', workBuddyInspectError: true });
@@ -357,6 +464,391 @@ async function testWorkBuddyAXHandoff() {
   await until(() => inspectFailureSvc.task.status === 'paused');
   assert.equal(visualFallback, 1, 'read-only inspect failure falls back to the existing visual flow');
   assert.equal(inspectFailureNative.calls.some(call => ['workbuddyFill', 'workbuddySend'].includes(call.op)), false);
+}
+
+async function testWorkBuddyOutboundTextBudget() {
+  const goal = '😀'.repeat(3000), criteria = '🚀'.repeat(1200);
+  const native = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash',
+    workBuddyInspection: { available: true, editorCount: 1, draftEmpty: true, selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: false, homeReady: true } });
+  const observer = async task => ({ taskId: 71, sessionId: 'budget-fixture-session', status: 'ok',
+    summary: 'synthetic completion', startedAt: task.submittedAt, updatedAt: task.submittedAt + 1, model: 'deepseek-v4.1-flash' });
+  const svc = service(native, async () => { throw new Error('handoff should not invoke visual planner'); }, [], { observeWorkBuddy: observer });
+  assert((await svc.start({ goal, criteria, target: 'workbuddy', origin: 'dialogue', workModel: 'deepseek-v4.1-flash' })).ok);
+  assert.equal(svc.task.goal, goal, '3,000 Unicode scalar goal is preserved in full');
+  assert.equal(svc.task.criteria, criteria, '1,200 Unicode scalar criteria is preserved in full');
+  assert(svc.task.outboundText.startsWith(goal + '\n\n验收标准：\n' + criteria));
+  assert(svc.task.outboundText.includes(WECHAT_RULE));
+  assert(svc.task.outboundText.includes(`[workbunny:${svc.task.id}]`));
+  assert(svc.task.outboundText.length <= WORKBUDDY_TEXT_UTF16_LIMIT, 'full bounded task and fixed additions fit native UTF-16 budget');
+  await until(() => svc.task.status === 'review');
+  const fill = native.calls.find(call => call.op === 'workbuddyFill');
+  assert.equal(fill.payload.text, svc.task.outboundText, 'native receives the complete persisted outbound text without truncation');
+  await svc.close();
+
+  for (const request of [
+    { goal: 'invalid\ttab', criteria: 'ok' },
+    { goal: 'valid task', criteria: 'invalid\u0001criteria' },
+    { goal: 'invalid\rlone CR', criteria: 'ok' },
+  ]) {
+    const invalidNative = new FakeNative();
+    const invalidSvc = service(invalidNative, async () => ({}));
+    const result = await invalidSvc.start({ ...request, target: 'workbuddy', workModel: 'deepseek-v4.1-flash' });
+    assert.equal(result.ok, false, 'unsupported control characters are refused');
+    assert.equal(invalidNative.calls.length, 0, 'control-character rejection precedes native permissions, activation, or input');
+    assert.equal(invalidSvc.task, null);
+  }
+
+  assert.equal(workBuddyTextWithinLimit('😀'.repeat(WORKBUDDY_TEXT_UTF16_LIMIT / 2)), true);
+  assert.equal(workBuddyTextWithinLimit('😀'.repeat(WORKBUDDY_TEXT_UTF16_LIMIT / 2) + 'a'), false,
+    'UTF-16 budget counts surrogate pairs as two units');
+  const oversize = 'x'.repeat(WORKBUDDY_TEXT_UTF16_LIMIT + 1);
+  assert.equal(workBuddyTextWithinLimit(oversize), false);
+  assert.throws(() => validateWorkBuddyOutbound(oversize), /12000.*未截断/u,
+    'over-budget outbound text is rejected with an explicit no-truncation result');
+}
+
+async function testMonitorBoundFollowUpAndAutomaticAcceptance() {
+  let sawFollowUp = false, followUpPolls = 0;
+  const previousMessageKey = 'message-key-original-round';
+  const followUpMessageKey = 'message-key-followup-round';
+  const conversationInspection = { available: true, conversationReady: true, associationMarkerPresent: true, editorCount: 1,
+    draftEmpty: true, selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: false };
+  const native = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash',
+    workBuddyInspection: { available: true, editorCount: 1, draftEmpty: true, selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: false, homeReady: true },
+    workBuddyConversationInspection: conversationInspection });
+  const observer = async task => {
+    if (task.followUpAwaitingMonitor) {
+      sawFollowUp = true;
+      followUpPolls++;
+      if (followUpPolls === 1) return { taskId: 11, messageKey: previousMessageKey, sessionId: 'fixture-session-bound', status: 'running', summary: 'stale previous round', updatedAt: task.submittedAt };
+      return { taskId: 1, messageKey: followUpMessageKey, sessionId: 'fixture-session-bound', status: 'ok', summary: 'follow-up result',
+        updatedAt: task.submittedAt, model: 'deepseek-v4.1-flash' };
+    }
+    return { taskId: 11, messageKey: previousMessageKey, sessionId: 'fixture-session-bound', status: 'running', summary: 'still running', updatedAt: Date.now() };
+  };
+  const svc = service(native, async () => { throw new Error('monitor path must not call visual planner'); }, [], { observeWorkBuddy: observer });
+  assert((await svc.start({ goal: '按验收标准完成任务', criteria: '最终文件存在且能打开', origin: 'dialogue', target: 'workbuddy', workModel: 'deepseek-v4.1-flash' })).ok);
+  await until(() => svc.task.status === 'monitoring' && svc.task.sessionId === 'fixture-session-bound');
+  assert.equal(svc.running, true, 'Monitor running state keeps the desktop task supervised in background');
+  assert.equal(svc.task.origin, 'dialogue');
+  assert.equal(svc.task.criteria, '最终文件存在且能打开');
+  assert.equal(svc.task.goal, '按验收标准完成任务', 'the user goal remains separately intact');
+  assert.equal(svc.task.bunnyTaskId, svc.task.id);
+  assert.match(svc.task.outboundText, new RegExp(`\\[workbunny:${svc.task.id}\\]`));
+  assert.match(svc.task.outboundText, /最终文件存在且能打开/);
+  assert.equal(svc.task.monitorTaskId, 11);
+  assert.equal(svc.task.monitorMessageKey, previousMessageKey);
+
+  const beforeUnsafe = native.calls.length;
+  assert.equal((await svc.followUp({ text: '请使用 AppleScript 退出微信再重试' })).ok, false);
+  assert.equal(native.calls.length, beforeUnsafe, 'a model-generated follow-up cannot bypass the WeChat scope guard');
+  native.app = { pid: 999, bundleId: 'cn.haminn.workbunny', name: 'workbunny' };
+  const activationCount = native.calls.filter(call => call.op === 'activate').length;
+  const result = await svc.followUp({ text: '请补齐缺失文件并确认可打开' });
+  assert.equal(result.ok, true);
+  assert.equal(native.calls.filter(call => call.op === 'activate').length, activationCount + 1, 'a bound follow-up can reactivate WorkBuddy, then must recheck the actual conversation');
+  assert.equal(result.sessionId, 'fixture-session-bound');
+  assert.equal(svc.task.followUpRound, 1);
+  assert.equal(svc.task.previousMonitorTaskId, 11);
+  assert.equal(svc.task.previousMonitorMessageKey, previousMessageKey);
+  assert(svc.task.submittedAt > 0);
+  const conversationInspect = native.calls.find(call => call.op === 'workbuddyInspect' && call.payload.mode === 'conversation');
+  assert.equal(conversationInspect.payload.marker, svc.task.associationMarker);
+  assert.equal(conversationInspect.payload.expected.bundleId, 'com.tencent.workbuddy.mac');
+  assert(native.calls.some(call => call.op === 'workbuddyFill' && call.payload.mode === 'conversation'));
+  assert.equal(native.calls.filter(call => call.op === 'workbuddySend').length, 2, 'one initial message and one single follow-up are sent');
+  await until(() => svc.task.status === 'review');
+  assert.equal(sawFollowUp, true);
+  assert(followUpPolls >= 2, 'the previous round task ID is ignored until the new submission appears');
+  assert.equal(svc.task.monitorTaskId, 1, 'a new Monitor instance may assign a different per-process task counter');
+  assert.equal(svc.task.monitorMessageKey, followUpMessageKey);
+  assert.match(svc.task.evidence, /follow-up result/);
+  const sentCount = native.calls.filter(call => call.op === 'workbuddySend').length;
+  svc.task.followUpRound = 2;
+  assert.equal((await svc.followUp({ text: '第三轮应被拒绝' })).ok, false);
+  assert.equal(native.calls.filter(call => call.op === 'workbuddySend').length, sentCount, 'service enforces the two-round follow-up ceiling');
+  svc.update({ status: 'verifying' });
+  assert.equal((await svc.accept({ automatic: true, report: '条件通过', evidence: '独立检查通过' })).ok, true);
+  assert.equal(svc.task.userAccepted, false, 'Bunny automatic acceptance never records user acceptance');
+  assert.equal(svc.task.automaticAccepted, true);
+}
+
+async function testNumericMonitorTaskIdBindsThroughRealObserver() {
+  const monitor = new Monitor();
+  let seeded = false;
+  const observe = task => {
+    if (!task.submittedAt) return null;
+    if (!seeded) {
+      const row = monitor.taskBlank(task.outboundText, task.submittedAt);
+      row.bunnyTaskId = task.bunnyTaskId;
+      row.status = 'ok'; row.summary = 'synthetic Monitor numeric-ID result';
+      row.endedAt = task.submittedAt + 20;
+      const snap = monitor.blank();
+      snap.sessionId = 'numeric-monitor-session'; snap.task = row; snap.lastEventAt = row.endedAt;
+      monitor.sessions.set('synthetic-monitor-file', { snap });
+      seeded = true;
+    }
+    return observeWorkBuddy(monitor, task);
+  };
+  const native = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash',
+    workBuddyInspection: { available: true, editorCount: 1, draftEmpty: true, selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: false, homeReady: true } });
+  const svc = service(native, async () => { throw new Error('a real observer record should complete this synthetic integration'); }, [], { observeWorkBuddy: observe });
+  assert((await svc.start({ goal: 'numeric monitor integration', target: 'workbuddy', workModel: 'deepseek-v4.1-flash' })).ok);
+  await until(() => svc.task.status === 'review');
+  assert.equal(svc.task.sessionId, 'numeric-monitor-session');
+  assert.equal(svc.task.monitorSessionId, 'numeric-monitor-session');
+  assert.equal(svc.task.monitorTaskId, 1);
+  assert.equal(typeof svc.task.monitorTaskId, 'number', 'Monitor.taskBlank emits a numeric task id and service keeps its type');
+  assert.match(svc.task.evidence, /synthetic Monitor numeric-ID result/);
+  assert.equal(native.calls.filter(call => call.op === 'workbuddySend').length, 1);
+}
+
+function monitorWithMessage(text, sessionId, startedAt, priorTasks = 0) {
+  const monitor = new Monitor();
+  for (let i = 0; i < priorTasks; i++) monitor.taskBlank(`prior task ${i}`, startedAt - 1000 - i);
+  const snap = monitor.blank();
+  snap.sessionId = sessionId;
+  monitor.beginTask(text, startedAt, snap, { priming: true });
+  Object.assign(snap.task, { status: 'ok', summary: 'same persisted Monitor result', endedAt: startedAt + 5000,
+    model: 'deepseek-v4.1-flash' });
+  snap.lastEventAt = startedAt + 5000;
+  monitor.sessions.set(`session-${sessionId}`, { snap });
+  return { monitor, row: snap.task };
+}
+
+async function testMonitorMessageKeySurvivesInstanceCounterReorder() {
+  const id = 'd52ab891-7385-4072-a8ea-62d7ed7db0e6';
+  const task = makePausedResumeTask({ id, bunnyTaskId: id });
+  task.associationMarker = `[workbunny:${id}]`;
+  task.outboundText = makeWorkBuddyOutbound(task);
+  const submittedAt = Date.now() - 5000, sessionId = 'stable-message-session';
+  const oldInstance = monitorWithMessage(task.outboundText, sessionId, submittedAt, 10);
+  const newInstance = monitorWithMessage(task.outboundText, sessionId, submittedAt, 0);
+  assert.equal(oldInstance.row.id, 11);
+  assert.equal(newInstance.row.id, 1);
+  assert.equal(oldInstance.row.messageKey, newInstance.row.messageKey,
+    'Monitor derives the same message identity when attach order changes the process-local counter');
+  assert.notEqual(monitorWithMessage(task.outboundText, 'another-session', submittedAt).row.messageKey, oldInstance.row.messageKey,
+    'a different session receives a different stable message identity');
+  assert.notEqual(monitorWithMessage(task.outboundText, sessionId, submittedAt + 1).row.messageKey, oldInstance.row.messageKey,
+    'a different user-message timestamp receives a different stable identity');
+  const otherUUIDText = task.outboundText.replace(task.associationMarker, '[workbunny:11111111-1111-4111-8111-111111111111]');
+  assert.notEqual(monitorWithMessage(otherUUIDText, sessionId, submittedAt).row.messageKey, oldInstance.row.messageKey,
+    'a different task UUID in the user message receives a different stable identity');
+
+  const stableNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac' });
+  const stableService = service(stableNative, async () => { throw new Error('Monitor restart recovery should be read-only'); }, [], {
+    observeWorkBuddy: observation => observeWorkBuddy(newInstance.monitor, observation),
+  });
+  stableService.task = makePausedResumeTask({ id, bunnyTaskId: id, status: 'paused', outboundText: task.outboundText,
+    associationMarker: task.associationMarker, handoffSent: true, submittedAt, sessionId,
+    monitorSessionId: sessionId, monitorTaskId: oldInstance.row.id, monitorMessageKey: oldInstance.row.messageKey });
+  assert.equal((await stableService.resume()).ok, true);
+  await until(() => stableService.task.status === 'review');
+  assert.equal(stableService.task.monitorTaskId, 1);
+  assert.equal(stableService.task.monitorMessageKey, oldInstance.row.messageKey);
+  await stableService.close();
+
+  const legacyNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac' });
+  let observedLegacy;
+  const legacyService = service(legacyNative, async () => { throw new Error('legacy message recovery should remain read-only'); }, [], {
+    observeWorkBuddy: observation => { observedLegacy = observation; return observeWorkBuddy(newInstance.monitor, observation); },
+  });
+  legacyService.task = makePausedResumeTask({ id, bunnyTaskId: id, status: 'paused', outboundText: task.outboundText,
+    associationMarker: task.associationMarker, handoffSent: true, submittedAt, sessionId,
+    monitorSessionId: sessionId, monitorTaskId: oldInstance.row.id });
+  assert.equal((await legacyService.resume()).ok, true);
+  await until(() => legacyService.task.status === 'review');
+  assert.equal(observedLegacy.monitorTaskId, undefined, 'legacy resume clears only the unstable counter and rediscovers by task marker/session/time');
+  assert.equal(legacyService.task.sessionId, sessionId);
+  assert.equal(legacyService.task.submittedAt, submittedAt);
+  assert.equal(legacyService.task.monitorTaskId, 1);
+  assert.equal(legacyService.task.monitorMessageKey, newInstance.row.messageKey);
+  await legacyService.close();
+}
+
+async function testVisualWorkBuddySendBindsExactMonitorTask() {
+  const monitor = new Monitor();
+  let seeded = false, plannerCalls = 0, observeSnapshots = [];
+  const observe = task => {
+    observeSnapshots.push({ submittedAt: task.submittedAt, draftInsertedAt: task.draftInsertedAt, handoffSent: task.handoffSent });
+    if (task.submitAttemptedAt && !seeded) {
+      const row = monitor.taskBlank(task.outboundText, task.draftInsertedAt);
+      row.bunnyTaskId = task.bunnyTaskId;
+      row.status = 'ok'; row.summary = 'visual-path Monitor result'; row.endedAt = row.startedAt + 20;
+      const snap = monitor.blank(); snap.sessionId = 'visual-monitor-session'; snap.task = row; snap.lastEventAt = row.endedAt;
+      monitor.sessions.set('visual-monitor-file', { snap }); seeded = true;
+    }
+    return observeWorkBuddy(monitor, task);
+  };
+  const native = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash' });
+  const svc = service(native, async () => {
+    plannerCalls++;
+    if (plannerCalls === 1) return { action: 'type', purpose: 'task', text: 'service replaces this with the exact outbound text' };
+    if (plannerCalls === 2) return { action: 'key', key: 'enter', purpose: 'submit' };
+    throw new Error('Monitor-bound visual handoff must stop asking the planner');
+  }, [], { observeWorkBuddy: observe });
+  assert((await svc.start({ goal: 'visual Monitor handoff', target: 'workbuddy', workModel: 'deepseek-v4.1-flash' })).ok);
+  await until(() => svc.task.status === 'review');
+  assert.equal(plannerCalls, 2);
+  assert.equal(svc.task.draftInserted, true);
+  assert(Number.isFinite(svc.task.draftInsertedAt));
+  assert.equal(svc.task.submitAttemptedAt > 0, true);
+  assert.equal(svc.task.handoffSent, true, 'handoff is recorded only after the exact marker-bearing Monitor task is found');
+  assert.equal(svc.task.submittedAt, svc.task.draftInsertedAt, 'Monitor task start time becomes the confirmed submission timestamp');
+  assert.equal(svc.task.sessionId, 'visual-monitor-session');
+  assert.equal(svc.task.monitorTaskId, 1, 'real Monitor taskBlank numeric IDs bind through observer');
+  assert.match(svc.task.evidence, /visual-path Monitor result/);
+  assert(native.calls.some(call => call.op === 'type'));
+  assert.equal(native.calls.filter(call => call.op === 'key').length, 1);
+  assert.equal(native.calls.some(call => call.op === 'workbuddySend'), false, 'visual submission is not confused with the dedicated AX send op');
+  assert(observeSnapshots.some(item => item.draftInsertedAt && item.submittedAt === item.draftInsertedAt),
+    'observer receives the temporary timestamp anchor while the stored submittedAt is still unset');
+  assert.equal(observeSnapshots[0]?.handoffSent, undefined);
+  await svc.close();
+
+  let retryPlannerCalls = 0;
+  const delayedNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash' });
+  const delayedSvc = service(delayedNative, async () => {
+    retryPlannerCalls++;
+    if (retryPlannerCalls === 1) return { action: 'type', purpose: 'task', text: 'exact task' };
+    return { action: 'key', key: 'enter', purpose: 'submit' };
+  }, [], { observeWorkBuddy: () => null });
+  assert((await delayedSvc.start({ goal: 'submission is uncertain', target: 'workbuddy', workModel: 'deepseek-v4.1-flash' })).ok);
+  await until(() => delayedSvc.task.status === 'paused');
+  assert.equal(delayedSvc.task.handoffSent, undefined);
+  assert.equal(delayedSvc.task.submittedAt, undefined, 'uncertain submission is never marked as sent');
+  assert.equal(delayedNative.calls.filter(call => call.op === 'key').length, 1, 'uncertain send is not replayed');
+  assert.match(delayedSvc.task.note, /可能已发生.*Monitor.*不会|Monitor 未能精确确认/u);
+  await delayedSvc.close();
+}
+
+function makePausedResumeTask(overrides = {}) {
+  const id = 'bcf0b2af-d420-4fb4-8fa3-98effc9246c9';
+  const task = { id, bunnyTaskId: id, goal: '恢复原任务', taskText: '恢复原任务', criteria: '核对同一交付',
+    target: 'workbuddy', workModel: 'deepseek-v4.1-flash', thinking: 'high', origin: 'panel', recipient: '文件传输助手',
+    associationMarker: `[workbunny:${id}]`, outboundText: '', sources: [], startedAt: Date.now() - 600000,
+    attemptStartedAt: Date.now() - 600000, followUpRound: 0, status: 'failed', steps: [] };
+  task.outboundText = makeWorkBuddyOutbound(task);
+  return Object.assign(task, overrides);
+}
+
+async function testExplicitResumeRecoverySafety() {
+  const observer = task => task.handoffSent ? ({ taskId: 1, sessionId: 'resume-session', status: 'ok',
+    summary: 'same task resumed and completed', startedAt: task.submittedAt || Date.now(), updatedAt: Date.now(), model: 'deepseek-v4.1-flash' }) : null;
+  const sameTextNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash',
+    workBuddyInspection: { available: true, homeReady: true, editorCount: 1, draftEmpty: false, draftMatchesRequest: true,
+      selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: true } });
+  const sameTextService = service(sameTextNative, async () => ({ action: 'done', completed: false, reason: 'unexpected planner path' }), [], { observeWorkBuddy: observer });
+  const priorReportedAt = Date.now() - 1000;
+  const originalTask = makePausedResumeTask({ draftInserted: true, draftInsertedAt: Date.now() - 30000,
+    report: '上次暂停的说明', reportedAt: priorReportedAt, status: 'failed' });
+  sameTextService.task = originalTask;
+  const originalId = originalTask.id, originalStartedAt = originalTask.startedAt, previousGeneration = sameTextService.generation;
+  assert.equal(sameTextNative.calls.length, 0, 'persisted failed task remains inert until resume is explicitly called');
+  const resumed = await sameTextService.resume();
+  assert.equal(resumed.ok, true);
+  assert.equal(resumed.id, originalId);
+  assert(sameTextService.generation > previousGeneration);
+  await until(() => sameTextService.task.status === 'review');
+  assert.equal(sameTextService.task.id, originalId, 'resume reuses the persisted task ID');
+  assert.equal(sameTextService.task.startedAt, originalStartedAt, 'original task start remains available for the journal');
+  assert(sameTextService.task.attemptStartedAt > originalStartedAt, 'runtime budget starts from this recovery attempt');
+  assert.equal(sameTextService.task.report, undefined);
+  assert.equal(sameTextService.task.reportedAt, undefined);
+  assert.deepEqual(sameTextService.task.reportHistory, [{ report: '上次暂停的说明', reportedAt: priorReportedAt, status: 'failed' }]);
+  assert.equal(sameTextNative.calls.filter(call => call.op === 'workbuddyFill').length, 1);
+  assert.equal(sameTextNative.workBuddyFillResults[0].idempotent, true, 'matching saved draft resumes through native idempotent fill');
+  assert.equal(sameTextNative.calls.filter(call => call.op === 'workbuddySend').length, 1);
+  assert.equal(sameTextNative.calls.some(call => call.op === 'type'), false, 'resume never types over the existing exact draft');
+  await sameTextService.close();
+
+  const unknownNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash',
+    workBuddyInspection: { available: true, homeReady: true, editorCount: 1, draftEmpty: false, draftMatchesRequest: false,
+      selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: true } });
+  const unknownService = service(unknownNative, async () => ({ action: 'key', key: 'enter', purpose: 'submit' }));
+  unknownService.task = makePausedResumeTask({ status: 'stopped', draftInserted: true, draftInsertedAt: Date.now() - 5000 });
+  assert.equal((await unknownService.resume()).ok, true);
+  await until(() => unknownService.task.status === 'paused');
+  assert.match(unknownService.task.note, /未能与原 outboundText 完全匹配/u);
+  assert.equal(unknownNative.calls.some(call => ['workbuddyFill', 'workbuddySend', 'type', 'key', 'click'].includes(call.op)), false,
+    'an unfamiliar draft is preserved and never overwritten or submitted');
+  await unknownService.close();
+
+  const pendingNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash' });
+  const pendingService = service(pendingNative, async () => ({ action: 'done', completed: false, reason: '当前截图无法确认回复' }), [], { observeWorkBuddy: () => null });
+  pendingService.task = makePausedResumeTask({ status: 'paused', draftInserted: true, draftInsertedAt: Date.now() - 5000,
+    steps: [{ step: 1, action: 'workbuddySend', state: 'intent', at: Date.now() - 1000 }] });
+  assert.equal((await pendingService.resume()).ok, true);
+  assert(Number.isFinite(pendingService.task.submitAttemptedAt), 'a persisted native send intent is treated as possibly delivered after restart');
+  await until(() => pendingService.task.status === 'paused');
+  assert.equal(pendingService.task.handoffSent, undefined);
+  assert.equal(pendingService.task.submittedAt, undefined, 'possible old send remains explicitly unconfirmed');
+  assert.equal(pendingNative.calls.some(call => ['workbuddyFill', 'workbuddySend', 'type', 'key', 'click'].includes(call.op)), false,
+    'possibly sent tasks resume only through monitor and read-only screenshots');
+  await pendingService.close();
+
+  const priorSubmission = Date.now() - 5000;
+  const restartedMessage = 'stable-message-key-after-restart';
+  const restartNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac' });
+  let restartObserverTask;
+  const restartService = service(restartNative, async () => { throw new Error('resumed Monitor must not invoke visual planning'); }, [], {
+    observeWorkBuddy: task => {
+      restartObserverTask = task;
+      return { taskId: 1, messageKey: restartedMessage, sessionId: 'resume-session', status: 'ok',
+        summary: 'same message found after Monitor restart', startedAt: priorSubmission, updatedAt: Date.now(), model: 'deepseek-v4.1-flash' };
+    },
+  });
+  restartService.task = makePausedResumeTask({ status: 'paused', handoffSent: true, submittedAt: priorSubmission,
+    sessionId: 'resume-session', monitorSessionId: 'resume-session', monitorTaskId: 11 });
+  assert.equal((await restartService.resume()).ok, true);
+  await until(() => restartService.task.status === 'review');
+  assert.equal(restartObserverTask.monitorTaskId, undefined, 'old per-process task counter is cleared for legacy recovery');
+  assert.equal(restartService.task.monitorTaskId, 1, 'same session and stable request marker can rebind under the new process counter');
+  assert.equal(restartService.task.monitorMessageKey, restartedMessage);
+  assert.equal(restartNative.calls.some(call => ['activate', 'workbuddyFill', 'workbuddySend', 'type', 'key', 'click'].includes(call.op)), false,
+    'already sent resume confirms through read-only Monitor before any UI activation');
+  await restartService.close();
+
+  const keyedNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac' });
+  const keyedMessage = 'persisted-stable-message-key';
+  const keyedService = service(keyedNative, async () => { throw new Error('stable-key Monitor confirmation must be read-only'); }, [], {
+    observeWorkBuddy: task => ({ taskId: 1, messageKey: keyedMessage, sessionId: 'resume-session', status: 'ok',
+      summary: 'same keyed message found after reorder', startedAt: priorSubmission, updatedAt: Date.now(), model: 'deepseek-v4.1-flash' }),
+  });
+  keyedService.task = makePausedResumeTask({ status: 'paused', handoffSent: true, submittedAt: priorSubmission,
+    sessionId: 'resume-session', monitorSessionId: 'resume-session', monitorTaskId: 11, monitorMessageKey: keyedMessage });
+  assert.equal((await keyedService.resume()).ok, true);
+  await until(() => keyedService.task.status === 'review');
+  assert.equal(keyedService.task.monitorTaskId, 1, 'a matching stable message key takes precedence over changed numeric task IDs');
+  assert.equal(keyedService.task.monitorMessageKey, keyedMessage);
+  assert.equal(keyedNative.calls.some(call => ['activate', 'workbuddyFill', 'workbuddySend', 'type', 'key', 'click'].includes(call.op)), false);
+  await keyedService.close();
+
+  const sourceNative = new FakeNative();
+  const sourceService = service(sourceNative, async () => ({}));
+  sourceService.task = makePausedResumeTask({ origin: 'dialogue', privacyEpoch: 12, sources: ['source-a'] });
+  assert.equal((await sourceService.resume({ privacyEpoch: 13, sources: ['source-a'] })).ok, false);
+  assert.equal((await sourceService.resume({ privacyEpoch: 12, sources: [] })).ok, false);
+  assert.equal(sourceNative.calls.length, 0, 'stale privacy epoch or removed source blocks recovery before native access');
+  sourceService.task = makePausedResumeTask({ origin: 'panel', sources: [null] });
+  assert.equal((await sourceService.resume()).ok, false, 'corrupt persisted source references cannot be silently dropped');
+  assert.equal(sourceNative.calls.length, 0);
+  await sourceService.close();
+
+  const permissionGate = deferred(), stopNative = new FakeNative({ permissionsGate: permissionGate });
+  const stopService = service(stopNative, async () => ({}));
+  stopService.task = makePausedResumeTask({ status: 'failed' });
+  const lateResume = stopService.resume();
+  await until(() => stopNative.calls.some(call => call.op === 'permissions'));
+  await stopService.stop('取消恢复');
+  permissionGate.resolve({ accessibilityTrusted: true, screenCaptureAllowed: true, postEventAllowed: true, sessionLocked: false });
+  const lateResult = await lateResume;
+  assert.equal(lateResult.ok, false);
+  assert.equal(stopService.task.status, 'stopped');
+  assert.equal(stopNative.calls.some(call => ['activate', 'capture', 'type', 'key', 'click', 'workbuddyFill', 'workbuddySend'].includes(call.op)), false,
+    'stop invalidates a resume blocked in preflight before it can act');
+  await stopService.close();
 }
 
 async function testFlashGuardPreflightAndBrainRequest() {
@@ -395,7 +887,8 @@ async function testFlashGuardPreflightAndBrainRequest() {
     assert.equal(taskPayload.executionModelVerified, false);
     assert.equal(Object.hasOwn(taskPayload, 'freeModelVerified'), false, 'Flash requests do not carry a Hy3 free-model field');
     assert.match(taskPayload.taskGoalSemantics, /目标应用中执行操作/);
-    assert.match(requests[0].messages[0].content, /上一动作刚聚焦同一输入框/);
+    assert.match(requests[0].messages[0].content, /若刚已聚焦且截图不变/);
+    assert.match(requests[0].messages[0].content, /直接输出单个type动作并带focus:\{x,y\}/);
 
     const repairCalls = [];
     wb.chat = async options => {
@@ -491,6 +984,12 @@ async function main() {
   const taskType = validateAction({ action: 'type', text: 'hello', purpose: 'task' });
   assert.throws(() => dispatchGuard(taskType, 'wechat', { ocr: [{ text: '文件传输助手', confidence: 1, x: 0.05, y: 0.2 }] }), /尚未确认/);
   assert.doesNotThrow(() => dispatchGuard(taskType, 'wechat', { ocr: [{ text: '文件传输助手', confidence: 1, x: 0.4, y: 0.08 }] }));
+  assert.throws(() => dispatchGuard(taskType, 'wechat', { ocr: [{ text: '文件传输助手', confidence: 1, x: 0.4, y: 0.08 }] }, false, 'hy3', 'Alice'), /尚未确认/, 'a different recipient requires its exact current header');
+  assert.doesNotThrow(() => dispatchGuard(taskType, 'wechat', { ocr: [{ text: 'Alice', confidence: 1, x: 0.4, y: 0.08 }] }, false, 'hy3', 'Alice'));
+  const missingDialogueRecipientNative = new FakeNative();
+  const missingDialogueRecipient = service(missingDialogueRecipientNative, async () => ({ action: 'done', completed: false }));
+  assert.equal((await missingDialogueRecipient.start({ goal: '发消息', target: 'wechat', origin: 'dialogue' })).ok, false);
+  assert.equal(missingDialogueRecipientNative.calls.length, 0, 'dialogue-origin WeChat task cannot start without an explicit recipient');
   const closedFree = { ocr: [{ text: 'Hy3', confidence: 0.95, x: 0.4, y: 0.49, width: 0.06, height: 0.018 }, { text: '0.00x', confidence: 0.95, x: 0.52, y: 0.49, width: 0.03, height: 0.018 }] };
   assert.doesNotThrow(() => dispatchGuard(taskType, 'workbuddy', closedFree), 'an explicit same-line selected free badge is sufficient');
   assert.doesNotThrow(() => dispatchGuard(taskType, 'workbuddy', { ocr: [{ text: '（Hy3 0.00x）', confidence: 0.95, x: 0.4, y: 0.49, width: 0.1, height: 0.018 }] }), 'combined OCR labels preserve an explicit free badge');
@@ -539,11 +1038,19 @@ async function main() {
   await testStartRaceAndStopDuringPermission();
   await testStopDuringActivateDoesNotContinue();
   await testWindowMotionAndStaleScreenshot();
+  await testTypeCanFocusAndInputUnderSameScreenshotGuards();
+  await testJPEGPreviewKeepsPNGForLargeImageOCR();
   await testJournalBeforeActionScopeAndReview();
   await testDoneWithoutVisibleCompletionPauses();
   await testWorkBuddyTypePurposeAndCurrentScope();
   await testWorkBuddyFlashProfile();
   await testWorkBuddyAXHandoff();
+  await testWorkBuddyOutboundTextBudget();
+  await testMonitorBoundFollowUpAndAutomaticAcceptance();
+  await testNumericMonitorTaskIdBindsThroughRealObserver();
+  await testMonitorMessageKeySurvivesInstanceCounterReorder();
+  await testVisualWorkBuddySendBindsExactMonitorTask();
+  await testExplicitResumeRecoverySafety();
   await testFlashGuardPreflightAndBrainRequest();
   await testInsertBackendDelayAndJournal();
   await testFreeModelIsStrictlyZeroCostAndStubbed();

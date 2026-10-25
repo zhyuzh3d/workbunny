@@ -10,6 +10,20 @@ import Vision
 
 struct DesktopError: LocalizedError { let message: String; var errorDescription: String? { message } }
 let outputLock = NSLock()
+let workBuddyTextUTF16Limit = 12_000
+func workBuddyTextWithinLimit(_ text: String) -> Bool { text.utf16.count <= workBuddyTextUTF16Limit }
+let workBuddyMaxAXDepth = 48
+func workBuddyCanDescend(depth: Int, childCount: Int, maxDepth: Int = workBuddyMaxAXDepth) -> Bool {
+    childCount > 0 && depth < maxDepth
+}
+func workBuddyTextControlsAllowed(_ text: String) -> Bool {
+    let values = Array(text.unicodeScalars.map(\.value))
+    for (index, value) in values.enumerated() {
+        if (value < 0x20 && value != 0x0A && value != 0x0D) || value == 0x7F { return false }
+        if value == 0x0D && (index + 1 >= values.count || values[index + 1] != 0x0A) { return false }
+    }
+    return true
+}
 func writeJSON(_ value: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]) else { return }
     var line = data; line.append(0x0A)
@@ -134,6 +148,11 @@ let workBuddyUIModel = "Deepseek-V4.1-Flash"
 let workBuddyRTEEmptyValue = "\u{FEFF}\n今天帮你做些什么？@ 添加上下文，/调用技能与指令"
 enum WorkBuddyDraftPlan { case write, alreadyFilled, reject }
 func workBuddyBundleAllowed(_ bundle: String?) -> Bool { bundle == workBuddyBundleID }
+func workBuddyMarkerAllowed(_ marker: String?) -> Bool {
+    guard let marker, marker.hasPrefix("[workbunny:"), marker.hasSuffix("]") else { return false }
+    let value = String(marker.dropFirst("[workbunny:".count).dropLast())
+    return UUID(uuidString: value) != nil && marker.utf16.count <= 64
+}
 func workBuddyModelAllowed(_ requestModel: String?, selectedModel: String?) -> Bool {
     requestModel == "deepseek-v4.1-flash" && selectedModel == workBuddyUIModel
 }
@@ -166,7 +185,18 @@ func workBuddyDraftPlan(current: String?, requested: String, sendButtonCount: In
 func workBuddyControlsUnique(editors: Int, combos: Int, sendButtons: Int, scanComplete: Bool) -> Bool {
     scanComplete && editors == 1 && combos == 1 && sendButtons == 1
 }
-func workBuddyHomeReady(title: String?) -> Bool { title == "WorkBuddy, 我帮你" }
+func workBuddyHomeReady(title: String?) -> Bool {
+    guard let title else { return false }
+    let canonical = title.replacingOccurrences(of: "，", with: ",")
+        .unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }
+    return String(String.UnicodeScalarView(canonical)) == "WorkBuddy,我帮你"
+}
+func workBuddyHeadingHomeReady(value: String?, title: String?, description: String?) -> Bool {
+    [value, title, description].compactMap { $0 }.contains(where: workBuddyHomeReady)
+}
+func workBuddyTargetReady(mode: String, homeReady: Bool, conversationMarkerPresent: Bool) -> Bool {
+    mode == "home" ? homeReady : (mode == "conversation" && conversationMarkerPresent)
+}
 
 struct WorkBuddyContext { let pid: pid_t; let windowID: UInt32; let rect: CGRect }
 struct WorkBuddyControls {
@@ -179,7 +209,15 @@ struct WorkBuddyControls {
     let selectedModel: String?
     let sendEnabled: Bool
     let homeReady: Bool
+    let associationMarkerPresent: Bool
     let scanComplete: Bool
+    let visitedNodes: Int
+    let maxDepthVisited: Int
+    let depthCutoff: Bool
+    let markerTextFound: Bool
+    let markerFrameMissing: Bool
+    let markerFrameOutsideTarget: Bool
+    let childrenFetchErrors: Int
 }
 func validateWorkBuddyContext(_ request: [String: Any]) throws -> WorkBuddyContext {
     guard let expected = request["expected"] as? [String: Any],
@@ -228,6 +266,12 @@ func rectsMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
     abs(lhs.minX-rhs.minX) <= 2 && abs(lhs.minY-rhs.minY) <= 2 &&
     abs(lhs.width-rhs.width) <= 2 && abs(lhs.height-rhs.height) <= 2
 }
+func rectIntersects(_ lhs: CGRect?, _ rhs: CGRect) -> Bool {
+    guard let lhs, lhs.minX.isFinite, lhs.minY.isFinite, lhs.width > 0, lhs.height > 0,
+          rhs.width > 0, rhs.height > 0 else { return false }
+    let intersection = lhs.intersection(rhs)
+    return !intersection.isNull && intersection.width > 0 && intersection.height > 0
+}
 func workBuddyAXWindow(app: AXUIElement, targetRect: CGRect) -> AXUIElement? {
     let focused = axElementAttribute(app, kAXFocusedWindowAttribute as String)
     let main = axElementAttribute(app, kAXMainWindowAttribute as String)
@@ -237,28 +281,44 @@ func workBuddyAXWindow(app: AXUIElement, targetRect: CGRect) -> AXUIElement? {
     }
     return nil
 }
-func scanWorkBuddyControls(_ root: AXUIElement, deadline: UInt64) -> WorkBuddyControls {
+func scanWorkBuddyControls(_ root: AXUIElement, deadline: UInt64, associationMarker: String?, targetRect: CGRect) -> WorkBuddyControls {
     var editors: [AXUIElement] = []
     var editorFocusElements: [AXUIElement] = []
     var combos: [(AXUIElement, String?)] = []
     var sends: [(AXUIElement, Bool)] = []
     var queue: [(AXUIElement, Int, Bool)] = [(root, 0, false)]
     var cursor = 0, visited = 0, complete = true
-    var draft: String?, selected: String?, homeHeadingFound = false
+    var maxDepthVisited = 0, depthCutoff = false, markerTextFound = false
+    var markerFrameMissing = false, markerFrameOutsideTarget = false, childrenFetchErrors = 0
+    var draft: String?, selected: String?, homeHeadingFound = false, associationMarkerPresent = false
     while cursor < queue.count {
         if DispatchTime.now().uptimeNanoseconds > deadline || visited >= 2000 { complete = false; break }
         let (element, depth, insideEditor) = queue[cursor]; cursor += 1; visited += 1
+        maxDepthVisited = max(maxDepthVisited, depth)
         AXUIElementSetMessagingTimeout(element, 0.2)
         guard let role = axAttribute(element, kAXRoleAttribute as String) as? String else { continue }
         let isEditor = role == kAXTextAreaRole as String
         if insideEditor || isEditor { editorFocusElements.append(element) }
+        if !insideEditor && !isEditor, let associationMarker {
+            for attribute in [kAXValueAttribute as String, kAXTitleAttribute as String, kAXDescriptionAttribute as String] {
+                if (axAttribute(element, attribute) as? String)?.contains(associationMarker) == true {
+                    markerTextFound = true
+                    let frame = axWindowRect(element)
+                    if frame == nil { markerFrameMissing = true }
+                    else if rectIntersects(frame, targetRect) {
+                        associationMarkerPresent = true
+                    } else { markerFrameOutsideTarget = true }
+                }
+            }
+        }
         if isEditor {
             editors.append(element)
             if let value = axAttribute(element, kAXValueAttribute as String) as? String { draft = value }
         } else if role == kAXHeadingRole as String {
-            let heading = (axAttribute(element, kAXValueAttribute as String) as? String)
-                ?? (axAttribute(element, kAXTitleAttribute as String) as? String)
-            if workBuddyHomeReady(title: heading) { homeHeadingFound = true }
+            let value = axAttribute(element, kAXValueAttribute as String) as? String
+            let title = axAttribute(element, kAXTitleAttribute as String) as? String
+            let description = axAttribute(element, kAXDescriptionAttribute as String) as? String
+            if workBuddyHeadingHomeReady(value: value, title: title, description: description) { homeHeadingFound = true }
         } else if role == kAXComboBoxRole as String,
                   let description = axAttribute(element, kAXDescriptionAttribute as String) as? String,
                   description.hasPrefix("Select model:") {
@@ -272,19 +332,32 @@ func scanWorkBuddyControls(_ root: AXUIElement, deadline: UInt64) -> WorkBuddyCo
                 sends.append((element, enabled))
             }
         }
-        if let children = axAttribute(element, kAXChildrenAttribute as String) as? [AXUIElement] {
-            if depth >= 25 {
-                if !children.isEmpty { complete = false; break }
-            } else {
+        var childrenValue: CFTypeRef?
+        let childrenStatus = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue)
+        if childrenStatus == .success, let children = childrenValue as? [AXUIElement] {
+            if !children.isEmpty && !workBuddyCanDescend(depth: depth, childCount: children.count) {
+                complete = false; depthCutoff = true; break
+            } else if !children.isEmpty {
                 queue.append(contentsOf: children.map { ($0, depth + 1, insideEditor || isEditor) })
             }
+        } else if childrenStatus != .attributeUnsupported && childrenStatus != .noValue {
+            childrenFetchErrors += 1
         }
     }
     return WorkBuddyControls(application: nil, editors: editors, editorFocusElements: editorFocusElements, combos: combos, sendButtons: sends, draft: draft,
-                             selectedModel: selected, sendEnabled: sends.count == 1 && sends[0].1,
-                             homeReady: homeHeadingFound, scanComplete: complete)
+        selectedModel: selected, sendEnabled: sends.count == 1 && sends[0].1,
+        homeReady: homeHeadingFound, associationMarkerPresent: associationMarkerPresent, scanComplete: complete,
+        visitedNodes: visited, maxDepthVisited: maxDepthVisited, depthCutoff: depthCutoff,
+        markerTextFound: markerTextFound, markerFrameMissing: markerFrameMissing,
+        markerFrameOutsideTarget: markerFrameOutsideTarget, childrenFetchErrors: childrenFetchErrors)
 }
 func workBuddyControls(_ request: [String: Any]) throws -> (WorkBuddyContext, WorkBuddyControls, Bool) {
+    let mode = request["mode"] as? String ?? "home"
+    let marker = request["marker"] as? String
+    guard mode == "home" || (mode == "conversation" && workBuddyMarkerAllowed(marker)) else {
+        throw DesktopError(message: "WorkBuddy AX 模式或会话关联标记无效")
+    }
+    guard mode == "home" || marker != nil else { throw DesktopError(message: "conversation 模式必须提供本任务关联标记") }
     let context = try validateWorkBuddyContext(request)
     guard AXIsProcessTrusted() else { throw DesktopError(message: "缺少辅助功能权限") }
     // The exact bundle/PID and matching visible CG window are checked before creating any AX element.
@@ -293,40 +366,51 @@ func workBuddyControls(_ request: [String: Any]) throws -> (WorkBuddyContext, Wo
     guard let window = workBuddyAXWindow(app: app, targetRect: context.rect) else {
         try revalidateWorkBuddyContext(request, context)
         return (context, WorkBuddyControls(application: app, editors: [], editorFocusElements: [], combos: [], sendButtons: [], draft: nil,
-            selectedModel: nil, sendEnabled: false, homeReady: false, scanComplete: false), false)
+            selectedModel: nil, sendEnabled: false, homeReady: false, associationMarkerPresent: false, scanComplete: false,
+            visitedNodes: 0, maxDepthVisited: 0, depthCutoff: false, markerTextFound: false,
+            markerFrameMissing: false, markerFrameOutsideTarget: false, childrenFetchErrors: 0), false)
     }
     let title = axAttribute(window, kAXTitleAttribute as String) as? String
-    let scanned = scanWorkBuddyControls(window, deadline: DispatchTime.now().uptimeNanoseconds + 2_000_000_000)
+    let scanned = scanWorkBuddyControls(window, deadline: DispatchTime.now().uptimeNanoseconds + 2_000_000_000,
+                                        associationMarker: marker, targetRect: context.rect)
     let controls = WorkBuddyControls(application: app, editors: scanned.editors, editorFocusElements: scanned.editorFocusElements,
         combos: scanned.combos, sendButtons: scanned.sendButtons,
         draft: scanned.draft, selectedModel: scanned.selectedModel, sendEnabled: scanned.sendEnabled,
-        homeReady: workBuddyHomeReady(title: title) || scanned.homeReady, scanComplete: scanned.scanComplete)
+        homeReady: workBuddyHomeReady(title: title) || scanned.homeReady, associationMarkerPresent: scanned.associationMarkerPresent, scanComplete: scanned.scanComplete,
+        visitedNodes: scanned.visitedNodes, maxDepthVisited: scanned.maxDepthVisited, depthCutoff: scanned.depthCutoff,
+        markerTextFound: scanned.markerTextFound, markerFrameMissing: scanned.markerFrameMissing,
+        markerFrameOutsideTarget: scanned.markerFrameOutsideTarget, childrenFetchErrors: scanned.childrenFetchErrors)
     try revalidateWorkBuddyContext(request, context)
     let available = workBuddyControlsUnique(editors: controls.editors.count, combos: controls.combos.count,
                                              sendButtons: controls.sendButtons.count, scanComplete: controls.scanComplete)
     return (context, controls, available)
 }
 func workBuddyInspect(_ request: [String: Any]) throws -> [String: Any] {
+    let mode = request["mode"] as? String ?? "home"
     let (_, controls, available) = try workBuddyControls(request)
     var draftMatchesRequest = false
     if let expected = request["text"] {
-        guard let text = expected as? String, text.utf16.count <= 3500,
-              !text.unicodeScalars.contains(where: { $0.value == 0 }) else {
-            throw DesktopError(message: "WorkBuddy inspect 文本无效或超过 3500 个 UTF-16 单元")
+        guard let text = expected as? String, workBuddyTextWithinLimit(text), workBuddyTextControlsAllowed(text) else {
+            throw DesktopError(message: "WorkBuddy inspect 文本无效或超过 12000 个 UTF-16 单元")
         }
-        draftMatchesRequest = available && controls.homeReady && controls.selectedModel == workBuddyUIModel &&
+        draftMatchesRequest = available && workBuddyTargetReady(mode: mode, homeReady: controls.homeReady, conversationMarkerPresent: controls.associationMarkerPresent) && controls.selectedModel == workBuddyUIModel &&
             workBuddyTextMatches(controls.draft, expected: text)
     }
     return ["available": available, "editorCount": controls.editors.count,
             "draftMatchesRequest": draftMatchesRequest,
             "draftEmpty": workBuddyDraftIsEmpty(controls.draft, sendButtonCount: controls.sendButtons.count, sendEnabled: controls.sendEnabled),
             "selectedModel": controls.selectedModel ?? "", "sendEnabled": controls.sendEnabled,
-            "homeReady": controls.homeReady]
+            "homeReady": controls.homeReady, "conversationReady": controls.associationMarkerPresent,
+            "associationMarkerPresent": controls.associationMarkerPresent,
+            "scanComplete": controls.scanComplete, "visitedNodes": controls.visitedNodes,
+            "maxDepthVisited": controls.maxDepthVisited, "depthCutoff": controls.depthCutoff,
+            "markerTextFound": controls.markerTextFound, "markerFrameMissing": controls.markerFrameMissing,
+            "markerFrameOutsideTarget": controls.markerFrameOutsideTarget,
+            "childrenFetchErrors": controls.childrenFetchErrors]
 }
 func workBuddyPayload(_ request: [String: Any]) throws -> (String, String) {
-    guard let text = request["text"] as? String, !text.isEmpty, text.utf16.count <= 3500,
-          !text.unicodeScalars.contains(where: { $0.value == 0 }),
-          let model = request["model"] as? String else { throw DesktopError(message: "WorkBuddy 文本无效或超过 3500 个 UTF-16 单元") }
+    guard let text = request["text"] as? String, !text.isEmpty, workBuddyTextWithinLimit(text), workBuddyTextControlsAllowed(text),
+          let model = request["model"] as? String else { throw DesktopError(message: "WorkBuddy 文本无效或超过 12000 个 UTF-16 单元") }
     guard model == "deepseek-v4.1-flash" else { throw DesktopError(message: "AX 仅允许精确模型 deepseek-v4.1-flash") }
     return (text, model)
 }
@@ -374,8 +458,9 @@ func workBuddyInputStillTargeted(_ request: [String: Any], context: WorkBuddyCon
 }
 func workBuddyFill(_ request: [String: Any]) throws -> [String: Any] {
     let (text, model) = try workBuddyPayload(request)
+    let mode = request["mode"] as? String ?? "home"
     let (context, controls, available) = try workBuddyControls(request)
-    guard available, controls.homeReady, controls.editors.count == 1,
+    guard available, workBuddyTargetReady(mode: mode, homeReady: controls.homeReady, conversationMarkerPresent: controls.associationMarkerPresent), controls.editors.count == 1,
           workBuddyModelAllowed(model, selectedModel: controls.selectedModel), let editor = controls.editors.first else {
         throw DesktopError(message: "WorkBuddy 编辑器、首页或 Flash 模型状态未确认")
     }
@@ -438,8 +523,9 @@ func workBuddyFill(_ request: [String: Any]) throws -> [String: Any] {
 }
 func workBuddySend(_ request: [String: Any]) throws -> [String: Any] {
     let (text, model) = try workBuddyPayload(request)
+    let mode = request["mode"] as? String ?? "home"
     let (context, controls, available) = try workBuddyControls(request)
-    guard available, controls.homeReady, let editor = controls.editors.first,
+    guard available, workBuddyTargetReady(mode: mode, homeReady: controls.homeReady, conversationMarkerPresent: controls.associationMarkerPresent), let editor = controls.editors.first,
           controls.editors.count == 1, workBuddyModelAllowed(model, selectedModel: controls.selectedModel),
           workBuddyTextMatches(controls.draft, expected: text),
           controls.sendButtons.count == 1, controls.sendEnabled else {
@@ -845,8 +931,23 @@ func runNativeSelfTest() -> Never {
               !workBuddyControlsUnique(editors: 2, combos: 1, sendButtons: 1, scanComplete: true),
               !workBuddyControlsUnique(editors: 1, combos: 2, sendButtons: 1, scanComplete: true),
               !workBuddyControlsUnique(editors: 1, combos: 1, sendButtons: 1, scanComplete: false),
+              workBuddyCanDescend(depth: 25, childCount: 1),
+              workBuddyCanDescend(depth: 47, childCount: 1),
+              !workBuddyCanDescend(depth: 48, childCount: 1),
+              !workBuddyCanDescend(depth: 10, childCount: 0),
               workBuddyHomeReady(title: "WorkBuddy, 我帮你"),
-              !workBuddyHomeReady(title: "Other window") else {
+              workBuddyHeadingHomeReady(value: "", title: "WorkBuddy， 我帮你", description: nil),
+              workBuddyHeadingHomeReady(value: nil, title: nil, description: " WorkBuddy,　我帮你 "),
+              !workBuddyHeadingHomeReady(value: "WorkBuddy, 我帮你 later", title: nil, description: nil),
+              !workBuddyHomeReady(title: "Other window"),
+              rectIntersects(CGRect(x: 15, y: 15, width: 10, height: 10), CGRect(x: 0, y: 0, width: 20, height: 20)),
+              !rectIntersects(CGRect(x: 30, y: 30, width: 10, height: 10), CGRect(x: 0, y: 0, width: 20, height: 20)),
+              workBuddyMarkerAllowed("[workbunny:bcf0b2af-d420-4fb4-8fa3-98effc9246c9]"),
+              !workBuddyMarkerAllowed("[workbunny:not-a-uuid]"),
+              workBuddyTargetReady(mode: "home", homeReady: true, conversationMarkerPresent: false),
+              !workBuddyTargetReady(mode: "conversation", homeReady: true, conversationMarkerPresent: false),
+              workBuddyTargetReady(mode: "conversation", homeReady: false, conversationMarkerPresent: true),
+              !workBuddyTargetReady(mode: "arbitrary", homeReady: true, conversationMarkerPresent: true) else {
             throw DesktopError(message: "WorkBuddy bundle/model/control/home guard 失败")
         }
         guard case .write = workBuddyDraftPlan(current: "", requested: "task text"),
@@ -894,6 +995,13 @@ func runNativeSelfTest() -> Never {
               workBuddyTextMatches("alpha\n\u{FEFF}\nbeta\n\u{FEFF}\ngamma", expected: "alpha\n\nbeta\n\ngamma") else {
             throw DesktopError(message: "WorkBuddy 读回规范化/差异标志失败")
         }
+        let atLimit = String(repeating: "😀", count: workBuddyTextUTF16Limit / 2)
+        guard workBuddyTextWithinLimit(atLimit), atLimit.utf16.count == workBuddyTextUTF16Limit,
+              !workBuddyTextWithinLimit(atLimit + "a"), workBuddyTextControlsAllowed("line1\r\nline2"),
+              !workBuddyTextControlsAllowed("bad\rbreak"), !workBuddyTextControlsAllowed("bad\ttab"),
+              !workBuddyTextControlsAllowed("bad\u{0001}control") else {
+            throw DesktopError(message: "WorkBuddy UTF-16 文本上限回归失败")
+        }
         let windowConfig = makeCaptureConfiguration(width: captureSize.width, height: captureSize.height, fitWindow: true)
         guard windowConfig.scalesToFit, windowConfig.preservesAspectRatio,
               windowConfig.ignoreShadowsSingleWindow, windowConfig.ignoreShadowsDisplay, !windowConfig.showsCursor else {
@@ -917,7 +1025,8 @@ func runNativeSelfTest() -> Never {
         catch { /* Expected rejection of implicit newline. */ }
         writeJSON(["ok": true, "selfTest": "native", "rectCases": ["CGWindowBounds", "lowercase"],
                    "capturePixelSize": [captureSize.width, captureSize.height], "windowFit": true,
-                   "workBuddyGuards": true, "workBuddyReadbackGuards": true, "workBuddySerializedMatch": true,
+                   "workBuddyGuards": true, "workBuddyConversationGuard": true, "workBuddyReadbackGuards": true, "workBuddySerializedMatch": true,
+                   "workBuddyTextUTF16Limit": workBuddyTextUTF16Limit,
                    "invalidRectsRejected": invalidRects.count,
                    "multilineEvents": ["text:A", "shiftEnter", "text:B", "shiftEnter", "text:C"],
                    "surrogateChunkSizes": chunks.map(\.count)])

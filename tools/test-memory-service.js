@@ -6,7 +6,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { performance } = require('perf_hooks');
 const { MemoryService } = require('../src/main/memory-service');
+const vc = require('../src/main/vault-crypto');
 const { timeContext } = require('../src/main/companion-time');
 
 const root = path.resolve(__dirname, '..');
@@ -198,7 +200,12 @@ async function testAssistantLineageDeletionAndCorrection(temp, safeStorage) {
   assert.equal((await updateService.db.request('get', { ids: [oldSource.id, oldMemory.id, oldReply.id] })).rows.length, 0);
   const updatedMemory = (await updateService.list({ kind: 'memory' }))[0];
   assert.equal(updatedMemory.content, '我的猫名字改为新猫名RS');
-  assert(updateService.recent.some(x => x.value.source === 'user-reviewed' && x.value.content.includes('新猫名RS')));
+  const reviewedSource = (await updateService.db.request('get', { ids: updatedMemory.sources })).rows[0];
+  assert.equal(updateService.decode(reviewedSource).value.source, 'user-reviewed', 'correction evidence remains linked and removable');
+  assert(!updateService.recent.some(x => x.value.source === 'user-reviewed'), 'memory edits are not recent chat turns');
+  const correctedContext = await updateService.context('猫叫什么', { budget: 8500 });
+  assert(!correctedContext.messages.some(x => x.role === 'user' && x.content.includes('新猫名RS')));
+  assert.match(correctedContext.text, /新猫名RS/, 'the corrected fact remains available as memory');
   await updateService.close();
 }
 
@@ -214,7 +221,83 @@ async function testCorrectionInvalidatesSource(temp, safeStorage) {
   assert.equal(newMemory.content, '我改为喜欢绿茶');
   assert.notEqual(newMemory.id, memory.id);
   assert(!service.recent.some(x => x.id === original.id));
-  assert(service.recent.some(x => x.value.content === '我改为喜欢绿茶' && x.value.source === 'user-reviewed'));
+  assert(!service.recent.some(x => x.value.content === '我改为喜欢绿茶' && x.value.source === 'user-reviewed'));
+  await service.close();
+}
+
+async function testReviewedEditAndMoodForget(temp, safeStorage) {
+  const correctionDir = path.join(temp, 'reviewed-edit-history-vault');
+  let service = await createService(correctionDir, safeStorage).init();
+  await service.addMessage('user', '请记住：我的小猫叫棉花Audit');
+  const originalMemory = (await service.list({ kind: 'memory' }))[0];
+  const updated = await service.updateMemory(originalMemory.id, '我的小猫名字更正为云朵Audit');
+  assert.equal(updated.removedSources, 1);
+  let correctedMemory = (await service.list({ kind: 'memory' }))[0];
+  const correctedSourceId = correctedMemory.sources[0];
+  assert.equal((await service.db.request('get', { ids: [correctedSourceId] })).rows.length, 1,
+    'the correction source remains available for provenance and cascade deletion');
+  assert(!service.recent.some(row => row.id === correctedSourceId));
+  let context = await service.context('你好', { budget: 8500 });
+  assert(!context.messages.some(row => row.role === 'user' && row.content.includes('云朵Audit')),
+    'an editor correction must not be injected as a spoken user turn');
+  assert.match(context.text, /云朵Audit/, 'the corrected memory itself remains in context');
+  assert.match(context.text, /新的对话起点/, 'an edit must not advance the last-conversation timestamp');
+  await service.close();
+
+  service = await createService(correctionDir, safeStorage).init();
+  correctedMemory = (await service.list({ kind: 'memory' }))[0];
+  assert(!service.recent.some(row => row.value.source === 'user-reviewed'), 'restart must keep editor evidence out of recent dialogue');
+  context = await service.context('你好', { budget: 8500 });
+  assert(!context.messages.some(row => row.role === 'user' && row.content.includes('云朵Audit')));
+  assert.match(context.text, /新的对话起点/);
+  await service.remove(correctedMemory.id);
+  assert.equal((await service.db.request('get', { ids: [correctedMemory.sources[0]] })).rows.length, 0,
+    'forgetting the corrected memory still cascades to its review evidence');
+  assert.equal((await service.search('云朵Audit', ['message', 'memory'])).length, 0);
+  await service.close();
+
+  const moodDir = path.join(temp, 'mood-forget-vault');
+  service = await createService(moodDir, safeStorage).init();
+  const moodSource = await service.addMessage('user', '我很难过');
+  assert.equal(service.state.mood, '关切');
+  assert.equal(service.moodSourceId, moodSource.id);
+  const persisted = (await service.query('state', 1))[0].value;
+  assert.equal(persisted.moodSourceId, moodSource.id);
+  await service.remove(moodSource.id);
+  assert.equal(service.state.mood, '平静');
+  assert.equal(service.moodSourceId, null);
+  assert.equal((await service.query('state', 1))[0].value.mood, '平静');
+  assert.doesNotMatch((await service.context('你好', { budget: 8500 })).text, /虚拟表现状态：关切/);
+  const rememberedMoodSource = await service.addMessage('user', '请记住：我很难过');
+  const rememberedMood = (await service.list({ kind: 'memory' })).find(row => row.sources.includes(rememberedMoodSource.id));
+  assert(rememberedMood);
+  assert.equal(service.state.mood, '关切');
+  await service.remove(rememberedMood.id);
+  assert.equal(service.state.mood, '平静', 'forgetting a derived memory resets state sourced from its user message');
+  assert.equal((await service.db.request('get', { ids: [rememberedMoodSource.id] })).rows.length, 0);
+  await service.close();
+
+  service = await createService(moodDir, safeStorage).init();
+  assert.equal(service.state.mood, '平静', 'the neutralized state survives restart');
+  assert.equal(service.moodSourceId, null);
+  assert.doesNotMatch((await service.context('你好', { budget: 8500 })).text, /虚拟表现状态：关切/);
+  await service.close();
+
+  // Older encrypted state has no mood source ID. Deleting a user record must
+  // conservatively reset a non-neutral mood instead of preserving an opaque effect.
+  const legacyDir = path.join(temp, 'legacy-mood-vault');
+  service = await createService(legacyDir, safeStorage).init();
+  const legacyMessage = await service.addMessage('user', '普通旧消息');
+  await service.write([{ id: 'companion-state', kind: 'state', ts: service.clock(), value: {
+    mood: '关切', energy: 0.7, warmth: 0.7, updatedAt: service.clock(), interactions: 1,
+    userMessagesSeen: 1, lastExtractCount: 0, sources: [],
+  } }]);
+  await service.close();
+  service = await createService(legacyDir, safeStorage).init();
+  assert.equal(service.moodSourceId, null);
+  await service.remove(legacyMessage.id);
+  assert.equal(service.state.mood, '平静', 'legacy state without provenance is cleared conservatively');
+  assert.equal((await service.query('state', 1))[0].value.moodSourceId, undefined);
   await service.close();
 }
 
@@ -370,6 +453,76 @@ async function testContextBudgetAndDisabledFallback(temp, safeStorage) {
   await service.close();
 }
 
+async function testContextReferences(temp, safeStorage) {
+  let enabled = true;
+  const service = await createService(path.join(temp, 'reference-vault'), safeStorage, {
+    settings: { get enabled() { return enabled; }, extract: false },
+  }).init();
+  const source = await service.addMessage('user', 'reference alpha source phrase');
+  await service.write([
+    { id: 'reference-memory', kind: 'memory', ts: source.ts + 1, value: {
+      content: 'confirmed reference alpha memory', memoryKind: 'fact', status: 'confirmed', sources: [source.id],
+    } },
+    { id: 'reference-pending-memory', kind: 'memory', ts: source.ts + 2, value: {
+      content: 'pending reference alpha candidate', memoryKind: 'candidate', status: 'pending', sources: [source.id],
+    } },
+    { id: 'reference-summary', kind: 'summary', ts: source.ts + 3, value: {
+      content: 'reference alpha summary excerpt', sources: [source.id],
+    } },
+    { id: 'reference-old-message', kind: 'message', ts: Date.UTC(2001, 0, 1), value: {
+      role: 'assistant', content: 'historical transcript-only yellow ziggurat marker', sources: [],
+    } },
+  ]);
+
+  const included = await service.context('reference alpha summary', { budget: 5000 });
+  const includedRefs = included.references;
+  assert(includedRefs.some(r => r.id === 'reference-memory' && r.kind === 'memory'));
+  assert(includedRefs.some(r => r.id === 'reference-summary' && r.kind === 'summary'));
+  assert.equal(includedRefs.filter(r => r.id === 'reference-summary').length, 1, 'a summary matched in two sections must appear once');
+  assert(!includedRefs.some(r => r.id === 'reference-pending-memory'), 'pending candidate must not be shown as a fact reference');
+  assert(!includedRefs.some(r => r.id === 'reference-old-message'), 'ordinary old messages are not memory references');
+  const memoryRef = includedRefs.find(r => r.id === 'reference-memory');
+  assert.equal(memoryRef.content, 'confirmed reference alpha memory');
+  assert.equal(memoryRef.ts, source.ts + 1);
+  assert.deepEqual(memoryRef.sources, [source.id]);
+  assert(included.text.includes(memoryRef.content), 'reference content must be the same content inserted into the prompt');
+  assert(included.sourceIds.includes('reference-memory') && included.sourceIds.includes('reference-summary'), 'references supplement, not replace, sourceIds');
+  assert(included.text.includes('不要把检索相似当作事实'), 'prompt must instruct the model to clarify ambiguous identity/relations');
+
+  const oldMessageContext = await service.context('historical transcript-only yellow ziggurat', { budget: 5000 });
+  assert(oldMessageContext.text.includes('historical transcript-only yellow ziggurat marker'));
+  assert(oldMessageContext.sourceIds.includes('reference-old-message'), 'sourceIds must continue to include injected old messages');
+  assert(!oldMessageContext.references.some(r => r.id === 'reference-old-message'), 'old transcript rows never become memory references');
+
+  const recentContext = await service.context('quasar unicorn 7f31', {
+    recent: [{ role: 'user', content: 'recent-only marker' }], budget: 5000,
+  });
+  assert(!recentContext.references.some(r => r.id === source.id || r.kind === 'message'), 'recent messages are not memory references');
+  const internalContext = await service.context('reference alpha summary', { internal: true, budget: 5000 });
+  assert.deepEqual(internalContext.references, [], 'internal context without historical records has no references');
+
+  const cutSource = await service.addMessage('user', 'budget cut reference marker');
+  await service.write([{ id: 'reference-cut-memory', kind: 'memory', ts: cutSource.ts + 1, value: {
+    content: 'budget cut reference marker ' + '长内容'.repeat(260), memoryKind: 'fact', status: 'confirmed', sources: [cutSource.id],
+  } }]);
+  const cutContext = await service.context('budget cut reference marker', { budget: 1000 });
+  assert(!cutContext.text.includes('budget cut reference marker'));
+  assert(!cutContext.references.some(r => r.id === 'reference-cut-memory'), 'a row that did not fit the history budget must not be listed as a reference');
+
+  const beforeDelete = await service.context('reference alpha summary', { budget: 5000 });
+  assert(beforeDelete.references.some(r => r.id === 'reference-memory'));
+  await service.remove('reference-memory');
+  const afterDelete = await service.context('reference alpha summary', { budget: 5000 });
+  assert(!afterDelete.references.some(r => r.id === 'reference-memory' || r.id === 'reference-summary'), 'deleted sources cannot remain in new references');
+
+  enabled = false;
+  const disabledContext = await service.context('reference alpha summary', {
+    recent: [{ role: 'user', content: 'current turn only' }], budget: 1000,
+  });
+  assert.deepEqual(disabledContext.references, [], 'disabled memory falls back without historical references');
+  await service.close();
+}
+
 async function testAnniversaryIndexAndClearCount(temp, safeStorage) {
   let now = Date.UTC(2010, 4, 1, 4);
   const service = await createService(path.join(temp, 'anniversary-vault'), safeStorage, { clock: () => now }).init();
@@ -420,6 +573,106 @@ async function testLegacyUnknownTimeIsNotInvented(temp, safeStorage) {
   assert(!/在\d+秒前/.test(context.text));
   assert(!fs.existsSync(path.join(parent, 'memory.json')));
   await service.close();
+}
+
+async function testRestoreTopologyAndRollback(temp, safeStorage) {
+  const passphrase = 'test-only-topology-passphrase';
+  const target = await createService(path.join(temp, 'topology-target-vault'), safeStorage).init();
+  await target.personaRevision({ name: '默认伙伴', profile: '仅测试', ownerName: '用户' });
+  const parentA = { id: 'topology-parent-a', kind: 'message', ts: 10,
+    value: { role: 'user', content: 'first parent source', sources: [] } };
+  const parentB = { id: 'topology-parent-b', kind: 'message', ts: 20,
+    value: { role: 'user', content: 'second parent source', sources: [] } };
+  const summary = { id: 'topology-two-parent-summary', kind: 'summary', ts: 30,
+    value: { content: 'derived from both parents', sources: [parentA.id, parentB.id] } };
+  const memory = { id: 'topology-child-memory', kind: 'memory', ts: 40,
+    value: { content: 'multi-parent restored fact marker', status: 'confirmed', memoryKind: 'fact',
+      evidence: 'derived from both parents', sources: [summary.id] } };
+  const childFirstBackup = await vc.exportEnvelope({ format: 1, exportedAt: Date.now(),
+    records: [memory, summary, parentB, parentA] }, passphrase);
+  const restored = await target.restore(childFirstBackup, passphrase);
+  assert.equal(restored.records, 4);
+  const imported = await target.db.request('get', { ids: [parentA.id, parentB.id, summary.id, memory.id] });
+  assert.equal(imported.rows.length, 4, 'out-of-order parents and child should all restore');
+  assert((await target.search('multi-parent restored fact marker', ['memory'], 5)).some(r => r.id === memory.id));
+  assert.deepEqual((await target.query('memory', 1))[0].value.sources, [summary.id]);
+  assert.deepEqual((await target.query('summary', 1))[0].value.sources, [parentA.id, parentB.id]);
+  await target.close();
+
+  const cycleTarget = await createService(path.join(temp, 'cycle-target-vault'), safeStorage).init();
+  await cycleTarget.personaRevision({ name: '默认伙伴', profile: '仅测试', ownerName: '用户' });
+  const cycleBackup = await vc.exportEnvelope({ format: 1, exportedAt: Date.now(), records: [
+    { id: 'cycle-a', kind: 'summary', ts: 1, value: { content: 'cycle A', sources: ['cycle-b'] } },
+    { id: 'cycle-b', kind: 'summary', ts: 2, value: { content: 'cycle B', sources: ['cycle-a'] } },
+  ] }, passphrase);
+  await assert.rejects(cycleTarget.restore(cycleBackup, passphrase), /来源关系有循环/);
+  assert.equal((await cycleTarget.db.request('stats')).counts.total, 1, 'cycle rejection must not clear the existing fresh persona');
+  assert.equal((await cycleTarget.db.request('stats')).counts.persona, 1);
+
+  const selfBackup = await vc.exportEnvelope({ format: 1, exportedAt: Date.now(), records: [
+    { id: 'self-reference', kind: 'message', ts: 3,
+      value: { role: 'user', content: 'self reference', sources: ['self-reference'] } },
+  ] }, passphrase);
+  await assert.rejects(cycleTarget.restore(selfBackup, passphrase), /不能引用自身/);
+  assert.equal((await cycleTarget.db.request('stats')).counts.persona, 1, 'self-reference rejection leaves the destination unchanged');
+  await cycleTarget.close();
+
+  const rollback = await createService(path.join(temp, 'restore-rollback-vault'), safeStorage).init();
+  const invalidRecord = { id: 'rollback-too-large', kind: 'message', ts: 201,
+    value: { role: 'user', content: 'x'.repeat(2 * 1024 * 1024), sources: [] } };
+  const manyValid = Array.from({ length: 200 }, (_, i) => ({ id: `rollback-valid-${String(i).padStart(3, '0')}`,
+    kind: 'message', ts: i, value: { role: 'user', content: `rollback batch ${i}`, sources: [] } }));
+  const failingBackup = await vc.exportEnvelope({ format: 1, exportedAt: Date.now(), records: [...manyValid, invalidRecord] }, passphrase);
+  await assert.rejects(rollback.restore(failingBackup, passphrase), /Vault request failed/);
+  const emptyAfterFailure = await rollback.db.request('stats');
+  assert.equal(emptyAfterFailure.counts.total, 0, 'a failed later batch must clear earlier committed batches');
+  await rollback.close();
+}
+
+async function testRestoreExportScale(temp, safeStorage) {
+  const messageCount = 6000, memoryCount = 600;
+  const sourceDir = path.join(temp, 'restore-scale-source-vault');
+  const source = await createService(sourceDir, safeStorage).init();
+  const start = Date.UTC(2016, 0, 1), end = Date.UTC(2026, 0, 1);
+  const messages = Array.from({ length: messageCount }, (_, i) => ({
+    id: `restore-scale-message-${String(i).padStart(5, '0')}`, kind: 'message',
+    ts: Math.round(start + (end - start) * i / (messageCount - 1)),
+    value: { role: i % 2 ? 'assistant' : 'user', content: `Synthetic migration sample ${i}: fictional travel note.`, sources: [] },
+  }));
+  for (let i = 0; i < messages.length; i += 200) await source.write(messages.slice(i, i + 200), source.epoch, { notify: false });
+  const memories = Array.from({ length: memoryCount }, (_, i) => {
+    const sourceIndex = i * 10, sourceId = messages[sourceIndex].id;
+    return { id: `restore-scale-memory-${String(i).padStart(4, '0')}`, kind: 'memory', ts: messages[sourceIndex].ts,
+      value: { content: i === 0 ? 'synthetic oldest anchor for restore check' : `Synthetic migration memory ${i}: fictional route note.`,
+        memoryKind: 'fact', status: 'confirmed', evidence: messages[sourceIndex].value.content,
+        sources: i === 0 ? [sourceId, messages[sourceIndex + 2].id] : [sourceId] } };
+  });
+  for (let i = 0; i < memories.length; i += 200) await source.write(memories.slice(i, i + 200), source.epoch, { notify: false });
+
+  const passphrase = 'test-only-scale-restore-passphrase';
+  const exportStart = performance.now();
+  const backup = await source.export(passphrase);
+  const exportMs = performance.now() - exportStart;
+  const target = await createService(path.join(temp, 'restore-scale-target-vault'), safeStorage).init();
+  const restoreStart = performance.now();
+  const result = await target.restore(backup, passphrase);
+  const restoreMs = performance.now() - restoreStart;
+  assert.equal(result.records, messageCount + memoryCount);
+  const anchor = (await target.db.request('get', { ids: [memories[0].id, messages[0].id, messages[2].id] })).rows;
+  assert.equal(anchor.length, 3);
+  const decoded = new Map(anchor.map(row => [row.id, target.decode(row)]));
+  assert.deepEqual(decoded.get(memories[0].id).value.sources, [messages[0].id, messages[2].id]);
+  assert.equal(decoded.get(messages[0].id).value.role, 'user');
+  assert.equal(decoded.get(messages[2].id).value.role, 'user');
+  assert((await target.search('synthetic oldest anchor restore check', ['memory'], 5)).some(row => row.id === memories[0].id));
+  const sourceCount = (await target.db.request('get', { ids: decoded.get(memories[0].id).value.sources })).rows.length;
+  assert.equal(sourceCount, 2, 'restored oldest fact retains both source records');
+  const stats = await target.stats();
+  assert.equal(stats.counts.message, messageCount);
+  assert.equal(stats.counts.memory, memoryCount);
+  console.log(`[memory-restore-scale] records=${result.records} export_ms=${exportMs.toFixed(1)} restore_ms=${restoreMs.toFixed(1)} sources_ok=${sourceCount}`);
+  await source.close();
+  await target.close();
 }
 
 async function testExportRestorePaginationAndOldTimes(temp, safeStorage) {
@@ -506,12 +759,16 @@ async function main() {
     await testAsyncKeyOpening(temp, safeStorage);
     await testAssistantLineageDeletionAndCorrection(temp, safeStorage);
     await testCorrectionInvalidatesSource(temp, safeStorage);
+    await testReviewedEditAndMoodForget(temp, safeStorage);
     await testOldExtractionCannotResurrectDeletedSource(temp, safeStorage);
     await testExtractionEvidenceAndPeriodicTrigger(temp, safeStorage);
     await testCancelledExtractionDoesNotCommitAndCanRetry(temp, safeStorage);
     await testContextBudgetAndDisabledFallback(temp, safeStorage);
+    await testContextReferences(temp, safeStorage);
     await testAnniversaryIndexAndClearCount(temp, safeStorage);
     await testLegacyUnknownTimeIsNotInvented(temp, safeStorage);
+    await testRestoreTopologyAndRollback(temp, safeStorage);
+    await testRestoreExportScale(temp, safeStorage);
     await testExportRestorePaginationAndOldTimes(temp, safeStorage);
     testLunarDates();
     console.log('MemoryService integration checks passed');

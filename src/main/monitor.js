@@ -30,6 +30,7 @@ const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { StringDecoder } = require('string_decoder');
+const { createHash } = require('crypto');
 
 const SCAN_MS = 1200;          // 读文件增量的频率
 const FULL_SCAN_MS = 6000;     // 全树找"有没有新会话"的频率（这个贵）
@@ -46,8 +47,8 @@ const MAX_SESSIONS = 6;              // 同时跟几个会话（再多也没意�
 const ATTACH_WINDOW_MS = 6 * 3600e3; // 只接 6 小时内动过的会话文件
 const KEEP_DONE_MS = 40 * 60e3;      // 已完成且静了这么久就让它退场，别无限涨
 
-/** 只有「助手自己说这件事没办成」才算失败 —— 不看命令行回显 */
-const FAIL_WORDS = /失败|没能|没能完成|无法完成|做不到|没有成功|还是不行|权限不足|没跑通/;
+/** 只有正文开头明确由助手自述本次任务未完成才算失败；正文里的报错、引用和分析只是内容。 */
+const SELF_FAILURE_OPENING = /^(?:(?:很)?抱歉|对不起)[，,:：\s]*(?:(?:我|我们)(?:这次|本次|目前|仍然)?(?:没能|未能|无法|不能|没法|做不到)(?:完成|办成|交付|解决|处理|执行)|(?:这次|本次|这个|该)(?:任务|工作)(?:我|我们)(?:没能|未能|无法|不能|没法|做不到)(?:完成|办成|交付|解决|处理|执行))|^(?:(?:我|我们)(?:这次|本次|目前|仍然)?(?:没能|未能|无法|不能|没法|做不到)(?:完成|办成|交付|解决|处理|执行)|(?:这次|本次|这个|该)(?:任务|工作)(?:我|我们)(?:没能|未能|无法|不能|没法|做不到)(?:完成|办成|交付|解决|处理|执行))|^I\s+(?:couldn't|could\s+not|was\s+unable\s+to)\s+(?:complete|finish|fulfill)\b/i;
 
 /** 压缩/续接类消息不是主人下的新指令，不能当成新任务 */
 const NOT_A_TASK = /<conversation_history_summary>|<compact-summary>|This session is being continued|Please continue with the conversation based on the summarized context/i;
@@ -112,7 +113,7 @@ function dur(ms) {
 function verdict(status) {
   if (status === 'failed') return '没办成';
   if (status === 'abandoned') return '没下文';
-  return '做完了';
+  return '已给出答复，交付仍需核对';
 }
 
 /** 助手答复是 markdown，念出来/塞给模型之前先洗成人话 */
@@ -341,6 +342,8 @@ class Monitor extends EventEmitter {
       } else if (o.role === 'assistant') {
         const txt = textOf(o.content);
         if (txt && s.task && s.task.status === 'running') {
+          const model = o.providerData?.model || o.model;
+          if (typeof model === 'string') s.task.model = model;
           s.assistantText = txt;
           s.task.summary = txt;
           s.task.candidateAt = ts;
@@ -352,7 +355,11 @@ class Monitor extends EventEmitter {
 
     // 只要又出现思考或工具调用，就说明刚才那段文字只是中间汇报
     if (t === 'reasoning') {
-      if (s.task && s.task.status === 'running') s.task.candidateAt = 0;
+      if (s.task && s.task.status === 'running') {
+        s.task.candidateAt = 0;
+        const model = o.providerData?.model || o.model;
+        if (typeof model === 'string') s.task.model = model;
+      }
       return;
     }
 
@@ -375,6 +382,12 @@ class Monitor extends EventEmitter {
 
   beginTask(txt, ts, s, e) {
     s.task = this.taskBlank(txt, ts);
+    // UI counters are process-local. Delegation needs an identity that survives
+    // reattaching files in a different order or restarting the monitor.
+    s.task.messageKey = createHash('sha256').update(`${s.sessionId || ''}\0${ts}\0${txt}`).digest('hex');
+    // Extract before taskBlank bounds the public userText to 500 characters.
+    const markers = [...txt.matchAll(/\[workbunny:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/g)];
+    if (new Set(markers.map(m => m[1])).size === 1) s.task.bunnyTaskId = markers[0][1];
     s.userText = s.task.userText;
     s.assistantText = '';
     s.phase = 'running';
@@ -397,7 +410,7 @@ class Monitor extends EventEmitter {
     t.status =
       reason === 'abandoned' || (reason === 'superseded' && !t.summary)
         ? 'abandoned'
-        : t.summary && FAIL_WORDS.test(t.summary)
+        : t.summary && SELF_FAILURE_OPENING.test(t.summary.trim())
           ? 'failed'
           : 'ok';
     t.endReason = reason || 'done';
@@ -412,6 +425,11 @@ class Monitor extends EventEmitter {
       durationMs: t.durationMs,
       endedAt: t.endedAt,
       sessionId: s.sessionId,
+      startedAt: t.startedAt,
+      bunnyTaskId: t.bunnyTaskId,
+      model: t.model,
+      endReason: t.endReason,
+      messageKey: t.messageKey,
     });
     if (s.history.length > HISTORY_MAX) s.history.length = HISTORY_MAX;
 

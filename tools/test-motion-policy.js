@@ -21,3 +21,25 @@ test('the real playback gateway and slot resolver replace disabled, empty and mi
  vm.runInContext('toIdle();rotateIdle()',context);
  assert.ok(played.length);assert.ok(played.every(m=>m.key==='idle_breath'&&m.loop===1));
 });
+test('an interaction voice keeps its touch gesture while ordinary speech still returns to neutral',()=>{
+ const renderer=fs.readFileSync(path.join(__dirname,'../src/renderer/app.js'),'utf8');
+ const main=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');
+ assert.match(main,/send\('speaking',\s*\{\s*on:\s*true,\s*text:\s*item\.text,\s*interaction:\s*item\.interaction === true\s*\}\)/,
+  'the speech-start event carries only the interaction speech flag');
+ const start=renderer.indexOf("case 'speaking':"),end=renderer.indexOf("case 'audio':",start);
+ assert(start>=0&&end>start,'the real speaking event branch exists');
+ const branch=renderer.slice(start,end);
+ const idles=[];
+ const context={speakingNow:false,thinkingNow:false,shownHeard:false,shownState:'',ambientTimer:0,currentMotion:'touch_greet',IDLE:'idle_loop',
+  toIdle:fade=>idles.push(fade),paintEar(){},clearHeardLater(){}};
+ vm.createContext(context);
+ vm.runInContext(`function handleSpeaking(ev){switch(ev.type){${branch}default:break;}}`,context);
+ context.handleSpeaking({type:'speaking',on:true,interaction:true});
+ assert.equal(context.speakingNow,true);
+ assert.deepEqual(idles,[],'interaction speech does not replace its active gesture');
+ context.handleSpeaking({type:'speaking',on:false,interaction:true});
+ assert.equal(context.speakingNow,false,'speech completion updates state without changing the action');
+ context.currentMotion='think_pose';
+ context.handleSpeaking({type:'speaking',on:true,interaction:false});
+ assert.deepEqual(idles,[0.45],'ordinary speech retains the existing neutral-pose transition');
+});

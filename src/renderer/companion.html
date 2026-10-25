@@ -14,6 +14,10 @@
       <span id="memoryStatus" class="status-pill">正在读取</span>
     </header>
     <section class="main memory-main">
+      <details id="currentRecallCard" class="card recall-card" hidden>
+        <summary id="currentRecallTitle">本轮想起</summary>
+        <div id="currentRecallList" class="recall-list"></div>
+      </details>
       <div class="card settings-card">
         <button id="memoryUnlock" class="button quiet" hidden>解锁记忆</button>
         <div class="setting-row"><div><strong>使用记忆</strong><p>保存聊天，并在对话中参考记忆</p></div><label class="switch"><input id="memoryEnabled" type="checkbox"><span></span></label></div>
@@ -49,7 +53,30 @@
       <span id="desktopStatus" class="status-pill">尚未读取</span>
     </header>
     <section class="main desktop-main">
-      <div class="card task-card">
+      <div id="taskStateCard" class="card task-state-card">
+        <div class="section-heading"><div><h2>Bunny 当前操作</h2><p id="taskStateNote">没有进行中的代理操作</p></div></div>
+        <p id="taskPauseNote" class="inline-note task-pause-note" hidden></p>
+        <div id="taskMeta" class="task-detail task-meta" hidden></div>
+        <p id="taskSummary" class="task-summary" hidden></p>
+        <details id="taskEvidenceDetails" class="task-evidence">
+          <summary>任务与核对依据</summary>
+          <div id="taskDetails" class="task-details"></div>
+        </details>
+        <details id="taskPreview" class="task-preview-details" hidden>
+          <summary>查看任务截图</summary>
+          <figure class="preview"><img id="taskScreenshot" alt="最近一次任务截图"><figcaption>最近任务截图</figcaption></figure>
+        </details>
+      </div>
+
+      <div id="workbuddyMonitorCard" class="card monitor-card">
+        <div class="section-heading"><div><h2>WorkBuddy 实际进度</h2><p>来自现有会话监视</p></div></div>
+        <div id="workbuddyMonitorTasks" class="task-details"></div>
+      </div>
+
+      <details id="taskFormDetails" class="card task-card">
+        <summary>手动交代（备用）</summary>
+        <div class="task-form">
+        <p class="desktop-intro">你可以直接告诉 Bunny 要办什么。</p>
         <label class="field-label" for="taskTarget">代理对象</label>
         <select id="taskTarget">
           <option value="workbuddy">工作代理 · WorkBuddy</option>
@@ -66,25 +93,20 @@
         </div>
         <label id="taskGoalLabel" class="field-label" for="taskGoal">交给 WorkBuddy 的任务</label>
         <textarea id="taskGoal" rows="3" maxlength="1200" placeholder="写下要原文交给 WorkBuddy 的任务"></textarea>
+        <label id="taskCriteriaLabel" class="field-label" for="taskCriteria">验收条件</label>
+        <textarea id="taskCriteria" rows="2" maxlength="1200" placeholder="写下如何确认结果；例如：WorkBuddy 中可见交付回复"></textarea>
         <div class="button-row"><button id="desktopRefresh" class="button quiet">刷新状态</button><button id="workbuddyOpen" class="button quiet">查看 WorkBuddy</button></div>
-      </div>
+        </div>
+      </details>
 
-      <div class="card permissions-card">
+      <details id="permissionsDetails" class="card permissions-card">
+        <summary>系统权限</summary>
+        <div class="permissions-content">
         <div class="section-heading"><div><h2>系统权限</h2><p>权限需要在系统设置中授权。</p></div><button id="desktopPermission" class="button quiet">请求权限</button></div>
         <div id="permissionList" class="permission-list"></div>
         <p id="permissionNote" class="inline-note"></p>
-      </div>
-
-      <div class="card task-state-card">
-        <div class="section-heading"><div><h2>Bunny 当前操作</h2><p id="taskStateNote">没有进行中的代理操作</p></div></div>
-        <div id="taskDetails" class="task-details"></div>
-        <figure id="taskPreview" class="preview" hidden><img id="taskScreenshot" alt="最近一次任务截图"><figcaption>最近任务截图</figcaption></figure>
-      </div>
-
-      <div id="workbuddyMonitorCard" class="card monitor-card">
-        <div class="section-heading"><div><h2>WorkBuddy 实际进度</h2><p>来自现有会话监视</p></div></div>
-        <div id="workbuddyMonitorTasks" class="task-details"></div>
-      </div>
+        </div>
+      </details>
 
       <details class="card insert-card"><summary>输入辅助</summary>
         <p class="inline-note">点击后有 3 秒切换输入焦点。</p>
@@ -93,7 +115,7 @@
       </details>
       <p class="safety-note">截图只会随任务发送给所选模型，不会常驻截屏。</p>
     </section>
-    <footer class="sticky-actions"><div class="sticky-button-row"><button id="taskStart" class="button primary">发送给 WorkBuddy</button><button id="taskStop" class="button danger" disabled>暂停代理操作</button><button id="taskAccept" class="button quiet" disabled>确认结果</button></div><span id="desktopActionNote" class="inline-note" role="status"></span></footer>
+    <footer id="desktopActions" class="sticky-actions" hidden><div class="sticky-button-row"><button id="taskStart" class="button primary" hidden>发送给 WorkBuddy</button><button id="taskResume" class="button primary" hidden>继续处理</button><button id="taskStop" class="button danger" disabled hidden>暂停代理操作</button><button id="taskAccept" class="button quiet" disabled hidden>确认结果</button></div><span id="desktopActionNote" class="inline-note" role="status"></span></footer>
   </main>
 
   <footer id="pageError" class="global-note" role="status" hidden></footer>

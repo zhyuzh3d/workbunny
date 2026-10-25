@@ -94,6 +94,20 @@ html, body {
   to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
 #bubbleText { white-space: pre-wrap; }
+.memory-basis {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 7px;
+  padding: 4px 8px;
+  border: 1px solid rgba(35, 38, 43, .18);
+  border-radius: 99px;
+  background: #f1eee8;
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.2;
+}
+.memory-basis:hover { background: #e3dfd7; color: var(--ink); }
+.memory-basis.hidden { display: none; }
 #bubbleTail {
   position: absolute;
   left: 50%;
@@ -178,6 +192,8 @@ html, body {
   backdrop-filter: blur(10px);
 }
 #activity.hidden { display: none; }
+#activity.desktop-openable { cursor: pointer; }
+#activity.desktop-openable:hover { border-color: rgba(60, 70, 80, .28); }
 #activityText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #activity .dot {
   width: 7px; height: 7px; border-radius: 50%;
