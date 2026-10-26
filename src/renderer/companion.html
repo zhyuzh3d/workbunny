@@ -20,12 +20,38 @@
       </details>
       <div class="card settings-card">
         <button id="memoryUnlock" class="button quiet" hidden>解锁记忆</button>
+        <div class="scene-settings">
+          <div class="scene-row">
+            <label class="field-label" for="memoryScene">当前场景</label>
+            <select id="memoryScene" aria-label="当前场景">
+              <option value="private">私聊</option>
+              <option value="life">生活</option>
+              <option value="work">工作</option>
+            </select>
+          </div>
+          <p id="memorySceneScope" class="inline-note" aria-live="polite">生活：可按需参考生活与工作资料</p>
+          <label class="field-label" for="sceneProfile">当前场景补充设定</label>
+          <textarea id="sceneProfile" rows="2" maxlength="2000" placeholder="写下此场景希望补充的交流方式"></textarea>
+          <p class="inline-note scene-profile-hint">这是同一个 Bunny 的场景补充，不会替换共通角色设定。场景只控制可参考资料，不改变操作授权。</p>
+          <div class="button-row scene-profile-actions"><button id="sceneProfileSave" class="button quiet">保存本场景设定</button><span id="sceneProfileNote" class="inline-note" role="status"></span></div>
+        </div>
         <div class="setting-row"><div><strong>使用记忆</strong><p>保存聊天，并在对话中参考记忆</p></div><label class="switch"><input id="memoryEnabled" type="checkbox"><span></span></label></div>
         <div class="setting-row"><div><strong>整理新记忆</strong><p>空闲时将近期对话交给 WorkBuddy 免费模型整理</p></div><label class="switch"><input id="memoryExtract" type="checkbox"><span></span></label></div>
         <div id="memoryConfigNote" class="inline-note" role="status"></div>
       </div>
 
       <div class="count-grid" id="memoryCounts"></div>
+
+      <section class="card context-card" aria-labelledby="contextHeading">
+        <div class="section-heading"><div><h2 id="contextHeading">对话衔接</h2><p id="contextStatus" role="status">正在读取当前场景…</p></div></div>
+        <p class="inline-note">最近 8 轮保留原文，更早对话逐段压缩。私聊、生活、工作各自保存压缩版本；原始记录仍可检索。</p>
+      </section>
+
+      <section class="card maintenance-card" aria-labelledby="maintenanceHeading">
+        <div class="section-heading"><div><h2 id="maintenanceHeading">整理记忆</h2><p id="maintenanceStatus" role="status">正在读取整理状态…</p></div></div>
+        <p class="inline-note maintenance-scope">小憩吸收新增对话并更新场景压缩；整理记忆会分批轮查更早的记忆，只归档完全重复项，保留重要信息。</p>
+        <div class="button-row"><button id="maintenanceDoze" class="button quiet">小憩</button><button id="maintenanceDream" class="button quiet">整理记忆</button></div>
+      </section>
 
       <div class="tabs" id="memoryTabs" role="tablist" aria-label="记忆内容">
         <button class="tab active" data-kind="memory" role="tab">长期记忆</button>

@@ -20,7 +20,8 @@ class WeChatObserver {
     const changedWindow = w.windowId !== undefined && w.windowId !== window.windowId;
     w.windowId = window.windowId;
     const payload = { sampleId: w.id, windowId: window.windowId, expected: { bundleId: BUNDLE, pid: window.pid },
-      regions: [{ x: 0.065, y: 0.08, width: 0.30, height: 0.89 }, { x: 0.32, y: 0.02, width: 0.66, height: 0.84 }],
+      regions: [{ x: 0.065, y: 0.08, width: 0.30, height: 0.89, minChangedPixels: 3, minChangedRatio: 0 },
+        { x: 0.32, y: 0.02, width: 0.66, height: 0.84, minChangedPixels: 0, minChangedRatio: 0.0015 }],
       reset: reset || changedWindow, pixelThreshold: 20, minChangedRatio: 0.0015, includeImage: true };
     let first = await this.native.request('visualSample', payload, 12000);
     if (signal?.aborted) throw new Error('关注已暂停');
@@ -28,8 +29,16 @@ class WeChatObserver {
       await pause(450);
       const second = await this.native.request('visualSample', { ...payload, reset: false }, 12000);
       if (signal?.aborted) throw new Error('关注已暂停');
-      const stable = Array.isArray(first.regions) && first.regions.length > 0 && Array.isArray(second.regions) &&
+      const comparable = Array.isArray(first.regions) && first.regions.length > 0 && Array.isArray(second.regions) &&
         second.regions.length === first.regions.length && second.regions.every((r, i) => Number.isFinite(r.ratio) && Number.isFinite(first.regions[i].ratio) && Number.isFinite(r.sinceLastRatio) && r.sinceLastRatio <= 0.003);
+      const stable = comparable && first.regions.some((candidate, i) => {
+        const current = second.regions[i];
+        const minPixels = Number.isFinite(candidate.minChangedPixels) ? candidate.minChangedPixels : 0;
+        const minRatio = Number.isFinite(candidate.minChangedRatio) ? candidate.minChangedRatio : 0.0015;
+        return candidate.changedPixels > 0 && candidate.changedPixels >= minPixels && candidate.ratio >= minRatio &&
+          Number.isFinite(current.stableChangedPixels) && Number.isFinite(current.stableRatio) &&
+          current.stableChangedPixels >= minPixels && current.stableRatio >= minRatio;
+      });
       if (!stable) return { changed: false, unstable: true };
       first = second;
     }

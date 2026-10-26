@@ -25,7 +25,8 @@ class FakeDesktop {
   async start(options) {
     this.startCalls.push(options); this.starting = true; this.running = true;
     const id = `task-${this.startCalls.length}`;
-    this.task = { id, ...options, status: 'running', startedAt: Date.now(), updatedAt: Date.now(), steps: [] };
+    this.task = { id, ...options, domain: options.domain || (options.target === 'workbuddy' ? 'work' : options.scene || 'life'),
+      status: 'running', startedAt: Date.now(), updatedAt: Date.now(), steps: [] };
     this.starting = false;
     return { ok: true, id };
   }
@@ -97,6 +98,7 @@ async function testIndependentPassAcceptsAndReportsOnce() {
   assert.equal(desktop.task.status, 'accepted');
   assert.equal(reports.length, 1);
   assert.match(reports[0].text, /WorkBuddy 回复列出文件与验证结果/);
+  assert.deepEqual([reports[0].scene, reports[0].domain, reports[0].visibilityFloor], ['life', 'work', 1]);
   secretary.onStatus({ task: { ...desktop.task, status: 'review' } });
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(desktop.acceptCalls.length, 1);
@@ -231,7 +233,7 @@ async function testPausedAndFailedTasksAreReported() {
 
 async function testExplicitResumePreservesTaskAndPrivacy() {
   const desktop = new FakeDesktop(), reports = [];
-  const original = { id: 'old-task', origin: 'dialogue', status: 'paused', goal: '原任务',
+  const original = { id: 'old-task', origin: 'dialogue', status: 'paused', goal: '原任务', scene: 'life', domain: 'work', visibilityFloor: 1,
     userRequest: '原始用户交代', privacyEpoch: 3, sources: ['original-user'], steps: [], reportedAt: 1 };
   desktop.task = original;
   let resumed = 0;
@@ -262,6 +264,28 @@ async function testExplicitResumePreservesTaskAndPrivacy() {
   assert.match(refused.text, /记忆来源已变更/);
   assert.equal(resumed, 1, 'changed privacy epochs cannot replay old tasks');
   stale.close();
+}
+
+async function testSceneHidesAndBlocksResumeOfHigherFloorTask() {
+  const desktop = new FakeDesktop(), reports = [];
+  let resumed = 0, scene = 'work';
+  const hidden = { id: 'private-work', origin: 'dialogue', status: 'paused', goal: 'private-source work task',
+    scene: 'private', domain: 'work', visibilityFloor: 2, privacyEpoch: 3, sources: [], steps: [] };
+  desktop.task = hidden;
+  desktop.resume = async () => { resumed++; return { ok: true, id: hidden.id }; };
+  const secretary = new Secretary({ desktop, getScene: () => scene, epoch: () => 3, report: async item => reports.push(item) });
+  assert(!secretary.context().includes('private-source work task'), 'lower-scene context omits private WorkBuddy task details');
+  const refused = await secretary.dispatch({ action: 'resume' }, { requestId: 'hidden-resume', userText: '继续那项工作' });
+  assert.match(refused.text, /当前场景可见/u);
+  assert.equal(resumed, 0, 'hidden tasks are never resumed by a voice/text control');
+  secretary.taskEpochs.set(hidden.id, 3);
+  hidden.status = 'paused'; hidden.reportedAt = null;
+  secretary.onStatus({ task: { ...hidden } });
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(reports.length, 0, 'a hidden task cannot publish a report in a lower scene');
+  scene = 'private';
+  assert(secretary.context().includes('private-source work task'), 'the task is visible again in its allowed scene');
+  secretary.close();
 }
 
 async function testReviewDoesNotSpinOrLeaveFailedAcceptanceRunning() {
@@ -301,6 +325,7 @@ async function main() {
   await testInternalAndRestartedTasksAreNotReplayed();
   await testPausedAndFailedTasksAreReported();
   await testExplicitResumePreservesTaskAndPrivacy();
+  await testSceneHidesAndBlocksResumeOfHigherFloorTask();
   await testReviewDoesNotSpinOrLeaveFailedAcceptanceRunning();
   console.log('Secretary lifecycle checks passed');
 }

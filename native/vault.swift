@@ -119,6 +119,7 @@ if CommandLine.arguments.dropFirst().first == "--verify-key-parent" {
 
 final class DB {
     var db: OpaquePointer?
+    var restoring = false
     init(path: String) throws {
         let url = URL(fileURLWithPath: path).standardizedFileURL
         let dir = url.deletingLastPathComponent()
@@ -131,18 +132,24 @@ final class DB {
         let chmodRC = url.path.withCString { chmod($0, 0o600) }
         guard chmodRC == 0 else { throw fail("database_permissions_failed") }
         let version = try scalarInt("PRAGMA user_version")
-        guard version <= 1 else { throw fail("database_version_newer") }
+        guard version <= 3 else { throw fail("database_version_newer") }
         if version == 0 {
             try exec("""
                 BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS records(
                   id TEXT PRIMARY KEY, kind TEXT NOT NULL, ts INTEGER NOT NULL,
                   updatedAt INTEGER NOT NULL, state TEXT NOT NULL,
-                  expiresAt INTEGER, body TEXT NOT NULL
+                  expiresAt INTEGER, body TEXT NOT NULL,
+                  domain TEXT NOT NULL DEFAULT 'private' CHECK(domain IN ('work','life','private')),
+                  visibilityFloor INTEGER NOT NULL DEFAULT 2 CHECK(visibilityFloor BETWEEN 0 AND 2),
+                  ingestionSeq INTEGER NOT NULL UNIQUE
                 );
                 CREATE INDEX IF NOT EXISTS records_kind_state_ts_id_idx ON records(kind,state,ts DESC,id DESC);
                 CREATE INDEX IF NOT EXISTS records_state_ts_id_idx ON records(state,ts DESC,id DESC);
                 CREATE INDEX IF NOT EXISTS records_ts_id_idx ON records(ts DESC,id DESC);
+                CREATE INDEX IF NOT EXISTS records_floor_kind_state_ts_id_idx ON records(visibilityFloor,kind,state,ts DESC,id DESC);
+                CREATE INDEX IF NOT EXISTS records_domain_floor_ts_id_idx ON records(domain,visibilityFloor,ts,id);
+                CREATE INDEX IF NOT EXISTS records_domain_floor_ingestion_idx ON records(domain,visibilityFloor,ingestionSeq);
                 CREATE TABLE IF NOT EXISTS tokens(
                   recordId TEXT NOT NULL REFERENCES records(id) ON DELETE CASCADE,
                   token TEXT NOT NULL, PRIMARY KEY(recordId, token)
@@ -156,11 +163,42 @@ final class DB {
                 CREATE INDEX IF NOT EXISTS links_derived_idx ON links(derivedId);
                 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
                 INSERT OR IGNORE INTO meta(key,value) VALUES('epoch',0);
-                PRAGMA user_version=1;
+                INSERT OR IGNORE INTO meta(key,value) VALUES('ingestion_seq',0);
+                PRAGMA user_version=3;
                 COMMIT;
                 """)
         } else {
-            try exec("CREATE INDEX IF NOT EXISTS records_kind_state_ts_id_idx ON records(kind,state,ts DESC,id DESC); CREATE INDEX IF NOT EXISTS records_state_ts_id_idx ON records(state,ts DESC,id DESC); CREATE INDEX IF NOT EXISTS records_ts_id_idx ON records(ts DESC,id DESC); CREATE INDEX IF NOT EXISTS tokens_token_idx ON tokens(token); CREATE INDEX IF NOT EXISTS links_derived_idx ON links(derivedId);")
+            if version == 1 {
+                // Existing rows contain no trustworthy scope metadata. The
+                // conservative migration therefore makes every legacy row
+                // private and visible only in private mode.
+                try exec("BEGIN IMMEDIATE; ALTER TABLE records ADD COLUMN domain TEXT NOT NULL DEFAULT 'private' CHECK(domain IN ('work','life','private')); ALTER TABLE records ADD COLUMN visibilityFloor INTEGER NOT NULL DEFAULT 2 CHECK(visibilityFloor BETWEEN 0 AND 2); PRAGMA user_version=2; COMMIT;")
+            }
+            let currentVersion = try scalarInt("PRAGMA user_version")
+            if currentVersion == 2 {
+                // A stable, monotonic ingestion sequence supports maintenance
+                // watermarks even when timestamps repeat or the clock moves
+                // backwards. Legacy rows receive a deterministic sequence.
+                try withTransaction {
+                    try exec("ALTER TABLE records ADD COLUMN ingestionSeq INTEGER NOT NULL DEFAULT 0")
+                    let select = try statement("SELECT id FROM records ORDER BY ts ASC,id ASC")
+                    var ordered: [String] = []
+                    while true { let rc = sqlite3_step(select); if rc == SQLITE_DONE { break }; guard rc == SQLITE_ROW else { sqlite3_finalize(select); throw fail("database_operation_failed") }; ordered.append(columnText(select,0)) }
+                    sqlite3_finalize(select)
+                    var sequence: Int64 = 0
+                    for id in ordered {
+                        sequence += 1
+                        let update = try statement("UPDATE records SET ingestionSeq=? WHERE id=?")
+                        bind(update,1,sequence); bind(update,2,id)
+                        guard sqlite3_step(update) == SQLITE_DONE else { sqlite3_finalize(update); throw fail("database_operation_failed") }
+                        sqlite3_finalize(update)
+                    }
+                    try exec("INSERT OR REPLACE INTO meta(key,value) VALUES('ingestion_seq',\(sequence)); CREATE UNIQUE INDEX IF NOT EXISTS records_ingestion_seq_idx ON records(ingestionSeq); CREATE INDEX IF NOT EXISTS records_domain_floor_ingestion_idx ON records(domain,visibilityFloor,ingestionSeq); PRAGMA user_version=3")
+                }
+            } else {
+                try exec("INSERT OR IGNORE INTO meta(key,value) VALUES('ingestion_seq',0); CREATE UNIQUE INDEX IF NOT EXISTS records_ingestion_seq_idx ON records(ingestionSeq); CREATE INDEX IF NOT EXISTS records_domain_floor_ingestion_idx ON records(domain,visibilityFloor,ingestionSeq)")
+            }
+            try exec("CREATE INDEX IF NOT EXISTS records_kind_state_ts_id_idx ON records(kind,state,ts DESC,id DESC); CREATE INDEX IF NOT EXISTS records_state_ts_id_idx ON records(state,ts DESC,id DESC); CREATE INDEX IF NOT EXISTS records_ts_id_idx ON records(ts DESC,id DESC); CREATE INDEX IF NOT EXISTS records_floor_kind_state_ts_id_idx ON records(visibilityFloor,kind,state,ts DESC,id DESC); CREATE INDEX IF NOT EXISTS records_domain_floor_ts_id_idx ON records(domain,visibilityFloor,ts,id); CREATE INDEX IF NOT EXISTS tokens_token_idx ON tokens(token); CREATE INDEX IF NOT EXISTS links_derived_idx ON links(derivedId);")
         }
     }
     deinit { if let db { sqlite3_close_v2(db) } }
@@ -183,6 +221,27 @@ final class DB {
     func bind(_ s: OpaquePointer, _ index: Int32, _ value: Int64) { sqlite3_bind_int64(s, index, value) }
     func columnText(_ s: OpaquePointer, _ n: Int32) -> String { sqlite3_column_text(s, n).map { String(cString: $0) } ?? "" }
     func epoch() throws -> Int64 { try scalarInt("SELECT value FROM meta WHERE key='epoch'") }
+    func nextIngestionSeq() throws -> Int64 {
+        try exec("UPDATE meta SET value=value+1 WHERE key='ingestion_seq'")
+        return try scalarInt("SELECT value FROM meta WHERE key='ingestion_seq'")
+    }
+    func existingIngestionSeq(_ id: String) throws -> Int64? {
+        let s = try statement("SELECT ingestionSeq FROM records WHERE id=?")
+        defer { sqlite3_finalize(s) }; bind(s,1,id)
+        guard sqlite3_step(s) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(s,0)
+    }
+    func safeSequence(_ value: Any?) -> Int64? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let value = number.doubleValue
+        guard value.isFinite, value.rounded(.towardZero) == value, value >= 1, value <= 9_007_199_254_740_991 else { return nil }
+        return number.int64Value
+    }
+    func advanceIngestionCounter(to sequence: Int64) throws {
+        let s = try statement("UPDATE meta SET value=MAX(value,?) WHERE key='ingestion_seq'")
+        defer { sqlite3_finalize(s) }; bind(s,1,sequence)
+        guard sqlite3_step(s) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw fail("database_operation_failed") }
+    }
     func advanceEpoch() throws -> Int64 { try exec("UPDATE meta SET value=value+1 WHERE key='epoch'"); return try epoch() }
     func exists(_ id: String) throws -> Bool {
         let s=try statement("SELECT 1 FROM records WHERE id=? LIMIT 1"); defer{sqlite3_finalize(s)}
@@ -192,8 +251,35 @@ final class DB {
         let s=try statement("WITH RECURSIVE reachable(id) AS (SELECT ? UNION SELECT links.derivedId FROM links JOIN reachable ON links.sourceId=reachable.id) SELECT 1 FROM reachable WHERE id=? LIMIT 1")
         defer{sqlite3_finalize(s)}; bind(s,1,derived); bind(s,2,source); return sqlite3_step(s)==SQLITE_ROW
     }
+    func sceneFloor(_ scene: String) -> Int64? {
+        switch scene { case "work": return 0; case "life": return 1; case "private": return 2; default: return nil }
+    }
+    func requestedSceneFloor(_ p: [String: Any]) throws -> Int64? {
+        guard let raw = p["scene"] else { return nil }
+        if raw is NSNull { return nil } // Explicit maintenance-only, unfiltered access.
+        guard let scene = raw as? String, let floor = sceneFloor(scene) else { throw fail("invalid_request") }
+        return floor
+    }
+    func domainFloor(_ domain: String) -> Int64? {
+        switch domain { case "work": return 0; case "life": return 1; case "private": return 2; default: return nil }
+    }
+    func directDependentsMeetFloor(id: String, floor: Int64, stagedFloors: [String: Int64]) throws -> Bool {
+        // Validate the final transaction view, allowing a parent and all of
+        // its children to be raised together without exposing a lower-floor
+        // edge during commit.
+        let q = try statement("SELECT records.id,records.visibilityFloor FROM links JOIN records ON records.id=links.derivedId WHERE links.sourceId=?")
+        defer { sqlite3_finalize(q) }; bind(q,1,id)
+        while true {
+            let rc = sqlite3_step(q)
+            if rc == SQLITE_DONE { return true }
+            guard rc == SQLITE_ROW else { throw fail("database_operation_failed") }
+            let childID = columnText(q,0)
+            let childFloor = stagedFloors[childID] ?? sqlite3_column_int64(q,1)
+            if childFloor < floor { return false }
+        }
+    }
     func row(_ s: OpaquePointer) -> [String: Any] {
-        var out: [String: Any] = ["id": columnText(s,0), "kind": columnText(s,1), "ts": sqlite3_column_int64(s,2), "updatedAt": sqlite3_column_int64(s,3), "state": columnText(s,4), "body": columnText(s,6)]
+        var out: [String: Any] = ["id": columnText(s,0), "kind": columnText(s,1), "ts": sqlite3_column_int64(s,2), "updatedAt": sqlite3_column_int64(s,3), "state": columnText(s,4), "body": columnText(s,6), "domain": columnText(s,7), "visibilityFloor": sqlite3_column_int64(s,8), "ingestionSeq": sqlite3_column_int64(s,9)]
         if sqlite3_column_type(s,5) != SQLITE_NULL { out["expiresAt"] = sqlite3_column_int64(s,5) }
         return out
     }
@@ -219,40 +305,104 @@ final class DB {
         return number.int64Value
     }
     func text(_ v: Any?) -> String? { v as? String }
+    func validSourceID(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 256 &&
+          value == value.trimmingCharacters(in: .whitespacesAndNewlines) &&
+          value.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
+    }
     func request(_ op: String, _ p: [String: Any]) throws -> [String: Any] {
         switch op {
+        case "begin_restore":
+            guard !restoring, try scalarInt("SELECT COUNT(*) FROM records") == 0 else { throw fail("restore_requires_empty_database") }
+            restoring = true
+            return ["restoring": true]
+        case "end_restore":
+            restoring = false
+            return ["restoring": false]
         case "stats":
             var counts: [String: Int] = ["total": 0]
-            let s = try statement("SELECT kind,COUNT(*) FROM records GROUP BY kind"); defer { sqlite3_finalize(s) }
+            let scopeFloor=try requestedSceneFloor(p)
+            let state: String
+            if let raw=p["state"] { guard let value=text(raw), ["all","active"].contains(value) else { throw fail("invalid_request") }; state=value }
+            else { state="all" }
+            var sql="SELECT kind,COUNT(*) FROM records"
+            var filters:[String]=[], binds:[(String?,Int64?)]=[]
+            if let scopeFloor { filters.append("visibilityFloor<=?"); binds.append((nil,scopeFloor)) }
+            if state == "active" { filters.append("state='active'") }
+            if !filters.isEmpty { sql += " WHERE " + filters.joined(separator:" AND ") }
+            sql += " GROUP BY kind"
+            let s = try statement(sql)
+            defer { sqlite3_finalize(s) }
+            for (i,value) in binds.enumerated() { if let text=value.0 { bind(s,Int32(i+1),text) } else if let number=value.1 { bind(s,Int32(i+1),number) } }
             while sqlite3_step(s) == SQLITE_ROW { let kind = columnText(s,0); let count = Int(sqlite3_column_int64(s,1)); counts[kind] = count; counts["total", default: 0] += count }
             return ["epoch": try epoch(), "counts": counts]
         case "write":
             guard let expected = int(p["epoch"]), let records = p["records"] as? [[String: Any]], records.count <= 200 else { throw fail("invalid_request") }
+            let restoreSequence = (p["restoreSequence"] as? Bool) == true
+            guard restoreSequence == restoring else { throw fail("invalid_request") }
             return try withTransaction {
                 guard try epoch() == expected else { throw fail("stale_epoch") }
+                var stagedSequences = Set<Int64>()
+                var stagedIDs = Set<String>()
                 for r in records {
                     guard let id=text(r["id"]), let sources=r["sources"] as? [String], sources.count <= 200 else { throw fail("invalid_record") }
                     for source in Set(sources) { guard !source.isEmpty, source.utf8.count <= 256, source != id, try exists(source) else { throw fail("invalid_source") } }
+                    if restoreSequence {
+                        guard stagedIDs.insert(id).inserted, let sequence = safeSequence(r["ingestionSeq"]), stagedSequences.insert(sequence).inserted,
+                              try existingIngestionSeq(id) == nil else { throw fail("invalid_record") }
+                    } else if r["ingestionSeq"] != nil { throw fail("invalid_record") }
                 }
+                let stagedFloors = Dictionary(records.compactMap { r -> (String, Int64)? in
+                    guard let id = text(r["id"]) else { return nil }
+                    let floor = int(r["visibilityFloor"]) ?? 2
+                    return (id, floor)
+                }, uniquingKeysWith: { _, latest in latest })
                 for r in records {
                     guard let id=text(r["id"]), !id.isEmpty, id.utf8.count <= 256,
                           let kind=text(r["kind"]), ["message","memory","summary","state","task","persona"].contains(kind),
                           let ts=int(r["ts"]), (0...4_102_444_800_000).contains(ts),
                           let updated=int(r["updatedAt"]), (0...4_102_444_800_000).contains(updated),
-                          let state=text(r["state"]), ["active","superseded"].contains(state),
+                          let state=text(r["state"]), ["active","superseded","archived"].contains(state),
                           let body=text(r["body"]), body.utf8.count <= 2 * 1024 * 1024,
                           let tokens=r["tokens"] as? [String], tokens.count <= 512,
-                          let sources=r["sources"] as? [String], sources.count <= 200 else { throw fail("invalid_record") }
+                          let sources=r["sources"] as? [String], sources.count <= 200,
+                          let domain=text(r["domain"]) ?? (r["domain"] == nil ? "private" : nil),
+                          let domainMin=domainFloor(domain),
+                          let floor = r["visibilityFloor"] == nil ? Int64(2) : int(r["visibilityFloor"]),
+                          (0...2).contains(floor), floor >= domainMin else { throw fail("invalid_record") }
                     let expiry=int(r["expiresAt"])
                     if let rawExpiry=r["expiresAt"], !(rawExpiry is NSNull), (expiry == nil || !(0...4_102_444_800_000).contains(expiry!)) { throw fail("invalid_record") }
                     for token in tokens { guard !token.isEmpty, token.utf8.count <= 256 else { throw fail("invalid_record") } }
                     for source in Set(sources) {
                         guard source != id else { throw fail("invalid_source") }
+                        let sourceFloor: Int64
+                        if let staged = stagedFloors[source] { sourceFloor = staged }
+                        else {
+                            let parent = try statement("SELECT visibilityFloor FROM records WHERE id=?")
+                            defer { sqlite3_finalize(parent) }; bind(parent,1,source)
+                            guard sqlite3_step(parent) == SQLITE_ROW else { throw fail("invalid_source") }
+                            sourceFloor = sqlite3_column_int64(parent,0)
+                        }
+                        guard floor >= sourceFloor else { throw fail("invalid_source") }
                     }
-                    let s=try statement("INSERT INTO records(id,kind,ts,updatedAt,state,expiresAt,body) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,ts=excluded.ts,updatedAt=excluded.updatedAt,state=excluded.state,expiresAt=excluded.expiresAt,body=excluded.body"); defer { sqlite3_finalize(s) }
+                    guard try directDependentsMeetFloor(id:id,floor:floor,stagedFloors:stagedFloors) else { throw fail("invalid_source") }
+                    let ingestionSeq: Int64
+                    if restoreSequence {
+                        guard let supplied = safeSequence(r["ingestionSeq"]) else { throw fail("invalid_record") }
+                        ingestionSeq = supplied
+                    } else {
+                        if let existing = try existingIngestionSeq(id) { ingestionSeq = existing }
+                        else {
+                            let next = try nextIngestionSeq()
+                            guard next <= 9_007_199_254_740_991 else { throw fail("sequence_exhausted") }
+                            ingestionSeq = next
+                        }
+                    }
+                    let s=try statement("INSERT INTO records(id,kind,ts,updatedAt,state,expiresAt,body,domain,visibilityFloor,ingestionSeq) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,ts=excluded.ts,updatedAt=excluded.updatedAt,state=excluded.state,expiresAt=excluded.expiresAt,body=excluded.body,domain=excluded.domain,visibilityFloor=excluded.visibilityFloor"); defer { sqlite3_finalize(s) }
                     bind(s,1,id); bind(s,2,kind); bind(s,3,ts); bind(s,4,updated); bind(s,5,state)
                     if let expiry { sqlite3_bind_int64(s,6,expiry) } else { sqlite3_bind_null(s,6) }
-                    bind(s,7,body); guard sqlite3_step(s)==SQLITE_DONE else { throw fail("invalid_record") }
+                    bind(s,7,body); bind(s,8,domain); bind(s,9,floor); bind(s,10,ingestionSeq); guard sqlite3_step(s)==SQLITE_DONE else { throw fail("invalid_record") }
+                    if restoreSequence { try advanceIngestionCounter(to: ingestionSeq) }
                     let del=try statement("DELETE FROM tokens WHERE recordId=?"); bind(del,1,id); _=sqlite3_step(del); sqlite3_finalize(del)
                     let unlink=try statement("DELETE FROM links WHERE derivedId=?"); bind(unlink,1,id); _=sqlite3_step(unlink); sqlite3_finalize(unlink)
                     for token in Set(tokens) { let q=try statement("INSERT INTO tokens(recordId,token) VALUES(?,?)"); bind(q,1,id); bind(q,2,token); guard sqlite3_step(q)==SQLITE_DONE else { sqlite3_finalize(q); throw fail("invalid_record") }; sqlite3_finalize(q) }
@@ -264,36 +414,93 @@ final class DB {
                 return ["epoch": try epoch(), "written": records.count]
             }
         case "query":
-            let limit=min(200,max(1,Int(int(p["limit"]) ?? 50))), state=text(p["state"]) ?? "active"
-            var sql="SELECT id,kind,ts,updatedAt,state,expiresAt,body FROM records WHERE 1=1"; var binds:[(String?,Int64?)]=[]
+            let rawLimit: Int64
+            if let raw = p["limit"] { guard let value=int(raw) else { throw fail("invalid_request") }; rawLimit=value }
+            else { rawLimit=50 }
+            let limit=min(200,max(1,Int(rawLimit)))
+            let state: String
+            if let raw = p["state"] { guard let value=text(raw), ["all","active","superseded","archived"].contains(value) else { throw fail("invalid_request") }; state=value }
+            else { state="active" }
+            let sort: String
+            if let raw=p["sort"] { guard let value=text(raw), ["time","ingestion"].contains(value) else { throw fail("invalid_request") }; sort=value } else { sort="time" }
+            let beforeSeq: Int64?
+            if let raw=p["beforeSeq"] { guard let value=int(raw), sort == "ingestion" else { throw fail("invalid_request") }; beforeSeq=value } else { beforeSeq=nil }
+            let afterSeq: Int64?
+            if let raw=p["afterSeq"] { guard let value=int(raw), sort == "ingestion" else { throw fail("invalid_request") }; afterSeq=value } else { afterSeq=nil }
+            if sort == "ingestion" && (p["before"] != nil || p["beforeId"] != nil || p["after"] != nil || p["afterId"] != nil) { throw fail("invalid_request") }
+            if sort != "ingestion" && (p["beforeSeq"] != nil || p["afterSeq"] != nil) { throw fail("invalid_request") }
+            let sourceID: String?
+            if let raw=p["sourceId"] {
+                guard let value=text(raw), validSourceID(value) else { throw fail("invalid_request") }
+                sourceID=value
+            } else { sourceID=nil }
+            var sql="SELECT records.id,records.kind,records.ts,records.updatedAt,records.state,records.expiresAt,records.body,records.domain,records.visibilityFloor,records.ingestionSeq FROM "
+            var binds:[(String?,Int64?)]=[]
+            if let sourceID {
+                // CROSS JOIN fixes links as the selective origin. The planner
+                // otherwise walks all ordered records before checking EXISTS.
+                sql += "links CROSS JOIN records ON records.id=links.derivedId WHERE links.sourceId=?"
+                binds.append((sourceID,nil))
+            } else { sql += "records WHERE 1=1" }
+            if let floor=try requestedSceneFloor(p) { sql += " AND visibilityFloor<=?"; binds.append((nil,floor)) }
+            if let raw=p["domain"] { guard let domain=text(raw), domainFloor(domain) != nil else { throw fail("invalid_request") }; sql += " AND domain=?"; binds.append((domain,nil)) }
+            if let raw=p["visibilityFloor"] { guard let floor=int(raw), (0...2).contains(floor) else { throw fail("invalid_request") }; sql += " AND visibilityFloor=?"; binds.append((nil,floor)) }
+            let before: Int64?
+            if let raw=p["before"] { guard let value=int(raw) else { throw fail("invalid_request") }; before=value } else { before=nil }
+            let after: Int64?
+            if let raw=p["after"] { guard let value=int(raw) else { throw fail("invalid_request") }; after=value } else { after=nil }
+            let beforeId: String?
+            if let raw=p["beforeId"] { guard let value=text(raw), !value.isEmpty, value.utf8.count<=256, before != nil else { throw fail("invalid_request") }; beforeId=value } else { beforeId=nil }
+            let afterId: String?
+            if let raw=p["afterId"] { guard let value=text(raw), !value.isEmpty, value.utf8.count<=256, after != nil else { throw fail("invalid_request") }; afterId=value } else { afterId=nil }
+            let order: String
+            if let raw=p["order"] { guard let value=text(raw), ["asc","desc"].contains(value) else { throw fail("invalid_request") }; order=value } else { order="desc" }
             if state != "all" { sql += " AND state=?"; binds.append((state,nil)) }
-            if let kind=text(p["kind"]) { sql += " AND kind=?"; binds.append((kind,nil)) }
-            if let before=int(p["before"]) {
-                if let beforeId=text(p["beforeId"]) { sql += " AND (ts<? OR (ts=? AND id<?))"; binds += [(nil,before),(nil,before),(beforeId,nil)] }
+            if let raw=p["kind"] { guard let kind=text(raw) else { throw fail("invalid_request") }; sql += " AND kind=?"; binds.append((kind,nil)) }
+            if let before {
+                if let beforeId { sql += " AND (ts<? OR (ts=? AND id<?))"; binds += [(nil,before),(nil,before),(beforeId,nil)] }
                 else { sql += " AND ts<?"; binds.append((nil,before)) }
             }
-            if let after=int(p["after"]) { sql += " AND ts>?"; binds.append((nil,after)) }
-            sql += " ORDER BY ts DESC,id DESC LIMIT \(limit)"
+            if let after {
+                if let afterId { sql += " AND (ts>? OR (ts=? AND id>?))"; binds += [(nil,after),(nil,after),(afterId,nil)] }
+                else { sql += " AND ts>?"; binds.append((nil,after)) }
+            }
+            if let beforeSeq { sql += " AND ingestionSeq<?"; binds.append((nil,beforeSeq)) }
+            if let afterSeq { sql += " AND ingestionSeq>?"; binds.append((nil,afterSeq)) }
+            if sort == "ingestion" { sql += order == "asc" ? " ORDER BY ingestionSeq ASC LIMIT \(limit)" : " ORDER BY ingestionSeq DESC LIMIT \(limit)" }
+            else { sql += order == "asc" ? " ORDER BY ts ASC,id ASC LIMIT \(limit)" : " ORDER BY ts DESC,id DESC LIMIT \(limit)" }
             return ["rows": try rows(sql,binds)]
         case "get":
             guard let ids=p["ids"] as? [String], ids.count <= 200 else { throw fail("invalid_request") }
             if ids.isEmpty { return ["rows": []] }
             let placeholders=Array(repeating:"?",count:ids.count).joined(separator:",")
-            return ["rows": try rows("SELECT id,kind,ts,updatedAt,state,expiresAt,body FROM records WHERE id IN (\(placeholders)) ORDER BY ts DESC,id DESC",ids.map{($0,nil)})]
+            var sql="SELECT id,kind,ts,updatedAt,state,expiresAt,body,domain,visibilityFloor,ingestionSeq FROM records WHERE id IN (\(placeholders))"; var binds=ids.map{($0,nil) as (String?,Int64?)}
+            if let floor=try requestedSceneFloor(p) { sql += " AND visibilityFloor<=?"; binds.append((nil,floor)) }
+            sql += " ORDER BY ts DESC,id DESC"
+            return ["rows": try rows(sql,binds)]
         case "search":
             guard let tokens=p["tokens"] as? [String], tokens.count <= 128, let now=int(p["now"]) else { throw fail("invalid_request") }
             if tokens.isEmpty { return ["rows": []] }
             let kinds = (p["kinds"] as? [String]) ?? (text(p["kind"]).map{[$0]} ?? [])
             let limit=min(50,max(1,Int(int(p["limit"]) ?? 20)))
             let uniqueTokens=Array(Set(tokens)); let marks=Array(repeating:"?",count:uniqueTokens.count).joined(separator:",")
-            var sql="SELECT r.id,r.kind,r.ts,r.updatedAt,r.state,r.expiresAt,r.body,COUNT(*) score FROM records r JOIN tokens t ON t.recordId=r.id WHERE r.state='active' AND (r.expiresAt IS NULL OR r.expiresAt>?) AND t.token IN (\(marks))"
+            var sql="SELECT r.id,r.kind,r.ts,r.updatedAt,r.state,r.expiresAt,r.body,r.domain,r.visibilityFloor,r.ingestionSeq,COUNT(*) score FROM records r JOIN tokens t ON t.recordId=r.id WHERE r.state='active' AND (r.expiresAt IS NULL OR r.expiresAt>?) AND t.token IN (\(marks))"
             var vals:[(String?,Int64?)]=[(nil,now)]+uniqueTokens.map{($0,nil)}
+            if let floor=try requestedSceneFloor(p) { sql += " AND r.visibilityFloor<=?"; vals.append((nil,floor)) }
+            if let raw=p["domain"] {
+                guard let domain=text(raw), domainFloor(domain) != nil else { throw fail("invalid_request") }
+                sql += " AND r.domain=?"; vals.append((domain,nil))
+            }
+            if let raw=p["visibilityFloor"] {
+                guard let floor=int(raw), (0...2).contains(floor) else { throw fail("invalid_request") }
+                sql += " AND r.visibilityFloor=?"; vals.append((nil,floor))
+            }
             if !kinds.isEmpty { sql += " AND r.kind IN (\(Array(repeating:"?",count:kinds.count).joined(separator:",")))"; vals += kinds.map{($0,nil)} }
             sql += " GROUP BY r.id ORDER BY score DESC,r.ts DESC,r.id DESC LIMIT \(limit)"
             let s=try statement(sql); defer{sqlite3_finalize(s)}
             for (i,v) in vals.enumerated(){ if let t=v.0 {bind(s,Int32(i+1),t)} else if let n=v.1 {bind(s,Int32(i+1),n)} }
             var out:[[String:Any]]=[]
-            while true {let rc=sqlite3_step(s);if rc==SQLITE_DONE{break};guard rc==SQLITE_ROW else{throw fail("database_operation_failed")};var x=row(s);x["score"]=sqlite3_column_int64(s,7);out.append(x)}
+            while true {let rc=sqlite3_step(s);if rc==SQLITE_DONE{break};guard rc==SQLITE_ROW else{throw fail("database_operation_failed")};var x=row(s);x["score"]=sqlite3_column_int64(s,10);out.append(x)}
             return ["rows":out]
         case "remove":
             guard let expected=int(p["epoch"]), let id=text(p["recordId"]) else { throw fail("invalid_request") }
@@ -306,6 +513,7 @@ final class DB {
             }
             try exec("PRAGMA wal_checkpoint(TRUNCATE)"); return result
         case "clear":
+            restoring = false
             let result=try withTransaction { () -> [String:Any] in try exec("DELETE FROM records"); return ["epoch":try advanceEpoch()] }
             try exec("PRAGMA wal_checkpoint(TRUNCATE)"); return result
         default: throw fail("unknown_operation")
@@ -317,22 +525,32 @@ guard CommandLine.arguments.count == 2 else { exit(2) }
 let store: DB
 do { store = try DB(path: CommandLine.arguments[1]) } catch { exit(3) }
 var input = Data()
+
+// Drain Foundation autoreleased JSON/bridge objects after each complete
+// request. Keep the response write inside the pool so request-sized result
+// dictionaries and encoded Data do not accumulate in the long-lived process.
+func processRequestLine(_ line: Data, store: DB) {
+    autoreleasepool {
+        var responseID: Any = NSNull()
+        do {
+            guard let obj=try JSONSerialization.jsonObject(with:line) as? [String:Any], let id=obj["id"], let op=obj["op"] as? String else { throw fail("invalid_request") }
+            responseID=id
+            let result=try store.request(op,obj)
+            var response:[String:Any]=["id":id,"ok":true]; for (k,v) in result { response[k]=v }
+            send(response)
+        } catch let e as VaultError { send(["id":responseID,"ok":false,"error":e.code]) }
+        catch { send(["id":responseID,"ok":false,"error":"invalid_request"]) }
+    }
+}
+
 while true {
-    let chunk = FileHandle.standardInput.availableData
+    let chunk = autoreleasepool { FileHandle.standardInput.availableData }
     if chunk.isEmpty { break }
     input.append(chunk)
     if input.count > maxLineBytes && input.firstIndex(of: 10) == nil { send(["id": NSNull(), "ok": false, "error":"request_too_large"]); exit(4) }
     while let nl=input.firstIndex(of:10) {
         let line=Data(input[..<nl]);input.removeSubrange(...nl)
         guard line.count <= maxLineBytes else {send(["id":NSNull(),"ok":false,"error":"request_too_large"]);continue}
-        var responseID: Any = NSNull()
-        do {
-            guard let obj=try JSONSerialization.jsonObject(with:line) as? [String:Any], let id=obj["id"], let op=obj["op"] as? String else {throw fail("invalid_request")}
-            responseID=id
-            let payload=obj
-            let result=try store.request(op,payload)
-            var response:[String:Any]=["id":id,"ok":true];for (k,v) in result {response[k]=v};send(response)
-        } catch let e as VaultError { send(["id":responseID,"ok":false,"error":e.code]) }
-        catch { send(["id":responseID,"ok":false,"error":"invalid_request"]) }
+        processRequestLine(line, store: store)
     }
 }

@@ -40,10 +40,23 @@ function labelStatus(value) {
 let memoryKind = 'memory', memoryQuery = '', memoryCursor = null, memoryHasMore = false, memoryPageCount = 0;
 let memoryRows = [], memoryStats = null, memoryCfg = {}, savedMemoryCfg = {}, memoryCfgWriting = false;
 let memoryCfgPending = false;
+const SCENES = ['private', 'life', 'work'];
+const SCENE_SCOPE_TEXT = {
+  private: '私聊：可按需参考私聊、生活与工作资料',
+  life: '生活：可按需参考生活与工作资料',
+  work: '工作：可按需参考工作资料',
+};
+let activeScene = 'life', savedScene = 'life', sceneRevision = 0;
+let sceneWritePending = 0, sceneWriteTail = Promise.resolve();
+let savedSceneProfiles = { private: '', life: '', work: '' };
+let sceneProfileDrafts = { private: '', life: '', work: '' };
+const sceneProfileRevisions = { private: 0, life: 0, work: 0 };
+let profileWritePending = 0, profileWriteTail = Promise.resolve();
 let memoryRefreshPending = false, memoryRefreshTimer = null, memoryRefreshBusy = false;
 let memoryViewRevision = 0;
 let memoryListBusyRevision = 0;
 let currentRecallEntries = [];
+let maintenanceBusy = false;
 function countValue(value) { return typeof value === 'number' ? value : Number(value?.count ?? value?.total ?? 0) || 0; }
 function countsObject(stats) { return stats?.counts && typeof stats.counts === 'object' ? stats.counts : {}; }
 function setPill(id, text, tone = '') {
@@ -52,14 +65,17 @@ function setPill(id, text, tone = '') {
 function paintMemoryStats(stats) {
   memoryStats = stats || {};
   const counts = countsObject(memoryStats);
-  const state = memoryStats.state && typeof memoryStats.state === 'object' ? memoryStats.state : null;
-  const stateLabel = state ? [state.mood, Number.isFinite(state.energy) ? `精力 ${Math.round(state.energy <= 1 ? state.energy * 100 : state.energy)}%` : ''].filter(Boolean).join(' · ') : '';
+  const sceneLabel = { private: '私聊', life: '生活', work: '工作' }[memoryStats.scene || activeScene] || '生活';
   $('memoryUnlock').hidden = memoryStats.ready !== false || !!memoryStats.opening;
   if (memoryStats.locked) setPill('memoryStatus', '电脑解锁后载入记忆', 'warn');
   else if (memoryStats.opening) setPill('memoryStatus', '正在解锁记忆 · 请留意 macOS 授权', 'warn');
   else if (memoryStats.error) setPill('memoryStatus', `读取失败 · ${memoryStats.error}`, 'bad');
   else if (memoryStats.ready === false) setPill('memoryStatus', '记忆服务未就绪', 'warn');
-  else setPill('memoryStatus', stateLabel || '已就绪', 'ok');
+  else setPill('memoryStatus', `${sceneLabel} · 已就绪`, 'ok');
+  const compression = memoryStats.compression;
+  $('contextStatus').textContent = compression?.version > 0
+    ? `${sceneLabel} · 压缩版本 ${compression.version}${compression.updatedAt ? ` · ${formatTime(compression.updatedAt)}` : ''}`
+    : `${sceneLabel} · 尚无需要压缩的旧对话`;
   const target = $('memoryCounts'); target.replaceChildren();
   for (const [key, title] of [['memory', '长期记忆'], ['message', '聊天记录'], ['summary', '对话摘要']]) {
     const box = node('div', 'count-box');
@@ -68,12 +84,76 @@ function paintMemoryStats(stats) {
     target.append(box);
   }
 }
+function paintMaintenanceStatus(value) {
+  const labels = { idle: '空闲', queued: '排队中', running: '整理中', paused: '已暂停', failed: '暂未完成', unavailable: '状态暂不可用' };
+  if (!value || typeof value !== 'object') {
+    $('maintenanceStatus').textContent = '整理状态暂不可用';
+    return;
+  }
+  const label = labels[value.status] || '状态未知';
+  const details = [];
+  if (Number.isFinite(value.processed) && value.processed > 0) details.push(`已处理 ${value.processed} 条`);
+  if (Number.isFinite(value.scanned) && value.scanned > 0) details.push(`检查旧记忆 ${value.scanned} 条`);
+  if (Number.isFinite(value.archived) && value.archived > 0) details.push(`归档重复项 ${value.archived} 条`);
+  if (value.note) details.push(String(value.note).slice(0, 180));
+  if (value.status === 'idle' && value.lastSuccessAt) details.push(`上次完成 ${formatTime(value.lastSuccessAt)}`);
+  $('maintenanceStatus').textContent = [label, ...details].join(' · ');
+}
+async function loadMaintenanceStatus() {
+  try { paintMaintenanceStatus(await api('memoryMaintenanceStatus')); }
+  catch (error) { paintMaintenanceStatus({ status: 'unavailable', note: error.message || '整理状态暂不可用' }); }
+}
+async function requestMemoryMaintenance(mode) {
+  if (maintenanceBusy) return;
+  maintenanceBusy = true;
+  $('maintenanceDoze').disabled = $('maintenanceDream').disabled = true;
+  $('maintenanceStatus').textContent = mode === 'doze' ? '正在排入小憩…' : '正在排入记忆整理…';
+  try {
+    const result = await api('memoryMaintain', mode);
+    if (!result?.ok) throw new Error(result?.error || '请求没有排入');
+    await loadMaintenanceStatus();
+  } catch (error) {
+    $('maintenanceStatus').textContent = error.message || '整理请求没有完成';
+  } finally {
+    maintenanceBusy = false;
+    $('maintenanceDoze').disabled = $('maintenanceDream').disabled = false;
+  }
+}
 function memoryConfigFrom(result) {
   const root = result?.config || result || {};
   const value = root.memory && typeof root.memory === 'object' ? root.memory : {};
   memoryCfg = { enabled: !!value.enabled, extract: !!value.extract };
   savedMemoryCfg = { ...memoryCfg };
+  activeScene = SCENES.includes(value.scene) ? value.scene : 'life';
+  savedScene = activeScene;
+  const profiles = root.buddy?.sceneProfiles && typeof root.buddy.sceneProfiles === 'object' ? root.buddy.sceneProfiles : {};
+  savedSceneProfiles = Object.fromEntries(SCENES.map(scene => [scene, typeof profiles[scene] === 'string' ? profiles[scene].slice(0, 2000) : '']));
+  sceneProfileDrafts = { ...savedSceneProfiles };
   paintMemoryConfig();
+  paintSceneSettings();
+}
+function applyMemoryConfigUpdate(result) {
+  const root = result?.config || result || {};
+  const remoteMemory = root.memory && typeof root.memory === 'object' ? root.memory : {};
+  for (const key of ['enabled', 'extract']) {
+    const dirty = memoryCfg[key] !== savedMemoryCfg[key];
+    const remote = !!remoteMemory[key];
+    savedMemoryCfg[key] = remote;
+    if (!dirty) memoryCfg[key] = remote;
+  }
+  const remoteScene = SCENES.includes(remoteMemory.scene) ? remoteMemory.scene : 'life';
+  const sceneDirty = activeScene !== savedScene;
+  savedScene = remoteScene;
+  if (!sceneDirty) activeScene = remoteScene;
+  const profiles = root.buddy?.sceneProfiles && typeof root.buddy.sceneProfiles === 'object' ? root.buddy.sceneProfiles : {};
+  for (const scene of SCENES) {
+    const dirty = (sceneProfileDrafts[scene] || '') !== (savedSceneProfiles[scene] || '');
+    const remote = typeof profiles[scene] === 'string' ? profiles[scene].slice(0, 2000) : '';
+    savedSceneProfiles[scene] = remote;
+    if (!dirty) sceneProfileDrafts[scene] = remote;
+  }
+  paintMemoryConfig();
+  paintSceneSettings();
 }
 function paintMemoryConfig() {
   $('memoryEnabled').checked = memoryCfg.enabled;
@@ -81,6 +161,78 @@ function paintMemoryConfig() {
 }
 function configDraftLabel(draft) {
   return `使用记忆：${draft.enabled ? '开' : '关'}，整理新记忆：${draft.extract ? '开' : '关'}`;
+}
+function paintSceneSettings() {
+  $('memoryScene').value = activeScene;
+  $('memorySceneScope').textContent = SCENE_SCOPE_TEXT[activeScene];
+  $('sceneProfile').value = sceneProfileDrafts[activeScene] || '';
+  syncSceneProfileNote();
+}
+function hasUnsavedSceneProfiles() {
+  return SCENES.some(scene => (sceneProfileDrafts[scene] || '') !== (savedSceneProfiles[scene] || ''));
+}
+function syncSceneProfileNote() {
+  const dirty = (sceneProfileDrafts[activeScene] || '') !== (savedSceneProfiles[activeScene] || '');
+  $('sceneProfileSave').disabled = profileWritePending > 0;
+  if (!profileWritePending && dirty && !$('sceneProfileNote').classList.contains('bad-text')) setNote('sceneProfileNote', '有未保存的场景设定');
+  else if (!profileWritePending && $('sceneProfileNote').textContent === '正在保存…') setNote('sceneProfileNote', '');
+}
+function changeMemoryScene(scene) {
+  if (!SCENES.includes(scene) || scene === activeScene) return;
+  activeScene = scene;
+  const revision = ++sceneRevision;
+  paintSceneSettings();
+  setNote('memorySceneScope', SCENE_SCOPE_TEXT[scene]);
+  setNote('sceneProfileNote', (sceneProfileDrafts[scene] || '') !== (savedSceneProfiles[scene] || '') ? '有未保存的场景设定' : '');
+  sceneWritePending++;
+  setNote('memoryConfigNote', '正在切换场景…');
+  sceneWriteTail = sceneWriteTail.catch(() => {}).then(async () => {
+    try {
+      const result = await api('config', { memory: { scene } });
+      if (result?.ok === false) throw new Error(result.error || '保存失败');
+      savedScene = scene;
+      if (revision === sceneRevision) setNote('memoryConfigNote', '场景已切换');
+    } catch (error) {
+      if (revision === sceneRevision) {
+        activeScene = savedScene;
+        paintSceneSettings();
+        setNote('memoryConfigNote', `场景切换失败，已恢复原场景。${error.message || '请重试。'}`, true);
+      }
+    } finally { sceneWritePending--; }
+  });
+}
+function saveSceneProfile() {
+  const scene = activeScene;
+  const content = String(sceneProfileDrafts[scene] || '').slice(0, 2000);
+  const revision = sceneProfileRevisions[scene];
+  profileWritePending++;
+  $('sceneProfileSave').disabled = true;
+  setNote('sceneProfileNote', '正在保存…');
+  profileWriteTail = profileWriteTail.catch(() => {}).then(async () => {
+    try {
+      const result = await api('config', { buddy: { sceneProfiles: { [scene]: content } } });
+      if (result?.ok === false) throw new Error(result.error || '保存失败');
+      const root = result?.config || result;
+      const returnedProfiles = root?.buddy?.sceneProfiles;
+      if (returnedProfiles && typeof returnedProfiles === 'object') {
+        for (const key of SCENES) {
+          const wasDirty = (sceneProfileDrafts[key] || '') !== (savedSceneProfiles[key] || '');
+          const remote = typeof returnedProfiles[key] === 'string' ? returnedProfiles[key].slice(0, 2000) : '';
+          savedSceneProfiles[key] = remote;
+          if (!wasDirty) sceneProfileDrafts[key] = remote;
+        }
+      } else savedSceneProfiles[scene] = content;
+      if (revision === sceneProfileRevisions[scene]) sceneProfileDrafts[scene] = content;
+      if (activeScene === scene) syncSceneProfileNote();
+      if (activeScene === scene && revision === sceneProfileRevisions[scene]) setNote('sceneProfileNote', '本场景设定已保存');
+      else if (activeScene === scene) setNote('sceneProfileNote', '已保存上一版；有新的修改未保存');
+    } catch (error) {
+      if (activeScene === scene) setNote('sceneProfileNote', `保存失败，草稿仍保留。${error.message || '请重试。'}`, true);
+    } finally {
+      profileWritePending--;
+      if (activeScene === scene) syncSceneProfileNote();
+    }
+  });
 }
 async function flushMemoryConfig() {
   if (memoryCfgWriting) return;
@@ -113,7 +265,7 @@ function saveMemorySetting(key, value) {
   flushMemoryConfig();
 }
 addEventListener('beforeunload', (event) => {
-  if (!memoryCfgPending) return;
+  if (!memoryCfgPending && !sceneWritePending && !profileWritePending && !hasUnsavedSceneProfiles()) return;
   event.preventDefault(); event.returnValue = '';
 });
 function rowSourceIds(row) {
@@ -134,19 +286,21 @@ function renderSources(card, rows) {
   card.append(region);
 }
 function renderRecord(row) {
+  const isConflict = row.origin === 'user-key-conflict-v1' && row.status === 'pending';
+  const isModelCandidate = /^(?:doze-candidate|model-candidate)/u.test(row.origin || '') && row.status === 'pending';
   const card = node('article', 'record');
   card.dataset.recordId = row.id || '';
   const top = node('div', 'record-top');
   top.append(node('span', 'record-date', formatTime(row.ts)));
   if (row.role) top.append(node('span', 'badge', row.role));
-  if (row.status) top.append(node('span', `badge${row.status === 'pending' ? ' pending' : ''}`, labelStatus(row.status)));
+  if (row.status) top.append(node('span', `badge${row.status === 'pending' ? ' pending' : ''}`, isConflict ? '用户说法待核对' : isModelCandidate ? '整理候选' : labelStatus(row.status)));
   card.append(top);
   card.append(node('div', `record-content${row.role ? ' role' : ''}`, row.content || '（空内容）'));
   if (row.evidence) card.append(node('div', 'record-source', `依据：${row.evidence}`));
   const actions = node('div', 'record-actions');
   let editBox = null;
   if (row.kind === 'memory') {
-    addAction(actions, '编辑', () => {
+    if (!isConflict) addAction(actions, '编辑', () => {
       if (editBox) { editBox.remove(); editBox = null; if (memoryRefreshPending) void refreshMemoryView(); return; }
       memoryViewRevision++;
       if (memoryRefreshBusy || memoryListBusyRevision) memoryRefreshPending = true;
@@ -164,12 +318,12 @@ function renderRecord(row) {
       }, 'button primary');
       editBox.append(textarea, saveRow); card.append(editBox); textarea.focus();
     });
-    if (row.status === 'pending') addAction(actions, '确认', async () => {
+    if (row.status === 'pending') addAction(actions, isConflict ? '采用这次说法' : '确认', async () => {
       try {
         hideError();
-        const result = await api('memoryUpdate', row.id, row.content || '');
+        const result = isConflict ? await api('memoryResolveConflict', row.id) : await api('memoryUpdate', row.id, row.content || '');
         if (!result?.ok) throw new Error(result?.error || '没有确认记忆');
-        setNote('memoryActionNote', '记忆已确认'); await loadMemoryStats(); await loadMemoryList(true);
+        setNote('memoryActionNote', isConflict ? '已采用这次说法，旧说法保留为历史' : '记忆已确认'); await loadMemoryStats(); await loadMemoryList(true);
       } catch (error) { showError(error); }
     }, 'button primary');
     const ids = rowSourceIds(row);
@@ -336,8 +490,11 @@ async function initMemory() {
     if (!memoryStats) paintMemoryStats({ ready: false, error: error.message });
     setNote('memoryConfigNote', error.message || '设置暂不可用', true);
   }
+  await loadMaintenanceStatus();
   await loadMemoryList(true);
 }
+$('maintenanceDoze').addEventListener('click', () => { void requestMemoryMaintenance('doze'); });
+$('maintenanceDream').addEventListener('click', () => { void requestMemoryMaintenance('dream'); });
 $('memoryUnlock').addEventListener('click', async () => { try { paintMemoryStats(await api('memoryUnlock')); await loadMemoryList(true); } catch (error) { showError(error); } });
 $('memoryTabs').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-kind]');
@@ -349,6 +506,14 @@ $('memoryTabs').addEventListener('click', (event) => {
 $('memorySearchBtn').addEventListener('click', () => { memoryQuery = $('memorySearch').value.trim(); loadMemoryList(true); });
 $('memorySearch').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('memorySearchBtn').click(); } });
 $('memoryMore').addEventListener('click', () => { if (memoryHasMore) loadMemoryList(false); });
+$('memoryScene').addEventListener('change', event => changeMemoryScene(event.target.value));
+$('sceneProfile').addEventListener('input', event => {
+  sceneProfileDrafts[activeScene] = event.target.value.slice(0, 2000);
+  sceneProfileRevisions[activeScene]++;
+  $('sceneProfileNote').classList.remove('bad-text');
+  syncSceneProfileNote();
+});
+$('sceneProfileSave').addEventListener('click', saveSceneProfile);
 $('memoryEnabled').addEventListener('change', (event) => saveMemorySetting('enabled', event.target.checked));
 $('memoryExtract').addEventListener('change', (event) => saveMemorySetting('extract', event.target.checked));
 $('memoryExport').addEventListener('click', async () => {
@@ -366,7 +531,8 @@ $('memoryRestore').addEventListener('click', async () => {
   if (hasStoredMemory()) { setNote('memoryActionNote', '请先导出备份，再清空当前记忆后恢复。', true); return; }
   try {
     const result = await api('memoryRestore', passphrase);
-    setNote('memoryActionNote', result?.canceled ? '已取消' : result?.ok ? '备份已恢复' : result?.error || '没有恢复备份', !result?.ok && !result?.canceled);
+    setNote('memoryActionNote', result?.canceled ? '已取消' : result?.ok ?
+      '备份已恢复' + (result.legacyPrivateRecords ? '，旧资料已放入私聊，可切换后查看。' : '') : result?.error || '没有恢复备份', !result?.ok && !result?.canceled);
     if (result?.ok) { await loadMemoryStats(); await loadMemoryList(true); }
   } catch (error) { setNote('memoryActionNote', error.message || '恢复失败', true); }
   finally { $('backupPassphrase').value = ''; }
@@ -747,7 +913,9 @@ if (page === 'memory') {
   window.pet?.on?.(event => {
     if (event?.type === 'memory-ready') { loadMemoryStats(); loadMemoryList(true); }
     else if (event?.type === 'memory-changed') scheduleMemoryRefresh();
+    else if (event?.type === 'memory-maintenance') { paintMaintenanceStatus(event); if (event.status === 'idle') void loadMemoryStats(); }
     else if (event?.type === 'recall') { recallRevision++; paintCurrentRecall(event.entries); }
+    else if (event?.type === 'config' && event.config) applyMemoryConfigUpdate(event.config);
   });
 }
 else {

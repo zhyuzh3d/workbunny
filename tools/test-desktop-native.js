@@ -108,11 +108,13 @@ test('type plans reject implicit newlines and controls, emit explicit soft break
 test('generic visual sampling is bounded, commit-based, and never queries application UI', () => {
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   const visual = source.slice(source.indexOf('func captureVisualFrame('), source.indexOf('func recognizePNG('));
-  assert.match(source, /func normalizedVisualRegions\(_ value: Any\?\)/);
+  assert.match(source, /func normalizedVisualRegions\(_ value: Any\?, defaultMinChangedRatio: Double = 0\.001\)/);
   assert.match(source, /\(1\.\.\.4\)\.contains\(rows\.count\)/);
   assert.match(source, /let visualRegionMaxSide = 320/);
   assert.match(source, /let visualSampleCapacity = 8/);
   assert.match(source, /func compareVisualRegion\(_ baseline: VisualRegionFrame, _ current: VisualRegionFrame, threshold: Int\)/);
+  assert.match(source, /func visualChangedMask\(_ baseline: VisualRegionFrame, _ current: VisualRegionFrame, threshold: Int\)/);
+  assert.match(source, /stableChangedPixels/);
   assert.match(source, /func visualCommit\(_ request: \[String: Any\]\)/);
   assert.match(source, /func resetVisualBaseline\(_ id: String\)/);
   assert.match(source, /func visualForget\(_ request: \[String: Any\]\)/);
@@ -129,6 +131,8 @@ test('generic visual sampling is bounded, commit-based, and never queries applic
   assert.equal(result.visualSample, true);
   assert.equal(result.visualCapacity, 8);
   assert.equal(result.inputIdleReadOnly, true);
+  assert.deepEqual(result.syntheticSidebarBadgePixels, [4, 12, 18]);
+  assert.equal(result.syntheticStableOverlap, 4);
 });
 
 test('rectFrom accepts CGWindowBounds casing and preserves dimension validation', () => {

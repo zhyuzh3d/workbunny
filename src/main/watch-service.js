@@ -2,7 +2,13 @@
 
 const { randomUUID } = require('crypto');
 const { checkDesktopScope } = require('./desktop-scope');
+const { normalizeScene, rank, canRead } = require('./memory-scope');
 const ACTIVE = new Set(['active', 'waiting', 'needs_window']);
+const SELECTABLE = new Set([...ACTIVE, 'paused']);
+function canReadScope(scene, record) {
+  if (!record) return false;
+  try { return canRead(normalizeScene(scene), record); } catch { return false; }
+}
 const MESSAGE_KIND_LABEL = { image: '图片', voice: '语音', file: '文件', other: '非文本' };
 
 // Match the end of the old visible conversation, rather than treating every
@@ -22,77 +28,95 @@ function incomingDelta(previous, current, baselineReady = false) {
 }
 
 class WatchService {
-  constructor({ journal, sensor, inspect, execute, propose, report, epoch, ready, canOperate = async () => true, emit = () => {}, clock = Date.now, autoSchedule = true }) {
-    Object.assign(this, { journal, sensor, inspect, execute, propose, report, epoch, ready, canOperate, emit, clock, autoSchedule });
+  constructor({ journal, sensor, inspect, execute, propose, report, epoch, ready, getScene = () => 'life', canOperate = async () => true, emit = () => {}, clock = Date.now, autoSchedule = true }) {
+    Object.assign(this, { journal, sensor, inspect, execute, propose, report, epoch, ready, getScene, canOperate, emit, clock, autoSchedule });
     this.items = new Map(); this.controllers = new Map(); this.runTokens = new Map();
     this.timer = null; this.checking = false; this.closed = false; this.restoreRevision = 0;
   }
-  list() { return [...this.items.values()].map(w => ({ ...w, baseline: undefined, sources: undefined, privacyEpoch: undefined,
+  list() { return [...this.items.values()].filter(w => canReadScope(this.getScene(), w)).map(w => ({ ...w, baseline: undefined, sources: undefined, privacyEpoch: undefined,
     pendingSend: undefined, pendingEventIds: undefined, pendingReports: undefined })); }
   publish() { this.emit(this.list()); }
   owns(w, signal, token) {
     return !this.closed && !signal?.aborted && this.items.get(w.id) === w &&
       (token === undefined || this.runTokens.get(w.id) === token) && w.privacyEpoch === this.epoch() && this.ready();
   }
-  current(w, signal, token) { return this.owns(w, signal, token) && ACTIVE.has(w.status); }
+  current(w, signal, token) { return this.owns(w, signal, token) && canReadScope(this.getScene(), w) && ACTIVE.has(w.status); }
   async save(w, guard = () => this.owns(w)) {
     if (!guard()) return false;
     w.updatedAt = this.clock();
-    await this.journal.saveWatch(w);
+    const saved = await this.journal.saveWatch(w);
+    if (Number.isInteger(saved?.visibilityFloor)) w.visibilityFloor = Math.max(w.visibilityFloor || 0, saved.visibilityFloor);
     if (!guard()) return false;
     this.publish(); return true;
   }
   async restore() {
     const revision = ++this.restoreRevision, epoch = this.epoch();
+    const stale = [...this.items.values()];
+    for (const [id, controller] of this.controllers) {
+      this.runTokens.set(id, (this.runTokens.get(id) || 0) + 1);
+      controller.abort();
+    }
+    this.controllers.clear(); this.runTokens.clear(); this.items.clear();
+    for (const watch of stale) await this.sensor.forget(watch).catch(() => {});
     const watches = await this.journal.listWatches();
     if (this.closed || revision !== this.restoreRevision || epoch !== this.epoch() || !this.ready()) return;
-    for (const value of watches) {
+    const skipped = [];
+    for (const listed of watches) {
+      if (this.closed || revision !== this.restoreRevision || epoch !== this.epoch() || !this.ready()) return;
+      let value;
+      try { value = await this.journal.restoreWatch(listed.id); }
+      catch { skipped.push(listed.id); continue; }
+      if (!value) { skipped.push(listed.id); continue; }
       if (this.closed || revision !== this.restoreRevision || epoch !== this.epoch() || !this.ready()) return;
       const w = { ...value, privacyEpoch: epoch, baseline: [], baselineReady: false, bound: false,
         pendingEventIds: Array.isArray(value.pendingEventIds) ? [...value.pendingEventIds] : [],
         pendingReports: Array.isArray(value.pendingReports) ? [...value.pendingReports] : [],
         status: value.userInterventionAt && ['stopped', 'paused'].includes(value.status) ? value.status
-          : value.pendingSend ? 'paused' : value.expiresAt !== undefined && this.clock() >= value.expiresAt ? 'expired'
-          : ['stopped', 'expired'].includes(value.status) ? value.status : 'paused',
+          : ['stopped', 'expired'].includes(value.status) ? value.status
+          : value.pendingSend ? 'paused' : value.expiresAt !== undefined && this.clock() >= value.expiresAt ? 'expired' : 'paused',
         note: value.userInterventionAt ? value.note
           : value.pendingSend ? '应用已重启；上次发送结果不确定，已暂停且不会重发。请先核对微信。'
           : value.expiresAt !== undefined && this.clock() >= value.expiresAt ? '已达到交办时长'
-          : ['stopped', 'expired'].includes(value.status) ? value.note : '应用已重启；恢复后重新建立基线，不自动回复离线期间的消息。' };
+          : ['stopped', 'expired'].includes(value.status) ? value.note : value.note || '应用已重启；恢复后重新建立基线，不自动回复离线期间的消息。' };
       this.items.set(w.id, w); this.runTokens.set(w.id, 0);
-      await this.save(w, () => this.owns(w, undefined, 0) && revision === this.restoreRevision);
-      if (!this.owns(w, undefined, 0) || revision !== this.restoreRevision) return;
-      if (w.pendingSend && !w.pendingSendReported && !w.userInterventionAt) {
-        const event = await this.journal.getEvent(w.pendingSend);
-        if (!this.owns(w, undefined, 0) || revision !== this.restoreRevision) return;
-        if (event) await this.reportEvent(w, event, event.reportText || `${w.recipient} 的自动回复结果不确定；应用已重启并暂停关注，请先核对微信。`, undefined, 0);
-      } else if (!w.userInterventionAt) {
-        for (const eventId of [...w.pendingReports, ...w.pendingEventIds]) {
-          const event = await this.journal.getEvent(eventId);
+      try {
+        if (w.pendingSend && !w.pendingSendReported && !w.userInterventionAt) {
+          const event = await this.journal.getEvent(w.pendingSend);
           if (!this.owns(w, undefined, 0) || revision !== this.restoreRevision) return;
-          if (!event) {
-            w.pendingReports = w.pendingReports.filter(id => id !== eventId);
-            w.pendingEventIds = w.pendingEventIds.filter(id => id !== eventId);
-            await this.save(w, () => this.owns(w, undefined, 0) && revision === this.restoreRevision);
+          if (event) await this.reportEvent(w, event, event.reportText || `${w.recipient} 的自动回复结果不确定；应用已重启并暂停关注，请先核对微信。`, undefined, 0);
+        } else if (!w.userInterventionAt && !['stopped', 'expired'].includes(w.status)) {
+          for (const eventId of [...w.pendingReports, ...w.pendingEventIds]) {
+            const event = await this.journal.getEvent(eventId);
             if (!this.owns(w, undefined, 0) || revision !== this.restoreRevision) return;
-            continue;
-          }
-          if (['send_pending', 'send_unknown'].includes(event.phase)) {
-            w.pendingSend = event.id; w.status = 'paused'; w.note = '应用已重启；发现发送意图但结果不确定，已暂停且不会重发。请先核对微信。';
-            await this.save(w, () => this.owns(w, undefined, 0) && revision === this.restoreRevision);
+            if (!event) {
+              w.pendingReports = w.pendingReports.filter(id => id !== eventId);
+              w.pendingEventIds = w.pendingEventIds.filter(id => id !== eventId);
+              await this.save(w, () => this.owns(w, undefined, 0) && revision === this.restoreRevision);
+              if (!this.owns(w, undefined, 0) || revision !== this.restoreRevision) return;
+              continue;
+            }
+            if (['send_pending', 'send_unknown'].includes(event.phase)) {
+              w.pendingSend = event.id; w.status = 'paused'; w.note = '应用已恢复；发现发送意图但结果不确定，已暂停且不会重发。请先核对微信。';
+              await this.save(w, () => this.owns(w, undefined, 0) && revision === this.restoreRevision);
+              if (!this.owns(w, undefined, 0) || revision !== this.restoreRevision) return;
+              await this.reportEvent(w, event, event.reportText || `${w.recipient} 的自动回复结果不确定；应用已恢复并暂停关注，请先核对微信。`, undefined, 0);
+              break;
+            }
+            const text = event.reportText || `${w.recipient} 有一条新消息（${String(event.message || '').slice(0, 500)}）；应用恢复后没有自动回复，请核对。`;
+            await this.reportEvent(w, event, text, undefined, 0);
             if (!this.owns(w, undefined, 0) || revision !== this.restoreRevision) return;
-            await this.reportEvent(w, event, event.reportText || `${w.recipient} 的自动回复结果不确定；应用已重启并暂停关注，请先核对微信。`, undefined, 0);
-            break;
+            if (w.status === 'expired') break;
           }
-          const text = event.reportText || `${w.recipient} 有一条新消息（${String(event.message || '').slice(0, 500)}）；应用重启后没有自动回复，请核对。`;
-          await this.reportEvent(w, event, text, undefined, 0);
-          if (!this.owns(w, undefined, 0) || revision !== this.restoreRevision) return;
-          if (w.status === 'expired') break;
         }
-      }
+      } catch { skipped.push(w.id); }
+      if (!this.owns(w, undefined, 0) || revision !== this.restoreRevision) return;
     }
     this.schedule();
+    this.publish();
+    return { restored: this.items.size, skipped };
   }
-  async start({ recipient, recipientAliases = [], goal, criteria, watch, sources = [] }) {
+  async start({ recipient, recipientAliases = [], goal, criteria, watch, sources = [], scene = this.getScene(), visibilityFloor }) {
+    scene = normalizeScene(scene);
     if (!this.ready()) return { ok: false, error: '请先解锁本地记忆' };
     if (!Array.isArray(sources) || !sources.length || sources.length > 200 || sources.some(id => typeof id !== 'string' || !id || id.length > 256) ||
         !recipient || !watch || !['notify', 'reply'].includes(watch.mode)) return { ok: false, error: '持续关注需要本轮交办来源和明确会话、规则' };
@@ -108,7 +132,9 @@ class WatchService {
     if ([...this.items.values()].filter(w => !['stopped', 'expired'].includes(w.status)).length >= 4) return { ok: false, error: '最多同时保留四项持续关注，请先停止一项' };
     if ([...this.items.values()].some(w => w.recipient === recipient && !['stopped', 'expired'].includes(w.status))) return { ok: false, error: '已有关联该会话的持续关注，可暂停、恢复或停止后重新交代' };
     const now = this.clock();
-    const w = { id: randomUUID(), target: 'wechat', recipient, recipientAliases, goal, criteria, mode: watch.mode, policy: watch.policy, completion: watch.completion || 'manual',
+    if (visibilityFloor !== undefined && (!Number.isInteger(visibilityFloor) || visibilityFloor < rank(scene) || visibilityFloor > 2)) return { ok: false, error: '持续关注可见范围不合法' };
+    const floor = visibilityFloor ?? rank(scene);
+    const w = { id: randomUUID(), target: 'wechat', recipient, recipientAliases, goal, criteria, scene, domain: scene, visibilityFloor: floor, mode: watch.mode, policy: watch.policy, completion: watch.completion || 'manual',
       intervalSeconds: watch.intervalSeconds ?? 10, ...(watch.durationMinutes === undefined ? {} : { expiresAt: now + watch.durationMinutes * 60000 }),
       status: 'waiting', note: '等待空闲时打开指定会话并建立基线', sources, privacyEpoch: this.epoch(), startedAt: now,
       eventCount: 0, baseline: [], baselineReady: false, pendingEventIds: [], pendingReports: [], nextCheckAt: now };
@@ -118,7 +144,9 @@ class WatchService {
     this.schedule(50); return { ok: true, id: w.id };
   }
   find({ id, recipient } = {}) {
-    const rows = [...this.items.values()].filter(w => id ? w.id === id : recipient ? [w.recipient, ...(w.recipientAliases || [])].some(n => n.toLowerCase() === recipient.toLowerCase()) : !['stopped', 'expired'].includes(w.status));
+    const rows = [...this.items.values()].filter(w => canReadScope(this.getScene(), w) && (id ? w.id === id : recipient
+      ? SELECTABLE.has(w.status) && [w.recipient, ...(w.recipientAliases || [])].some(n => n.toLowerCase() === recipient.toLowerCase())
+      : SELECTABLE.has(w.status)));
     return rows.length === 1 ? rows[0] : null;
   }
   async control(action, selector) {
@@ -421,11 +449,13 @@ class WatchService {
     w.pendingReports = [...new Set([...(w.pendingReports || []), event.id])];
     w.pendingEventIds = [...new Set([...(w.pendingEventIds || []), event.id])];
     if (!await this.save(w, owned) || !owned()) return false;
+    if (!canReadScope(this.getScene(), w)) return false;
     const receipt = await this.journal.receipt(event, text);
     if (!owned()) return false;
     // The receiver deduplicates this stable eventId across a crash between
     // delivery and clearing the outbox entry.
-    if (receipt.inserted) await this.report({ text, eventId: event.id, epoch: w.privacyEpoch, sources: [event.id], persisted: true });
+    if (receipt.inserted && canReadScope(this.getScene(), w)) await this.report({ text, eventId: event.id, epoch: w.privacyEpoch, sources: [event.id], persisted: true,
+      scene: w.scene, domain: w.domain, visibilityFloor: w.visibilityFloor });
     if (!owned()) return false;
     if (w.pendingSend === event.id) w.pendingSendReported = true;
     if (event.identityString) { event.reportStatus = 'reported'; await this.journal.saveEvent(w, event); }
@@ -446,6 +476,30 @@ class WatchService {
     }
     if ([...this.items.values()].some(w => w.privacyEpoch !== this.epoch())) this.items.clear();
     this.publish();
+  }
+  async sceneChanged() {
+    const scene = normalizeScene(this.getScene());
+    const affected = [...this.items.values()].filter(w => ACTIVE.has(w.status) && !canReadScope(scene, w));
+    for (const w of affected) {
+      // Invalidate the current run before any awaited cleanup so late sensor,
+      // model, or desktop results cannot continue into a send/report path.
+      const token = (this.runTokens.get(w.id) || 0) + 1;
+      this.runTokens.set(w.id, token);
+      this.controllers.get(w.id)?.abort();
+      w.status = 'paused';
+      w.note = w.pendingSend
+        ? '切换到不可见场景；上次发送结果仍不确定，已暂停且不会重发。请先核对微信。'
+        : '切换到不可见场景；持续关注已暂停。切回后需明确恢复，不会自动回复。';
+      w.baseline = []; w.baselineReady = false; w.bound = false;
+      w.nextCheckAt = this.clock();
+      await this.sensor.forget(w).catch(() => {});
+      try { await this.save(w, () => this.owns(w, undefined, token)); }
+      catch { /* Keep the in-memory pause even if the journal is temporarily unavailable. */ }
+    }
+    // publish() applies the current visibility filter, so no hidden watch is
+    // included in the scene-change event.
+    this.publish();
+    return { paused: affected.length };
   }
   async close() { this.closed = true; clearTimeout(this.timer); this.invalidate(); await this.sensor.close?.(); }
 }

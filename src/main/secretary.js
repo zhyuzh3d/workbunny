@@ -3,6 +3,11 @@
 const { validateIntent, parseStrictJson } = require('./dialogue-actions');
 const { requestVerification } = require('./verification-transport');
 const { collectDeliveryEvidence } = require('./delivery-evidence');
+const { normalizeScene, rank, canRead } = require('./memory-scope');
+function canReadScope(scene, record) {
+  if (!record) return false;
+  try { return canRead(normalizeScene(scene), record); } catch { return false; }
+}
 
 const FLASH = 'deepseek-v4.1-flash';
 const TERMINAL = new Set(['paused', 'stopped', 'failed', 'accepted']);
@@ -67,21 +72,25 @@ async function verifyDelivery({ task, screenshot, signal }) {
 }
 
 class Secretary {
-  constructor({ desktop, watches, contacts, report, verify = verifyDelivery, ready = () => true, epoch = () => 0, clock = Date.now, maxFollowUps = 2 } = {}) {
-    Object.assign(this, { desktop, watches, contacts, report, verify, ready, epoch, clock, maxFollowUps });
+  constructor({ desktop, watches, contacts, report, verify = verifyDelivery, ready = () => true, epoch = () => 0, getScene = () => 'life', clock = Date.now, maxFollowUps = 2 } = {}) {
+    Object.assign(this, { desktop, watches, contacts, report, verify, ready, epoch, getScene, clock, maxFollowUps });
     this.requests = new Map(); this.taskEpochs = new Map(); this.suppressed = new Set();
     this.verifying = null; this.controller = null; this.handled = new Set(); this.closed = false;
   }
   context() {
-    const task = this.desktop?.task;
+    return this.contextSnapshot().text;
+  }
+  contextSnapshot() {
+    const task = canReadScope(this.getScene(), this.desktop?.task) ? this.desktop?.task : null;
     const watching = this.watches?.list().filter(w => !['stopped', 'expired'].includes(w.status)).map(w => ({ id: w.id, recipient: w.recipient, mode: w.mode, status: w.status, policy: w.policy })) || [];
     const prefix = watching.length ? '持续关注（独立于当前代办）:' + JSON.stringify(watching) + '\n' : '';
-    if (!task) return prefix + '当前没有由 Bunny 发起的代办。';
-    if (task.privacyEpoch !== undefined && task.privacyEpoch !== this.epoch()) return '旧代办引用的记忆已经变更，不再引用其旧内容；需要用户重新交代。';
-    return prefix + JSON.stringify({ goal: task.goal, target: task.target, status: LABEL[task.status] || task.status, statusCode: task.status,
+    const sourceIds = watching.map(watch => watch.id);
+    if (!task) return { text: prefix + '当前没有由 Bunny 发起的代办。', sourceIds };
+    if (task.privacyEpoch !== undefined && task.privacyEpoch !== this.epoch()) return { text: prefix + '旧代办引用的记忆已经变更，不再引用其旧内容；需要用户重新交代。', sourceIds };
+    return { text: prefix + JSON.stringify({ goal: task.goal, target: task.target, status: LABEL[task.status] || task.status, statusCode: task.status,
       canResume: ['paused', 'stopped', 'review'].includes(task.status),
       note: task.note, report: task.report || '', source: '真实代理操作状态',
-      workbuddyStillRunning: task.handoffSent && task.status === 'stopped' });
+      workbuddyStillRunning: task.handoffSent && task.status === 'stopped' }), sourceIds: [...sourceIds, task.id].filter(Boolean) };
   }
   dispatch(intent, { requestId, userText, source = 'text', sources = [], voiceTurn, signal, isCurrent = () => true } = {}) {
     if (this.closed || !this.ready() || !isCurrent()) return Promise.resolve({ text: '请先解锁本地记忆，再继续代办。' });
@@ -102,7 +111,8 @@ class Secretary {
   async _dispatch(intent, { source, isCurrent, userText, signal, sources }) {
     if (intent.action === 'contact_alias') {
       if (!this.contacts) return { text: '本地联系人资料尚未就绪。' };
-      try { await this.contacts.remember(intent.recipient, [intent.alias], { source: ('用户明确纠正：' + userText).slice(0, 80) }); return { text: `记住了，${intent.alias} 指的是微信里的 ${intent.recipient}。` }; }
+      try { await this.contacts.remember(intent.recipient, [intent.alias], { source: ('用户明确纠正：' + userText).slice(0, 80), sources,
+        scene: normalizeScene(this.getScene()) }); return { text: `记住了，${intent.alias} 指的是微信里的 ${intent.recipient}。` }; }
       catch (e) { return { text: e.message }; }
     }
     if (intent.action.startsWith('watch_')) {
@@ -112,15 +122,18 @@ class Secretary {
     }
     let contact;
     if (intent.target === 'wechat') {
-      try { contact = this.contacts ? await this.contacts.resolve(intent.recipient.trim()) : { recipient: intent.recipient.trim(), aliases: [] }; }
+      try { contact = this.contacts ? await this.contacts.resolve(intent.recipient.trim(), { scene: normalizeScene(this.getScene()) }) : { recipient: intent.recipient.trim(), aliases: [] }; }
       catch (error) { return { text: error.message }; }
       if (contact.ambiguous) return { text: `“${intent.recipient}”对应多个联系人，请告诉我微信中的准确显示名。` };
     }
     if (intent.watch) {
       if (!this.watches) return { text: '持续关注服务尚未就绪。' };
       if (!isCurrent() || signal?.aborted) return { text: '交办已被后续对话替换，没有开始关注。' };
-      const result = await this.watches.start({ ...intent, recipient: contact.recipient, recipientAliases: contact.aliases || [], sources });
-      return { text: result.ok ? `好，我会持续关注 ${contact.recipient} 的新消息，${intent.watch.mode === 'reply' ? '按你交代的规则回复，遇到不确定的事向你汇报' : '有消息就告诉你'}。你可以随时让我暂停或停止。` : result.error };
+      const scene = normalizeScene(this.getScene());
+      const result = await this.watches.start({ ...intent, recipient: contact.recipient, recipientAliases: contact.aliases || [], sources,
+        scene, visibilityFloor: rank(scene) });
+      return { text: result.ok ? `好，我会持续关注 ${contact.recipient} 的新消息，${intent.watch.mode === 'reply' ? '按你交代的规则回复，遇到不确定的事向你汇报' : '有消息就告诉你'}。你可以随时让我暂停或停止。` : result.error,
+        ...(result.ok && result.id ? { watchId: result.id } : {}) };
     }
     if (intent.action === 'stop') {
       this.controller?.abort();
@@ -134,7 +147,7 @@ class Secretary {
     if (this.desktop.running || this.desktop.starting || this.verifying) return { text: `我还在处理上一件事：${this.statusText()} 你可以让我先暂停。` };
     if (intent.action === 'resume') {
       const task = this.desktop.task;
-      if (!task || !['paused', 'stopped', 'review'].includes(task.status)) return { text: '目前没有需要继续的旧代办。请告诉我新的安排。' };
+      if (!task || !canReadScope(this.getScene(), task) || !['paused', 'stopped', 'review'].includes(task.status)) return { text: '目前没有当前场景可见、可以继续的旧代办。请告诉我新的安排。' };
       if (task.privacyEpoch !== undefined && task.privacyEpoch !== this.epoch()) return { text: '这件事的记忆来源已变更，请重新交代；我不会从旧内容恢复操作。' };
       const epoch = this.epoch();
       task.initialOrigin ||= task.origin;
@@ -147,7 +160,7 @@ class Secretary {
       signal?.addEventListener('abort', abortResume, { once: true });
       if (signal?.aborted) abortResume();
       let response;
-      try { response = await this.desktop.resume({ privacyEpoch: epoch, sources: task.sources }); } finally { signal?.removeEventListener('abort', abortResume); }
+      try { response = await this.desktop.resume({ privacyEpoch: epoch, sources: task.sources, scene: normalizeScene(this.getScene()) }); } finally { signal?.removeEventListener('abort', abortResume); }
       if (signal?.aborted || epoch !== this.epoch()) return { text: '继续请求已失效，没有继续操作。' };
       this.onStatus(this.desktop.publicStatus());
       return { text: response?.ok ? '好，我接着核对原任务的进度和结果，不重复发送已提交的内容。' : `暂时没能继续：${response?.error || '请查看原任务状态'}。`, taskId: response?.ok ? task.id : undefined };
@@ -157,7 +170,8 @@ class Secretary {
     const goal = recipient ? `仅在微信会话「${recipient}」中完成：${intent.goal}` : intent.goal;
     const epoch = this.epoch();
     if (signal?.aborted) return { text: '这次请求已被新的对话替换，没有发起操作。' };
-    const starting = this.desktop.start({ target: intent.target, goal, criteria: intent.criteria,
+    const scene = normalizeScene(this.getScene());
+    const starting = this.desktop.start({ target: intent.target, goal, criteria: intent.criteria, scene, visibilityFloor: rank(scene),
       recipient, recipientAliases: contact?.aliases || [], operation: intent.operation, message: intent.message,
       origin: 'dialogue', inputSource: source, sources, privacyEpoch: epoch, workModel: FLASH });
     const startingTask = this.desktop.task;
@@ -181,7 +195,7 @@ class Secretary {
     return { text: intent.target === 'workbuddy' ? '好，我来交给 WorkBuddy 执行，跟进进度并检查结果。' : `好，我去微信的${recipient}处理，办好后告诉你。`, taskId: response.id };
   }
   statusText() {
-    const task = this.desktop?.task;
+    const task = canReadScope(this.getScene(), this.desktop?.task) ? this.desktop?.task : null;
     if (!task) return '目前没有正在处理的代办。';
     if (task.privacyEpoch !== undefined && task.privacyEpoch !== this.epoch()) return '该代办的记忆来源已经变更，请重新交代。';
     return `${LABEL[task.status] || '当前状态'}：${task.report || task.note || task.goal}`;
@@ -189,7 +203,7 @@ class Secretary {
   onStatus(status) {
     if (this.closed) return;
     const task = status?.task;
-    if (!task || this.desktop.task?.id !== task.id || task.origin !== 'dialogue' || this.suppressed.has(task.id) ||
+    if (!task || !canReadScope(this.getScene(), task) || this.desktop.task?.id !== task.id || task.origin !== 'dialogue' || this.suppressed.has(task.id) ||
         !this.taskEpochs.has(task.id) || this.taskEpochs.get(task.id) !== this.epoch()) return;
     if (TERMINAL.has(task.status)) this.controller?.abort();
     if (task.status === 'review' && !this.verifying && this.ready() && !this.handled.has(reviewKeyOf(task))) {
@@ -207,7 +221,7 @@ class Secretary {
   }
   async _review(id, screenshot) {
     const task = this.desktop.task;
-    if (task?.id !== id || task.status !== 'review' || !this.ready()) return;
+    if (task?.id !== id || !canReadScope(this.getScene(), task) || task.status !== 'review' || !this.ready()) return;
     const revision = this.desktop.generation;
     const epoch = this.epoch();
     const reviewKey = reviewKeyOf(task);
@@ -216,7 +230,7 @@ class Secretary {
     if (this.handled.size > 256) this.handled.delete(this.handled.values().next().value);
     const controller = new AbortController(); this.controller = controller;
     const current = () => !this.closed && this.ready() && !controller.signal.aborted &&
-      this.epoch() === epoch && this.desktop.task?.id === id && this.desktop.generation === revision;
+      this.epoch() === epoch && canReadScope(this.getScene(), this.desktop.task) && this.desktop.task?.id === id && this.desktop.generation === revision;
     try {
       const observation = { round: task.followUpRound || 0, monitorTaskId: task.monitorTaskId || null, monitorMessageKey: task.monitorMessageKey || null,
         executorReport: String(task.monitorSummary || '').slice(0, 3000), observation: String(task.evidence || '').slice(0, 2000), at: this.clock() };
@@ -252,13 +266,14 @@ class Secretary {
     await this._announce(id, note);
   }
   async _announce(id, text) {
-    if (this.closed || this.desktop.task?.id !== id || this.desktop.task.reportedAt ||
+    if (this.closed || this.desktop.task?.id !== id || !canReadScope(this.getScene(), this.desktop.task) || this.desktop.task.reportedAt ||
         !this.taskEpochs.has(id) || this.taskEpochs.get(id) !== this.epoch()) return;
     this.desktop.task.report = text;
     this.desktop.task.reportedAt = this.clock();
     await this.desktop.journal();
-    if (!this.closed && this.desktop.task?.id === id && this.taskEpochs.get(id) === this.epoch()) {
-      await this.report({ text, taskId: id, status: this.desktop.task.status, epoch: this.taskEpochs.get(id), sources: [id] });
+    if (!this.closed && this.desktop.task?.id === id && canReadScope(this.getScene(), this.desktop.task) && this.taskEpochs.get(id) === this.epoch()) {
+      await this.report({ text, taskId: id, status: this.desktop.task.status, epoch: this.taskEpochs.get(id), sources: [id],
+        scene: this.desktop.task.scene, domain: this.desktop.task.domain, visibilityFloor: this.desktop.task.visibilityFloor });
     }
   }
   close() { this.closed = true; this.controller?.abort(); }

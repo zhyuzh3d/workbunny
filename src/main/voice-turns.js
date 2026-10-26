@@ -1,18 +1,24 @@
 'use strict';
+const { randomUUID } = require('node:crypto');
 // One speculative request per stable revision. ASR finals refine segments;
 // they do not restart the pause clock or create a second model request.
 function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => {}, onError = () => {},
   pauseMs = 1000, turnMs = 3000, finalWaitMs = 8000,
-  now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, sessionId = randomUUID() }) {
   let current = null, serial = 0, requestTimer, sealTimer, confirmationTimer;
   const canonical = s => String(s || '').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
   const contentKey = s => String(s || '').replace(/\s+/g, ' ').trim().replace(/[。.!?！？]+$/u, '').trim();
   const textOf = t => [...t.segments, t.partial].filter(Boolean).join('\n');
   function remember(t) {
-    if (!t || t.remembered || t.skipped) return;
+    if (!t || t.skipped) return;
+    if (t.remembered) return t.receipt;
     const text = textOf(t);
     if (canonical(text).length < 2) return;
-    t.remembered = true; onRemember(text);
+    t.remembered = true;
+    // The final punctuation may differ from the speculative request. A stable
+    // turn identity and the actual write receipt link replies to that final.
+    t.receipt = onRemember(text, { turnId: `${sessionId}:${t.id}`, heardAt: t.lastActivity });
+    return t.receipt;
   }
   function invalidate(t = current) {
     if (!t?.request || !t.request.valid) return;
@@ -46,10 +52,10 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
       if (canonical(text).length < 2 || t.request) return;
       let release;
       const settled = new Promise(r => { release = r; });
-      const token = { valid: true, release, text, id: t.id, heardAt: t.lastActivity,
+      const token = { valid: true, release, text, id: t.id, turnId: `${sessionId}:${t.id}`, heardAt: t.lastActivity,
         isCurrent: () => current === t && token.valid,
         waitForCommit: () => settled,
-        remember: () => { if (token.isCurrent()) remember(t); },
+        remember: () => { if (token.isCurrent()) return remember(t); },
         skip: () => { if (token.isCurrent()) t.skipped = true; },
       };
       t.request = token;

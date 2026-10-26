@@ -10,7 +10,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function makeJournal(log = []) {
+function makeJournal(log = [], epoch = () => 9) {
   const watches = new Map(), events = new Map(), receipts = new Map();
   return {
     watches, events, receipts, log,
@@ -21,6 +21,15 @@ function makeJournal(log = []) {
       return watches.get(watch.id);
     },
     async listWatches() { return [...watches.values()].map(w => structuredClone(w)); },
+    async restoreWatch(id) {
+      const value = watches.get(id);
+      if (!value) return null;
+      const restored = { ...structuredClone(value), privacyEpoch: epoch(), status: ['stopped', 'expired'].includes(value.status) ? value.status : 'paused',
+        baseline: [], baselineReady: false, bound: false,
+        note: value.pendingSend ? '应用已恢复；上次发送结果不确定，已暂停且不会重发。请先核对微信。' : value.note };
+      watches.set(id, structuredClone(restored));
+      return restored;
+    },
     async saveEvent(watch, event) {
       assert.equal(event.id, this.eventId(watch.id, event.identityString), 'service must pass identityString with every event');
       const current = events.get(event.id) || {};
@@ -45,7 +54,7 @@ function makeJournal(log = []) {
 
 function makeHarness({ mode = 'notify', clock = () => 1000, epoch = () => 9, ready = () => true,
   frames = [], views = [], execute, propose, canOperate, report } = {}) {
-  const log = [], journal = makeJournal(log), sensor = {
+  const log = [], journal = makeJournal(log, epoch), sensor = {
     samples: 0, commits: 0, forgets: 0, closes: 0,
     async sample(w, options) { this.samples++; log.push(['sample', options.reset]); return frames.shift() || { changed: false, baseline: false }; },
     async commit() { this.commits++; log.push(['commit']); },
@@ -86,6 +95,7 @@ async function testEmptyBaselineAndNoChange() {
   await h.svc.tick(w.id);
   assert.equal(h.reports.length, 1, 'message arriving after an empty baseline is treated as new');
   assert.equal(h.reports[0].sources.length, 1);
+  assert.deepEqual([h.reports[0].scene, h.reports[0].domain, h.reports[0].visibilityFloor], ['life', 'life', 1]);
   assert.equal(h.reports[0].eventId, [...h.journal.events.keys()][0]);
 }
 
@@ -248,6 +258,118 @@ async function testUnknownSendAndPendingRestore() {
   assert.equal(crashBetweenEventAndWatchWrite.executions.length, 0);
 }
 
+async function testRecipientControlIgnoresStoppedHistory() {
+  const h = makeHarness();
+  const oldA = await start(h); await h.svc.control('stop', { id: oldA.id });
+  const oldB = await start(h); await h.svc.control('stop', { id: oldB.id });
+  const current = await start(h);
+  assert.equal(h.svc.find({ recipient: current.recipient })?.id, current.id,
+    'voice recipient control resolves among visible selectable watches and ignores stopped history');
+  const paused = await h.svc.control('pause', { recipient: current.recipient });
+  assert.equal(paused.ok, true);
+  assert.equal(h.svc.items.get(current.id).status, 'paused');
+  assert.equal(h.svc.find({ recipient: current.recipient })?.id, current.id,
+    'the single paused watch remains selectable for resume/stop');
+}
+
+async function testSceneScopeHidesWatchesAndStopsChecks() {
+  let scene = 'private';
+  const h = makeHarness({ frames: [frame({ baseline: true })] });
+  h.svc.getScene = () => scene;
+  const w = await start(h);
+  assert.equal(w.scene, 'private'); assert.equal(w.domain, 'private'); assert.equal(w.visibilityFloor, 2);
+  assert.equal(h.svc.list().length, 1);
+  scene = 'life';
+  assert.equal(h.svc.list().length, 0, 'private watch metadata is not exposed in life');
+  await h.svc.tick(w.id);
+  assert.equal(h.sensor.samples, 0, 'invisible watch does not inspect or operate in a lower scene');
+  assert.equal(h.svc.find({ id: w.id }), null, 'hidden watch cannot be resumed or controlled by id');
+}
+
+async function testSceneChangeAbortsInflightInspectAndRequiresResume() {
+  let scene = 'life';
+  const inspection = deferred();
+  const h = makeHarness({ frames: [frame({ baseline: true }), frame()], views: [
+    { headerMatched: true, messages: [] },
+  ] });
+  h.svc.getScene = () => scene;
+  let inspectSignal;
+  let inspectCount = 0;
+  h.svc.inspect = async (_w, _frame, signal) => {
+    inspectCount++;
+    if (inspectCount === 1) return { headerMatched: true, messages: [] };
+    inspectSignal = signal; return inspection.promise;
+  };
+  const w = await start(h);
+  await h.svc.tick(w.id);
+  const pendingTick = h.svc.tick(w.id);
+  while (!inspectSignal) await new Promise(resolve => setTimeout(resolve, 0));
+  const originalEpoch = w.privacyEpoch;
+  scene = 'work';
+  const changed = await h.svc.sceneChanged();
+  assert.equal(changed.paused, 1);
+  assert.equal(inspectSignal.aborted, true, 'scene transition aborts in-flight inspect');
+  assert.equal(w.status, 'paused');
+  assert.equal(w.privacyEpoch, originalEpoch, 'scene transition does not alter source epoch');
+  inspection.resolve({ headerMatched: true, messages: [incoming('late', 'must not process')] });
+  await pendingTick;
+  scene = 'private';
+  await h.svc.sceneChanged();
+  await h.svc.tick(w.id);
+  assert.equal(w.status, 'paused', 'returning to a readable scene does not auto-resume the watch');
+  assert.equal(h.proposals.length, 0);
+  assert.equal(h.executions.filter(x => x.operation === 'send').length, 0);
+  assert.equal(h.svc.list().length, 1, 'paused task remains available for explicit control in a readable scene');
+}
+
+async function testSceneChangeAbortsInflightProposalBeforeSend() {
+  let scene = 'life';
+  const proposal = deferred();
+  const h = makeHarness({ mode: 'reply', frames: [frame({ baseline: true }), frame()], views: [
+    { headerMatched: true, messages: [] },
+    { headerMatched: true, messages: [incoming('new', 'please reply')] },
+  ], propose: () => proposal.promise });
+  h.svc.getScene = () => scene;
+  const w = await start(h, { mode: 'reply' });
+  await h.svc.tick(w.id);
+  const pendingTick = h.svc.tick(w.id);
+  while (!h.proposals.length) await new Promise(resolve => setTimeout(resolve, 0));
+  scene = 'work';
+  await h.svc.sceneChanged();
+  assert.equal(h.proposals[0].signal.aborted, true);
+  proposal.resolve({ reply: 'must not send' });
+  await pendingTick;
+  assert.equal(h.executions.filter(x => x.operation === 'send').length, 0);
+  assert.equal(w.status, 'paused');
+}
+
+async function testSceneChangeDuringSendKeepsUnknownAnchorWithoutReplay() {
+  let scene = 'life';
+  const sending = deferred();
+  const h = makeHarness({ mode: 'reply', frames: [frame({ baseline: true }), frame()], views: [
+    { headerMatched: true, messages: [] },
+    { headerMatched: true, messages: [incoming('new', 'please reply')] },
+  ], propose: async () => ({ reply: 'one attempt' }), execute: async (_w, req) => req.operation === 'send' ? sending.promise : { ok: true } });
+  h.svc.getScene = () => scene;
+  const w = await start(h, { mode: 'reply' });
+  await h.svc.tick(w.id);
+  const pendingTick = h.svc.tick(w.id);
+  while (!h.executions.some(x => x.operation === 'send')) await new Promise(resolve => setTimeout(resolve, 0));
+  const pendingId = w.pendingSend;
+  assert(pendingId, 'durable send intent exists before the UI operation');
+  scene = 'work';
+  await h.svc.sceneChanged();
+  sending.resolve({ ok: true });
+  await pendingTick;
+  assert.equal(w.status, 'paused');
+  assert.equal(w.pendingSend, pendingId, 'scene change preserves uncertain send state');
+  scene = 'private';
+  await h.svc.sceneChanged();
+  await h.svc.tick(w.id);
+  assert.equal(h.executions.filter(x => x.operation === 'send').length, 1, 'neither late completion nor returning to a higher scene replays send');
+  assert.equal(w.pendingSend, pendingId);
+}
+
 async function testPauseDuringOpenAndPropose() {
   const opening = deferred();
   const h = makeHarness({ execute: async (_w, req) => req.operation === 'open' ? opening.promise : { ok: true },
@@ -359,6 +481,11 @@ async function main() {
   await testUnstableFrameAndNonTextMessages();
   await testPersistedEventPreventsReproposal();
   await testUnknownSendAndPendingRestore();
+  await testRecipientControlIgnoresStoppedHistory();
+  await testSceneScopeHidesWatchesAndStopsChecks();
+  await testSceneChangeAbortsInflightInspectAndRequiresResume();
+  await testSceneChangeAbortsInflightProposalBeforeSend();
+  await testSceneChangeDuringSendKeepsUnknownAnchorWithoutReplay();
   await testPauseDuringOpenAndPropose();
   await testPauseWhileCheckingIdleGuard();
   await testPauseDuringSendNeverReportsOrReplays();

@@ -2,7 +2,7 @@
 
 const assert = require('assert/strict');
 const { DesktopService, WECHAT_RULE, validateAction, dispatchGuard, analyzeWorkBuddyOCR, selectedFlash, prepareOCR, promptOCR, preflightWorkModel,
-  WORKBUDDY_TEXT_UTF16_LIMIT, workBuddyTextWithinLimit, validateWorkBuddyOutbound, makeWorkBuddyOutbound } = require('../src/main/desktop-service');
+  validateWechatAction, WORKBUDDY_TEXT_UTF16_LIMIT, workBuddyTextWithinLimit, validateWorkBuddyOutbound, makeWorkBuddyOutbound } = require('../src/main/desktop-service');
 const { Monitor } = require('../src/main/monitor');
 const { observeWorkBuddy } = require('../src/main/workbuddy-observation');
 const { ContactDirectory, createContactDirectory } = require('../src/main/contact-directory');
@@ -729,7 +729,7 @@ async function testVisualWorkBuddySendBindsExactMonitorTask() {
 function makePausedResumeTask(overrides = {}) {
   const id = 'bcf0b2af-d420-4fb4-8fa3-98effc9246c9';
   const task = { id, bunnyTaskId: id, goal: '恢复原任务', taskText: '恢复原任务', criteria: '核对同一交付',
-    target: 'workbuddy', workModel: 'deepseek-v4.1-flash', thinking: 'high', origin: 'panel', recipient: '文件传输助手',
+    target: 'workbuddy', scene: 'life', domain: 'work', visibilityFloor: 1, workModel: 'deepseek-v4.1-flash', thinking: 'high', origin: 'panel', recipient: '文件传输助手',
     associationMarker: `[workbunny:${id}]`, outboundText: '', sources: [], startedAt: Date.now() - 600000,
     attemptStartedAt: Date.now() - 600000, followUpRound: 0, status: 'failed', steps: [] };
   task.outboundText = makeWorkBuddyOutbound(task);
@@ -993,9 +993,21 @@ async function testContactDirectoryAndWechatOperations() {
   assert.deepEqual((await directory.resolve('Alice')).aliases, ['Alice', '爱丽丝', '阿丽丝'], 'confirmed aliases accumulate');
   assert.equal((await directory.resolve('Bob')).confirmed, false, 'unknown spoken names do not inherit another contact');
   await assert.rejects(directory.remember('Bob', ['爱丽丝']), /冲突/u);
-  const failedWriteDirectory = new ContactDirectory({ read: async () => [{ recipient: 'Old', aliases: ['旧名'] }], write: async () => { throw new Error('disk error'); } });
+  const failedWriteDirectory = new ContactDirectory({ read: async () => [{ recipient: 'Old', aliases: ['旧名'], scene: 'private', domain: 'private', visibilityFloor: 2 }], write: async () => { throw new Error('disk error'); } });
   await assert.rejects(failedWriteDirectory.remember('Old', ['新名']), /disk error/u);
-  assert.deepEqual((await failedWriteDirectory.resolve('Old')).aliases, ['Old', '旧名'], 'failed persistence leaves in-memory aliases unchanged');
+  assert.deepEqual((await failedWriteDirectory.resolve('Old', { scene: 'private' })).aliases, ['Old', '旧名'], 'failed persistence leaves in-memory aliases unchanged');
+  assert.equal((await failedWriteDirectory.resolve('Old', { scene: 'life' })).confirmed, false, 'private contacts never appear in life');
+  let sceneWrites = [];
+  const scoped = new ContactDirectory({
+    read: async ({ scene }) => sceneWrites.filter(row => row.scene === scene),
+    write: async ({ scene, contacts }) => { sceneWrites = [...sceneWrites.filter(row => row.scene !== scene), ...contacts]; },
+  });
+  await scoped.remember('Alice', ['爱丽丝'], { scene: 'private' });
+  assert.equal((await scoped.resolve('爱丽丝', { scene: 'life' })).confirmed, false, 'alias learned in private is not disclosed in life');
+  assert.equal((await scoped.resolve('爱丽丝', { scene: 'private' })).confirmed, true);
+  await scoped.remember('Bob', ['小波'], { scene: 'life' });
+  assert.equal(sceneWrites.length, 2, 'writing a lower-scope directory partition preserves private entries');
+  assert.equal((await scoped.resolve('爱丽丝', { scene: 'private' })).confirmed, true);
   assert.equal(typeof createContactDirectory, 'function');
 
   const recipientOCR = [{ text: 'Alice', confidence: 0.98, x: 0.42, y: 0.08, width: 0.08, height: 0.02 }];
@@ -1016,6 +1028,7 @@ async function testContactDirectoryAndWechatOperations() {
     recipient: '爱丽丝', message: body })).ok);
   await until(() => svc.task.status === 'review');
   assert.equal(svc.task.recipient, 'Alice');
+  assert.deepEqual([svc.task.scene, svc.task.domain, svc.task.visibilityFloor], ['life', 'life', 1]);
   assert.equal(svc.task.message, body);
   assert.equal(svc.task.sendState, 'confirmed');
   assert.equal(svc.task.submitAttemptedAt > 0, true);
@@ -1052,10 +1065,47 @@ async function testContactDirectoryAndWechatOperations() {
   assert.equal(navigationNative.calls.some(call => call.op === 'type'), false, 'navigation is limited to canonical names and confirmed aliases');
 }
 
+async function testWechatCannotQuitAndKeepsSafeShortcuts() {
+  assert.match(WECHAT_RULE, /不得退出或登出已存在的微信/u);
+  const scope = { target: 'wechat', operation: 'open', recipient: 'Alice', recipientAliases: ['Alice'] };
+  for (const modifier of ['cmd', 'command', 'meta']) {
+    assert.throws(() => validateWechatAction({ action: 'key', key: 'q', modifiers: [modifier] }, scope), /禁止通过快捷键退出/u,
+      `${modifier}+Q is blocked for WeChat`);
+    const parsed = validateAction({ action: 'key', key: 'q', modifiers: [modifier] });
+    assert.throws(() => validateWechatAction(parsed, scope), /禁止通过快捷键退出/u,
+      `${modifier}+Q is blocked before WeChat dispatch`);
+  }
+  for (const key of ['f', 'v']) {
+    const action = validateAction({ action: 'key', key, modifiers: ['command'] });
+    assert.doesNotThrow(() => validateWechatAction(action, scope), `Command+${key.toUpperCase()} remains available`);
+  }
+  assert.doesNotThrow(() => validateWechatAction(validateAction({ action: 'click', x: 0.42, y: 0.45 }), scope),
+    'ordinary in-window contact clicks remain available');
+
+  const header = [{ text: 'Alice', confidence: 0.98, x: 0.42, y: 0.08, width: 0.08, height: 0.02 }];
+  const native = new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: header });
+  const svc = service(native, async () => ({ action: 'key', key: 'q', modifiers: ['meta'] }));
+  assert((await svc.start({ goal: '打开 Alice 会话', target: 'wechat', origin: 'watch', operation: 'open', recipient: 'Alice' })).ok);
+  await until(() => svc.task.status === 'paused');
+  assert.equal(native.calls.some(call => call.op === 'key'), false, 'blocked quit shortcut never reaches native input');
+}
+
+async function testTaskScopeVisibilityAndResumeGate() {
+  let scene = 'life';
+  const native = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac' });
+  const svc = service(native, async () => { throw new Error('hidden task must not execute'); }, [], { getScene: () => scene });
+  svc.task = makePausedResumeTask({ scene: 'private', domain: 'work', visibilityFloor: 2, status: 'paused' });
+  assert.equal(svc.publicStatus().task, null, 'private task is absent from lower-scene public status');
+  assert.equal((await svc.resume()).ok, false, 'resume is rejected until the task is visible in the current scene');
+  assert.equal(native.calls.length, 0, 'visibility gate runs before native calls');
+  scene = 'private';
+  assert.equal(svc.publicStatus().task.visibilityFloor, 2, 'the original task becomes visible when its scene returns');
+}
+
 async function testWechatResumeDoesNotReplayOrOverwrite() {
   const header = [{ text: 'Alice', confidence: 0.99, x: 0.4, y: 0.08, width: 0.08, height: 0.02 }];
   const body = '原始待发送内容';
-  const directory = createContactDirectory({ read: async () => [{ recipient: 'Alice', aliases: ['爱丽丝'] }] });
+  const directory = createContactDirectory({ read: async () => [{ recipient: 'Alice', aliases: ['爱丽丝'], scene: 'life', domain: 'life', visibilityFloor: 1 }] });
   const native = new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: [...header, { text: body, confidence: 0.99, x: 0.4, y: 0.82, width: 0.2, height: 0.02 }] });
   const actions = [
     { action: 'type', text: body, purpose: 'task' },
@@ -1084,7 +1134,7 @@ async function testWechatResumeDoesNotReplayOrOverwrite() {
   assert.equal(stranger.calls.filter(call => call.op === 'type' || call.op === 'key').length, 0, 'a different visible draft is preserved without input');
 
   const sent = service(new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: header }), async () => ({ action: 'wait', reason: 'read only' }), [], { contactDirectory: directory });
-  sent.task = { id: 'sent', target: 'wechat', status: 'paused', goal: 'send', operation: 'send', message: body, recipient: 'Alice', recipientAliases: ['Alice'], submitAttemptedAt: Date.now(), startedAt: Date.now(), steps: [] };
+  sent.task = { id: 'sent', target: 'wechat', scene: 'life', domain: 'life', visibilityFloor: 1, status: 'paused', goal: 'send', operation: 'send', message: body, recipient: 'Alice', recipientAliases: ['Alice'], submitAttemptedAt: Date.now(), startedAt: Date.now(), steps: [] };
   assert((await sent.resume()).ok);
   await until(() => sent.native.calls.some(call => call.op === 'capture'));
   await sent.stop('test stop after unknown send');
@@ -1200,6 +1250,8 @@ async function main() {
   await testFreeModelIsStrictlyZeroCostAndStubbed();
   await testFreeChoiceProofLifecycle();
   await testContactDirectoryAndWechatOperations();
+  await testWechatCannotQuitAndKeepsSafeShortcuts();
+  await testTaskScopeVisibilityAndResumeGate();
   await testWechatResumeDoesNotReplayOrOverwrite();
   await testGuiLeaseSerializesAndReleases();
   console.log('DesktopService integration checks passed');

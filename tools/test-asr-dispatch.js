@@ -25,3 +25,14 @@ test('loud input without new recognized words cannot cancel a valid response; ne
  f.asr.onMessage({t:'partial',v:'再列出待办'});assert.equal(old.isCurrent(),false);
  f.levels(1000,.1);assert.equal(f.requests.length,2);assert.match(f.requests[1].turn.text,/整理。\n再列出待办/);
 });
+test('late final from disabled continuous listening never becomes a manual chat',()=>{
+ const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');
+ const handler=source.slice(source.indexOf("    asr.on('final', (t) => {"),source.indexOf("    asr.on('recycle'"));
+ const asr=new Asr('/unused'),requests=[],events=[],messages=[];
+ const ctx={asr,alwaysOn:false,log:()=>{},send:(type,data)=>events.push({type,...data}),pushHistory:(...a)=>messages.push(a),think:q=>requests.push(q)};
+ vm.runInNewContext(handler,ctx);
+ asr.always=true;asr.emit('final','停用之前尚未提交的半句');
+ assert.equal(requests.length,0);assert.equal(messages.length,0);assert.equal(events.length,0);
+ asr.always=false;asr.emit('final','真正的手动录音');
+ assert.equal(requests.length,1);assert.equal(messages.length,1);assert.equal(requests[0].userText,'真正的手动录音');
+});

@@ -76,6 +76,44 @@ function draftPatch(prefix) {
 function pendingValue(path, fallback) {
   return edits.has(path) ? edits.get(path).value : readPath(cfg, path) ?? fallback;
 }
+const SCENE_SCOPE_TEXT = {
+  private: '私聊：可按需参考私聊、生活与工作资料。',
+  life: '生活：可按需参考生活与工作资料。',
+  work: '工作：仅参考工作资料。',
+};
+function paintSceneProfile(source = cfg) {
+  const configured = source?.memory?.scene;
+  let scene = pendingValue('memory.scene', configured || 'life');
+  if (!Object.hasOwn(SCENE_SCOPE_TEXT, scene)) scene = 'life';
+  $('panelScene').value = scene;
+  $('panelSceneScope').textContent = SCENE_SCOPE_TEXT[scene];
+  const path = `buddy.sceneProfiles.${scene}`;
+  $('panelSceneProfile').value = pendingValue(path, '');
+  const status = $('panelSceneProfileStatus');
+  status.classList.remove('bad', 'dirty');
+  if (edits.has(path)) { status.textContent = '有未保存的场景补充'; status.classList.add('dirty'); }
+  else status.textContent = '';
+}
+function changePanelScene(scene) {
+  if (!Object.hasOwn(SCENE_SCOPE_TEXT, scene)) return;
+  const path = 'memory.scene', prior = pendingValue(path, cfg?.memory?.scene || 'life');
+  if (scene === prior) return;
+  edit(path, scene);
+  const revision = edits.get(path).revision;
+  paintSceneProfile();
+  $('panelSceneProfileStatus').textContent = '正在切换场景…';
+  $('panelSceneProfileStatus').classList.remove('bad', 'dirty');
+  persist({ memory: { scene } }, [path]).then(() => {
+    if (!edits.has(path)) $('panelSceneProfileStatus').textContent = '';
+  }).catch(error => {
+    if (edits.get(path)?.revision === revision) {
+      edits.delete(path);
+      paintSceneProfile();
+      $('panelSceneProfileStatus').textContent = `场景切换失败，已恢复原设置。${error.message || ''}`;
+      $('panelSceneProfileStatus').classList.add('bad');
+    }
+  });
+}
 
 /* ═══════════ tab 切换 ═══════════ */
 function showTab(t) {
@@ -411,6 +449,7 @@ function syncTts(c, acknowledged = []) {
   };
   for (const [id, path, fallback] of [['setName', 'buddy.name', 'baby'], ['setProfile', 'buddy.profile', ''], ['setOwnerName', 'buddy.ownerName', '主人'], ['rmUrl', 'tts.baseURL', '']])
     if (!edits.has(path)) $(id).value = readPath(c, path) ?? fallback;
+  paintSceneProfile(c);
   if (!edits.has('tts.apiKey')) $('rmKey').value = c.tts.hasApiKey ? KEY_MASK : '';
   $('setAlways').checked = pendingValue('voice.alwaysListen', false);
   $('setJudge').checked = pendingValue('asr.judge', true);
@@ -450,6 +489,7 @@ function fillForm() {
   paintAvatars();
   paintScale();
   paintBrain();
+  paintSceneProfile(c);
   paintTts();
 }
 
@@ -559,6 +599,15 @@ function buildMotionList() {
     });
     $('brainKeyInput').addEventListener('input', () => edit('brain', true));
     $('brainThinking').addEventListener('change', () => edit('brain', true));
+    $('panelScene').addEventListener('change', () => changePanelScene($('panelScene').value));
+    $('panelSceneProfile').addEventListener('input', () => {
+      const scene = pendingValue('memory.scene', cfg?.memory?.scene || 'life');
+      const path = `buddy.sceneProfiles.${scene}`;
+      edit(path, $('panelSceneProfile').value.slice(0, 2000));
+      $('panelSceneProfileStatus').textContent = '有未保存的场景补充';
+      $('panelSceneProfileStatus').classList.remove('bad');
+      $('panelSceneProfileStatus').classList.add('dirty');
+    });
     for (const [id, path] of [['setName', 'buddy.name'], ['setProfile', 'buddy.profile'], ['setOwnerName', 'buddy.ownerName']])
       $(id).addEventListener('input', () => edit(path, $(id).value));
     $('setAlways').addEventListener('change', () => edit('voice.alwaysListen', $('setAlways').checked));

@@ -115,19 +115,44 @@ function chatPayload(opts) {
   const { model = 'hy3', messages, thinking = 'auto' } = opts;
   // The current WorkBuddy endpoint only accepts streaming chat. Its broker
   // buffers the SSE response, so callers must bound reasoning/output budgets.
-  const payload = { model, messages, max_tokens: opts.maxTokens || 4096, ...opts.extraBody, stream: true };
-  if (!opts.extraBody && (thinking === 'low' || thinking === 'high')) payload.reasoning_effort = thinking;
+  const extraBody = opts.extraBody || {};
+  const payload = { model, messages, max_tokens: opts.maxTokens || 4096, ...extraBody };
+  if (!Object.hasOwn(extraBody, 'reasoning_effort') && (thinking === 'low' || thinking === 'high')) payload.reasoning_effort = thinking;
+  payload.stream = true;
   return payload;
 }
+
+function sanitizeFinishReason(value) {
+  if (typeof value !== 'string') return null;
+  const safe = value.trim().toLowerCase();
+  if (!safe) return null;
+  return ['stop', 'length', 'max_tokens', 'max_output_tokens', 'content_filter', 'tool_calls', 'function_call', 'error', 'cancelled', 'timeout'].includes(safe) ? safe : 'other';
+}
+function sanitizeUsage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const result = {};
+  for (const key of ['prompt_tokens', 'completion_tokens', 'total_tokens', 'input_tokens', 'output_tokens']) {
+    const n = value[key];
+    if (Number.isSafeInteger(n) && n >= 0) result[key] = n;
+  }
+  if (typeof value.credit === 'number' && Number.isFinite(value.credit) && value.credit >= 0) result.credit = value.credit;
+  return Object.keys(result).length ? result : null;
+}
+function hasReasoningContent(value) {
+  return !!value && typeof value === 'object' && [value.reasoning_content, value.reasoning].some(v => typeof v === 'string' && v.length > 0);
+}
 function parseChatBody(body, model = 'hy3') {
-  let raw = '', usedModel = model, usage = null;
+  let raw = '', usedModel = model, usage = null, finishReason = null, hasReasoning = false;
   let object;
   try { object = JSON.parse(body); } catch { /* Older brokers may still return SSE. */ }
   if (object) {
     const data = object.data?.choices ? object.data : object;
     usedModel = data.model || model;
-    usage = data.usage || null;
-    const content = data.choices?.[0]?.message?.content;
+    usage = sanitizeUsage(data.usage);
+    const choice = data.choices?.[0];
+    finishReason = sanitizeFinishReason(choice?.finish_reason ?? choice?.finishReason);
+    hasReasoning = hasReasoningContent(choice?.message);
+    const content = choice?.message?.content;
     raw = typeof content === 'string' ? content : '';
   } else for (const line of body.split('\n')) {
     if (!line.startsWith('data:')) continue;
@@ -137,15 +162,23 @@ function parseChatBody(body, model = 'hy3') {
     try { event = JSON.parse(text); } catch { continue; }
     const data = event.data?.choices ? event.data : event;
     if (data.model) usedModel = data.model;
-    if (data.usage) usage = data.usage;
-    raw += data.choices?.[0]?.delta?.content || '';
+    if (data.usage) usage = sanitizeUsage(data.usage);
+    const choice = data.choices?.[0];
+    if (choice?.finish_reason !== undefined && choice.finish_reason !== null) finishReason = sanitizeFinishReason(choice.finish_reason);
+    const delta = choice?.delta;
+    if (hasReasoningContent(delta)) hasReasoning = true;
+    raw += delta?.content || '';
   }
   if (!raw.trim()) {
-    const error = new Error('WorkBuddy 没有返回回答，请重试。');
-    error.code = 'E_EMPTY_RESPONSE';
+    const limited = ['length', 'max_tokens', 'max_output_tokens', 'token_limit'].includes(String(finishReason || '').toLowerCase());
+    const error = new Error(limited ? 'WorkBuddy 输出达到 token 上限，整理结果不完整。' : 'WorkBuddy 没有返回可用回答，请重试。');
+    error.code = limited ? 'E_OUTPUT_LIMIT' : 'E_EMPTY_RESPONSE';
+    error.finishReason = finishReason;
+    error.usage = usage;
+    error.hasReasoning = hasReasoning;
     throw error;
   }
-  return { raw, model: usedModel, usage };
+  return { raw, model: usedModel, usage, finishReason, hasReasoning };
 }
 async function chat(opts) {
   const { model = 'hy3', signal, onDelta, onSentence } = opts;
@@ -153,7 +186,7 @@ async function chat(opts) {
   const r = await request({ method: 'POST', path: '/v2/chat/completions',
     headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
     body_b64: Buffer.from(JSON.stringify(payload)).toString('base64'),
-  }, { signal });
+  }, { signal, timeoutMs: opts.timeoutMs });
   const { raw, model: usedModel, usage } = parseChatBody(r.body, model);
   if (onDelta) onDelta(raw);
   const { extractTags, makeSentenceSplitter } = require('./llm');
@@ -162,4 +195,4 @@ async function chat(opts) {
   return { ...parsed, text: parsed.clean.trim(), raw, model: usedModel, usage, provider: 'workbuddy' };
 }
 
-module.exports = { chat, request, discovery, chatPayload, parseChatBody, openApplication };
+module.exports = { chat, request, discovery, chatPayload, parseChatBody, openApplication, sanitizeUsage };

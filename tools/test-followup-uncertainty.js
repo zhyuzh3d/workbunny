@@ -48,7 +48,7 @@ class UncertainSendNative {
 
 function fixtureTask(id) {
   const task = { id, bunnyTaskId: id, goal: '检查这份交付', taskText: '检查这份交付', criteria: '确认数据完整',
-    target: 'workbuddy', workModel: 'deepseek-v4.1-flash', thinking: 'high', origin: 'dialogue', inputSource: 'text',
+    target: 'workbuddy', scene: 'life', domain: 'work', visibilityFloor: 1, workModel: 'deepseek-v4.1-flash', thinking: 'high', origin: 'dialogue', inputSource: 'text',
     privacyEpoch: 7, recipient: '文件传输助手', associationMarker: `[workbunny:${id}]`, sources: [],
     sessionId: 'wb-session-1', monitorSessionId: 'wb-session-1', monitorTaskId: 40, monitorMessageKey: 'old-message-key',
     monitorStatus: 'ok', monitorSummary: '旧回复：交付检查已完成。', submittedAt: Date.now() - 5000,

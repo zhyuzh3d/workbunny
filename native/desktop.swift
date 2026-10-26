@@ -787,6 +787,8 @@ struct VisualROI: Equatable {
     let y: Double
     let width: Double
     let height: Double
+    let minChangedPixels: Int
+    let minChangedRatio: Double
 }
 
 struct VisualRegionFrame {
@@ -833,7 +835,7 @@ func visualSampleId(_ value: Any?) throws -> String {
     return value
 }
 
-func normalizedVisualRegions(_ value: Any?) throws -> [VisualROI] {
+func normalizedVisualRegions(_ value: Any?, defaultMinChangedRatio: Double = 0.001) throws -> [VisualROI] {
     guard let rows = value as? [[String: Any]], (1...4).contains(rows.count) else {
         throw DesktopError(message: "regions 必须包含 1 至 4 个归一化矩形")
     }
@@ -844,7 +846,14 @@ func normalizedVisualRegions(_ value: Any?) throws -> [VisualROI] {
               x >= 0, y >= 0, width > 0, height > 0, x + width <= 1, y + height <= 1 else {
             throw DesktopError(message: "ROI 必须位于 0..1 归一化窗口范围内")
         }
-        return VisualROI(x: x, y: y, width: width, height: height)
+        let pixels = row["minChangedPixels"] == nil ? 0 : number(row["minChangedPixels"])
+        let ratio = row["minChangedRatio"] == nil ? defaultMinChangedRatio : number(row["minChangedRatio"])
+        guard let pixels, pixels.isFinite, pixels.rounded() == pixels, (0...102_400).contains(pixels),
+              let ratio, ratio.isFinite, (0...1).contains(ratio) else {
+            throw DesktopError(message: "ROI 变化门槛不合法")
+        }
+        return VisualROI(x: x, y: y, width: width, height: height,
+                         minChangedPixels: Int(pixels), minChangedRatio: ratio)
     }
 }
 
@@ -853,7 +862,6 @@ func visualParameters(_ request: [String: Any]) throws -> (String, UInt32, [Visu
     guard let windowId = uint(request["windowId"]), windowId > 0 else {
         throw DesktopError(message: "visualSample 需要有效 windowId")
     }
-    let regions = try normalizedVisualRegions(request["regions"])
     if let reset = request["reset"], !(reset is Bool) { throw DesktopError(message: "reset 必须是布尔值") }
     if let include = request["includeImage"], !(include is Bool) { throw DesktopError(message: "includeImage 必须是布尔值") }
     let thresholdValue = number(request["pixelThreshold"]) ?? 18
@@ -862,6 +870,7 @@ func visualParameters(_ request: [String: Any]) throws -> (String, UInt32, [Visu
     }
     let ratio = number(request["minChangedRatio"]) ?? 0.001
     guard ratio.isFinite, (0...1).contains(ratio) else { throw DesktopError(message: "minChangedRatio 必须位于 0..1") }
+    let regions = try normalizedVisualRegions(request["regions"], defaultMinChangedRatio: ratio)
     let expected = request["expected"] as? [String: Any]
     if request["expected"] != nil {
         guard let expected, let bundle = expected["bundleId"] as? String, !bundle.isEmpty,
@@ -897,20 +906,32 @@ func downsampleVisualRegion(_ image: CGImage, roi: VisualROI) throws -> VisualRe
     return VisualRegionFrame(width: width, height: height, rgba: rgba)
 }
 
-func compareVisualRegion(_ baseline: VisualRegionFrame, _ current: VisualRegionFrame, threshold: Int) -> (ratio: Double, changedPixels: Int, totalPixels: Int) {
+func visualChangedMask(_ baseline: VisualRegionFrame, _ current: VisualRegionFrame, threshold: Int) -> [Bool] {
     guard baseline.width == current.width, baseline.height == current.height,
-          baseline.rgba.count == current.rgba.count, baseline.width > 0, baseline.height > 0 else { return (1, 0, 0) }
+          baseline.rgba.count == current.rgba.count, baseline.width > 0, baseline.height > 0 else { return [] }
     let total = baseline.width * baseline.height
-    var changed = 0
+    var mask = [Bool](repeating: false, count: total)
     for pixel in 0..<total {
         let offset = pixel * 4
-        if abs(Int(baseline.rgba[offset]) - Int(current.rgba[offset])) > threshold ||
-           abs(Int(baseline.rgba[offset + 1]) - Int(current.rgba[offset + 1])) > threshold ||
-           abs(Int(baseline.rgba[offset + 2]) - Int(current.rgba[offset + 2])) > threshold {
-            changed += 1
-        }
+        mask[pixel] = abs(Int(baseline.rgba[offset]) - Int(current.rgba[offset])) > threshold ||
+          abs(Int(baseline.rgba[offset + 1]) - Int(current.rgba[offset + 1])) > threshold ||
+          abs(Int(baseline.rgba[offset + 2]) - Int(current.rgba[offset + 2])) > threshold
     }
-    return (Double(changed) / Double(total), changed, total)
+    return mask
+}
+
+func visualMaskMetrics(_ mask: [Bool]) -> (ratio: Double, changedPixels: Int, totalPixels: Int) {
+    let changed = mask.reduce(into: 0) { if $1 { $0 += 1 } }
+    return (mask.isEmpty ? 1 : Double(changed) / Double(mask.count), changed, mask.count)
+}
+
+func visualMaskOverlap(_ lhs: [Bool], _ rhs: [Bool]) -> Int {
+    guard !lhs.isEmpty, lhs.count == rhs.count else { return 0 }
+    return zip(lhs, rhs).reduce(into: 0) { if $1.0 && $1.1 { $0 += 1 } }
+}
+
+func compareVisualRegion(_ baseline: VisualRegionFrame, _ current: VisualRegionFrame, threshold: Int) -> (ratio: Double, changedPixels: Int, totalPixels: Int) {
+    visualMaskMetrics(visualChangedMask(baseline, current, threshold: threshold))
 }
 
 func visualGeometryMatches(_ lhs: VisualFrame, _ rhs: VisualFrame) -> Bool {
@@ -977,7 +998,7 @@ func captureVisualFrame(sampleId: String, windowId: UInt32, regions: [VisualROI]
 }
 
 func visualSample(_ request: [String: Any]) throws -> [String: Any] {
-    let (id, windowId, regions, reset, threshold, minRatio, expected) = try visualParameters(request)
+    let (id, windowId, regions, reset, threshold, _, expected) = try visualParameters(request)
     ensureVisualSampleState(id)
     if reset { resetVisualBaseline(id) }
     let (frame, image) = try captureVisualFrame(sampleId: id, windowId: windowId, regions: regions, expected: expected)
@@ -989,15 +1010,26 @@ func visualSample(_ request: [String: Any]) throws -> [String: Any] {
     var changed = false
     var measurements: [[String: Any]] = []
     for index in frame.pixels.indices {
-        let measure = hasBaseline && !geometryChanged
-          ? compareVisualRegion(baseline!.pixels[index], frame.pixels[index], threshold: threshold)
-          : (ratio: 0.0, changedPixels: 0, totalPixels: frame.pixels[index].width * frame.pixels[index].height)
-        let isChanged = measure.changedPixels > 0 && measure.ratio >= minRatio && hasBaseline && !geometryChanged
+        let total = frame.pixels[index].width * frame.pixels[index].height
+        let currentMask = hasBaseline && !geometryChanged
+          ? visualChangedMask(baseline!.pixels[index], frame.pixels[index], threshold: threshold)
+          : [Bool](repeating: false, count: total)
+        let previousMask: [Bool]
+        if hasBaseline, !geometryChanged, let previousSample, visualGeometryMatches(previousSample, frame) {
+            previousMask = visualChangedMask(baseline!.pixels[index], previousSample.pixels[index], threshold: threshold)
+        } else { previousMask = [Bool](repeating: false, count: total) }
+        let measure = visualMaskMetrics(currentMask)
+        let stablePixels = visualMaskOverlap(currentMask, previousMask)
+        let stableRatio = measure.totalPixels > 0 ? Double(stablePixels) / Double(measure.totalPixels) : 0
+        let region = regions[index]
+        let isChanged = measure.changedPixels > 0 && measure.changedPixels >= region.minChangedPixels &&
+          measure.ratio >= region.minChangedRatio && hasBaseline && !geometryChanged
         changed = changed || isChanged
         let drift: Any = previousSample.map { visualGeometryMatches($0, frame)
           ? compareVisualRegion($0.pixels[index], frame.pixels[index], threshold: threshold).ratio as Any : NSNull() } ?? NSNull()
         measurements.append(["ratio": measure.ratio, "changedPixels": measure.changedPixels, "totalPixels": measure.totalPixels,
-          "sinceLastRatio": drift])
+          "sinceLastRatio": drift, "stableChangedPixels": stablePixels, "stableRatio": stableRatio,
+          "minChangedPixels": region.minChangedPixels, "minChangedRatio": region.minChangedRatio])
     }
     state.latest = frame
     visualSampleStates[id] = state
@@ -1198,6 +1230,20 @@ func runNativeSelfTest() -> Never {
         }
         let validROI = try normalizedVisualRegions([["x": 0.75, "y": 0.75, "width": 0.25, "height": 0.25]])
         guard validROI.count == 1 else { throw DesktopError(message: "合法边界 ROI 被拒绝") }
+        let tunedROIs = try normalizedVisualRegions([
+          ["x": 0.065, "y": 0.08, "width": 0.30, "height": 0.89, "minChangedPixels": 3, "minChangedRatio": 0],
+          ["x": 0.32, "y": 0.02, "width": 0.66, "height": 0.84],
+        ], defaultMinChangedRatio: 0.0015)
+        guard tunedROIs[0].minChangedPixels == 3, tunedROIs[0].minChangedRatio == 0,
+              tunedROIs[1].minChangedPixels == 0, tunedROIs[1].minChangedRatio == 0.0015 else {
+            throw DesktopError(message: "按 ROI 配置变化门槛失败")
+        }
+        do {
+            _ = try normalizedVisualRegions([["x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2,
+              "minChangedPixels": 1.5, "minChangedRatio": 0]])
+            throw DesktopError(message: "非法 ROI 变化门槛被接受")
+        } catch let error as DesktopError where error.message == "非法 ROI 变化门槛被接受" { throw error }
+        catch { /* Fractional absolute pixel thresholds must be rejected. */ }
         for invalid in [
           [["x": -0.01, "y": 0.1, "width": 0.2, "height": 0.2]],
           [["x": 0.9, "y": 0.1, "width": 0.2, "height": 0.2]],
@@ -1227,10 +1273,60 @@ func runNativeSelfTest() -> Never {
               !shouldIncludeVisualImage(changed: true, reset: false, includeImage: false) else {
             throw DesktopError(message: "像素变化阈值、比例或 PNG 输出门控失败")
         }
+
+        // Synthetic regression for the configured sidebar crop: the integral
+        // 433x1602 crop of a 1440x1800 capture is stretched into 320x320.
+        // This never captures the screen.
+        func syntheticSidebarImage(badgeSize: Int, shiftX: Int = 0, red: UInt8 = 255, green: UInt8 = 0, blue: UInt8 = 0) throws -> CGImage {
+            let width = 433, height = 1602
+            var rgba = [UInt8](repeating: 0, count: width * height * 4)
+            for pixel in 0..<(width * height) {
+                let offset = pixel * 4
+                rgba[offset] = 100; rgba[offset + 1] = 100; rgba[offset + 2] = 100; rgba[offset + 3] = 255
+            }
+            if badgeSize > 0 {
+                let left = 60 + shiftX, top = 240
+                for y in top..<top + badgeSize {
+                    for x in left..<left + badgeSize {
+                        let offset = (y * width + x) * 4
+                        rgba[offset] = red; rgba[offset + 1] = green; rgba[offset + 2] = blue
+                    }
+                }
+            }
+            guard let provider = CGDataProvider(data: Data(rgba) as CFData),
+                  let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                    bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue),
+                    provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else {
+                throw DesktopError(message: "合成徽标采样图创建失败")
+            }
+            return image
+        }
+        let syntheticROI = VisualROI(x: 0, y: 0, width: 1, height: 1, minChangedPixels: 3, minChangedRatio: 0)
+        let syntheticBaseline = try downsampleVisualRegion(syntheticSidebarImage(badgeSize: 0), roi: syntheticROI)
+        let syntheticCounts = try [5, 8, 12].map { size -> Int in
+            let sample = try downsampleVisualRegion(syntheticSidebarImage(badgeSize: size), roi: syntheticROI)
+            let count = compareVisualRegion(syntheticBaseline, sample, threshold: 20).changedPixels
+            guard count >= 3, count < 154 else { throw DesktopError(message: "小型侧边栏徽标门槛回归失败") }
+            return count
+        }
+        let badge = try downsampleVisualRegion(syntheticSidebarImage(badgeSize: 5), roi: syntheticROI)
+        let badgeMask = visualChangedMask(syntheticBaseline, badge, threshold: 20)
+        let sameBadge = try downsampleVisualRegion(syntheticSidebarImage(badgeSize: 5), roi: syntheticROI)
+        let movedBadge = try downsampleVisualRegion(syntheticSidebarImage(badgeSize: 5, shiftX: 80), roi: syntheticROI)
+        let lowNoise = try downsampleVisualRegion(syntheticSidebarImage(badgeSize: 5, red: 120, green: 100, blue: 100), roi: syntheticROI)
+        let stableOverlap = visualMaskOverlap(badgeMask, visualChangedMask(syntheticBaseline, sameBadge, threshold: 20))
+        guard stableOverlap >= syntheticROI.minChangedPixels,
+              visualMaskOverlap(badgeMask, visualChangedMask(syntheticBaseline, syntheticBaseline, threshold: 20)) == 0,
+              visualMaskOverlap(badgeMask, visualChangedMask(syntheticBaseline, movedBadge, threshold: 20)) < syntheticROI.minChangedPixels,
+              compareVisualRegion(syntheticBaseline, lowNoise, threshold: 20).changedPixels == 0,
+              compareVisualRegion(syntheticBaseline, syntheticBaseline, threshold: 20).changedPixels == 0 else {
+            throw DesktopError(message: "侧边栏徽标连续帧空间重叠/消失/移动/低幅噪声回归失败")
+        }
         visualSampleStates.removeAll(); visualSampleLRU.removeAll()
         let fakeFrame = VisualFrame(sampleId: "a", windowId: 12, pid: 34, bundleId: "fixture",
           desktopRect: CGRect(x: 1, y: 2, width: 20, height: 10), width: 40, height: 20,
-          regions: [VisualROI(x: 0, y: 0, width: 1, height: 1)], pixels: [basePixels])
+          regions: [VisualROI(x: 0, y: 0, width: 1, height: 1, minChangedPixels: 0, minChangedRatio: 0.001)], pixels: [basePixels])
         ensureVisualSampleState("a")
         visualSampleStates["a"]?.latest = fakeFrame
         guard (try visualCommit(["sampleId": "a"]))["committed"] as? Bool == true,
@@ -1358,6 +1454,7 @@ func runNativeSelfTest() -> Never {
         writeJSON(["ok": true, "selfTest": "native", "rectCases": ["CGWindowBounds", "lowercase"],
                    "capturePixelSize": [captureSize.width, captureSize.height], "windowFit": true,
                    "visualSample": true, "visualCapacity": visualSampleCapacity, "inputIdleReadOnly": true,
+                   "syntheticSidebarBadgePixels": syntheticCounts, "syntheticStableOverlap": stableOverlap,
                    "workBuddyGuards": true, "workBuddyConversationGuard": true, "workBuddyReadbackGuards": true, "workBuddySerializedMatch": true,
                    "workBuddyTextUTF16Limit": workBuddyTextUTF16Limit,
                    "invalidRectsRejected": invalidRects.count,

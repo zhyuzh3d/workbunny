@@ -6,6 +6,11 @@ const { freeModel, parseObject } = require('./workbuddy-free');
 const { checkDesktopScope } = require('./desktop-scope');
 const { createContactDirectory, normalizedName } = require('./contact-directory');
 const { GuiLease } = require('./gui-lease');
+const { normalizeScene, rank, scopeOf, canRead } = require('./memory-scope');
+function canReadScope(scene, record) {
+  if (!record) return false;
+  try { return canRead(normalizeScene(scene), record); } catch { return false; }
+}
 const delay = ms => new Promise(r => setTimeout(r, ms));
 function withTimeout(promise, ms, message) {
   let timer;
@@ -15,7 +20,7 @@ function withTimeout(promise, ms, message) {
 const TARGETS = { workbuddy: 'com.tencent.workbuddy.mac', wechat: 'com.tencent.xinWeChat' };
 const WORK_MODELS = Object.freeze({ flash: 'deepseek-v4.1-flash', hy3: 'hy3' });
 const FIXTURE_BUNDLE = 'cn.haminn.workbunny.fixture';
-const WECHAT_RULE = '微信操作只允许截图视觉识别与键盘鼠标。只操作本任务中用户明确指定的微信会话；严禁微信AppleScript、辅助功能元素树/控件自动化、MCP/微信系统工具、插件/协议API、重启/退出/kill微信。绝不支付或退出微信。把工作交给WorkBuddy时，也必须完整传达这些限制，不能指挥它绕过。';
+const WECHAT_RULE = '微信操作只允许截图视觉识别与键盘鼠标。只操作本任务中用户明确指定的微信会话；严禁微信AppleScript、辅助功能元素树/控件自动化、MCP/微信系统工具、插件/协议API、重启/退出/kill微信；不得退出或登出已存在的微信。绝不支付。把工作交给WorkBuddy时，也必须完整传达这些限制，不能指挥它绕过。';
 const MONITOR_POLL_MS = 1200;
 const MONITOR_DISCOVERY_POLLS = 25;
 const WORKBUDDY_TEXT_UTF16_LIMIT = 12_000;
@@ -216,6 +221,10 @@ function isWechatSubmit(action) {
     (isEnterAction(action) && action.purpose === 'submit');
 }
 function validateWechatAction(action, task) {
+  if (action.action === 'key' && String(action.key || '').toLowerCase() === 'q' &&
+      (action.modifiers || []).some(modifier => ['cmd', 'command', 'meta'].includes(String(modifier).toLowerCase()))) {
+    throw new Error('禁止通过快捷键退出微信');
+  }
   const operation = task.operation || 'general';
   const typeTask = action.action === 'type' && action.purpose !== 'navigation';
   const navigationType = action.action === 'type' && action.purpose === 'navigation';
@@ -315,23 +324,24 @@ function validateAction(value) {
   }
   if (v.action === 'key') {
     if (!/^(?:[a-z0-9]|enter|return|tab|space|delete|backspace|forwarddelete|escape|esc|left|right|up|down|home|end|pageup|pagedown)$/i.test(value.key || '')) throw new Error('不受支持的按键');
-    v.key = value.key.toLowerCase(); v.modifiers = Array.isArray(value.modifiers) ? value.modifiers : [];
+    v.key = value.key.toLowerCase(); v.modifiers = Array.isArray(value.modifiers)
+      ? value.modifiers.map(modifier => String(modifier).toLowerCase() === 'meta' ? 'command' : String(modifier).toLowerCase()) : [];
     if (value.purpose !== undefined) {
       if (!['submit', 'navigation'].includes(value.purpose) || !['enter', 'return'].includes(v.key) || v.modifiers.length) {
         throw new Error('key purpose 只支持无修饰 Enter/Return 的 submit 或 navigation');
       }
       v.purpose = value.purpose;
     }
-    if (v.modifiers.some(x => !['cmd', 'command', 'ctrl', 'control', 'alt', 'option', 'shift'].includes(x))) throw new Error('不受支持的快捷键');
-    if (v.modifiers.some(x => ['cmd', 'command'].includes(x)) && ['q', 'w'].includes(v.key)) throw new Error('禁止关闭应用或窗口');
+    if (v.modifiers.some(x => !['cmd', 'command', 'meta', 'ctrl', 'control', 'alt', 'option', 'shift'].includes(x))) throw new Error('不受支持的快捷键');
   }
   if (v.action === 'scroll') { v.deltaY = Math.max(-800, Math.min(800, Number(value.deltaY) || 0)); v.deltaX = 0; }
   return v;
 }
 class DesktopService {
   constructor({ native = new DesktopNative(), emit = () => {}, persist = async () => {}, imageResize = png => png, planner, fixturePid = null,
-    observeWorkBuddy = async () => null, contactDirectory = createContactDirectory(), lease = new GuiLease(), owner = null } = {}) {
-    Object.assign(this, { native, emit, persist, imageResize, planner, observeWorkBuddy, contactDirectory, lease });
+    observeWorkBuddy = async () => null, contactDirectory = createContactDirectory(), lease = new GuiLease(), owner = null,
+    getScene = () => 'life' } = {}) {
+    Object.assign(this, { native, emit, persist, imageResize, planner, observeWorkBuddy, contactDirectory, lease, getScene });
     this.guiOwner = typeof owner === 'string' && owner.trim() ? owner : 'desktop-' + crypto.randomUUID();
     this.guiLeaseHeld = false; this.guiLeaseDepth = 0; this.followUpController = null;
     this.fixturePid = Number.isSafeInteger(fixturePid) && fixturePid > 0 ? fixturePid : null;
@@ -340,13 +350,29 @@ class DesktopService {
     this.controller = null; this.permission = {}; this.revision = 0; this.monitorPromise = null; this.monitorPromiseGeneration = null; this.followUpInProgress = false;
   }
   publicStatus() {
-    return { permissions: { ...this.permission }, running: this.running, task: this.task ? { ...this.task, steps: (this.task.steps || []).map(step => ({ ...step })), scope: this.task.scope ? { ...this.task.scope } : undefined } : null, screenshot: this.screenshot?.preview || null };
+    const task = this.task && canReadScope(this.getScene(), this.task)
+      ? { ...this.task, steps: (this.task.steps || []).map(step => ({ ...step })), scope: this.task.scope ? { ...this.task.scope } : undefined } : null;
+    return { permissions: { ...this.permission }, running: this.running, task, screenshot: task ? this.screenshot?.preview || null : null };
   }
   async status() { this.permission = await this.native.request('permissions', {}, 8000); return this.publicStatus(); }
   async requestPermission() { this.permission = await this.native.request('requestPermission', {}, 8000); return this.publicStatus(); }
   update(patch) { if (this.task) Object.assign(this.task, patch); this.emit(this.publicStatus()); }
-  async journal() { if (this.task) await this.persist({ ...this.task, screenshot: undefined }); }
-  assertLive(gen) { if (gen !== this.generation || !this.running) throw new Error('任务已停止'); }
+  async journal() {
+    if (!this.task) return;
+    const task = this.task, saved = await this.persist({ ...task, screenshot: undefined });
+    const record = Array.isArray(saved) ? saved[0] : saved?.record || saved;
+    if (this.task === task && Number.isInteger(record?.visibilityFloor) &&
+        (!Number.isInteger(task.visibilityFloor) || record.visibilityFloor > task.visibilityFloor)) {
+      task.visibilityFloor = record.visibilityFloor;
+      if (typeof record.domain === 'string') task.domain = record.domain;
+      if (!task.scene && ['work', 'life', 'private'].includes(record.domain)) task.scene = record.domain;
+      this.emit(this.publicStatus());
+    }
+  }
+  assertLive(gen) {
+    if (gen !== this.generation || !this.running) throw new Error('任务已停止');
+    if (this.task && !canReadScope(this.getScene(), this.task)) throw new Error('当前场景不可继续这项任务；已暂停并保留原结果');
+  }
   async acquireGuiLease(signal = this.controller?.signal) {
     if (this.guiLeaseHeld) { this.guiLeaseDepth++; return true; }
     await this.lease.acquire(this.guiOwner, signal);
@@ -480,13 +506,17 @@ class DesktopService {
     }
     throw new Error('模型连续两次未返回有效桌面动作 JSON，任务已暂停');
   }
-  async start({ goal, target = 'workbuddy', workModel = WORK_MODELS.flash, origin = 'panel', inputSource = origin === 'dialogue' ? 'text' : 'panel', criteria = '', recipient, recipientAliases = [], operation = 'general', message, sources = [], privacyEpoch } = {}) {
+  async start({ goal, target = 'workbuddy', workModel = WORK_MODELS.flash, origin = 'panel', inputSource = origin === 'dialogue' ? 'text' : 'panel', criteria = '', recipient, recipientAliases = [], operation = 'general', message, sources = [], privacyEpoch, scene = this.getScene(), visibilityFloor } = {}) {
     if (this.running || this.starting) return { ok: false, error: '已有桌面任务正在执行' };
+    scene = normalizeScene(scene);
     const scopeError = checkDesktopScope(target, goal);
     if (scopeError) return { ok: false, error: scopeError };
     if (!['voice', 'text', 'panel'].includes(inputSource)) return { ok: false, error: '交代来源不合法' };
     if (!Array.isArray(sources) || sources.length > 200 || sources.some(id => typeof id !== 'string' || !id || id.length > 256) ||
-        (privacyEpoch !== undefined && (!Number.isSafeInteger(privacyEpoch) || privacyEpoch < 0))) return { ok: false, error: '任务来源或隐私版本不合法' };
+        (privacyEpoch !== undefined && (!Number.isSafeInteger(privacyEpoch) || privacyEpoch < 0)) ||
+        (visibilityFloor !== undefined && (!Number.isInteger(visibilityFloor) || visibilityFloor < rank(scene) || visibilityFloor > 2))) return { ok: false, error: '任务来源或隐私版本不合法' };
+    const taskDomain = target === 'workbuddy' ? 'work' : scene;
+    const taskFloor = Number.isInteger(visibilityFloor) ? Math.max(rank(scene), visibilityFloor) : rank(scene);
     const resolvedRecipient = recipient === undefined && (origin === 'panel' || target !== 'wechat') ? '文件传输助手' : recipient;
     if (typeof goal !== 'string' || !goal.trim() || [...goal].length > 3000 || !['workbuddy', 'wechat', 'current'].includes(target) || !Object.values(WORK_MODELS).includes(workModel) || !['dialogue', 'panel', 'watch'].includes(origin) || typeof criteria !== 'string' || [...criteria].length > 2000 || typeof resolvedRecipient !== 'string' || resolvedRecipient.trim().length > 100 || (target === 'wechat' && !resolvedRecipient.trim()) || !WECHAT_OPERATIONS.has(operation) || !Array.isArray(recipientAliases) || recipientAliases.length > 20 || recipientAliases.some(alias => typeof alias !== 'string' || !alias.trim() || alias.length > 100)) return { ok: false, error: '请填写有效任务、来源、验收标准和微信会话，并选择目标和执行模型' };
     if (target === 'wechat' && ['send', 'draft'].includes(operation) && (typeof message !== 'string' || !message.trim() || [...message].length > 3500 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(message) || /\r(?!\n)/u.test(message))) {
@@ -497,7 +527,7 @@ class DesktopService {
     if (target === 'wechat') {
       contactRequestToken = ++this.startRequestToken;
       this.starting = true;
-      try { contact = await this.contactDirectory.resolve(resolvedRecipient.trim()); }
+      try { contact = await this.contactDirectory.resolve(resolvedRecipient.trim(), { scene }); }
       catch (error) { if (contactRequestToken === this.startRequestToken) this.starting = false; return { ok: false, error: `无法确认微信联系人：${error.message}` }; }
       if (!this.starting || contactRequestToken !== this.startRequestToken) return { ok: false, error: '任务已停止' };
       if (contact.ambiguous) { this.starting = false; return { ok: false, error: '联系人别名有歧义，请明确联系人' }; }
@@ -516,7 +546,7 @@ class DesktopService {
     const id = crypto.randomUUID();
     const associationMarker = `[workbunny:${id}]`;
     const attemptStartedAt = Date.now();
-    const task = { id, bunnyTaskId: id, goal, taskText: goal, target, workModel, thinking, origin, inputSource, criteria: criteria.trim(), recipient: contact?.recipient || resolvedRecipient.trim(),
+    const task = { id, bunnyTaskId: id, goal, taskText: goal, target, workModel, thinking, origin, inputSource, criteria: criteria.trim(), scene, domain: taskDomain, visibilityFloor: taskFloor, recipient: contact?.recipient || resolvedRecipient.trim(),
       recipientAliases: contact?.aliases || [resolvedRecipient.trim()], contactConfirmed: contact?.confirmed === true,
       operation, ...(typeof message === 'string' ? { message } : {}), associationMarker,
       sources: [...new Set(sources)], ...(privacyEpoch === undefined ? {} : { privacyEpoch }),
@@ -539,6 +569,7 @@ class DesktopService {
       if (target === 'wechat') this.task.outboundText = this.task.message || '';
       else if (target !== 'workbuddy') this.task.outboundText = this.task.goal;
       const taskScope = Object.freeze({ id: this.task.id, goal: this.task.goal, taskText: this.task.taskText, agentGoal, target: this.task.target, workModel, thinking,
+        scene: this.task.scene, domain: this.task.domain, visibilityFloor: this.task.visibilityFloor,
         origin: this.task.origin, criteria: this.task.criteria, recipient: this.task.recipient, recipientAliases: this.task.recipientAliases,
         operation: this.task.operation, message: this.task.message, associationMarker: this.task.associationMarker, outboundText: this.task.outboundText,
         startedAt: this.task.startedAt, attemptStartedAt: this.task.attemptStartedAt });
@@ -553,10 +584,16 @@ class DesktopService {
       return { ok: false, error: gen === this.generation ? e.message : '任务已停止' };
     }
   }
-  async resume({ privacyEpoch, sources } = {}) {
+  async resume({ privacyEpoch, sources, scene = this.getScene() } = {}) {
     if (this.running || this.starting) return { ok: false, error: '已有桌面任务正在执行' };
     const task = this.task;
     if (!task || !['paused', 'stopped', 'review', 'failed'].includes(task.status)) return { ok: false, error: '当前没有可恢复的桌面任务' };
+    scene = normalizeScene(scene);
+    if (!canReadScope(scene, task)) return { ok: false, error: '当前场景不可见这项旧任务；切回原场景后再继续' };
+    const priorScope = scopeOf(task);
+    task.domain ||= priorScope.domain;
+    task.scene ||= 'private';
+    task.visibilityFloor = Math.max(priorScope.visibilityFloor, rank(scene));
     const scopeError = checkDesktopScope(task.target, task.goal);
     if (scopeError) return { ok: false, error: scopeError };
     if (task.target === 'wechat') {
@@ -580,7 +617,7 @@ class DesktopService {
         if (permissions.sessionLocked) throw new Error('电脑已锁屏，请解锁后重试');
         if (!permissions.accessibilityTrusted || !permissions.screenCaptureAllowed || !permissions.postEventAllowed) throw new Error('请先允许屏幕录制和辅助功能权限');
         this.starting = false;
-        const taskScope = Object.freeze({ id: task.id, goal: task.goal, taskText: task.goal, target: 'wechat', operation: task.operation,
+        const taskScope = Object.freeze({ id: task.id, goal: task.goal, taskText: task.goal, target: 'wechat', scene: task.scene, domain: task.domain, visibilityFloor: task.visibilityFloor, operation: task.operation,
           message: task.message, recipient: task.recipient, recipientAliases: task.recipientAliases || [task.recipient], contactConfirmed: task.contactConfirmed === true,
           origin: task.origin, workModel: task.workModel, thinking: task.thinking, criteria: task.criteria, outboundText: task.message || '',
           startedAt: task.startedAt, attemptStartedAt: now, resumeMode: true, resumeRequireMatchingDraft,
@@ -650,7 +687,7 @@ class DesktopService {
       if (!this.planner) { await preflightWorkModel(task.workModel, this.controller.signal); this.assertLive(gen); }
       this.starting = false;
       const agentGoal = `恢复同一 WorkBuddy 任务。任务原文和验收标准已经保存在原任务中；不得创建新任务或改变内容。${task.handoffSent || task.submitAttemptedAt ? '此前可能已提交，只读确认 Monitor/截图状态，禁止重发。' : resumeRequireMatchingDraft ? '只有首页草稿与已保存 outboundText 完全相同时，才允许原生幂等填充并提交一次；任何不同草稿都暂停。' : '尚未输入原文，可以继续原任务。'}`;
-      const taskScope = Object.freeze({ id: task.id, goal: task.goal, taskText: task.taskText || task.goal, agentGoal,
+      const taskScope = Object.freeze({ id: task.id, goal: task.goal, taskText: task.taskText || task.goal, agentGoal, scene: task.scene, domain: task.domain, visibilityFloor: task.visibilityFloor,
         target: task.target, workModel: task.workModel, thinking: task.thinking, origin: task.origin, criteria: task.criteria,
         recipient: task.recipient, associationMarker: task.associationMarker, outboundText: task.outboundText,
         startedAt: task.startedAt, attemptStartedAt: task.attemptStartedAt, resumeMode: true, resumeRequireMatchingDraft,
@@ -1019,6 +1056,7 @@ class DesktopService {
     throw new Error(taskScope.target === 'wechat' ? '微信任务达到 12 步或 120 秒上限，保留当前状态；请检查目标会话后再显式恢复' : '已达到本轮操作上限，保留当前结果等待查看');
   }
   async accept({ automatic = false, report = '', evidence = '' } = {}) {
+    if (!canReadScope(this.getScene(), this.task)) return { ok: false, error: '当前场景不可见这项任务，不能提交验收' };
     if (automatic ? !['review', 'verifying'].includes(this.task?.status) : this.task?.status !== 'review') return { ok: false, error: '当前没有待验收任务' };
     const now = Date.now();
     if (this.running) {
@@ -1035,6 +1073,7 @@ class DesktopService {
   }
   async followUp({ text } = {}) {
     const task = this.task;
+    if (!canReadScope(this.getScene(), task)) return { ok: false, error: '当前场景不可见这项任务，不能继续追问' };
     if (this.followUpInProgress) return { ok: false, error: '已有追问正在处理' };
     if (!task || task.target !== 'workbuddy' || typeof text !== 'string' || !text.trim() || [...text].length > 3000 || !workBuddyTextWithinLimit(text)) return { ok: false, error: '追问内容无效或当前任务不是 WorkBuddy 任务' };
     const scopeError = checkDesktopScope(task.target, text);
@@ -1137,7 +1176,9 @@ class DesktopService {
     if (this.running || typeof text !== 'string' || !text.trim() || text.length > 3500) return { ok: false, error: '正在执行任务，或文字为空/过长' };
     if (/[\u0000-\u001f\u007f]/.test(text)) return { ok: false, error: '焦点输入暂时只支持单段文字，请去掉换行和制表符；此入口不会代按回车。' };
     const gen = ++this.generation; this.running = true;
-    this.task = { id: crypto.randomUUID(), status: 'running', target: 'current', goal: '向当前输入焦点插入文字', steps: [], startedAt: Date.now(), note: '3 秒后输入，请切换到目标输入框' };
+    const scene = normalizeScene(this.getScene());
+    this.task = { id: crypto.randomUUID(), status: 'running', target: 'current', scene, domain: scene, visibilityFloor: rank(scene),
+      goal: '向当前输入焦点插入文字', steps: [], startedAt: Date.now(), note: '3 秒后输入，请切换到目标输入框' };
     this.emit(this.publicStatus());
     let lease = false;
     try {

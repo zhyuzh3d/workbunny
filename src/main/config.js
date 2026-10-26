@@ -8,6 +8,8 @@ const path = require('path');
 const os = require('os');
 const qwenVoices = require('./qwen-voices');
 const modelCatalog = require('./model-catalog');
+const { SCENES, LABELS, normalizeScene } = require('./memory-scope');
+const { containsSecret } = require('./conversation-input');
 
 const HOME = os.homedir();
 
@@ -276,15 +278,15 @@ const TTS_ENGINES = [
 
 const DEFAULTS = {
   version: 2,
-  memory: { enabled: true, extract: true },
+  memory: { enabled: true, extract: true, scene: 'life', recentRounds: 8 },
   motions: { disabled: [] },
   avatar: 'D',
-  buddy: { name: 'baby', ownerName: '主人',
+  buddy: { name: 'baby', ownerName: '主人', sceneProfiles: { private: '', life: '', work: '' },
     profile: '我是你的桌面小助手，陪你更轻松地使用 WorkBuddy。我会留意工作进展、帮你协调任务，也愿意陪你聊天、听你说话。我很喜欢和你待在一起：忙时帮忙，闲时陪伴。' },
   brain: {
     source: 'workbuddy',   // workbuddy | apikey
-    model: 'hy3',           // WorkBuddy 内置混元三
-    thinking: 'low',       // WorkBuddy 混元三：低 / 高 / 模型默认
+    model: 'deepseek-v4.1-flash',
+    thinking: 'high',
     provider: 'deepseek',  // apikey 模式：用哪家
     modelId: '',           // apikey 模式：模型 id（空 = 该家列表里的第一个）
     apiKey: '',
@@ -369,7 +371,7 @@ function deepMerge(base, over) {
 
 /** WorkBuddy model access is brokered by the running, signed-in app. */
 function readWorkBuddyLLM() {
-  return { transport: 'workbuddy', provider: 'workbuddy', model: 'hy3', apiKey: '' };
+  return { transport: 'workbuddy', provider: 'workbuddy', model: DEFAULTS.brain.model, apiKey: '' };
 }
 function listWorkBuddyModels() { return modelCatalog.get('workbuddy').models; }
 function resolveLLM(c) {
@@ -394,7 +396,7 @@ function migrateBrain(c) {
     if (b.apiKey && PROVIDERS.some(p => p.id === b.provider)) {
       b.profiles[b.provider] = { apiKey: b.apiKey, modelId: b.modelId || '', thinking: b.thinking || 'auto', ...b.profiles[b.provider] };
     }
-    if (b.source !== 'apikey') { b.model = 'hy3'; b.thinking = 'low'; }
+    if (b.source !== 'apikey') { b.model = b.model || DEFAULTS.brain.model; b.thinking = b.thinking || DEFAULTS.brain.thinking; }
     b.connectionsVersion = 1;
   }
   // Keep old credentials on disk, but removed providers can no longer be selected or routed.
@@ -432,6 +434,8 @@ function load() {
   if (MOTIONS.filter(m => m.slot === 'idle').every(m => cache.motions.disabled.includes(m.key)))
     cache.motions.disabled = cache.motions.disabled.filter(k => k !== 'idle_loop');
   cache.tts.qwen = qwenVoices.normalize(cache.tts.qwen);
+  cache.memory.scene = normalizeScene(cache.memory.scene);
+  cache.buddy.sceneProfiles = Object.fromEntries(SCENES.map(scene => [scene, String(cache.buddy.sceneProfiles?.[scene] || '').slice(0, 2000)]));
   return cache;
 }
 
@@ -442,7 +446,10 @@ function save(patch) {
     next.buddy.name = String(next.buddy.name || 'baby').trim().slice(0, 64) || 'baby';
     next.buddy.ownerName = String(next.buddy.ownerName || '主人').trim().slice(0, 64) || '主人';
     next.buddy.profile = String(next.buddy.profile ?? DEFAULTS.buddy.profile).slice(0, 2000);
+    next.buddy.sceneProfiles = Object.fromEntries(SCENES.map(scene => [scene, String(next.buddy.sceneProfiles?.[scene] || '').slice(0, 2000)]));
+    if ([next.buddy.profile, ...Object.values(next.buddy.sceneProfiles)].some(containsSecret)) throw new Error('角色设定会发送给对话模型，请不要填写密码或密钥');
   }
+  if (patch?.memory && Object.hasOwn(patch.memory, 'scene') && !SCENES.includes(patch.memory.scene)) throw new Error('未知的对话场景');
   if (patch?.motions) {
     if (!Array.isArray(next.motions.disabled)) throw new Error('动作配置格式不正确');
     const known = new Set(MOTIONS.map(m => m.key));
@@ -465,16 +472,19 @@ function save(patch) {
   return next;
 }
 
-function buildSystemPrompt(extraContext) {
+function buildSystemPrompt(extraContext, { scene = load().memory.scene } = {}) {
   const c = load();
   const ctx = extraContext || '主人现在没有在跑任务，可能只是在发呆或者看别的东西。';
   const activeSlots = [...new Set(MOTIONS.filter(m => m.tag === 'llm' && !c.motions.disabled.includes(m.key)).map(m => m.slot))];
   const motionHint = activeSlots.map(s => s + '（' + SLOT_LABEL[s] + '）').join(' / ');
   const ownerName = String(c.buddy.ownerName || '主人').trim() || '主人';
   const profile = String(c.buddy.profile ?? DEFAULTS.buddy.profile).trim();
+  scene = normalizeScene(scene);
+  const sceneProfile = String(c.buddy.sceneProfiles?.[scene] || '').trim();
   return PERSONA.replace(MOTION_HINT, motionHint).replace(/主人/g, () => ownerName)
     .replace(/\{name\}/g, () => c.buddy.name).replace('{context}', () => ctx) +
     `\n\n# 用户设定的角色\n${profile}\n\n# 对话称呼\n你的名字是「${c.buddy.name}」。请称呼用户为「${ownerName}」，将这个称呼自然地用于对话。` +
+    `\n\n# 当前对话场景\n${LABELS[scene]}。共用角色身份不变；只使用本轮提供的可见资料，不猜测其他场景。${sceneProfile ? '\n当前场景补充设定：\n' + sceneProfile : ''}` +
     '\n\n# 工作分工与真实能力\n你是情感伙伴和用户的小秘书。复杂开发与正式工作由 WorkBuddy 等智能体软件执行；你代替用户安排、发送要求、跟进进度、检查和验收，不独立承担复杂编程或组建工作团队。直接电脑操作主要服务社交和日常代办。角色设定影响表达方式，不扩大工具能力或用户授权。用户可直接口头或文字交代，根据本轮明确意图使用操作协议发起 WorkBuddy 或微信代办；“工作与日常”用于查看进度、暂停及备用手动输入。只有实际操作回执、绑定会话监视和交付检查才能证明已发送、执行中或完成；普通聊天回答不能冒充电脑操作或 WorkBuddy 的交付。';
 }
 

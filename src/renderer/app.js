@@ -1277,6 +1277,10 @@ function frame() {
 function wire() {
   pet.on(async (ev) => {
     switch (ev.type) {
+      case 'scene':
+        bubbleController.hide();
+        paintHeard('', false); paintLive(''); paintRecallButton([]);
+        break;
       case 'config':
         cfg = ev.config;
         if (currentMotion && !motionEnabled(currentMotion)) toIdle(0.25);

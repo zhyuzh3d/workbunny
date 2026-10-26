@@ -18,6 +18,8 @@ function harness({ windows, samples = [], ocr = [], responses = [] } = {}) {
     ] };
     if (op === 'visualSample') return samples.shift() || { changed: false, baseline: false, geometryChanged: false, regions: [] };
     if (op === 'recognize') return { texts: ocr };
+    if (op === 'visualCommit') return { committed: true };
+    if (op === 'visualForget') return { forgotten: true };
     throw new Error(`unexpected native request: ${op}`);
   }, async close() {} };
   const observer = new WeChatObserver({ native,
@@ -31,6 +33,14 @@ function header(text = 'Alice') { return [{ text, confidence: 0.99, x: 0.42, y: 
 function inspection({ headerMatched = true, messages = [], recipientUnread = false, draft = '' } = {}) {
   return JSON.stringify({ headerMatched, recipientUnread, draft, messages });
 }
+const sidebarMetric = ({ changed = 4, stable = 0, since = 0 } = {}) => ({
+  ratio: changed / 102400, changedPixels: changed, totalPixels: 102400, sinceLastRatio: since,
+  stableChangedPixels: stable, stableRatio: stable / 102400, minChangedPixels: 3, minChangedRatio: 0,
+});
+const conversationMetric = ({ changed = 0, stable = 0, since = 0 } = {}) => ({
+  ratio: changed / 102400, changedPixels: changed, totalPixels: 102400, sinceLastRatio: since,
+  stableChangedPixels: stable, stableRatio: stable / 102400, minChangedPixels: 0, minChangedRatio: 0.0015,
+});
 const message = (direction, text, kind = 'text', evidence = {}) => ({ direction, kind, text, time: '10:30', ...evidence });
 
 async function testStableAndUnstableSamplingNeverRunsRecognition() {
@@ -41,8 +51,8 @@ async function testStableAndUnstableSamplingNeverRunsRecognition() {
   assert.equal(unchanged.requests.length, 0, 'unchanged pixels do not invoke a model');
 
   const unstable = harness({ samples: [
-    { changed: true, baseline: false, geometryChanged: false, regions: [{ ratio: 0.01 }] },
-    { changed: true, baseline: false, geometryChanged: false, regions: [{ ratio: 0.12 }] },
+    { changed: true, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 1000 }), conversationMetric()] },
+    { changed: true, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 1000 }), conversationMetric({ since: 0.12 })] },
   ] });
   const result = await unstable.observer.sample({ id: 'w2', recipient: 'Alice' });
   assert.equal(result.unstable, true);
@@ -76,7 +86,7 @@ async function testStableAndUnstableSamplingNeverRunsRecognition() {
 
   for (const regions of [[], [{ ratio: 0.01 }]]) {
     const missingMetrics = harness({ samples: [
-      { changed: true, baseline: false, geometryChanged: false, regions: [{ ratio: 0.01 }, { ratio: 0.05 }] },
+      { changed: true, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 1000 }), conversationMetric({ changed: 5000 })] },
       { changed: true, baseline: false, geometryChanged: false, regions },
     ] });
     const frame = await missingMetrics.observer.sample({ id: `w-missing-${regions.length}`, recipient: 'Alice' });
@@ -87,12 +97,71 @@ async function testStableAndUnstableSamplingNeverRunsRecognition() {
 async function testEqualChangedAreaIsNotEvidenceOfStability() {
   for (const [drift, expectedUnstable] of [[0.1, true], [0.0001, false]]) {
     const h = harness({ samples: [
-      { changed: true, baseline: false, geometryChanged: false, regions: [{ ratio: 0.05 }] },
-      { changed: true, baseline: false, geometryChanged: false, regions: [{ ratio: 0.05, sinceLastRatio: drift }], pngBase64: 'stable-frame' },
+      { changed: true, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 5000 }), conversationMetric({ changed: 5000 })] },
+      { changed: true, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 5000, stable: 5000, since: drift }), conversationMetric({ changed: 5000, stable: 5000, since: drift })], pngBase64: 'stable-frame' },
     ] });
     const value = await h.observer.sample({ id: 'pixel-stability' });
     assert.equal(!!value.unstable, expectedUnstable, 'direct previous-frame pixel drift controls stability, not equal changed-pixel counts');
   }
+}
+
+async function testSmallSidebarBadgeRequiresSameRoiSpatialOverlap() {
+  const sample = async (secondRegions) => {
+    const h = harness({ samples: [
+      { changed: true, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 4 }), conversationMetric()] },
+      { changed: true, baseline: false, geometryChanged: false, regions: secondRegions, pngBase64: 'stable-sidebar' },
+    ] });
+    const result = await h.observer.sample({ id: 'small-badge', recipient: 'Alice' });
+    assert.deepEqual(h.nativeCalls.map(call => call.op), ['frontmost', 'visualSample', 'visualSample']);
+    assert.equal(h.nativeCalls[1].payload.regions[0].minChangedPixels, 3);
+    assert.equal(h.nativeCalls[1].payload.regions[0].minChangedRatio, 0);
+    assert.equal(h.nativeCalls[1].payload.regions[1].minChangedRatio, 0.0015, 'conversation retains the large change threshold');
+    return { ...h, result };
+  };
+
+  const stable = await sample([sidebarMetric({ changed: 4, stable: 4 }), conversationMetric()]);
+  assert.equal(stable.result.changed, true, 'a persistent 5px synthetic badge is accepted from spatial mask overlap');
+  assert.equal(stable.result.unstable, undefined);
+  assert.equal(stable.requests.length, 0, 'sampling alone never calls OCR/model');
+
+  for (const [label, regions] of [
+    ['badge disappeared', [sidebarMetric({ changed: 0, stable: 0, since: 4 / 102400 }), conversationMetric()]],
+    ['same-area badge moved', [sidebarMetric({ changed: 4, stable: 0, since: 8 / 102400 }), conversationMetric()]],
+    ['same-area change appeared in another ROI', [sidebarMetric({ changed: 4, stable: 0 }), conversationMetric({ changed: 500, stable: 500 })]],
+  ]) {
+    const result = await sample(regions);
+    assert.equal(result.result.changed, false, label);
+    assert.equal(result.result.unstable, true, label);
+  }
+
+  const noNoise = harness({ samples: [{ changed: false, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 0 }), conversationMetric()] }] });
+  const quiet = await noNoise.observer.sample({ id: 'noise', recipient: 'Alice' });
+  assert.equal(quiet.changed, false, 'a <=20 RGB change never crosses the native candidate threshold');
+  assert.deepEqual(noNoise.nativeCalls.map(call => call.op), ['frontmost', 'visualSample']);
+  assert.equal(noNoise.requests.length, 0);
+
+  async function watchCycle(samples) {
+    const h = harness({ samples });
+    let inspected = 0;
+    const journal = { async saveWatch(watch) { return watch; }, async listWatches() { return []; } };
+    const service = new WatchService({ journal, sensor: h.observer, inspect: async () => { inspected++; return { headerMatched: true, messages: [] }; },
+      execute: async () => ({ ok: true }), propose: async () => ({ reply: '' }), report: async () => {},
+      epoch: () => 1, ready: () => true, canOperate: async () => true, autoSchedule: false });
+    const watch = await service.start({ recipient: 'Alice', goal: '关注新消息', criteria: '发现变化后核对',
+      watch: { mode: 'notify', policy: '只通知，不回复' }, sources: ['source-badge'] });
+    await service.tick(watch.id);
+    return { h, inspected };
+  }
+  const accepted = await watchCycle([
+    { changed: true, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 4 }), conversationMetric()] },
+    { changed: true, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 4, stable: 4 }), conversationMetric()] },
+  ]);
+  assert.equal(accepted.inspected, 1, 'a stable same-position badge reaches one inspection');
+  const rejected = await watchCycle([
+    { changed: true, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 4 }), conversationMetric()] },
+    { changed: true, baseline: false, geometryChanged: false, regions: [sidebarMetric({ changed: 4, stable: 0, since: 8 / 102400 }), conversationMetric()] },
+  ]);
+  assert.equal(rejected.inspected, 0, 'a moved equal-area change does not reach OCR/model inspection');
 }
 
 async function testWindowBindingUsesBackgroundWindowIdentity() {
@@ -240,6 +309,7 @@ async function testReplySchemaAndInjectionBoundary() {
 async function run() {
   await testStableAndUnstableSamplingNeverRunsRecognition();
   await testEqualChangedAreaIsNotEvidenceOfStability();
+  await testSmallSidebarBadgeRequiresSameRoiSpatialOverlap();
   await testWindowBindingUsesBackgroundWindowIdentity();
   await testOcrHeaderIsRequiredDespiteModelClaim();
   await testConfirmedAliasCanBindHeader();

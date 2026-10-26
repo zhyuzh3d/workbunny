@@ -25,7 +25,18 @@
     <label class="row"><span>名字</span><input id="setName" type="text" /></label>
     <label class="row"><span>设定</span><textarea id="setProfile" rows="5" maxlength="2000"></textarea></label>
     <label class="row"><span>怎么称呼你</span><input id="setOwnerName" type="text" maxlength="64" placeholder="主人" /></label>
-
+    <div class="scene-profile-box">
+      <div class="group">当前场景</div>
+      <label class="row"><span>对话场景</span><select id="panelScene" aria-label="对话场景">
+        <option value="private">私聊</option>
+        <option value="life">生活</option>
+        <option value="work">工作</option>
+      </select></label>
+      <div class="note" id="panelSceneScope">生活：可参考生活与工作资料。</div>
+      <label class="row scene-profile-row"><span>场景补充</span><textarea id="panelSceneProfile" rows="3" maxlength="2000" placeholder="可留空，沿用共通设定"></textarea></label>
+      <div class="note">同一个 Bunny 的场景补充，不替换上面的共通角色设定。切换场景立即生效；修改补充后点下方“保存”。</div>
+      <div class="scene-profile-status" id="panelSceneProfileStatus" role="status"></div>
+    </div>
     <div class="group">形象</div>
     <div class="avRow" id="avRow"></div>
 

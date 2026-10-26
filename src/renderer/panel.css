@@ -87,6 +87,13 @@ body[data-p="motions"]  #motions  { display: flex; }
 .pb[data-page] { display: none; }
 .pb[data-page].on { display: block; }
 .row.dim { opacity: .45; }
+.scene-profile-box { margin: 12px 0 14px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,253,250,.68); }
+.scene-profile-box .group { margin-top: 0; }
+.scene-profile-box .note { margin-left: 86px; }
+.scene-profile-box .scene-profile-row { margin-top: 9px; }
+.scene-profile-box .scene-profile-status { min-height: 15px; margin: 5px 0 0 86px; color: var(--muted); font-size: 10.5px; }
+.scene-profile-box .scene-profile-status.bad { color: #a9453a; }
+.scene-profile-box .scene-profile-status.dirty { color: #775614; }
 
 /* tab：四个字一排，当前页下面一条线 */
 .tabs {

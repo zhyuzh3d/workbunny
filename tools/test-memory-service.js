@@ -261,12 +261,12 @@ async function testReviewedEditAndMoodForget(temp, safeStorage) {
   const moodSource = await service.addMessage('user', '我很难过');
   assert.equal(service.state.mood, '关切');
   assert.equal(service.moodSourceId, moodSource.id);
-  const persisted = (await service.query('state', 1))[0].value;
+  const persisted = (await service.query('state', 1, { scene: 'private' }))[0].value;
   assert.equal(persisted.moodSourceId, moodSource.id);
   await service.remove(moodSource.id);
   assert.equal(service.state.mood, '平静');
   assert.equal(service.moodSourceId, null);
-  assert.equal((await service.query('state', 1))[0].value.mood, '平静');
+  assert.equal((await service.query('state', 1, { scene: 'private' }))[0].value.mood, '平静');
   assert.doesNotMatch((await service.context('你好', { budget: 8500 })).text, /虚拟表现状态：关切/);
   const rememberedMoodSource = await service.addMessage('user', '请记住：我很难过');
   const rememberedMood = (await service.list({ kind: 'memory' })).find(row => row.sources.includes(rememberedMoodSource.id));
@@ -297,7 +297,7 @@ async function testReviewedEditAndMoodForget(temp, safeStorage) {
   assert.equal(service.moodSourceId, null);
   await service.remove(legacyMessage.id);
   assert.equal(service.state.mood, '平静', 'legacy state without provenance is cleared conservatively');
-  assert.equal((await service.query('state', 1))[0].value.moodSourceId, undefined);
+  assert.equal((await service.query('state', 1, { scene: 'private' }))[0].value.moodSourceId, undefined);
   await service.close();
 }
 
@@ -444,11 +444,11 @@ async function testContextBudgetAndDisabledFallback(temp, safeStorage) {
   assert(recentChars >= 1900, `large pinned context squeezed recent conversation to ${recentChars} chars`);
   enabled = false;
   const fallback = await service.context('当前这一轮', { recent: [
-    { role: 'assistant', content: '更早的 RAM 对话' },
-    { role: 'user', content: '当前这一轮' },
+    { role: 'assistant', content: '更早的 RAM 对话', domain: 'life', visibilityFloor: 1 },
+    { role: 'user', content: '当前这一轮', domain: 'life', visibilityFloor: 1 },
   ], budget: 500 });
   assert.deepEqual(fallback.messages, [{ role: 'user', content: '当前这一轮' }]);
-  const tiny = await service.context('当前这一轮', { recent: [{ role: 'user', content: '当前这一轮' }], budget: 100 });
+  const tiny = await service.context('当前这一轮', { recent: [{ role: 'user', content: '当前这一轮', domain: 'life', visibilityFloor: 1 }], budget: 100 });
   assert(tiny.text.length + tiny.messages.reduce((n, m) => n + JSON.stringify(m).length, 0) <= 100);
   await service.close();
 }
@@ -568,7 +568,7 @@ async function testLegacyUnknownTimeIsNotInvented(temp, safeStorage) {
   fs.writeFileSync(path.join(parent, 'memory.json'), JSON.stringify({ history: [{ role: 'user', content: '旧记录内容' }] }));
   const service = await createService(path.join(parent, 'db'), safeStorage).init();
   assert(service.db, `legacy migration failed: ${service.error}`);
-  const context = await service.context('你好', { budget: 1000 });
+  const context = await service.context('你好', { budget: 1000, scene: 'private' });
   assert.match(context.text, /具体时间未知/);
   assert(!/在\d+秒前/.test(context.text));
   assert(!fs.existsSync(path.join(parent, 'memory.json')));
@@ -594,9 +594,9 @@ async function testRestoreTopologyAndRollback(temp, safeStorage) {
   assert.equal(restored.records, 4);
   const imported = await target.db.request('get', { ids: [parentA.id, parentB.id, summary.id, memory.id] });
   assert.equal(imported.rows.length, 4, 'out-of-order parents and child should all restore');
-  assert((await target.search('multi-parent restored fact marker', ['memory'], 5)).some(r => r.id === memory.id));
-  assert.deepEqual((await target.query('memory', 1))[0].value.sources, [summary.id]);
-  assert.deepEqual((await target.query('summary', 1))[0].value.sources, [parentA.id, parentB.id]);
+  assert((await target.search('multi-parent restored fact marker', ['memory'], 5, { scene: 'private' })).some(r => r.id === memory.id));
+  assert.deepEqual((await target.query('memory', 1, { scene: 'private' }))[0].value.sources, [summary.id]);
+  assert.deepEqual((await target.query('summary', 1, { scene: 'private' }))[0].value.sources, [parentA.id, parentB.id]);
   await target.close();
 
   const cycleTarget = await createService(path.join(temp, 'cycle-target-vault'), safeStorage).init();

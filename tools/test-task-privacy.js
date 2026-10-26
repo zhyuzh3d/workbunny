@@ -28,6 +28,7 @@ async function main() {
     const task = (id, privacyEpoch, sources) => ({
       id, goal: 'Synthetic task: file a note', note: 'Synthetic result for privacy cascade test',
       status: 'review', startedAt: ++time, updatedAt: time, privacyEpoch, sources,
+      scene: 'life', domain: 'work', visibilityFloor: 1, target: 'workbuddy',
     });
     const get = ids => service.db.request('get', { ids });
 
@@ -44,6 +45,7 @@ async function main() {
     assert.deepEqual(decodedTask.value.sources, [origin.id], 'task journal must preserve provenance instead of defaulting sources to []');
     assert.equal(decodedTask.ts, firstTask.startedAt);
     assert.equal(decodedTask.value.privacyEpoch, firstEpoch);
+    assert.deepEqual([decodedTask.domain, decodedTask.value.domain, decodedTask.value.scene, decodedTask.value.visibilityFloor], ['work', 'work', 'life', 1]);
 
     const receipt = await service.addMessage('assistant', '合成任务报告：备忘录已处理。', {
       delivery: 'task-receipt', sources: [firstTask.id],

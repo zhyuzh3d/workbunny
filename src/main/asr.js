@@ -15,10 +15,13 @@ const { EventEmitter } = require('events');
 const AUTH_TIMEOUT_MS = 25000;
 
 class Asr extends EventEmitter {
-  constructor(binPath, log = () => {}) {
+  constructor(binPath, log = () => {}, spawnProcess = spawn) {
     super();
     this.bin = binPath;
+    this.spawnProcess = typeof spawnProcess === 'function' ? spawnProcess : spawn;
     this.proc = null;
+    this.discarded = new WeakSet();
+    this.retiring = new WeakSet();
     this.ready = false;
     this.lastError = null;
     this.partial = '';
@@ -49,7 +52,7 @@ class Asr extends EventEmitter {
     this.always = !!opts.always;
     let p;
     try {
-      p = spawn(this.bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      p = this.spawnProcess(this.bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
       this.lastError = e.message;
       this.emit('error', e.message);
@@ -76,6 +79,7 @@ class Asr extends EventEmitter {
 
     p.stdout.setEncoding('utf8');
     p.stdout.on('data', (chunk) => {
+      if (this.proc !== p || this.discarded.has(p)) return;
       buf += chunk;
       let nl;
       while ((nl = buf.indexOf('\n')) >= 0) {
@@ -89,27 +93,35 @@ class Asr extends EventEmitter {
           continue;
         }
         if (m.t === 'auth') sawAuth = true;
-        this.onMessage(m);
+        this.onMessage(m, p);
       }
     });
 
     p.stderr.setEncoding('utf8');
     p.stderr.on('data', (d) => {
+      if (this.proc !== p || this.discarded.has(p)) return;
       const s = String(d).trim();
       if (s) this.log('[asr stderr] ' + s.slice(0, 300));
     });
 
     p.on('error', (e) => {
+      if (this.proc !== p || this.discarded.has(p)) return;
       this.log('[asr] spawn error ' + e.message);
       this.emit('error', '语音模块启动失败：' + e.message);
     });
 
     p.on('close', (code, sig) => {
+      if (this.discarded.has(p)) return;
+      const isCurrent = this.proc === p;
+      if (!isCurrent && (!this.retiring.has(p) || this.proc !== null)) return;
       this.log(`[asr] exit code=${code} sig=${sig}`);
-      if (this.proc && this.proc !== p) return;
-      if (this.authWaitTimer) { clearTimeout(this.authWaitTimer); this.authWaitTimer = null; }
-      if (this.captureTimer) { clearInterval(this.captureTimer); this.captureTimer = null; }
-      if (this.proc === p) this.proc = null;
+      // Timers are instance state. A stale close may notify recovery after a
+      // normal kill, but it must never clear a replacement process's timers.
+      if (isCurrent) {
+        if (this.authWaitTimer) { clearTimeout(this.authWaitTimer); this.authWaitTimer = null; }
+        if (this.captureTimer) { clearInterval(this.captureTimer); this.captureTimer = null; }
+        this.proc = null;
+      }
       this.ready = false;
       // 134 = SIGABRT：几乎一定是 TCC 少了 usage description
       if (!sawAuth && (code === 134 || sig === 'SIGABRT')) {
@@ -119,7 +131,8 @@ class Asr extends EventEmitter {
     });
   }
 
-  onMessage(m) {
+  onMessage(m, sourceProc = null) {
+    if (sourceProc && (this.proc !== sourceProc || this.discarded.has(sourceProc))) return;
     switch (m.t) {
       case 'auth':
         this.emit('auth', { speech: m.speech, mic: m.mic, locale: m.locale || '', engine: m.engine || '' });
@@ -223,6 +236,7 @@ class Asr extends EventEmitter {
     const p = this.proc;
     setTimeout(() => {
       if (this.proc === p) {
+        this.retiring.add(p);
         try {
           p.kill('SIGKILL');
         } catch {}
@@ -231,14 +245,20 @@ class Asr extends EventEmitter {
     }, 2500);
   }
 
-  kill() {
+  kill({ discard = false } = {}) {
     if (this.captureTimer) { clearInterval(this.captureTimer); this.captureTimer = null; }
     if (this.authWaitTimer) { clearTimeout(this.authWaitTimer); this.authWaitTimer = null; }
     if (this.proc) {
+      const p = this.proc;
+      if (discard) this.discarded.add(p);
+      else this.retiring.add(p);
+      this.ready = false;
+      this.installing = false;
+      this.partial = '';
       try {
-        this.proc.kill('SIGKILL');
+        p.kill('SIGKILL');
       } catch {}
-      this.proc = null;
+      if (this.proc === p) this.proc = null;
     }
   }
 }

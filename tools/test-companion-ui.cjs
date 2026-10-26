@@ -32,12 +32,18 @@ let rows = [
   { id: 'memory-confirmed-2', kind: 'memory', ts: Date.now() - 1000, content: '安静的音乐', status: 'confirmed', sources: [] },
   { id: 'message-1', kind: 'message', ts: Date.now(), role: 'user', content: '你好' },
 ];
-let settings = { memory: { enabled: true, extract: true } };
+let settings = {
+  memory: { enabled: true, extract: true, scene: 'life' },
+  buddy: { name: 'Fixture', ownerName: '主人', profile: '共通角色设定', sceneProfiles: { private: '私聊补充', life: '生活补充', work: '工作补充' } },
+  voice: { alwaysListen: true }, tts: { enabled: true, apiKey: 'fixture-tts-secret' },
+  brain: { model: 'hy3', thinking: 'low', apiKey: 'fixture-brain-secret', profiles: { deepseek: { apiKey: 'fixture-provider-secret', modelId: 'deepseek-v4.1-flash' } } },
+};
 let failConfig = false;
 let holdConfig = false, heldConfigResolve = null;
 let holdNextMemoryList = false, heldMemoryListResolve = null;
 let insertFinish = null;
 let failNextMemorySources = false;
+let maintenanceStatus = { status: 'idle', mode: null, processed: 0, note: '暂无待整理内容', lastSuccessAt: null };
 let monitorSnapshot = { tasks: [{ name: 'Fixture 正在整理', status: 'running' }] };
 let watches = [
   { id: 'watch-wechat-alice', target: 'wechat', recipient: 'Alice', goal: '有新消息时提醒我', mode: 'notify', policy: '只通知我，不自动回复', status: 'active', note: '正在关注', intervalSeconds: 60, expiresAt: Date.now() + 3600000, lastCheckedAt: Date.now() - 60000, eventCount: 2 },
@@ -59,8 +65,10 @@ fs.writeFileSync(preload, `
     init: (...a) => api('init', ...a), workbuddyOpen: (...a) => api('workbuddyOpen', ...a), say: (...a) => api('say', ...a),
     memoryStats: (...a) => api('memoryStats', ...a), memoryList: (...a) => api('memoryList', ...a),
     memoryUpdate: (...a) => api('memoryUpdate', ...a), memoryRemove: (...a) => api('memoryRemove', ...a),
+    memoryResolveConflict: (...a) => api('memoryResolveConflict', ...a),
     memoryClear: (...a) => api('memoryClear', ...a), memorySources: (...a) => api('memorySources', ...a),
     memoryExport: (...a) => api('memoryExport', ...a), memoryRestore: (...a) => api('memoryRestore', ...a),
+    memoryMaintain: (...a) => api('memoryMaintain', ...a), memoryMaintenanceStatus: (...a) => api('memoryMaintenanceStatus', ...a),
     config: (...a) => api('config', ...a), taskStatus: (...a) => api('taskStatus', ...a),
     taskStart: (...a) => api('taskStart', ...a), taskStop: (...a) => api('taskStop', ...a),
     taskAccept: (...a) => api('taskAccept', ...a), desktopPermission: (...a) => api('desktopPermission', ...a),
@@ -76,8 +84,11 @@ fs.writeFileSync(preload, `
       emitMonitor: value => ipcRenderer.invoke('fixture:control', 'emitMonitor', value),
       emitWatches: value => ipcRenderer.invoke('fixture:control', 'emitWatches', value),
       emitRecall: value => ipcRenderer.invoke('fixture:control', 'emitRecall', value),
+      emitConfig: value => ipcRenderer.invoke('fixture:control', 'emitConfig', value),
       failMemorySources: () => ipcRenderer.invoke('fixture:control', 'failMemorySources'),
       emitMemoryChange: () => ipcRenderer.invoke('fixture:control', 'emitMemoryChange'),
+      injectConflictRows: () => ipcRenderer.invoke('fixture:control', 'injectConflictRows'),
+      emitMaintenance: value => ipcRenderer.invoke('fixture:control', 'emitMaintenance', value),
       getCalls: () => ipcRenderer.invoke('fixture:control', 'getCalls') },
   });
 `);
@@ -94,9 +105,26 @@ ipcMain.handle('fixture:control', (_event, action, value) => {
   if (action === 'emitMonitor') { monitorSnapshot = value; activeWindow?.webContents.send('fixture:event', { type: 'monitor', ...value }); return true; }
   if (action === 'emitWatches') { watches = value; activeWindow?.webContents.send('fixture:event', { type: 'watches', watches: value }); return true; }
   if (action === 'emitRecall') { activeWindow?.webContents.send('fixture:event', { type: 'recall', entries: value }); return true; }
+  if (action === 'emitConfig') {
+    if (value.memory) settings.memory = { ...settings.memory, ...value.memory };
+    if (value.buddy) settings.buddy = { ...settings.buddy, ...value.buddy,
+      ...(value.buddy.sceneProfiles ? { sceneProfiles: { ...settings.buddy.sceneProfiles, ...value.buddy.sceneProfiles } } : {}) };
+    settings.settingsRevision = (settings.settingsRevision || 0) + 1;
+    activeWindow?.webContents.send('fixture:event', { type: 'config', config: JSON.parse(JSON.stringify(settings)) });
+    return true;
+  }
+  if (action === 'emitMaintenance') { maintenanceStatus = value; activeWindow?.webContents.send('fixture:event', { type: 'memory-maintenance', ...value }); return true; }
   if (action === 'failMemorySources') { failNextMemorySources = true; return true; }
   if (action === 'emitMemoryChange') {
     rows.push({ id: `memory-live-${Date.now()}`, kind: 'memory', ts: Date.now(), content: '海边新记忆', status: 'pending', sources: [] });
+    activeWindow?.webContents.send('fixture:event', { type: 'memory-changed', counts: emptyCounts() });
+    return true;
+  }
+  if (action === 'injectConflictRows') {
+    rows.push(
+      { id: 'memory-user-conflict-fixture', kind: 'memory', ts: Date.now(), content: '用户生日冲突fixture', status: 'pending', origin: 'user-key-conflict-v1', sources: ['source-1'], evidence: '我的生日是3月4日' },
+      { id: 'memory-doze-candidate-fixture', kind: 'memory', ts: Date.now() - 1, content: '普通整理候选fixture', status: 'pending', origin: 'doze-candidate-v1', sources: ['source-1'], evidence: '候选来源' },
+    );
     activeWindow?.webContents.send('fixture:event', { type: 'memory-changed', counts: emptyCounts() });
     return true;
   }
@@ -107,10 +135,26 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
   called(name, ...args);
   if (name === 'init') return { monitor: monitorSnapshot, desktop: status, currentRecall: recallEntries, watches };
   if (name === 'workbuddyOpen') return { ok: true };
-  if (name === 'memoryStats') return { ready: true, counts: emptyCounts(), state: { mood: '愉快', energy: 72, interactions: 5 } };
+  if (name === 'memoryStats') return { ready: true, counts: emptyCounts(), scene: settings.memory.scene,
+    compression: { version: { private: 3, life: 2, work: 1 }[settings.memory.scene], updatedAt: Date.now() },
+    state: { mood: '愉快', energy: 72, interactions: 5 } };
+  if (name === 'memoryMaintenanceStatus') return maintenanceStatus;
+  if (name === 'memoryMaintain') { maintenanceStatus = { status: 'queued', mode: args[0], processed: 0, note: args[0] === 'doze' ? '小憩已排队' : '记忆整理已排队' }; return { ok: true, queued: true }; }
   if (name === 'config') {
+    if (!args[0]) {
+      const config = JSON.parse(JSON.stringify(settings));
+      delete config.tts.apiKey; delete config.brain.apiKey;
+      for (const profile of Object.values(config.brain.profiles || {})) delete profile.apiKey;
+      return config;
+    }
     if (failConfig) { failConfig = false; return { ok: false, error: 'fixture write failure' }; }
-    const commit = () => { if (args[0]?.memory) settings.memory = { ...settings.memory, ...args[0].memory }; return settings; };
+    const commit = () => {
+      const patch = args[0] || {};
+      if (patch.memory) settings.memory = { ...settings.memory, ...patch.memory };
+      if (patch.buddy) settings.buddy = { ...settings.buddy, ...patch.buddy,
+        ...(patch.buddy.sceneProfiles ? { sceneProfiles: { ...settings.buddy.sceneProfiles, ...patch.buddy.sceneProfiles } } : {}) };
+      return settings;
+    };
     if (holdConfig) return new Promise(resolve => { heldConfigResolve = () => resolve(commit()); });
     return commit();
   }
@@ -128,6 +172,11 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
   if (name === 'memoryUpdate') {
     const [id, content] = args, row = rows.find(item => item.id === id);
     if (row) { row.content = content; row.status = 'confirmed'; }
+    return { ok: !!row };
+  }
+  if (name === 'memoryResolveConflict') {
+    const [id] = args, row = rows.find(item => item.id === id && item.origin === 'user-key-conflict-v1' && item.status === 'pending');
+    if (row) row.status = 'confirmed';
     return { ok: !!row };
   }
   if (name === 'memorySources') {
@@ -189,6 +238,72 @@ async function click(win, id) { await evalIn(win, `document.getElementById(${JSO
 async function testMemory() {
   const win = await loadPage('memory');
   await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .record').length" ).then(n => n === 2), 'memory list');
+  await waitFor(() => evalIn(win, "document.getElementById('maintenanceStatus').textContent").then(text => text.includes('空闲')), 'initial maintenance status');
+  assert.match(await evalIn(win, "document.querySelector('.maintenance-scope').textContent"), /分批轮查更早.*完全重复/);
+  assert.match(await evalIn(win, "document.getElementById('contextStatus').textContent"), /生活.*压缩版本 2/);
+  await click(win, 'maintenanceDoze');
+  await waitFor(() => Promise.resolve((calls.memoryMaintain || []).length === 1), 'doze request');
+  assert.equal(calls.memoryMaintain[0][0], 'doze');
+  await waitFor(() => evalIn(win, "document.getElementById('maintenanceStatus').textContent").then(text => /排队中.*小憩已排队/.test(text)), 'doze queued status');
+  assert.match(await evalIn(win, "document.getElementById('maintenanceStatus').textContent"), /排队中.*小憩已排队/);
+  await evalIn(win, `window.pet.__fixture.emitMaintenance(${JSON.stringify({ status: 'running', mode: 'dream', processed: 12, note: '仅整理最近范围' })})`);
+  await waitFor(() => evalIn(win, "document.getElementById('maintenanceStatus').textContent").then(text => text.includes('整理中') && text.includes('已处理 12 条')), 'maintenance status event');
+  await click(win, 'maintenanceDream');
+  await waitFor(() => Promise.resolve((calls.memoryMaintain || []).length === 2), 'dream request');
+  assert.equal(calls.memoryMaintain[1][0], 'dream');
+  assert.equal(await evalIn(win, "document.getElementById('memoryScene').value"), 'life', 'life is the default scene');
+  assert.equal(await evalIn(win, "document.getElementById('memorySceneScope').textContent"), '生活：可按需参考生活与工作资料');
+  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '生活补充', 'the life overlay loads independently of the common profile');
+  await evalIn(win, "document.getElementById('memoryScene').value='work'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => Promise.resolve(settings.memory.scene === 'work'), 'work scene persisted');
+  assert.deepEqual(calls.config.at(-1)[0], { memory: { scene: 'work' } }, 'scene changes send only the scene patch');
+  assert.equal(await evalIn(win, "document.getElementById('memorySceneScope').textContent"), '工作：可按需参考工作资料');
+  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '工作补充');
+  await evalIn(win, "document.getElementById('sceneProfile').value='工作场景专属补充'; document.getElementById('sceneProfile').dispatchEvent(new Event('input',{bubbles:true})); document.getElementById('sceneProfileSave').click()");
+  await waitFor(() => Promise.resolve(settings.buddy.sceneProfiles.work === '工作场景专属补充'), 'work profile saved');
+  assert.deepEqual(calls.config.at(-1)[0], { buddy: { sceneProfiles: { work: '工作场景专属补充' } } }, 'profile save writes only the dirty scene key');
+  assert.equal(settings.buddy.profile, '共通角色设定', 'scene overlay saves do not replace the shared persona');
+  assert.equal(settings.voice.alwaysListen, true);
+  assert.equal(settings.tts.apiKey, 'fixture-tts-secret', 'scene settings preserve voice credentials');
+  assert.equal(settings.brain.apiKey, 'fixture-brain-secret', 'scene settings preserve intelligence credentials');
+  assert.equal(settings.brain.profiles.deepseek.apiKey, 'fixture-provider-secret', 'scene settings preserve provider credentials');
+  await evalIn(win, "document.getElementById('sceneProfile').value='工作未保存草稿'; document.getElementById('sceneProfile').dispatchEvent(new Event('input',{bubbles:true}))");
+  await evalIn(win, `window.pet.__fixture.emitConfig(${JSON.stringify({ buddy: { sceneProfiles: { private: '私聊外部更新', life: '生活外部更新', work: '工作外部更新' } } })})`);
+  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '工作未保存草稿', 'config events preserve the dirty current scene draft');
+  await evalIn(win, "document.getElementById('memoryScene').value='private'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => Promise.resolve(settings.memory.scene === 'private'), 'live config scene change');
+  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '私聊外部更新', 'config events refresh non-dirty scene profiles');
+  await evalIn(win, "document.getElementById('memoryScene').value='work'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => Promise.resolve(settings.memory.scene === 'work'), 'return to work scene with draft');
+  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '工作未保存草稿', 'dirty scene draft survives switching away and back');
+  await click(win, 'sceneProfileSave');
+  await waitFor(() => Promise.resolve(settings.buddy.sceneProfiles.work === '工作未保存草稿'), 'save dirty work profile after external update');
+  assert.deepEqual(calls.config.at(-1)[0], { buddy: { sceneProfiles: { work: '工作未保存草稿' } } }, 'saving does not overwrite another window scene edits');
+  await evalIn(win, "document.getElementById('memoryScene').value='private'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => Promise.resolve(settings.memory.scene === 'private'), 'private scene persisted');
+  assert.equal(await evalIn(win, "document.getElementById('memorySceneScope').textContent"), '私聊：可按需参考私聊、生活与工作资料');
+  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '私聊外部更新');
+  await evalIn(win, "document.getElementById('sceneProfile').value='私聊草稿'; document.getElementById('sceneProfile').dispatchEvent(new Event('input',{bubbles:true})); document.getElementById('memoryScene').value='life'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => Promise.resolve(settings.memory.scene === 'life'), 'return to life scene');
+  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '生活外部更新', 'scene change loads the matching overlay');
+  await evalIn(win, "document.getElementById('memoryScene').value='private'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => Promise.resolve(settings.memory.scene === 'private'), 'private scene restored');
+  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '私聊草稿', 'unsaved overlay drafts stay with their scene when switching');
+  assert.equal(await evalIn(win, "(() => { const e=new Event('beforeunload',{cancelable:true}); window.dispatchEvent(e); return e.defaultPrevented })()"), true, 'unsaved scene overlay prevents silent close');
+  await click(win, 'sceneProfileSave');
+  await waitFor(() => Promise.resolve(settings.buddy.sceneProfiles.private === '私聊草稿'), 'private profile saved');
+  await evalIn(win, "window.pet.__fixture.failConfig().then(()=>{document.getElementById('sceneProfile').value='私聊失败后保留';document.getElementById('sceneProfile').dispatchEvent(new Event('input',{bubbles:true}));document.getElementById('sceneProfileSave').click()})");
+  await waitFor(() => evalIn(win, "document.getElementById('sceneProfileNote').textContent").then(text => text.includes('保存失败')), 'profile save failure feedback');
+  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '私聊失败后保留', 'failed profile save keeps its draft');
+  await click(win, 'sceneProfileSave');
+  await waitFor(() => Promise.resolve(settings.buddy.sceneProfiles.private === '私聊失败后保留'), 'retry private profile save');
+  await evalIn(win, "document.getElementById('memoryScene').value='life'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => Promise.resolve(settings.memory.scene === 'life'), 'restore default scene for existing memory tests');
+  await evalIn(win, "window.pet.__fixture.failConfig().then(()=>{document.getElementById('memoryScene').value='work';document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))})");
+  await waitFor(() => evalIn(win, "document.getElementById('memoryConfigNote').textContent").then(text => text.includes('场景切换失败')), 'scene switch failure feedback');
+  assert.equal(await evalIn(win, "document.getElementById('memoryScene').value"), 'life', 'failed scene write restores the last saved scene');
+  assert.equal(await evalIn(win, "document.getElementById('memorySceneScope').textContent"), '生活：可按需参考生活与工作资料');
+
   assert.equal(await evalIn(win, "document.getElementById('currentRecallCard').hidden"), false, 'actual recall entries reveal the current-recall area');
   assert.equal(await evalIn(win, "document.querySelectorAll('#currentRecallList .recall-entry').length"), 2);
   const recallButtons = await evalIn(win, "[...document.querySelectorAll('#currentRecallList .recall-entry')].map(card=>[...card.querySelectorAll('button')].map(button=>button.textContent))");
@@ -213,7 +328,8 @@ async function testMemory() {
   assert.equal(await evalIn(win, "document.getElementById('memorySearch').value"), '', 'an already loaded record opens without replacing the current query');
   const recalledRecordActions = await evalIn(win, "[...document.querySelector('#memoryList [data-record-id=memory-pending-1]').querySelectorAll('button')].map(button=>button.textContent)");
   assert(recalledRecordActions.includes('编辑') && recalledRecordActions.includes('删除'), 'recalled records retain existing edit and delete actions');
-  assert.match(await evalIn(win, "document.getElementById('memoryStatus').textContent"), /愉快.*72/);
+  assert.match(await evalIn(win, "document.getElementById('memoryStatus').textContent"), /(?:工作|生活|私聊).*已就绪/);
+  assert.doesNotMatch(await evalIn(win, "document.getElementById('memoryStatus').textContent"), /72|精力/);
   assert.equal(await evalIn(win, "document.querySelector('#memoryList img') === null"), true, 'record text must not create markup');
   assert.equal(await evalIn(win, "document.querySelector('#memoryList .pending')?.textContent"), '待确认');
   assert.equal(await evalIn(win, "document.querySelector('#memoryList textarea')"), null);
@@ -257,6 +373,45 @@ async function testMemory() {
   assert.equal(calls.memoryUpdate.at(-1)[0], 'memory-pending-1');
   assert.equal(calls.memoryUpdate.at(-1)[1], rows.find(r => r.id === 'memory-pending-1').content);
   await waitFor(() => evalIn(win, "![...document.querySelectorAll('#memoryList .record')].find(card=>card.querySelector('.record-content')?.textContent.startsWith('我喜欢海边 <img'))?.querySelector('.pending')"), 'confirmed badge');
+
+  // A source-aware user conflict has a dedicated resolution action. It must not
+  // expose generic edit/confirm controls or mutate profile/settings state.
+  await evalIn(win, 'window.pet.__fixture.injectConflictRows()');
+  await evalIn(win, "document.getElementById('memorySearch').value=''; document.getElementById('memorySearchBtn').click()");
+  await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .record').length").then(n => n >= 4), 'conflict and doze fixtures loaded');
+  await evalIn(win, "document.getElementById('memorySearch').value='用户生日冲突fixture'; document.getElementById('memorySearchBtn').click()");
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=memory-user-conflict-fixture]') !== null"), 'conflict row search');
+  const conflictCard = "document.querySelector('#memoryList [data-record-id=memory-user-conflict-fixture]')";
+  assert.equal(await evalIn(win, `${conflictCard}.querySelector('.pending')?.textContent`), '用户说法待核对');
+  const conflictActions = await evalIn(win, `[...${conflictCard}.querySelectorAll('.record-actions button')].map(button=>button.textContent)`);
+  assert(conflictActions.includes('采用这次说法'));
+  assert(!conflictActions.includes('确认') && !conflictActions.includes('编辑'), 'conflict has no generic confirmation or edit action');
+  const beforeConflictResolve = (calls.memoryResolveConflict || []).length;
+  const beforeConflictUpdate = (calls.memoryUpdate || []).length;
+  const beforeConflictConfig = JSON.stringify({ memory: settings.memory, buddy: settings.buddy });
+  await evalIn(win, `${conflictCard}.querySelectorAll('.record-actions button')[0].click()`);
+  await waitFor(() => Promise.resolve((calls.memoryResolveConflict || []).length === beforeConflictResolve + 1), 'dedicated conflict resolution');
+  assert.deepEqual(calls.memoryResolveConflict.at(-1), ['memory-user-conflict-fixture']);
+  assert.equal((calls.memoryUpdate || []).length, beforeConflictUpdate, 'conflict did not use generic memoryUpdate');
+  assert.equal(JSON.stringify({ memory: settings.memory, buddy: settings.buddy }), beforeConflictConfig, 'resolving conflict does not change profiles or settings');
+
+  // A model/doze candidate remains an ordinary editable candidate, not a user conflict.
+  await evalIn(win, "document.getElementById('memorySearch').value='普通整理候选fixture'; document.getElementById('memorySearchBtn').click()");
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=memory-doze-candidate-fixture]') !== null"), 'doze candidate search');
+  const candidateCard = "document.querySelector('#memoryList [data-record-id=memory-doze-candidate-fixture]')";
+  assert.equal(await evalIn(win, `${candidateCard}.querySelector('.pending')?.textContent`), '整理候选');
+  const candidateActions = await evalIn(win, `[...${candidateCard}.querySelectorAll('.record-actions button')].map(button=>button.textContent)`);
+  assert(candidateActions.includes('确认') && candidateActions.includes('编辑'));
+  assert(!candidateActions.includes('采用这次说法'));
+  const beforeCandidateUpdate = (calls.memoryUpdate || []).length;
+  await evalIn(win, `[...${candidateCard}.querySelectorAll('.record-actions button')].find(button=>button.textContent==='确认').click()`);
+  await waitFor(() => Promise.resolve((calls.memoryUpdate || []).length === beforeCandidateUpdate + 1), 'ordinary candidate confirmation');
+  assert.equal(calls.memoryUpdate.at(-1)[0], 'memory-doze-candidate-fixture');
+  assert.equal(calls.memoryUpdate.at(-1)[1], '普通整理候选fixture');
+  assert.equal((calls.memoryResolveConflict || []).length, beforeConflictResolve + 1, 'ordinary candidate did not use conflict resolution');
+  await evalIn(win, "document.getElementById('memorySearch').value='海边'; document.getElementById('memorySearchBtn').click()");
+  await waitFor(() => evalIn(win, "[...document.querySelectorAll('#memoryList .record-content')].some(el=>el.textContent==='海边新记忆')"), 'restore existing memory query');
+
   const maxLength = await evalIn(win, "(() => { document.querySelector('#memoryList button').click(); return document.querySelector('#memoryList textarea')?.maxLength })()");
   assert.equal(maxLength, 1000);
   await evalIn(win, "document.getElementById('backupPassphrase').value='fixture-pass'; document.getElementById('memoryExport').click()");
