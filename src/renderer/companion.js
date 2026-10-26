@@ -383,6 +383,8 @@ $('memoryClear').addEventListener('click', async () => {
 let desktopStatus = null, insertPending = false, insertPromise = null, paintedTaskId = null;
 let resumePendingId = null, resumePreviousStatus = null, resumeTimer = null;
 let workBuddyMonitorSnapshot = null;
+let watchRows = [], watchRequestRevision = 0;
+const watchActionsPending = new Set(), watchFeedback = new Map();
 const PERMISSION_NAMES = { accessibilityTrusted: '辅助功能', screenCaptureAllowed: '屏幕录制', postEventAllowed: '输入控制', accessibility: '辅助功能', screenRecording: '屏幕录制', automation: '自动化', inputMonitoring: '输入监控' };
 const TASK_STATUS_LABELS = { starting: '正在准备', running: '代理操作中', awaiting: '等待 WorkBuddy 开始处理', monitoring: '观察 WorkBuddy', verifying: '核对结果', paused: '代理已暂停', stopped: '代理已暂停', review: '待你确认', accepted: '你已确认', failed: '代理未完成' };
 function taskStatusLabel(status) { return TASK_STATUS_LABELS[status] || labelStatus(status); }
@@ -529,6 +531,94 @@ function paintWorkBuddyMonitor(snapshot) {
     target.append(node('div', 'task-detail', `${task.name || task.title || 'WorkBuddy 任务'} · ${status}`));
   }
 }
+const WATCH_STATUS = { active: '关注中', paused: '已暂停', stopped: '已停止', needs_window: '需要打开目标应用', waiting: '等待新动态', expired: '已到期' };
+function paintWatches(rows) {
+  watchRequestRevision++;
+  watchRows = Array.isArray(rows) ? rows : [];
+  const list = $('watchList');
+  if (!list) return;
+  list.replaceChildren();
+  const active = watchRows.filter(row => !['stopped', 'expired'].includes(row?.status));
+  const inactive = watchRows.filter(row => ['stopped', 'expired'].includes(row?.status));
+  if (!active.length && !inactive.length) {
+    list.append(node('div', 'watch-empty', '暂时没有持续关注。可以告诉 Bunny：“帮我关注某位联系人的新消息，有消息就告诉我。”'));
+    return;
+  }
+  for (const row of active) list.append(makeWatchRow(row));
+  if (inactive.length) {
+    const details = node('details', 'watch-inactive');
+    details.append(node('summary', '', `已停止或到期（${inactive.length}）`));
+    const archive = node('div', 'watch-list');
+    for (const row of inactive) archive.append(makeWatchRow(row));
+    details.append(archive); list.append(details);
+  }
+}
+function makeWatchRow(row) {
+  const item = node('article', 'watch-item');
+  if (typeof row.id === 'string') item.dataset.watchId = row.id;
+  const target = row.target === 'workbuddy' ? 'WorkBuddy' : row.target === 'wechat' ? '微信' : '代理';
+  const recipient = typeof row.recipient === 'string' && row.recipient.trim() ? row.recipient.trim() : target;
+  const head = node('div', 'watch-item-head');
+  head.append(node('span', 'watch-item-name', recipient), node('span', 'watch-item-status', WATCH_STATUS[row.status] || '状态待更新'));
+  item.append(head);
+  item.append(node('div', 'watch-item-meta', `${target} · ${row.mode === 'reply' ? '按规则回复' : '仅通知'}`));
+  const goal = String(row.goal || '').trim();
+  if (goal) { const summary = node('div', 'watch-item-note', goal); summary.title = goal; item.append(summary); }
+  const note = watchFeedback.get(row.id) || String(row.note || '').trim();
+  if (note) { const noteEl = node('div', 'watch-item-note', note); noteEl.title = note; item.append(noteEl); }
+  const interval = Number.isFinite(row.intervalSeconds) && row.intervalSeconds > 0 ? `每 ${row.intervalSeconds} 秒检查` : '检查频率未知';
+  const expiry = row.expiresAt ? `到期：${formatTime(row.expiresAt)}` : '持续至手动停止';
+  item.append(node('div', 'watch-item-time', `${interval} · ${expiry}`));
+  const checked = row.lastCheckedAt ? `上次检查：${formatTime(row.lastCheckedAt)}` : '尚未检查';
+  const events = Number.isFinite(row.eventCount) && row.eventCount > 0 ? ` · 已发现 ${row.eventCount} 条动态` : '';
+  item.append(node('div', 'watch-item-time', checked + events));
+  const policy = String(row.policy || '').trim();
+  if (policy) {
+    const rules = node('details', 'watch-policy');
+    rules.append(node('summary', '', '查看处理规则'), node('div', 'watch-item-note', policy));
+    item.append(rules);
+  }
+  const actions = node('div', 'watch-item-actions');
+  const isPending = watchActionsPending.has(row.id);
+  const addAction = (label, method) => {
+    const button = node('button', 'button quiet', label); button.type = 'button'; button.disabled = isPending;
+    button.addEventListener('click', () => runWatchAction(row.id, method));
+    actions.append(button);
+  };
+  if (row.status === 'active' || row.status === 'waiting' || row.status === 'needs_window') {
+    addAction('暂停关注', 'watchPause');
+    addAction('现在检查', 'watchCheck');
+    addAction('停止关注', 'watchStop');
+  } else if (row.status === 'paused') {
+    addAction('继续关注', 'watchResume');
+    addAction('停止关注', 'watchStop');
+  }
+  if (actions.childElementCount) item.append(actions);
+  return item;
+}
+async function refreshWatches() {
+  const revision = ++watchRequestRevision;
+  try {
+    const rows = await api('watchList');
+    if (revision === watchRequestRevision) paintWatches(rows);
+  } catch (error) {
+    if (revision === watchRequestRevision) $('watchList').replaceChildren(node('div', 'watch-empty bad-text', error.message || '持续关注暂时无法读取'));
+  }
+}
+async function runWatchAction(id, method) {
+  if (watchActionsPending.has(id)) return;
+  watchActionsPending.add(id); watchFeedback.set(id, '正在处理…'); paintWatches(watchRows);
+  try {
+    const result = await api(method, id);
+    if (result === false || result?.ok === false) throw new Error(result?.error || '关注状态没有更新');
+    watchFeedback.delete(id);
+    await refreshWatches();
+  } catch (error) {
+    watchFeedback.set(id, error.message || '操作失败');
+  } finally {
+    watchActionsPending.delete(id); paintWatches(watchRows);
+  }
+}
 async function refreshDesktop() {
   try { hideError(); paintDesktopStatus(await api('taskStatus')); }
   catch (error) { setPill('desktopStatus', '状态读取失败', 'bad'); showError(error); }
@@ -662,13 +752,18 @@ if (page === 'memory') {
 }
 else {
   refreshDesktop();
+  refreshWatches();
+  $('watchRefresh').addEventListener('click', refreshWatches);
   $('workbuddyMonitorCard').hidden = $('taskTarget').value !== 'workbuddy';
   if (typeof window.pet?.init === 'function') Promise.resolve(window.pet.init()).then(result => {
     paintWorkBuddyMonitor(result?.monitor);
     if (result?.desktop) paintDesktopStatus(result.desktop);
+    if (Array.isArray(result?.watches)) paintWatches(result.watches);
   }).catch(() => {});
   if (typeof window.pet?.on === 'function') window.pet.on((event) => {
     if (event?.type === 'desktop') paintDesktopStatus(event);
     else if (event?.type === 'monitor') paintWorkBuddyMonitor(event);
+    else if (Array.isArray(event)) paintWatches(event);
+    else if (event?.type === 'watches') paintWatches(event.watches || event.rows);
   });
 }

@@ -5,6 +5,8 @@ const { DesktopService, WECHAT_RULE, validateAction, dispatchGuard, analyzeWorkB
   WORKBUDDY_TEXT_UTF16_LIMIT, workBuddyTextWithinLimit, validateWorkBuddyOutbound, makeWorkBuddyOutbound } = require('../src/main/desktop-service');
 const { Monitor } = require('../src/main/monitor');
 const { observeWorkBuddy } = require('../src/main/workbuddy-observation');
+const { ContactDirectory, createContactDirectory } = require('../src/main/contact-directory');
+const { GuiLease } = require('../src/main/gui-lease');
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate, timeoutMs = 8000) {
@@ -49,6 +51,7 @@ class FakeNative {
       return { pngBase64: this.capturePNG.toString('base64'), desktopRect };
     }
     if (op === 'recognize') {
+      if (typeof this.recognizedTexts === 'function') return { texts: this.recognizedTexts(this.calls.filter(call => call.op === 'recognize').length - 1) };
       if (this.recognizedTexts) return { texts: this.recognizedTexts };
       if (this.modelMenu) return this.modelMenuOpen ? { texts: [
         { text: 'Hy3', confidence: 0.95, x: 0.52, y: 0.49, width: 0.06, height: 0.018 }, { text: '0.00x', confidence: 0.95, x: 0.65, y: 0.49, width: 0.03, height: 0.018 },
@@ -980,12 +983,153 @@ async function testFreeChoiceProofLifecycle() {
   assert.equal(svc.freeChoicePending, false);
 }
 
+async function testContactDirectoryAndWechatOperations() {
+  let persisted = { contacts: [] };
+  const directory = new ContactDirectory({ read: async () => persisted, write: async value => { persisted = value; } });
+  const remembered = await directory.remember('Alice', ['爱丽丝'], { source: 'user-correction' });
+  assert.equal(remembered.confirmed, true);
+  assert.deepEqual((await directory.resolve('爱丽丝')).aliases, ['Alice', '爱丽丝']);
+  await directory.remember('Alice', ['阿丽丝'], { source: 'second-user-correction' });
+  assert.deepEqual((await directory.resolve('Alice')).aliases, ['Alice', '爱丽丝', '阿丽丝'], 'confirmed aliases accumulate');
+  assert.equal((await directory.resolve('Bob')).confirmed, false, 'unknown spoken names do not inherit another contact');
+  await assert.rejects(directory.remember('Bob', ['爱丽丝']), /冲突/u);
+  const failedWriteDirectory = new ContactDirectory({ read: async () => [{ recipient: 'Old', aliases: ['旧名'] }], write: async () => { throw new Error('disk error'); } });
+  await assert.rejects(failedWriteDirectory.remember('Old', ['新名']), /disk error/u);
+  assert.deepEqual((await failedWriteDirectory.resolve('Old')).aliases, ['Old', '旧名'], 'failed persistence leaves in-memory aliases unchanged');
+  assert.equal(typeof createContactDirectory, 'function');
+
+  const recipientOCR = [{ text: 'Alice', confidence: 0.98, x: 0.42, y: 0.08, width: 0.08, height: 0.02 }];
+  const body = '确认明天下午三点';
+  const serviceOpts = { contactDirectory: directory };
+  const events = [];
+  const native = new FakeNative({ bundleId: 'com.tencent.xinWeChat', events, recognizedTexts: index => index === 0 ? recipientOCR : index === 1 ? [
+    ...recipientOCR, { text: body, confidence: 0.99, x: 0.25, y: 0.82, width: 0.24, height: 0.025 },
+  ] : [...recipientOCR, { text: body, confidence: 0.99, x: 0.62, y: 0.55, width: 0.24, height: 0.025 }] });
+  native.events = events;
+  const actions = [
+    { action: 'type', text: 'planner must be replaced', purpose: 'task', focus: { x: 0.5, y: 0.9 } },
+    { action: 'key', key: 'enter', modifiers: [], purpose: 'submit' },
+    { action: 'done', completed: true, evidence: '目标联系人中出现完整已发送消息' },
+  ];
+  const svc = service(native, async () => actions.shift(), events, serviceOpts);
+  assert((await svc.start({ goal: '发送指定原文', target: 'wechat', origin: 'watch', operation: 'send',
+    recipient: '爱丽丝', message: body })).ok);
+  await until(() => svc.task.status === 'review');
+  assert.equal(svc.task.recipient, 'Alice');
+  assert.equal(svc.task.message, body);
+  assert.equal(svc.task.sendState, 'confirmed');
+  assert.equal(svc.task.submitAttemptedAt > 0, true);
+  const sendIntent = events.findIndex(event => event.type === 'persist' && event.steps.some(step => step.purpose === 'submit' && step.state === 'intent'));
+  const submitEvent = events.findIndex(event => event.type === 'native' && event.op === 'key');
+  assert(sendIntent >= 0 && sendIntent < submitEvent, 'submit attempt journal must precede Enter');
+  assert.equal(native.calls.filter(call => call.op === 'type').length, 1, 'the exact original message is typed once');
+  assert.equal(native.calls.filter(call => call.op === 'key').length, 1, 'the message is submitted once');
+  assert.equal(native.calls.find(call => call.op === 'type').payload.text, body, 'planner cannot change the user message');
+
+  const unknownNative = new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: recipientOCR });
+  const submitThenRepeat = [
+    { action: 'type', text: body }, { action: 'key', key: 'enter', modifiers: [], purpose: 'submit' },
+    { action: 'key', key: 'enter', modifiers: [], purpose: 'submit' },
+  ];
+  const unknown = service(unknownNative, async () => submitThenRepeat.shift(), [], serviceOpts);
+  assert((await unknown.start({ goal: '发送一次', target: 'wechat', origin: 'watch', operation: 'send', recipient: 'Alice', message: body })).ok);
+  await until(() => unknown.task.status === 'paused');
+  assert.equal(unknownNative.calls.filter(call => call.op === 'key').length, 1, 'unknown send result cannot be resubmitted');
+  assert.match(unknown.task.note, /仅允许观察|不会重复/u);
+
+  for (const operation of ['read', 'open']) {
+    const guardedNative = new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: recipientOCR });
+    const guarded = service(guardedNative, async () => ({ action: 'type', text: 'not allowed', purpose: 'task' }), [], serviceOpts);
+    assert((await guarded.start({ goal: '检查会话', target: 'wechat', origin: 'watch', operation, recipient: 'Alice' })).ok);
+    await until(() => guarded.task.status === 'paused');
+    assert.equal(guardedNative.calls.some(call => call.op === 'type' || call.op === 'key'), false, `${operation} never writes or submits`);
+  }
+
+  const navigationNative = new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: recipientOCR });
+  const navigation = service(navigationNative, async () => ({ action: 'type', text: 'Bob', purpose: 'navigation' }), [], serviceOpts);
+  assert((await navigation.start({ goal: '发送指定原文', target: 'wechat', origin: 'watch', operation: 'send', recipient: 'Alice', message: body })).ok);
+  await until(() => navigation.task.status === 'paused');
+  assert.equal(navigationNative.calls.some(call => call.op === 'type'), false, 'navigation is limited to canonical names and confirmed aliases');
+}
+
+async function testWechatResumeDoesNotReplayOrOverwrite() {
+  const header = [{ text: 'Alice', confidence: 0.99, x: 0.4, y: 0.08, width: 0.08, height: 0.02 }];
+  const body = '原始待发送内容';
+  const directory = createContactDirectory({ read: async () => [{ recipient: 'Alice', aliases: ['爱丽丝'] }] });
+  const native = new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: [...header, { text: body, confidence: 0.99, x: 0.4, y: 0.82, width: 0.2, height: 0.02 }] });
+  const actions = [
+    { action: 'type', text: body, purpose: 'task' },
+    { action: 'done', completed: false, evidence: '暂未提交' },
+  ];
+  const svc = service(native, async () => actions.shift(), [], { contactDirectory: directory });
+  assert((await svc.start({ goal: '准备微信草稿', target: 'wechat', origin: 'watch', operation: 'draft', recipient: 'Alice', message: body })).ok);
+  await until(() => svc.task.status === 'paused');
+  const typedBefore = native.calls.filter(call => call.op === 'type').length;
+  assert.equal(typedBefore, 1);
+  // A newly observed own draft can be resumed, but the task message is never typed a second time.
+  const resumeActions = [{ action: 'done', completed: true, evidence: '编辑区存在原始草稿' }];
+  svc.planner = async () => resumeActions.shift();
+  assert((await svc.resume()).ok);
+  await until(() => ['review', 'paused'].includes(svc.task.status));
+  assert.equal(svc.task.status, 'review', `matching original draft should resume without retyping: ${svc.task.note}`);
+  assert.equal(native.calls.filter(call => call.op === 'type').length, typedBefore);
+
+  const stranger = new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: [...header, { text: '别人的草稿', confidence: 0.99, x: 0.4, y: 0.82, width: 0.16, height: 0.02 }] });
+  const stoppedTask = service(stranger, async () => ({ action: 'done', completed: false, evidence: 'no match' }), [], { contactDirectory: directory });
+  assert((await stoppedTask.start({ goal: '草稿', target: 'wechat', origin: 'watch', operation: 'draft', recipient: 'Alice', message: body })).ok);
+  await until(() => stoppedTask.task.status === 'paused');
+  stoppedTask.task.draftInserted = true;
+  assert((await stoppedTask.resume()).ok);
+  await until(() => stoppedTask.task.status === 'paused');
+  assert.equal(stranger.calls.filter(call => call.op === 'type' || call.op === 'key').length, 0, 'a different visible draft is preserved without input');
+
+  const sent = service(new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: header }), async () => ({ action: 'wait', reason: 'read only' }), [], { contactDirectory: directory });
+  sent.task = { id: 'sent', target: 'wechat', status: 'paused', goal: 'send', operation: 'send', message: body, recipient: 'Alice', recipientAliases: ['Alice'], submitAttemptedAt: Date.now(), startedAt: Date.now(), steps: [] };
+  assert((await sent.resume()).ok);
+  await until(() => sent.native.calls.some(call => call.op === 'capture'));
+  await sent.stop('test stop after unknown send');
+  assert.equal(sent.native.calls.some(call => call.op === 'type' || call.op === 'key' || call.op === 'click'), false, 'submitted WeChat resume remains read-only');
+}
+
+async function testGuiLeaseSerializesAndReleases() {
+  const lease = new GuiLease();
+  assert.equal(lease.isFree(), true);
+  await lease.acquire('watch');
+  assert.equal(lease.isFree(), false);
+  assert.equal(lease.release('wrong-owner'), false);
+  assert.equal(lease.release('watch'), true);
+  assert.equal(lease.isFree(), true);
+  const nested = service(new FakeNative(), async () => ({}), [], { lease, owner: 'nested' });
+  await nested.acquireGuiLease(); await nested.acquireGuiLease();
+  nested.releaseGuiLease(); assert.equal(lease.isFree(), false, 'nested callers do not release another active GUI section');
+  nested.releaseGuiLease(); assert.equal(lease.isFree(), true);
+
+  const entered = deferred(), releasePlanner = deferred();
+  const firstNative = new FakeNative();
+  const sharedLease = new GuiLease();
+  const first = service(firstNative, async () => { entered.resolve(); return releasePlanner.promise; }, [], { lease: sharedLease, owner: 'primary' });
+  assert((await first.start({ goal: 'hold visual operation', target: 'current', workModel: 'hy3' })).ok);
+  await entered.promise;
+  const secondNative = new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: [{ text: 'Alice', confidence: 0.99, x: 0.4, y: 0.08 }] });
+  const second = service(secondNative, async () => ({ action: 'done', completed: false, evidence: 'view only' }), [], { lease: sharedLease, owner: 'watch' });
+  assert((await second.start({ goal: 'open contact', target: 'wechat', origin: 'watch', operation: 'open', recipient: 'Alice' })).ok);
+  await delay(50);
+  assert.equal(secondNative.calls.some(call => call.op === 'activate'), false, 'a second Desktop cannot activate while another owner holds the GUI');
+  await first.stop('release lease');
+  releasePlanner.resolve({ action: 'done', completed: false, evidence: 'stopped' });
+  await until(() => secondNative.calls.some(call => call.op === 'activate'));
+  await until(() => second.task.status === 'paused');
+  assert.equal(sharedLease.isFree(), true, 'run finally releases the shared lease');
+}
+
 async function main() {
   const taskType = validateAction({ action: 'type', text: 'hello', purpose: 'task' });
   assert.throws(() => dispatchGuard(taskType, 'wechat', { ocr: [{ text: '文件传输助手', confidence: 1, x: 0.05, y: 0.2 }] }), /尚未确认/);
   assert.doesNotThrow(() => dispatchGuard(taskType, 'wechat', { ocr: [{ text: '文件传输助手', confidence: 1, x: 0.4, y: 0.08 }] }));
   assert.throws(() => dispatchGuard(taskType, 'wechat', { ocr: [{ text: '文件传输助手', confidence: 1, x: 0.4, y: 0.08 }] }, false, 'hy3', 'Alice'), /尚未确认/, 'a different recipient requires its exact current header');
   assert.doesNotThrow(() => dispatchGuard(taskType, 'wechat', { ocr: [{ text: 'Alice', confidence: 1, x: 0.4, y: 0.08 }] }, false, 'hy3', 'Alice'));
+  assert.throws(() => dispatchGuard(taskType, 'wechat', { ocr: [{ text: '爱丽丝', confidence: 1, x: 0.4, y: 0.08 }] }, false, 'hy3', 'Alice', ['爱丽丝']), /尚未确认/u,
+    'aliases may locate a conversation but cannot authorize input/send unless the canonical header is visible');
   const missingDialogueRecipientNative = new FakeNative();
   const missingDialogueRecipient = service(missingDialogueRecipientNative, async () => ({ action: 'done', completed: false }));
   assert.equal((await missingDialogueRecipient.start({ goal: '发消息', target: 'wechat', origin: 'dialogue' })).ok, false);
@@ -1055,6 +1199,9 @@ async function main() {
   await testInsertBackendDelayAndJournal();
   await testFreeModelIsStrictlyZeroCostAndStubbed();
   await testFreeChoiceProofLifecycle();
+  await testContactDirectoryAndWechatOperations();
+  await testWechatResumeDoesNotReplayOrOverwrite();
+  await testGuiLeaseSerializesAndReleases();
   console.log('DesktopService integration checks passed');
 }
 

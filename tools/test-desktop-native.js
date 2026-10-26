@@ -6,6 +6,7 @@ const fs = require('fs');
 const { spawnSync } = require('child_process');
 const { PassThrough, Writable } = require('stream');
 const { DesktopNative, defaultBinary } = require('../src/main/desktop-native');
+const nativeTestBinary = () => process.env.WORKBUNNY_NATIVE_TEST_BINARY || defaultBinary();
 
 function fixture(options = {}) {
   const children = [];
@@ -80,7 +81,7 @@ test('locked-session guard covers capture, activate, and all input actions; perm
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   assert.match(source, /session\["CGSSessionScreenIsLocked"\]/);
   assert.match(source, /"sessionLocked": sessionLocked\(\)/);
-  assert.equal((source.match(/guard !sessionLocked\(\) else \{ throw DesktopError\(message: "电脑已锁屏，请解锁后重试"\) \}/g) || []).length, 5);
+  assert.equal((source.match(/guard !sessionLocked\(\) else \{ throw DesktopError\(message: "电脑已锁屏，请解锁后重试"\) \}/g) || []).length, 6);
   assert.match(source, /DispatchQueue\.global\(qos: \.userInitiated\)\.async/);
   assert.match(source, /RunLoop\.main\.run\(mode: \.default, before: Date\(timeIntervalSinceNow: 0\.1\)\)/);
 });
@@ -92,7 +93,7 @@ test('type plans reject implicit newlines and controls, emit explicit soft break
   assert.match(source, /scalar\.value <= 0x1f && scalar\.value != 0x0a/);
   assert.match(source, /event\.flags = \.maskShift[\s\S]{0,180}event\.post\(tap: \.cghidEventTap\)/);
   assert.match(source, /guard !sessionLocked\(\) else \{ throw DesktopError\(message: "电脑已锁屏，请解锁后重试"\) \}/);
-  const run = spawnSync(defaultBinary(), ['--self-test-native'], { encoding: 'utf8', timeout: 5000 });
+  const run = spawnSync(nativeTestBinary(), ['--self-test-native'], { encoding: 'utf8', timeout: 5000 });
   assert.equal(run.status, 0, run.stderr || run.stdout);
   const result = JSON.parse(run.stdout.trim());
   assert.equal(result.selfTest, 'native');
@@ -102,6 +103,32 @@ test('type plans reject implicit newlines and controls, emit explicit soft break
   assert.equal(result.invalidRectsRejected, 5);
   assert.deepEqual(result.multilineEvents, ['text:A', 'shiftEnter', 'text:B', 'shiftEnter', 'text:C']);
   assert.deepEqual(result.surrogateChunkSizes, [19, 3]);
+});
+
+test('generic visual sampling is bounded, commit-based, and never queries application UI', () => {
+  const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
+  const visual = source.slice(source.indexOf('func captureVisualFrame('), source.indexOf('func recognizePNG('));
+  assert.match(source, /func normalizedVisualRegions\(_ value: Any\?\)/);
+  assert.match(source, /\(1\.\.\.4\)\.contains\(rows\.count\)/);
+  assert.match(source, /let visualRegionMaxSide = 320/);
+  assert.match(source, /let visualSampleCapacity = 8/);
+  assert.match(source, /func compareVisualRegion\(_ baseline: VisualRegionFrame, _ current: VisualRegionFrame, threshold: Int\)/);
+  assert.match(source, /func visualCommit\(_ request: \[String: Any\]\)/);
+  assert.match(source, /func resetVisualBaseline\(_ id: String\)/);
+  assert.match(source, /func visualForget\(_ request: \[String: Any\]\)/);
+  assert.match(source, /if shouldIncludeVisualImage\(changed: changed, reset: reset/);
+  assert.match(source, /shouldIncludeVisualImage\(changed: changed, reset: reset, geometryChanged: geometryChanged,[\s\S]{0,120}hasBaseline: hasBaseline/);
+  assert.match(source, /NSRunningApplication\(processIdentifier: pid_t\(pid\)\)\?\.bundleIdentifier/);
+  assert.match(source, /case "visualSample": return try visualSample\(request\)/);
+  assert.doesNotMatch(visual, /AXUIElement|AppleScript|NSWorkspace\.shared\.frontmostApplication/);
+  assert.match(source, /CGEventSource\.secondsSinceLastEventType\(\.hidSystemState, eventType: anyInput\)/);
+  assert.match(source, /CGEventSource\.secondsSinceLastEventType\(\.combinedSessionState, eventType: anyInput\)/);
+  const run = spawnSync(nativeTestBinary(), ['--self-test-visual'], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(run.status, 0, run.stderr || run.stdout);
+  const result = JSON.parse(run.stdout.trim());
+  assert.equal(result.visualSample, true);
+  assert.equal(result.visualCapacity, 8);
+  assert.equal(result.inputIdleReadOnly, true);
 });
 
 test('rectFrom accepts CGWindowBounds casing and preserves dimension validation', () => {
@@ -166,13 +193,13 @@ test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bo
   assert.match(source, /case "workbuddyInspect"/);
   assert.match(source, /case "workbuddyFill"/);
   assert.match(source, /case "workbuddySend"/);
-  const run = spawnSync(defaultBinary(), ['--self-test-workbuddy'], { encoding: 'utf8', timeout: 5000 });
+  const run = spawnSync(nativeTestBinary(), ['--self-test-workbuddy'], { encoding: 'utf8', timeout: 5000 });
   assert.equal(run.status, 0, run.stderr || run.stdout);
   assert.equal(JSON.parse(run.stdout.trim()).workBuddyGuards, true);
   assert.equal(JSON.parse(run.stdout.trim()).workBuddyConversationGuard, true);
   assert.equal(JSON.parse(run.stdout.trim()).workBuddyReadbackGuards, true);
   assert.equal(JSON.parse(run.stdout.trim()).workBuddySerializedMatch, true);
-  const rejected = spawnSync(defaultBinary(), [], {
+  const rejected = spawnSync(nativeTestBinary(), [], {
     encoding: 'utf8', timeout: 5000,
     input: `${JSON.stringify({ id: 'wrong-bundle', op: 'workbuddyInspect', windowId: 1,
       expected: { pid: 1, bundleId: 'com.tencent.wechat' }, sentAtMs: Date.now(), timeoutMs: 1000 })}\n`,
@@ -181,7 +208,7 @@ test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bo
   const response = JSON.parse(rejected.stdout.trim());
   assert.equal(response.ok, false);
   assert.match(response.error, /仅允许目标应用 com\.tencent\.workbuddy\.mac/);
-  const invalidMarker = spawnSync(defaultBinary(), [], {
+  const invalidMarker = spawnSync(nativeTestBinary(), [], {
     encoding: 'utf8', timeout: 5000,
     input: `${JSON.stringify({ id: 'invalid-marker', op: 'workbuddyInspect', mode: 'conversation', marker: '[workbunny:invalid]', windowId: 1,
       expected: { pid: 1, bundleId: 'com.tencent.workbuddy.mac' }, sentAtMs: Date.now(), timeoutMs: 1000 })}\n`,

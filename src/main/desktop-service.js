@@ -4,7 +4,14 @@ const { DesktopNative } = require('./desktop-native');
 const wb = require('./workbuddy');
 const { freeModel, parseObject } = require('./workbuddy-free');
 const { checkDesktopScope } = require('./desktop-scope');
+const { createContactDirectory, normalizedName } = require('./contact-directory');
+const { GuiLease } = require('./gui-lease');
 const delay = ms => new Promise(r => setTimeout(r, ms));
+function withTimeout(promise, ms, message) {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); })])
+    .finally(() => clearTimeout(timer));
+}
 const TARGETS = { workbuddy: 'com.tencent.workbuddy.mac', wechat: 'com.tencent.xinWeChat' };
 const WORK_MODELS = Object.freeze({ flash: 'deepseek-v4.1-flash', hy3: 'hy3' });
 const FIXTURE_BUNDLE = 'cn.haminn.workbunny.fixture';
@@ -12,6 +19,9 @@ const WECHAT_RULE = '微信操作只允许截图视觉识别与键盘鼠标。�
 const MONITOR_POLL_MS = 1200;
 const MONITOR_DISCOVERY_POLLS = 25;
 const WORKBUDDY_TEXT_UTF16_LIMIT = 12_000;
+const WECHAT_OPERATIONS = new Set(['send', 'read', 'draft', 'open', 'general']);
+const WECHAT_STEP_LIMIT = 12;
+const WECHAT_TIME_LIMIT_MS = 120_000;
 function workBuddyTextWithinLimit(text) {
   return typeof text === 'string' && text.length > 0 && text.length <= WORKBUDDY_TEXT_UTF16_LIMIT &&
     !/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/u.test(text) && !/\r(?!\n)/u.test(text);
@@ -165,18 +175,99 @@ async function preflightWorkModel(workModel, signal) {
   }
   return WORK_MODELS.flash;
 }
-function dispatchGuard(action, target, shot, freeChoice = false, workModel = WORK_MODELS.hy3, recipient = '文件传输助手') {
+function recipientNames(recipient, aliases = []) {
+  return [...new Set([recipient, ...(Array.isArray(aliases) ? aliases : [])]
+    .filter(name => typeof name === 'string' && name.trim()).map(name => normalizedName(name).replace(/\s/gu, '')))];
+}
+function wechatHeaderConfirmed(shot, recipient, aliases = []) {
+  // Aliases are useful only for searching. A send is permitted only when the
+  // visible conversation header shows the directory's canonical display name.
+  const expected = new Set(recipientNames(recipient));
+  if (!expected.size) return false;
+  return (shot?.ocr || []).some(row => Number(row.confidence) >= 0.6 && typeof row.text === 'string' &&
+    row.y < 0.28 && row.x > 0.24 && expected.has(normalizedName(row.text).replace(/\s/gu, '')));
+}
+function wechatMessageVisible(shot, message, region = 'any') {
+  if (typeof message !== 'string' || !message) return false;
+  const normalize = text => text.normalize('NFKC').replace(/[“”]/gu, '"').replace(/[‘’]/gu, "'").replace(/\s+/gu, '');
+  const expected = normalize(message);
+  const rows = (shot?.ocr || []).filter(row => typeof row.text === 'string' && Number(row.confidence) >= 0.45 &&
+    (region === 'composer' ? Number(row.y) >= 0.65 : region === 'conversation' ? Number(row.y) >= 0.2 && Number(row.y) < 0.85 : true));
+  if (rows.some(row => normalize(row.text) === expected)) return true;
+  // Vision may split one exact message into adjacent OCR rows. Permit joining
+  // rows in reading order, while keeping every visible character significant.
+  const ordered = rows.slice().sort((a, b) => Number(a.y) - Number(b.y) || Number(a.x) - Number(b.x));
+  for (let start = 0; start < ordered.length; start++) {
+    let joined = '';
+    for (let end = start; end < Math.min(ordered.length, start + 16); end++) {
+      if (end > start && Number(ordered[end].y) - Number(ordered[end - 1].y) > 0.065) break;
+      joined += normalize(ordered[end].text);
+      if (joined === expected) return true;
+      if (!expected.startsWith(joined)) break;
+    }
+  }
+  return false;
+}
+function isEnterAction(action) {
+  return action?.action === 'key' && ['enter', 'return'].includes(action.key);
+}
+function isWechatSubmit(action) {
+  return (action?.action === 'click' && action.purpose === 'submit') ||
+    (isEnterAction(action) && action.purpose === 'submit');
+}
+function validateWechatAction(action, task) {
+  const operation = task.operation || 'general';
+  const typeTask = action.action === 'type' && action.purpose !== 'navigation';
+  const navigationType = action.action === 'type' && action.purpose === 'navigation';
+  const submit = isWechatSubmit(action);
+  if (navigationType) {
+    const allowed = recipientNames(task.recipient, task.recipientAliases);
+    if (!allowed.includes(normalizedName(action.text).replace(/\s/gu, ''))) throw new Error('微信导航搜索只能使用本任务指定联系人或已确认别名');
+  }
+  if ((operation === 'read' || operation === 'open') && (typeTask || submit)) {
+    throw new Error(operation === 'read' ? '只读微信任务禁止输入和发送' : '打开联系人任务禁止输入和发送');
+  }
+  if (operation === 'draft' && submit) throw new Error('草稿任务不能发送');
+  if (submit && operation !== 'send') throw new Error('微信发送必须由 operation:send 明确授权');
+  if (operation === 'send' && typeTask && !task.message) throw new Error('发送任务缺少用户明确提供的 message');
+  if (operation === 'draft' && typeTask && !task.message) throw new Error('草稿任务缺少用户明确提供的 message');
+  if (typeTask && ['send', 'draft'].includes(operation)) action.text = task.message;
+  if (task.submitAttemptedAt && !['wait', 'scroll', 'done'].includes(action.action)) {
+    throw new Error('微信提交结果尚未确认；仅允许观察，不会重复输入、点击或发送');
+  }
+  if (submit && operation === 'send' && !task.draftInserted) throw new Error('微信发送前必须先完成本任务 message 草稿输入');
+  if (task.submitAttemptedAt && !['wait', 'scroll', 'done'].includes(action.action)) {
+    throw new Error('微信提交结果尚未确认；仅允许观察，不会重复输入、点击或发送');
+  }
+  if (operation === 'send' && action.action === 'done' && action.completed &&
+      (!wechatHeaderConfirmed(task.screenshot || {}, task.recipient, task.recipientAliases) || !wechatMessageVisible(task.screenshot || {}, task.message, 'conversation'))) {
+    throw new Error('发送任务必须由当前截图同时确认正确会话和精确已发送消息');
+  }
+  if (operation === 'draft' && action.action === 'done' && action.completed &&
+      !wechatMessageVisible(task.screenshot || {}, task.message, 'composer')) {
+    throw new Error('草稿任务必须由当前截图确认编辑区保留精确 message');
+  }
+}
+function dispatchGuard(action, target, shot, freeChoice = false, workModel = WORK_MODELS.hy3,
+  recipient = '文件传输助手', recipientAliases = []) {
   const text = (shot.ocr || []).filter(r => r.confidence >= 0.6);
-  const enters = action.action === 'key' && ['enter', 'return'].includes(action.key);
+  const enters = isEnterAction(action);
   const typingTask = action.action === 'type' && action.purpose !== 'navigation';
   const typingAny = action.action === 'type';
+  if (target === 'wechat' && enters && !['navigation', 'submit'].includes(action.purpose)) {
+    throw new Error('微信 Enter 必须明确标记为 navigation 或 submit');
+  }
+  if (target === 'wechat' && typingAny && action.purpose === 'navigation' &&
+      !recipientNames(recipient, recipientAliases).includes(normalizedName(action.text).replace(/\s/gu, ''))) {
+    throw new Error('微信导航搜索只能使用指定联系人或已确认别名');
+  }
   if (target === 'wechat' && typingTask && action.focus && (action.focus.y < 0.65 || action.focus.y > 0.98 || action.focus.x < 0.05 || action.focus.x > 0.95)) {
     throw new Error('微信输入框点击位置不在安全的下方编辑区域');
   }
-  if (target === 'wechat' && (typingTask || enters || (action.action === 'click' && action.x > 0.78 && action.y > 0.78))) {
-    const expectedRecipient = String(recipient || '').normalize('NFKC').replace(/\s/g, '');
-    const header = text.some(r => r.text.normalize('NFKC').replace(/\s/g, '') === expectedRecipient && r.y < 0.28 && r.x > 0.24);
-    if (!header) throw new Error('截图尚未确认顶部会话标题与指定接收人精确匹配，未发送输入');
+  if (target === 'wechat' && (typingTask || isWechatSubmit(action))) {
+    if (!wechatHeaderConfirmed({ ocr: text }, recipient, recipientAliases)) {
+      throw new Error('截图尚未确认顶部会话标题与 canonical/已确认别名精确匹配，未发送输入');
+    }
   }
   if (target === 'workbuddy') {
     const analysis = analyzeWorkBuddyOCR(shot.ocr);
@@ -226,8 +317,10 @@ function validateAction(value) {
     if (!/^(?:[a-z0-9]|enter|return|tab|space|delete|backspace|forwarddelete|escape|esc|left|right|up|down|home|end|pageup|pagedown)$/i.test(value.key || '')) throw new Error('不受支持的按键');
     v.key = value.key.toLowerCase(); v.modifiers = Array.isArray(value.modifiers) ? value.modifiers : [];
     if (value.purpose !== undefined) {
-      if (value.purpose !== 'submit' || !['enter', 'return'].includes(v.key) || v.modifiers.length) throw new Error('key purpose submit 只支持无修饰 Enter/Return');
-      v.purpose = 'submit';
+      if (!['submit', 'navigation'].includes(value.purpose) || !['enter', 'return'].includes(v.key) || v.modifiers.length) {
+        throw new Error('key purpose 只支持无修饰 Enter/Return 的 submit 或 navigation');
+      }
+      v.purpose = value.purpose;
     }
     if (v.modifiers.some(x => !['cmd', 'command', 'ctrl', 'control', 'alt', 'option', 'shift'].includes(x))) throw new Error('不受支持的快捷键');
     if (v.modifiers.some(x => ['cmd', 'command'].includes(x)) && ['q', 'w'].includes(v.key)) throw new Error('禁止关闭应用或窗口');
@@ -236,10 +329,13 @@ function validateAction(value) {
   return v;
 }
 class DesktopService {
-  constructor({ native = new DesktopNative(), emit = () => {}, persist = async () => {}, imageResize = png => png, planner, fixturePid = null, observeWorkBuddy = async () => null } = {}) {
-    Object.assign(this, { native, emit, persist, imageResize, planner, observeWorkBuddy });
+  constructor({ native = new DesktopNative(), emit = () => {}, persist = async () => {}, imageResize = png => png, planner, fixturePid = null,
+    observeWorkBuddy = async () => null, contactDirectory = createContactDirectory(), lease = new GuiLease(), owner = null } = {}) {
+    Object.assign(this, { native, emit, persist, imageResize, planner, observeWorkBuddy, contactDirectory, lease });
+    this.guiOwner = typeof owner === 'string' && owner.trim() ? owner : 'desktop-' + crypto.randomUUID();
+    this.guiLeaseHeld = false; this.guiLeaseDepth = 0; this.followUpController = null;
     this.fixturePid = Number.isSafeInteger(fixturePid) && fixturePid > 0 ? fixturePid : null;
-    this.task = null; this.running = false; this.starting = false; this.generation = 0; this.screenshot = null;
+    this.task = null; this.running = false; this.starting = false; this.startRequestToken = 0; this.generation = 0; this.screenshot = null;
     this.freeChoice = false; this.freeChoicePending = false;
     this.controller = null; this.permission = {}; this.revision = 0; this.monitorPromise = null; this.monitorPromiseGeneration = null; this.followUpInProgress = false;
   }
@@ -251,8 +347,22 @@ class DesktopService {
   update(patch) { if (this.task) Object.assign(this.task, patch); this.emit(this.publicStatus()); }
   async journal() { if (this.task) await this.persist({ ...this.task, screenshot: undefined }); }
   assertLive(gen) { if (gen !== this.generation || !this.running) throw new Error('任务已停止'); }
+  async acquireGuiLease(signal = this.controller?.signal) {
+    if (this.guiLeaseHeld) { this.guiLeaseDepth++; return true; }
+    await this.lease.acquire(this.guiOwner, signal);
+    this.guiLeaseHeld = true; this.guiLeaseDepth = 1;
+    return true;
+  }
+  releaseGuiLease(force = false) {
+    if (!this.guiLeaseHeld) return false;
+    if (!force && this.guiLeaseDepth > 1) { this.guiLeaseDepth--; return true; }
+    this.guiLeaseHeld = false; this.guiLeaseDepth = 0;
+    return this.lease.release(this.guiOwner);
+  }
   async stop(reason = '用户停止') {
-    this.generation++; this.running = false; this.starting = false; this.controller?.abort(); await this.native.cancel?.();
+    this.generation++; this.startRequestToken++; this.running = false; this.starting = false; this.controller?.abort(); await this.native.cancel?.();
+    this.followUpController?.abort();
+    this.releaseGuiLease(true);
     this.monitorPromise = null; this.monitorPromiseGeneration = null;
     this.screenshot = null; this.freeChoice = false; this.freeChoicePending = false;
     if (this.task && ['running', 'starting', 'monitoring', 'verifying', 'awaiting', 'review'].includes(this.task.status)) { this.update({ status: 'stopped', note: reason, updatedAt: Date.now() }); await this.journal(); }
@@ -321,13 +431,28 @@ class DesktopService {
     const executionModelVerified = model === WORK_MODELS.flash ? selectedFlash(shot.ocr) : this.freeChoice;
     const taskPayload = { goal: agentGoal, taskText: taskScope.taskText, target: task.target, steps: task.steps, handoffSent: !!taskScope.handoffSent,
         draftInserted: !!taskScope.draftInserted, submitAttempted: !!taskScope.submitAttempted, associationMarker: taskScope.associationMarker, windowTarget: taskScope,
-        actionProtocol: taskScope.submitAttempted ? '提交状态待确认，只允许 wait/done/scroll。' : taskScope.draftInserted ? '必须只提交一次：使用 key Enter/Return 加 purpose:"submit"，或明确发送按钮 click 加 purpose:"submit"；不能再次输入任务。' : '尚未输入任务，按当前视觉流程继续。',
-        origin: taskScope.origin, criteria: taskScope.criteria, recipient: taskScope.recipient, outboundText: taskScope.outboundText,
+        actionProtocol: taskScope.target === 'wechat'
+          ? taskScope.submitAttempted ? '微信提交结果待视觉核实，只允许 wait/scroll/done；禁止键盘、点击和输入。'
+          : ['read', 'open'].includes(taskScope.operation) ? '只允许导航和只读查看；禁止任务输入与发送。'
+          : taskScope.operation === 'draft' ? '按原 message 创建草稿；禁止提交发送。'
+          : taskScope.draftInserted ? '原 message 草稿已写入，只能显式提交一次：key Enter/Return purpose:"submit"，或发送按钮 click purpose:"submit"；不得再次输入。'
+          : '仅可导航到指定联系人并按原 message 创建草稿；输入由服务替换成精确 message。'
+          : taskScope.submitAttempted ? '提交状态待确认，只允许 wait/done/scroll。' : taskScope.draftInserted ? '必须只提交一次：使用 key Enter/Return 加 purpose:"submit"，或明确发送按钮 click 加 purpose:"submit"；不能再次输入任务。' : '尚未输入任务，按当前视觉流程继续。',
+        origin: taskScope.origin, criteria: taskScope.criteria, recipient: taskScope.recipient, recipientAliases: taskScope.recipientAliases,
+        operation: taskScope.operation, message: taskScope.target === 'wechat' ? taskScope.message : undefined, outboundText: taskScope.outboundText,
         visibleText: promptOCR(shot.ocr, 100).map(r => ({ text: r.text.slice(0, 150), x: r.x, y: r.y, width: r.width, height: r.height, confidence: r.confidence })),
         workModel: model, thinking, executionModelVerified,
         ...(model === WORK_MODELS.hy3 ? { freeModelVerified: taskScope.target === 'workbuddy' && this.freeChoice } : {}),
         constraints: taskScope.target !== 'workbuddy' ? `当前目标是微信，仅操作用户明确指定的会话“${taskScope.recipient}”。涉及输入或发送时先确认顶部会话标题精确匹配；发送任务以已发送气泡验证。只读查看任务只查看，不输入或发送；草稿任务只修改草稿，不自行发送。不能操作模型选择、其他应用或其他联系人。${WECHAT_RULE}` : taskScope.handoffSent ? 'taskText 已由服务提交到当前 WorkBuddy 会话。只观察已有会话的真实回复和进度，允许 wait/done/scroll；禁止新建对话、输入、点击发送或重复提交。' : taskScope.submitAttempted ? '提交动作可能已经发生但Monitor尚未精确确认。本轮只读观察，允许wait/done/scroll，禁止所有输入、按键、点击和重复提交，也不得新建对话。' : model === WORK_MODELS.flash ? (executionModelVerified ? '当前完整 DeepSeek-V4.1-Flash 已验证，直接继续用户目标，不重复选模型。该档规划强度 high。若界面存在明确的推理强度控件才设置 high；若没有则沿用 WorkBuddy 自身设置，GUI 会话强度未经核验，不得将规划请求的 high 当作 GUI 会话的证据。严禁 Pro 或其他模型。' : 'WorkBuddy GUI 必须选择 DeepSeek-V4.1-Flash；该档规划强度 high。若界面存在明确的推理强度控件才设置 high；若没有则沿用 WorkBuddy 自身设置，GUI 会话强度未经核验，不得将规划请求的 high 当作 GUI 会话的证据。菜单关闭并高置信显示唯一完整 DeepSeek-V4.1-Flash 后，executionModelVerified 才为 true。严禁 Pro 或其他模型。') : (executionModelVerified ? '当前免费 Hy3 已验证，直接继续用户目标，不重复选模型。' : '免费 Hy3 尚未验证；先打开模型选择菜单，按 visibleText 的 width/height 点击 Hy3 文字框中心，只依据高置信 Hy3 与同行 0.00x 选择。菜单关闭且唯一当前 Hy3 可见后再输入；不得选择其他收费模型。'),
-        taskGoalSemantics: taskScope.handoffSent
+        taskGoalSemantics: taskScope.target === 'wechat' && taskScope.submitAttempted
+          ? '微信提交可能已发生。只观察当前指定会话的截图变化；不得重新输入、按键、点击或再次发送。'
+          : taskScope.target === 'wechat' && taskScope.operation === 'draft'
+          ? `只将用户明确指定的原 message 写入联系人“${taskScope.recipient}”的草稿，不发送；顶部会话标题必须显示联系人目录 canonical 名称。`
+          : taskScope.target === 'wechat' && ['read', 'open'].includes(taskScope.operation)
+          ? `只导航并查看联系人“${taskScope.recipient}”；顶部会话标题必须显示联系人目录 canonical 名称，不输入任务、不发送。`
+          : taskScope.target === 'wechat' && taskScope.operation === 'send'
+          ? `仅向联系人“${taskScope.recipient}”发送已保存的精确 message；顶部标题显示 canonical 名称后才可操作，提交一次后只观察精确已发送气泡。`
+          : taskScope.handoffSent
           ? 'taskText 已提交。只观察当前 WorkBuddy 会话的真实回复与进度，不要新建对话、不输入、不再发送；操作仅允许 wait、done、scroll。'
           : taskScope.submitAttempted
           ? 'WorkBuddy提交动作可能已经发生，但Monitor尚未精确匹配本任务标记。只读观察，不要按键、点击、输入、重新提交或新建会话；操作仅允许 wait、done、scroll。'
@@ -355,7 +480,7 @@ class DesktopService {
     }
     throw new Error('模型连续两次未返回有效桌面动作 JSON，任务已暂停');
   }
-  async start({ goal, target = 'workbuddy', workModel = WORK_MODELS.flash, origin = 'panel', inputSource = origin === 'dialogue' ? 'text' : 'panel', criteria = '', recipient, sources = [], privacyEpoch } = {}) {
+  async start({ goal, target = 'workbuddy', workModel = WORK_MODELS.flash, origin = 'panel', inputSource = origin === 'dialogue' ? 'text' : 'panel', criteria = '', recipient, recipientAliases = [], operation = 'general', message, sources = [], privacyEpoch } = {}) {
     if (this.running || this.starting) return { ok: false, error: '已有桌面任务正在执行' };
     const scopeError = checkDesktopScope(target, goal);
     if (scopeError) return { ok: false, error: scopeError };
@@ -363,7 +488,24 @@ class DesktopService {
     if (!Array.isArray(sources) || sources.length > 200 || sources.some(id => typeof id !== 'string' || !id || id.length > 256) ||
         (privacyEpoch !== undefined && (!Number.isSafeInteger(privacyEpoch) || privacyEpoch < 0))) return { ok: false, error: '任务来源或隐私版本不合法' };
     const resolvedRecipient = recipient === undefined && (origin === 'panel' || target !== 'wechat') ? '文件传输助手' : recipient;
-    if (typeof goal !== 'string' || !goal.trim() || [...goal].length > 3000 || !['workbuddy', 'wechat', 'current'].includes(target) || !Object.values(WORK_MODELS).includes(workModel) || !['dialogue', 'panel'].includes(origin) || typeof criteria !== 'string' || [...criteria].length > 2000 || typeof resolvedRecipient !== 'string' || resolvedRecipient.trim().length > 100 || (target === 'wechat' && origin === 'dialogue' && !resolvedRecipient.trim())) return { ok: false, error: '请填写有效任务、来源、验收标准和微信会话，并选择目标和执行模型' };
+    if (typeof goal !== 'string' || !goal.trim() || [...goal].length > 3000 || !['workbuddy', 'wechat', 'current'].includes(target) || !Object.values(WORK_MODELS).includes(workModel) || !['dialogue', 'panel', 'watch'].includes(origin) || typeof criteria !== 'string' || [...criteria].length > 2000 || typeof resolvedRecipient !== 'string' || resolvedRecipient.trim().length > 100 || (target === 'wechat' && !resolvedRecipient.trim()) || !WECHAT_OPERATIONS.has(operation) || !Array.isArray(recipientAliases) || recipientAliases.length > 20 || recipientAliases.some(alias => typeof alias !== 'string' || !alias.trim() || alias.length > 100)) return { ok: false, error: '请填写有效任务、来源、验收标准和微信会话，并选择目标和执行模型' };
+    if (target === 'wechat' && ['send', 'draft'].includes(operation) && (typeof message !== 'string' || !message.trim() || [...message].length > 3500 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(message) || /\r(?!\n)/u.test(message))) {
+      return { ok: false, error: `${operation === 'send' ? '发送' : '草稿'}任务必须提供有效的原文 message（最多 3500 字符），未执行桌面操作` };
+    }
+    let contact = null;
+    let contactRequestToken = null;
+    if (target === 'wechat') {
+      contactRequestToken = ++this.startRequestToken;
+      this.starting = true;
+      try { contact = await this.contactDirectory.resolve(resolvedRecipient.trim()); }
+      catch (error) { if (contactRequestToken === this.startRequestToken) this.starting = false; return { ok: false, error: `无法确认微信联系人：${error.message}` }; }
+      if (!this.starting || contactRequestToken !== this.startRequestToken) return { ok: false, error: '任务已停止' };
+      if (contact.ambiguous) { this.starting = false; return { ok: false, error: '联系人别名有歧义，请明确联系人' }; }
+      if (recipientAliases.length) {
+        const requested = new Set(recipientNames(contact.recipient, contact.aliases));
+        if (recipientAliases.some(alias => !requested.has(normalizedName(alias).replace(/\s/gu, '')))) { this.starting = false; return { ok: false, error: 'recipientAliases 必须来自已确认的联系人目录' }; }
+      }
+    }
     if (target === 'workbuddy' && (!workBuddyTextWithinLimit(goal) || !workBuddyTextWithinLimit(criteria || 'criteria'))) {
       return { ok: false, error: 'WorkBuddy 任务含不支持的控制字符或文本长度无效；未执行桌面操作' };
     }
@@ -374,7 +516,9 @@ class DesktopService {
     const id = crypto.randomUUID();
     const associationMarker = `[workbunny:${id}]`;
     const attemptStartedAt = Date.now();
-    const task = { id, bunnyTaskId: id, goal, taskText: goal, target, workModel, thinking, origin, inputSource, criteria: criteria.trim(), recipient: resolvedRecipient.trim(), associationMarker,
+    const task = { id, bunnyTaskId: id, goal, taskText: goal, target, workModel, thinking, origin, inputSource, criteria: criteria.trim(), recipient: contact?.recipient || resolvedRecipient.trim(),
+      recipientAliases: contact?.aliases || [resolvedRecipient.trim()], contactConfirmed: contact?.confirmed === true,
+      operation, ...(typeof message === 'string' ? { message } : {}), associationMarker,
       sources: [...new Set(sources)], ...(privacyEpoch === undefined ? {} : { privacyEpoch }),
       outboundText: '', submittedAt: undefined, followUpRound: 0, status: 'starting', note: '检查权限与执行模型', startedAt: attemptStartedAt, attemptStartedAt, updatedAt: attemptStartedAt, steps: [] };
     if (target === 'workbuddy') {
@@ -392,9 +536,11 @@ class DesktopService {
       const agentGoal = target === 'workbuddy'
         ? `在 WorkBuddy 新建对话，选择 ${workModel === WORK_MODELS.hy3 ? 'Hy3' : 'DeepSeek 4.1 Flash（可见思考控件时选择 high）'}，将 taskText 原文输入并发送，然后观察 WorkBuddy 的真实回复与进度；不得代替 WorkBuddy 执行或回答任务。`
         : this.task.goal;
-      if (target !== 'workbuddy') this.task.outboundText = this.task.goal;
+      if (target === 'wechat') this.task.outboundText = this.task.message || '';
+      else if (target !== 'workbuddy') this.task.outboundText = this.task.goal;
       const taskScope = Object.freeze({ id: this.task.id, goal: this.task.goal, taskText: this.task.taskText, agentGoal, target: this.task.target, workModel, thinking,
-        origin: this.task.origin, criteria: this.task.criteria, recipient: this.task.recipient, associationMarker: this.task.associationMarker, outboundText: this.task.outboundText,
+        origin: this.task.origin, criteria: this.task.criteria, recipient: this.task.recipient, recipientAliases: this.task.recipientAliases,
+        operation: this.task.operation, message: this.task.message, associationMarker: this.task.associationMarker, outboundText: this.task.outboundText,
         startedAt: this.task.startedAt, attemptStartedAt: this.task.attemptStartedAt });
       this.run(gen, taskScope).catch(async e => { if (gen === this.generation) { this.running = false; this.update({ status: 'paused', note: e.message, updatedAt: Date.now() }); await this.journal().catch(() => {}); } });
       return { ok: true, id: taskScope.id };
@@ -413,6 +559,41 @@ class DesktopService {
     if (!task || !['paused', 'stopped', 'review', 'failed'].includes(task.status)) return { ok: false, error: '当前没有可恢复的桌面任务' };
     const scopeError = checkDesktopScope(task.target, task.goal);
     if (scopeError) return { ok: false, error: scopeError };
+    if (task.target === 'wechat') {
+      if (!WECHAT_OPERATIONS.has(task.operation) || typeof task.recipient !== 'string' || !task.recipient.trim() ||
+          (['send', 'draft'].includes(task.operation) && (typeof task.message !== 'string' || !task.message))) return { ok: false, error: '原微信任务范围不完整，不能恢复' };
+      if (task.origin === 'dialogue' && !Number.isSafeInteger(task.privacyEpoch)) return { ok: false, error: '无法确认原任务的隐私版本，不能继续旧内容' };
+      if (task.privacyEpoch !== undefined && privacyEpoch !== task.privacyEpoch) return { ok: false, error: '原任务的隐私版本已变化，不能继续旧内容' };
+      if (sources !== undefined && (!Array.isArray(sources) || sources.length > 200 || sources.some(id => typeof id !== 'string' || !id || id.length > 256))) return { ok: false, error: '恢复任务的资料引用无效' };
+      if ((task.sources || []).some(id => !Array.isArray(sources) || !sources.includes(id))) return { ok: false, error: '原任务引用的资料已变化，不能继续旧内容' };
+      const typed = (task.steps || []).some(step => step.action === 'type' && step.purpose !== 'navigation' && ['intent', 'input-sent'].includes(step.state));
+      if (typed && !task.draftInserted) { task.draftInserted = true; task.draftInsertedAt ||= (task.steps || []).find(step => step.action === 'type' && step.purpose !== 'navigation')?.at || Date.now(); }
+      const now = Date.now();
+      const gen = ++this.generation;
+      const resumeRequireMatchingDraft = task.draftInserted === true && !task.submitAttemptedAt;
+      this.running = true; this.starting = true; this.controller = new AbortController();
+      task.attemptStartedAt = now; task.resumeCount = (Number.isSafeInteger(task.resumeCount) ? task.resumeCount : 0) + 1;
+      this.update({ status: 'starting', note: task.submitAttemptedAt ? '恢复为只读核对；不会再次发送' : resumeRequireMatchingDraft ? '恢复原微信草稿；需先视觉确认与原 message 完全一致' : '恢复原微信任务', updatedAt: now });
+      try {
+        await this.journal(); this.assertLive(gen);
+        const permissions = await this.native.request('permissions', {}, 8000); this.assertLive(gen); this.permission = permissions;
+        if (permissions.sessionLocked) throw new Error('电脑已锁屏，请解锁后重试');
+        if (!permissions.accessibilityTrusted || !permissions.screenCaptureAllowed || !permissions.postEventAllowed) throw new Error('请先允许屏幕录制和辅助功能权限');
+        this.starting = false;
+        const taskScope = Object.freeze({ id: task.id, goal: task.goal, taskText: task.goal, target: 'wechat', operation: task.operation,
+          message: task.message, recipient: task.recipient, recipientAliases: task.recipientAliases || [task.recipient], contactConfirmed: task.contactConfirmed === true,
+          origin: task.origin, workModel: task.workModel, thinking: task.thinking, criteria: task.criteria, outboundText: task.message || '',
+          startedAt: task.startedAt, attemptStartedAt: now, resumeMode: true, resumeRequireMatchingDraft,
+          draftInserted: !!task.draftInserted, submitAttemptedAt: task.submitAttemptedAt });
+        this.run(gen, taskScope).catch(async error => {
+          if (gen === this.generation) { this.running = false; this.update({ status: 'paused', note: error.message, updatedAt: Date.now() }); await this.journal().catch(() => {}); }
+        });
+        return { ok: true, id: task.id, generation: gen };
+      } catch (error) {
+        if (gen === this.generation) { this.starting = false; this.running = false; this.update({ status: this.controller?.signal.aborted ? 'stopped' : 'paused', note: error.message, updatedAt: Date.now() }); await this.journal().catch(() => {}); }
+        return { ok: false, error: error.message };
+      }
+    }
     if (task.target !== 'workbuddy' || !Object.values(WORK_MODELS).includes(task.workModel)) return { ok: false, error: '当前任务不支持安全恢复' };
     if (task.origin === 'dialogue' && !Number.isSafeInteger(task.privacyEpoch)) return { ok: false, error: '无法确认原任务的隐私版本，不能继续旧内容' };
     if (task.privacyEpoch !== undefined && privacyEpoch !== task.privacyEpoch) return { ok: false, error: '原任务的隐私版本已变化，不能继续旧内容' };
@@ -630,18 +811,29 @@ class DesktopService {
     return true;
   }
   async ensureWorkBuddyMonitor(gen, taskScope) {
+    const held = this.guiLeaseHeld;
+    if (held) this.releaseGuiLease(true);
     if (!this.monitorPromise || this.monitorPromiseGeneration !== gen) {
       this.monitorPromiseGeneration = gen;
       this.monitorPromise = this.monitorWorkBuddy(gen, taskScope).finally(() => {
         if (this.monitorPromiseGeneration === gen) { this.monitorPromise = null; this.monitorPromiseGeneration = null; }
       });
     }
-    return this.monitorPromise;
+    const result = await this.monitorPromise;
+    if (result === false && held && this.running) { await this.acquireGuiLease(this.controller?.signal); this.assertLive(gen); }
+    return result;
   }
   async run(gen, taskScope = Object.freeze({ id: this.task.id, goal: this.task.goal, taskText: this.task.taskText || this.task.goal,
     agentGoal: this.task.target === 'workbuddy' ? `在 WorkBuddy 新建对话，选择 ${this.task.workModel === WORK_MODELS.hy3 ? 'Hy3' : 'DeepSeek 4.1 Flash（可见思考控件时选择 high）'}，将 taskText 原文输入并发送，然后观察 WorkBuddy 的真实回复与进度；不得代替 WorkBuddy 执行或回答任务。` : this.task.goal,
     target: this.task.target, workModel: this.task.workModel, thinking: this.task.thinking, origin: this.task.origin, criteria: this.task.criteria, recipient: this.task.recipient,
     associationMarker: this.task.associationMarker, outboundText: this.task.outboundText, startedAt: this.task.startedAt })) {
+    try {
+      await this.acquireGuiLease(this.controller?.signal);
+      this.assertLive(gen);
+      return await this.runOwned(gen, taskScope);
+    } finally { this.releaseGuiLease(); }
+  }
+  async runOwned(gen, taskScope) {
     await this.journal(); this.assertLive(gen);
     if (taskScope.resumeMode && taskScope.target === 'workbuddy' && taskScope.handoffSent && Number.isFinite(taskScope.submittedAt)) {
       const terminal = await this.ensureWorkBuddyMonitor(gen, taskScope);
@@ -662,7 +854,13 @@ class DesktopService {
     let draftInserted = !!this.task.draftInserted || !!taskScope.draftInserted;
     let handoffSent = !!this.task.handoffSent;
     const attemptStartedAt = taskScope.attemptStartedAt || taskScope.startedAt;
-    for (let i = 0; (i < 18 || (this.task.submitAttemptedAt && i < 43)) && Date.now() - attemptStartedAt < 8 * 60000; i++) {
+    let lastNavigationSignature = '';
+    let sameNavigationCount = 0;
+    let postNavigationOCR = '';
+    let samePostNavigationFrames = 0;
+    const maxSteps = taskScope.target === 'wechat' ? WECHAT_STEP_LIMIT : 18;
+    const maxDuration = taskScope.target === 'wechat' ? WECHAT_TIME_LIMIT_MS : 8 * 60000;
+    for (let i = 0; (i < maxSteps || (taskScope.target === 'workbuddy' && this.task.submitAttemptedAt && i < 43)) && Date.now() - attemptStartedAt < maxDuration; i++) {
       this.assertLive(gen);
       if (taskScope.target === 'workbuddy' && draftInserted && !handoffSent && await this.tryBindVisualWorkBuddyMonitor(gen)) {
         handoffSent = true;
@@ -671,7 +869,20 @@ class DesktopService {
         continue;
       }
       const shot = await this.capture(scope, gen);
-      if (taskScope.resumeRequireMatchingDraft && !handoffSent) {
+      if (taskScope.target === 'wechat' && postNavigationOCR) {
+        const frameKey = JSON.stringify(shot.ocr.map(row => [row.text, row.x, row.y, row.width, row.height]));
+        samePostNavigationFrames = frameKey === postNavigationOCR ? samePostNavigationFrames + 1 : 0;
+        postNavigationOCR = frameKey;
+        if (samePostNavigationFrames >= 3) throw new Error('微信联系人导航连续三轮未改变画面，已停止；请确认联系人名称或手动打开目标会话后恢复');
+      }
+      if (taskScope.target === 'wechat' && taskScope.resumeRequireMatchingDraft) {
+        if (!draftInserted || !wechatHeaderConfirmed(shot, taskScope.recipient, taskScope.recipientAliases) ||
+            !wechatMessageVisible(shot, taskScope.message, 'composer')) {
+          throw new Error('恢复微信草稿时，当前目标会话和编辑区都未能精确匹配原 message；没有输入或发送');
+        }
+        this.task.resumeRequireMatchingDraft = false;
+      }
+      if (taskScope.target === 'workbuddy' && taskScope.resumeRequireMatchingDraft && !handoffSent) {
         handoffSent = await this.tryWorkBuddyHandoff(taskScope, scope, shot, gen, { requireMatchingDraft: true });
         if (!handoffSent) throw new Error('无法通过 WorkBuddy 原生同文校验恢复草稿');
         draftInserted = true;
@@ -710,7 +921,11 @@ class DesktopService {
         agentGoal: '提交动作可能已经发生，只能只读观察；禁止重发或新建会话。', draftInserted: true, submitAttempted: true,
         draftInsertedAt: this.task.draftInsertedAt, submitAttemptedAt: this.task.submitAttemptedAt }) : Object.freeze({ ...taskScope,
         draftInserted, draftInsertedAt: this.task.draftInsertedAt });
-      const action = automaticHy3Click || await this.nextAction(actionScope, shot, this.controller.signal); this.assertLive(gen);
+      const action = automaticHy3Click || await withTimeout(
+        this.nextAction(actionScope, shot, this.controller.signal),
+        taskScope.target === 'wechat' ? Math.max(1, Math.min(30_000, maxDuration - (Date.now() - attemptStartedAt))) : 90_000,
+        taskScope.target === 'wechat' ? '微信规划响应超时，已停止本轮以保留当前联系人和草稿状态' : '桌面规划响应超时');
+      this.assertLive(gen);
       if (taskScope.target === 'workbuddy' && draftInserted && !handoffSent && await this.tryBindVisualWorkBuddyMonitor(gen)) {
         handoffSent = true;
         const terminal = await this.ensureWorkBuddyMonitor(gen, taskScope);
@@ -718,6 +933,28 @@ class DesktopService {
         continue;
       }
       if (handoffSent && !['wait', 'done', 'scroll'].includes(action.action)) throw new Error('WorkBuddy 原文已提交，本轮只允许观察，禁止再次输入或发送');
+      if (taskScope.target === 'wechat') {
+        const wechatScope = { ...taskScope, draftInserted, submitAttemptedAt: this.task.submitAttemptedAt,
+          screenshot: shot, screenshotOCR: shot.ocr };
+        validateWechatAction(action, wechatScope);
+        if (action.action === 'type' && action.purpose !== 'navigation' && ['send', 'draft'].includes(taskScope.operation)) action.text = taskScope.message;
+        if (action.action === 'type' && action.purpose !== 'navigation' && taskScope.operation === 'read') throw new Error('只读微信任务禁止输入');
+        if (action.action === 'type' && action.purpose !== 'navigation' && taskScope.operation === 'open') throw new Error('打开联系人任务禁止输入');
+        if ((action.action === 'type' && action.purpose !== 'navigation') || isWechatSubmit(action)) {
+          if (!wechatHeaderConfirmed(shot, taskScope.recipient, taskScope.recipientAliases)) throw new Error('截图未精确确认微信顶部联系人标题；已停止');
+        }
+        if (action.action === 'done' && action.completed) {
+          if (!wechatHeaderConfirmed(shot, taskScope.recipient, taskScope.recipientAliases)) throw new Error('完成验收时顶部联系人标题未精确匹配');
+          if (taskScope.operation === 'send' && !wechatMessageVisible(shot, taskScope.message, 'conversation')) throw new Error('尚未在目标会话中看到精确已发送消息；任务保持未确认');
+          if (taskScope.operation === 'draft' && !wechatMessageVisible(shot, taskScope.message, 'composer')) throw new Error('目标会话编辑区未显示精确草稿，不能标记完成');
+        }
+        if (action.action === 'type' && action.purpose === 'navigation') {
+          const signature = `${action.purpose}:${normalizedName(action.text)}`;
+          sameNavigationCount = signature === lastNavigationSignature ? sameNavigationCount + 1 : 1;
+          lastNavigationSignature = signature;
+          if (sameNavigationCount >= 3) throw new Error('同一微信联系人导航重复三次仍未成功，已停止以避免误操作');
+        }
+      }
       if (taskScope.target === 'workbuddy' && draftInserted && !this.task.submitAttemptedAt &&
           !['wait', 'scroll'].includes(action.action) &&
           !(action.purpose === 'submit' && (action.action === 'click' || (action.action === 'key' && ['enter', 'return'].includes(action.key)))) ) {
@@ -730,21 +967,23 @@ class DesktopService {
         if (draftInserted) throw new Error('本轮 taskText 已输入过一次，代理已暂停以防重复发送');
         action.text = taskScope.outboundText || makeWorkBuddyOutbound(taskScope);
       }
-      const dispatch = dispatchGuard(action, taskScope.target, shot, this.freeChoice, taskScope.workModel, taskScope.recipient);
+      const dispatch = dispatchGuard(action, taskScope.target, shot, this.freeChoice, taskScope.workModel, taskScope.recipient, taskScope.recipientAliases);
       if (action.action === 'done') {
         await this.assertScreenshotCurrent(scope, shot, gen);
         this.running = false;
-        if (action.completed) this.update({ status: 'review', note: action.reason || '请根据截图验收结果', evidence: action.evidence, updatedAt: Date.now() });
+        if (action.completed) this.update({ status: 'review', note: action.reason || '请根据截图验收结果', evidence: action.evidence,
+          ...(taskScope.target === 'wechat' && taskScope.operation === 'send' ? { sendState: 'confirmed' } : {}), updatedAt: Date.now() });
         else this.update({ status: 'paused', note: action.reason || '截图未能确认目标完成', updatedAt: Date.now() });
         await this.journal(); return;
       }
       // Persist intent first; restarting never replays a potentially delivered click or send.
       const entry = { step: this.task.steps.length + 1, action: action.action, ...(action.purpose ? { purpose: action.purpose } : {}), reason: action.reason, state: 'intent', at: Date.now() };
-      const submitCandidate = taskScope.target === 'workbuddy' && draftInserted && !this.task.submitAttemptedAt &&
+      const submitCandidate = ['workbuddy', 'wechat'].includes(taskScope.target) && draftInserted && !this.task.submitAttemptedAt &&
         action.purpose === 'submit' && (action.action === 'click' || (action.action === 'key' && ['enter', 'return'].includes(action.key)));
       if (submitCandidate) {
         this.task.submitAttemptedAt = Date.now();
-        this.update({ status: 'awaiting', note: 'WorkBuddy 提交动作可能已发生，等待精确 Monitor 确认；不会重发' });
+        if (taskScope.target === 'wechat') this.task.sendState = 'unknown';
+        this.update({ status: 'awaiting', note: taskScope.target === 'wechat' ? '微信提交动作可能已发生；仅视觉核对，不会重发' : 'WorkBuddy 提交动作可能已发生，等待精确 Monitor 确认；不会重发' });
       }
         if (action.action === 'type' && action.focus) entry.focus = { ...action.focus };
         this.task.steps.push(entry); this.update({ note: action.reason || action.action }); await this.journal(); this.assertLive(gen);
@@ -753,12 +992,22 @@ class DesktopService {
         if (taskScope.target === 'workbuddy' && action.action === 'type' && action.purpose === 'task') {
           draftInserted = true; this.task.draftInserted = true; this.task.draftInsertedAt = Date.now();
         }
+        if (taskScope.target === 'wechat' && action.action === 'type' && action.purpose !== 'navigation') {
+          draftInserted = true; this.task.draftInserted = true; this.task.draftInsertedAt = Date.now();
+          if (taskScope.operation === 'send') this.task.sendState = 'draftInserted';
+          await this.journal();
+        }
         if (taskScope.target === 'workbuddy' && taskScope.workModel === WORK_MODELS.hy3) {
           this.freeChoicePending = dispatch.freeChoiceClick;
           if (dispatch.freeChoiceClick) this.freeChoice = false;
         }
       }
       this.assertLive(gen); entry.state = 'input-sent'; await this.journal();
+      if (taskScope.target === 'wechat' && action.action === 'type' && action.purpose === 'navigation') {
+        postNavigationOCR = JSON.stringify(shot.ocr.map(row => [row.text, row.x, row.y, row.width, row.height]));
+        samePostNavigationFrames = 0;
+      }
+      if (taskScope.target === 'wechat' && submitCandidate) this.update({ sendState: 'unknown', note: '微信已尝试提交；等待截图确认发送结果，不会重发', updatedAt: Date.now() });
       if (submitCandidate && await this.tryBindVisualWorkBuddyMonitor(gen)) {
         handoffSent = true;
         const terminal = await this.ensureWorkBuddyMonitor(gen, taskScope);
@@ -767,7 +1016,7 @@ class DesktopService {
       await delay(action.action === 'wait' ? 1800 : 450);
     }
     if (this.task.submitAttemptedAt && !this.task.handoffSent) throw new Error('WorkBuddy 提交动作可能已发生，但 Monitor 未能精确确认本任务；已停止输入和重发，请查看原会话。');
-    throw new Error('已达到本轮操作上限，保留当前结果等待查看');
+    throw new Error(taskScope.target === 'wechat' ? '微信任务达到 12 步或 120 秒上限，保留当前状态；请检查目标会话后再显式恢复' : '已达到本轮操作上限，保留当前结果等待查看');
   }
   async accept({ automatic = false, report = '', evidence = '' } = {}) {
     if (automatic ? !['review', 'verifying'].includes(this.task?.status) : this.task?.status !== 'review') return { ok: false, error: '当前没有待验收任务' };
@@ -794,6 +1043,7 @@ class DesktopService {
     if (task.followUpPending && task.followUpPending.state !== 'observed') return { ok: false, error: '上一次追问可能已发送，正在等待精确的新消息，不能重复发送' };
     if (!['monitoring', 'awaiting', 'review', 'verifying', 'paused'].includes(task.status)) return { ok: false, error: '当前任务状态不允许追问' };
     this.followUpInProgress = true;
+    this.followUpController = new AbortController();
     const priorRunning = this.running;
     const gen = this.generation;
     const assertFollowUpLive = () => { if (gen !== this.generation || this.task !== task) throw new Error('追问已停止'); };
@@ -801,6 +1051,8 @@ class DesktopService {
       const current = await this.observeWorkBuddy(Object.freeze({ ...task }));
       assertFollowUpLive();
       if (!validMonitorRecord(current, task) || current.sessionId !== task.sessionId || current.status === 'abandoned') throw new Error('Monitor 未确认原 WorkBuddy 会话仍可继续');
+      await this.acquireGuiLease(this.followUpController.signal);
+      assertFollowUpLive();
       let front = await this.native.request('frontmost', {}, 5000);
       assertFollowUpLive();
       if (front.application?.bundleId !== TARGETS.workbuddy) {
@@ -879,7 +1131,7 @@ class DesktopService {
     } catch (error) {
       if (this.task === task && gen === this.generation) { this.update({ status: 'paused', note: error.message, updatedAt: Date.now() }); await this.journal().catch(() => {}); }
       return { ok: false, error: error.message };
-    } finally { this.followUpInProgress = false; }
+    } finally { this.releaseGuiLease(); this.followUpController = null; this.followUpInProgress = false; }
   }
   async insert(text) {
     if (this.running || typeof text !== 'string' || !text.trim() || text.length > 3500) return { ok: false, error: '正在执行任务，或文字为空/过长' };
@@ -887,8 +1139,10 @@ class DesktopService {
     const gen = ++this.generation; this.running = true;
     this.task = { id: crypto.randomUUID(), status: 'running', target: 'current', goal: '向当前输入焦点插入文字', steps: [], startedAt: Date.now(), note: '3 秒后输入，请切换到目标输入框' };
     this.emit(this.publicStatus());
+    let lease = false;
     try {
       await delay(3000); this.assertLive(gen);
+      await this.acquireGuiLease(this.controller?.signal); lease = true; this.assertLive(gen);
       const f = await this.native.request('frontmost', {}, 5000); this.assertLive(gen);
       if (['cn.haminn.workbunny', 'com.openai.codex'].includes(f.application.bundleId)) throw new Error('请先切换到目标输入框');
       const w = f.windows.find(w => w.pid === f.application.pid && w.layer === 0);
@@ -899,8 +1153,10 @@ class DesktopService {
       this.assertLive(gen); entry.state = 'input-sent'; await this.journal();
       this.running = false; this.update({ status: 'review', note: '文字已发送至输入焦点，请检查', updatedAt: Date.now() }); await this.journal(); return { ok: true };
     } catch (e) { if (gen === this.generation) { this.running = false; this.update({ status: 'paused', note: e.message }); } return { ok: false, error: e.message }; }
+    finally { if (lease) this.releaseGuiLease(); }
   }
-  async close() { this.generation++; this.running = false; this.starting = false; this.freeChoice = false; this.freeChoicePending = false; this.controller?.abort(); await this.native.close(); }
+  async close() { this.generation++; this.startRequestToken++; this.running = false; this.starting = false; this.freeChoice = false; this.freeChoicePending = false; this.controller?.abort(); this.followUpController?.abort(); this.releaseGuiLease(true); await this.native.close(); }
 }
 module.exports = { DesktopService, validateAction, WECHAT_RULE, sameRect, dispatchGuard, analyzeWorkBuddyOCR, selectedFlash, prepareOCR, promptOCR, preflightWorkModel,
-  WORKBUDDY_TEXT_UTF16_LIMIT, workBuddyTextWithinLimit, validateWorkBuddyOutbound, makeWorkBuddyOutbound };
+  WORKBUDDY_TEXT_UTF16_LIMIT, workBuddyTextWithinLimit, validateWorkBuddyOutbound, makeWorkBuddyOutbound,
+  validateWechatAction, wechatHeaderConfirmed, wechatMessageVisible, WECHAT_OPERATIONS };

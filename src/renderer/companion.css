@@ -96,6 +96,25 @@ h2 { margin: 0; font-size: 13px; font-weight: 650; }
 .backup-card > .inline-note { display: block; margin-top: 8px; }
 .desktop-main { padding-top: 14px; }
 .task-state-card { border-color: rgba(48, 111, 71, .22); }
+.watch-card { padding-block: 12px; }
+.watch-card .section-heading { align-items: center; margin-bottom: 7px; }
+.watch-card .section-heading p { margin: 3px 0 0; color: var(--muted); font-size: 10px; }
+.watch-list { display: grid; gap: 7px; max-height: 250px; overflow: auto; align-content: start; }
+.watch-empty { color: var(--soft); font-size: 11px; line-height: 1.5; }
+.watch-item { min-width: 0; padding: 8px 9px; border-radius: 9px; background: #f1eee8; }
+.watch-item-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.watch-item-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+.watch-item-status { flex: 0 0 auto; color: var(--soft); font-size: 10px; }
+.watch-item-meta, .watch-item-note, .watch-item-time { margin-top: 3px; color: var(--soft); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+.watch-item-note { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.watch-item-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.watch-item-actions .button { min-height: 28px; padding: 5px 8px; font-size: 10px; }
+.watch-item .button:hover:not(:disabled) { background: #d8d4cc; color: #16191e; }
+.watch-policy > summary { cursor: pointer; color: var(--soft); font-size: 10px; }
+.watch-policy > summary:hover { color: #16191e; }
+.watch-policy[open] > summary { margin-bottom: 4px; }
+.watch-inactive > summary { cursor: pointer; color: var(--soft); font-size: 10px; }
+.watch-inactive[open] > summary { margin-bottom: 6px; }
 .task-state-card .section-heading { margin-bottom: 6px; }
 .task-state-card #taskStateNote { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
 .task-pause-note { margin: 0 0 7px; }

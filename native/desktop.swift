@@ -47,8 +47,10 @@ func windowEntries() -> [[String: Any]] {
               let pid = item[kCGWindowOwnerPID as String] as? Int,
               let bounds = item[kCGWindowBounds as String], let rect = rectFrom(bounds),
               let layer = item[kCGWindowLayer as String] as? Int else { return nil }
-        // Window titles are intentionally omitted; callers only need IDs and geometry.
-        return ["windowId": id, "pid": pid, "layer": layer, "rect": rectObject(rect)]
+        // Window titles are intentionally omitted. Bundle identity is process
+        // metadata only; it lets background observers associate a window safely.
+        let bundleId = NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier ?? ""
+        return ["windowId": id, "pid": pid, "bundleId": bundleId, "layer": layer, "rect": rectObject(rect)]
     }
 }
 func appIdentity(_ app: NSRunningApplication?) -> [String: Any] {
@@ -779,6 +781,267 @@ func capture(_ request: [String: Any]) throws -> [String: Any] {
     } else { throw DesktopError(message: "output 只支持 base64 或 tempFile") }
     return result
 }
+
+struct VisualROI: Equatable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+}
+
+struct VisualRegionFrame {
+    let width: Int
+    let height: Int
+    let rgba: [UInt8]
+}
+
+struct VisualFrame {
+    let sampleId: String
+    let windowId: UInt32
+    let pid: Int
+    let bundleId: String
+    let desktopRect: CGRect
+    let width: Int
+    let height: Int
+    let regions: [VisualROI]
+    let pixels: [VisualRegionFrame]
+}
+
+struct VisualSampleState {
+    var baseline: VisualFrame?
+    var latest: VisualFrame?
+}
+
+func visualRectsMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+    guard !lhs.isNull, !rhs.isNull else { return false }
+    return [lhs.minX, lhs.minY, lhs.width, lhs.height].enumerated().allSatisfy { index, value in
+        let other = [rhs.minX, rhs.minY, rhs.width, rhs.height][index]
+        return value.isFinite && other.isFinite && abs(value - other) < 1
+    }
+}
+
+var visualSampleStates: [String: VisualSampleState] = [:]
+var visualSampleLRU: [String] = []
+let visualSampleCapacity = 8
+let visualRegionMaxSide = 320
+let visualImageMaxPixels = 16_000_000
+
+func visualSampleId(_ value: Any?) throws -> String {
+    guard let value = value as? String, !value.isEmpty, value.utf8.count <= 100 else {
+        throw DesktopError(message: "sampleId 必须是 1 至 100 字符")
+    }
+    return value
+}
+
+func normalizedVisualRegions(_ value: Any?) throws -> [VisualROI] {
+    guard let rows = value as? [[String: Any]], (1...4).contains(rows.count) else {
+        throw DesktopError(message: "regions 必须包含 1 至 4 个归一化矩形")
+    }
+    return try rows.map { row in
+        guard let x = number(row["x"]), let y = number(row["y"]),
+              let width = number(row["width"]), let height = number(row["height"]),
+              [x, y, width, height].allSatisfy({ $0.isFinite }),
+              x >= 0, y >= 0, width > 0, height > 0, x + width <= 1, y + height <= 1 else {
+            throw DesktopError(message: "ROI 必须位于 0..1 归一化窗口范围内")
+        }
+        return VisualROI(x: x, y: y, width: width, height: height)
+    }
+}
+
+func visualParameters(_ request: [String: Any]) throws -> (String, UInt32, [VisualROI], Bool, Int, Double, [String: Any]?) {
+    let id = try visualSampleId(request["sampleId"])
+    guard let windowId = uint(request["windowId"]), windowId > 0 else {
+        throw DesktopError(message: "visualSample 需要有效 windowId")
+    }
+    let regions = try normalizedVisualRegions(request["regions"])
+    if let reset = request["reset"], !(reset is Bool) { throw DesktopError(message: "reset 必须是布尔值") }
+    if let include = request["includeImage"], !(include is Bool) { throw DesktopError(message: "includeImage 必须是布尔值") }
+    let thresholdValue = number(request["pixelThreshold"]) ?? 18
+    guard thresholdValue.isFinite, thresholdValue.rounded() == thresholdValue, (0...255).contains(thresholdValue) else {
+        throw DesktopError(message: "pixelThreshold 必须是 0 至 255 的整数")
+    }
+    let ratio = number(request["minChangedRatio"]) ?? 0.001
+    guard ratio.isFinite, (0...1).contains(ratio) else { throw DesktopError(message: "minChangedRatio 必须位于 0..1") }
+    let expected = request["expected"] as? [String: Any]
+    if request["expected"] != nil {
+        guard let expected, let bundle = expected["bundleId"] as? String, !bundle.isEmpty,
+              let pid = expected["pid"] as? Int, pid > 0 else {
+            throw DesktopError(message: "expected 必须包含有效 bundleId 和 pid")
+        }
+        _ = bundle; _ = pid
+    }
+    return (id, windowId, regions, request["reset"] as? Bool ?? false, Int(thresholdValue), ratio, expected)
+}
+
+func downsampleVisualRegion(_ image: CGImage, roi: VisualROI) throws -> VisualRegionFrame {
+    let full = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+    let requested = CGRect(x: roi.x * Double(image.width), y: roi.y * Double(image.height),
+                           width: roi.width * Double(image.width), height: roi.height * Double(image.height)).integral
+    let pixelRect = requested.intersection(full)
+    guard !pixelRect.isNull, pixelRect.width >= 1, pixelRect.height >= 1,
+          let crop = image.cropping(to: pixelRect) else { throw DesktopError(message: "ROI 像素范围无效") }
+    let width = max(1, min(visualRegionMaxSide, crop.width))
+    let height = max(1, min(visualRegionMaxSide, crop.height))
+    let bytesPerRow = width * 4
+    var rgba = [UInt8](repeating: 0, count: bytesPerRow * height)
+    let rendered = rgba.withUnsafeMutableBytes { raw -> Bool in
+        guard let base = raw.baseAddress,
+              let context = CGContext(data: base, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+        context.interpolationQuality = .low
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return true
+    }
+    guard rendered else { throw DesktopError(message: "ROI 像素采样失败") }
+    return VisualRegionFrame(width: width, height: height, rgba: rgba)
+}
+
+func compareVisualRegion(_ baseline: VisualRegionFrame, _ current: VisualRegionFrame, threshold: Int) -> (ratio: Double, changedPixels: Int, totalPixels: Int) {
+    guard baseline.width == current.width, baseline.height == current.height,
+          baseline.rgba.count == current.rgba.count, baseline.width > 0, baseline.height > 0 else { return (1, 0, 0) }
+    let total = baseline.width * baseline.height
+    var changed = 0
+    for pixel in 0..<total {
+        let offset = pixel * 4
+        if abs(Int(baseline.rgba[offset]) - Int(current.rgba[offset])) > threshold ||
+           abs(Int(baseline.rgba[offset + 1]) - Int(current.rgba[offset + 1])) > threshold ||
+           abs(Int(baseline.rgba[offset + 2]) - Int(current.rgba[offset + 2])) > threshold {
+            changed += 1
+        }
+    }
+    return (Double(changed) / Double(total), changed, total)
+}
+
+func visualGeometryMatches(_ lhs: VisualFrame, _ rhs: VisualFrame) -> Bool {
+    lhs.windowId == rhs.windowId && lhs.pid == rhs.pid && lhs.bundleId == rhs.bundleId &&
+      lhs.width == rhs.width && lhs.height == rhs.height && visualRectsMatch(lhs.desktopRect, rhs.desktopRect) &&
+      lhs.regions == rhs.regions && lhs.pixels.count == rhs.pixels.count &&
+      zip(lhs.pixels, rhs.pixels).allSatisfy { $0.width == $1.width && $0.height == $1.height }
+}
+
+func touchVisualSample(_ id: String) {
+    visualSampleLRU.removeAll { $0 == id }
+    visualSampleLRU.append(id)
+}
+
+func ensureVisualSampleState(_ id: String) {
+    guard visualSampleStates[id] == nil else { touchVisualSample(id); return }
+    while visualSampleStates.count >= visualSampleCapacity, let oldest = visualSampleLRU.first {
+        visualSampleStates.removeValue(forKey: oldest)
+        visualSampleLRU.removeFirst()
+    }
+    visualSampleStates[id] = VisualSampleState(baseline: nil, latest: nil)
+    touchVisualSample(id)
+}
+
+func resetVisualBaseline(_ id: String) {
+    guard var state = visualSampleStates[id] else { return }
+    state.baseline = nil
+    visualSampleStates[id] = state
+}
+
+func shouldIncludeVisualImage(changed: Bool, reset: Bool, geometryChanged: Bool = false, hasBaseline: Bool = true, includeImage: Bool) -> Bool {
+    includeImage && (changed || reset || geometryChanged || !hasBaseline)
+}
+
+func captureVisualFrame(sampleId: String, windowId: UInt32, regions: [VisualROI], expected: [String: Any]?) throws -> (VisualFrame, CGImage) {
+    guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
+    guard CGPreflightScreenCaptureAccess() else { throw DesktopError(message: "缺少屏幕录制权限") }
+    guard let before = windowEntries().first(where: { ($0["windowId"] as? UInt32) == windowId }),
+          let pid = before["pid"] as? Int, pid > 0, pid <= Int(Int32.max), let rect = rectFrom(before["rect"]),
+          let app = NSRunningApplication(processIdentifier: pid_t(pid)), let bundle = app.bundleIdentifier else {
+        throw DesktopError(message: "目标窗口当前不可见或进程身份不可用")
+    }
+    if let expected {
+        guard (expected["pid"] as? Int) == pid, (expected["bundleId"] as? String) == bundle else {
+            throw DesktopError(message: "目标窗口进程与 expected 身份不匹配")
+        }
+    }
+    let semaphore = DispatchSemaphore(value: 0)
+    var captured: Result<(CGImage, CGRect), Error>!
+    Task { do { captured = .success(try await captureImage(windowId)); semaphore.signal() }
+           catch { captured = .failure(error); semaphore.signal() } }
+    guard waitWithRunLoop(semaphore, seconds: 9) else { throw DesktopError(message: "视觉采样截图超时") }
+    let (image, capturedRect) = try captured.get()
+    guard image.width > 0, image.height > 0, image.width <= visualImageMaxPixels / image.height,
+          visualRectsMatch(rect, capturedRect) else { throw DesktopError(message: "截图尺寸或窗口几何无效") }
+    guard let after = windowEntries().first(where: { ($0["windowId"] as? UInt32) == windowId }),
+          (after["pid"] as? Int) == pid, visualRectsMatch(rect, rectFrom(after["rect"]) ?? .null),
+          NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier == bundle else {
+        throw DesktopError(message: "采样期间目标窗口或进程身份改变")
+    }
+    let samples = try regions.map { try downsampleVisualRegion(image, roi: $0) }
+    return (VisualFrame(sampleId: sampleId, windowId: windowId, pid: pid, bundleId: bundle,
+                        desktopRect: rect, width: image.width, height: image.height, regions: regions, pixels: samples), image)
+}
+
+func visualSample(_ request: [String: Any]) throws -> [String: Any] {
+    let (id, windowId, regions, reset, threshold, minRatio, expected) = try visualParameters(request)
+    ensureVisualSampleState(id)
+    if reset { resetVisualBaseline(id) }
+    let (frame, image) = try captureVisualFrame(sampleId: id, windowId: windowId, regions: regions, expected: expected)
+    var state = visualSampleStates[id] ?? VisualSampleState(baseline: nil, latest: nil)
+    let baseline = state.baseline
+    let previousSample = state.latest
+    let geometryChanged = baseline.map { !visualGeometryMatches($0, frame) } ?? false
+    let hasBaseline = baseline != nil && !reset
+    var changed = false
+    var measurements: [[String: Any]] = []
+    for index in frame.pixels.indices {
+        let measure = hasBaseline && !geometryChanged
+          ? compareVisualRegion(baseline!.pixels[index], frame.pixels[index], threshold: threshold)
+          : (ratio: 0.0, changedPixels: 0, totalPixels: frame.pixels[index].width * frame.pixels[index].height)
+        let isChanged = measure.changedPixels > 0 && measure.ratio >= minRatio && hasBaseline && !geometryChanged
+        changed = changed || isChanged
+        let drift: Any = previousSample.map { visualGeometryMatches($0, frame)
+          ? compareVisualRegion($0.pixels[index], frame.pixels[index], threshold: threshold).ratio as Any : NSNull() } ?? NSNull()
+        measurements.append(["ratio": measure.ratio, "changedPixels": measure.changedPixels, "totalPixels": measure.totalPixels,
+          "sinceLastRatio": drift])
+    }
+    state.latest = frame
+    visualSampleStates[id] = state
+    touchVisualSample(id)
+    var result: [String: Any] = ["baseline": !hasBaseline, "changed": changed, "geometryChanged": geometryChanged,
+      "regions": measurements, "desktopRect": rectObject(frame.desktopRect), "width": frame.width, "height": frame.height]
+    if shouldIncludeVisualImage(changed: changed, reset: reset, geometryChanged: geometryChanged,
+                                hasBaseline: hasBaseline, includeImage: request["includeImage"] as? Bool ?? false) {
+        let data = try pngData(image)
+        guard data.count <= 40 * 1024 * 1024 else { throw DesktopError(message: "视觉采样 PNG 超过 40 MiB 输出限制") }
+        result["pngBase64"] = data.base64EncodedString()
+    }
+    return result
+}
+
+func visualCommit(_ request: [String: Any]) throws -> [String: Any] {
+    let id = try visualSampleId(request["sampleId"])
+    guard var state = visualSampleStates[id], let latest = state.latest else {
+        throw DesktopError(message: "没有可提交的视觉采样；请先调用 visualSample")
+    }
+    state.baseline = latest
+    visualSampleStates[id] = state
+    touchVisualSample(id)
+    return ["committed": true, "sampleId": id]
+}
+
+func visualForget(_ request: [String: Any]) throws -> [String: Any] {
+    let id = try visualSampleId(request["sampleId"])
+    let removed = visualSampleStates.removeValue(forKey: id) != nil
+    visualSampleLRU.removeAll { $0 == id }
+    return ["forgotten": removed, "sampleId": id]
+}
+
+func inputIdle() -> [String: Any] {
+    let anyInput = CGEventType(rawValue: UInt32.max)!
+    let hid = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: anyInput)
+    let combined = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
+    func milliseconds(_ seconds: CFTimeInterval) -> Any {
+        guard seconds.isFinite, seconds >= 0 else { return NSNull() }
+        return seconds * 1000
+    }
+    return ["hidIdleMs": milliseconds(hid), "combinedIdleMs": milliseconds(combined)]
+}
+
 func recognizePNG(_ request: [String: Any]) throws -> [String: Any] {
     guard let encoded = request["pngBase64"] as? String, !encoded.isEmpty,
           encoded.utf8.count <= 11_184_812 else { throw DesktopError(message: "pngBase64 必须是最大 8 MiB PNG 的 base64 数据") }
@@ -830,7 +1093,11 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
         return ["accessibilityTrusted": ax, "screenCaptureAllowed": capture, "postEventAllowed": events,
                 "note": "若系統設定要求，請手動允許並重新啟動 workbunny"]
     case "frontmost": return ["application": appIdentity(currentFrontmost()), "windows": windowEntries()]
+    case "inputIdle": return inputIdle()
     case "recognize": return try recognizePNG(request)
+    case "visualSample": return try visualSample(request)
+    case "visualCommit": return try visualCommit(request)
+    case "visualForget": return try visualForget(request)
     case "workbuddyInspect": return try workBuddyInspect(request)
     case "workbuddyFill": return try workBuddyFill(request)
     case "workbuddySend": return try workBuddySend(request)
@@ -921,6 +1188,71 @@ func runNativeSelfTest() -> Never {
         }
         guard capturePixelSize(rect: CGRect(x: 0, y: 0, width: 560, height: 420), pointPixelScale: .nan) == nil else {
             throw DesktopError(message: "无效 pointPixelScale 被接受")
+        }
+        let visualRequest: [String: Any] = ["sampleId": "selftest", "windowId": 12,
+          "regions": [["x": 0.1, "y": 0.2, "width": 0.4, "height": 0.3]]]
+        let visualArgs = try visualParameters(visualRequest)
+        guard visualArgs.0 == "selftest", visualArgs.1 == 12, visualArgs.2.count == 1,
+              visualArgs.3 == false, visualArgs.4 == 18, visualArgs.5 == 0.001, visualArgs.6 == nil else {
+            throw DesktopError(message: "视觉采样参数默认值回归失败")
+        }
+        let validROI = try normalizedVisualRegions([["x": 0.75, "y": 0.75, "width": 0.25, "height": 0.25]])
+        guard validROI.count == 1 else { throw DesktopError(message: "合法边界 ROI 被拒绝") }
+        for invalid in [
+          [["x": -0.01, "y": 0.1, "width": 0.2, "height": 0.2]],
+          [["x": 0.9, "y": 0.1, "width": 0.2, "height": 0.2]],
+          [["x": 0.1, "y": 0.1, "width": 0.0, "height": 0.2]],
+          (0..<5).map { _ in ["x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2] },
+        ] {
+            do { _ = try normalizedVisualRegions(invalid); throw DesktopError(message: "错误接纳视觉 ROI") }
+            catch let error as DesktopError where error.message == "错误接纳视觉 ROI" { throw error }
+            catch { /* Invalid region is rejected before capture. */ }
+        }
+        let basePixels = VisualRegionFrame(width: 2, height: 1, rgba: [100, 100, 100, 255, 50, 60, 70, 255])
+        let changedPixels = VisualRegionFrame(width: 2, height: 1, rgba: [120, 100, 100, 255, 50, 60, 70, 255])
+        let comparison = compareVisualRegion(basePixels, changedPixels, threshold: 18)
+        let suppressed = compareVisualRegion(basePixels, changedPixels, threshold: 20)
+        let dimensionMismatch = compareVisualRegion(basePixels,
+          VisualRegionFrame(width: 1, height: 2, rgba: [100, 100, 100, 255, 50, 60, 70, 255]), threshold: 18)
+        guard comparison.ratio == 0.5, comparison.changedPixels == 1, comparison.totalPixels == 2,
+              suppressed.ratio == 0, dimensionMismatch.ratio == 1, dimensionMismatch.totalPixels == 0,
+              comparison.ratio >= 0.4, !(comparison.ratio >= 0.6),
+              comparison.changedPixels > 0 && comparison.ratio >= 0,
+              !(suppressed.changedPixels > 0 && suppressed.ratio >= 0),
+              shouldIncludeVisualImage(changed: false, reset: false, hasBaseline: true, includeImage: true) == false,
+              shouldIncludeVisualImage(changed: false, reset: false, hasBaseline: false, includeImage: true),
+              shouldIncludeVisualImage(changed: false, reset: false, geometryChanged: true, hasBaseline: true, includeImage: true),
+              shouldIncludeVisualImage(changed: true, reset: false, includeImage: true),
+              shouldIncludeVisualImage(changed: false, reset: true, includeImage: true),
+              !shouldIncludeVisualImage(changed: true, reset: false, includeImage: false) else {
+            throw DesktopError(message: "像素变化阈值、比例或 PNG 输出门控失败")
+        }
+        visualSampleStates.removeAll(); visualSampleLRU.removeAll()
+        let fakeFrame = VisualFrame(sampleId: "a", windowId: 12, pid: 34, bundleId: "fixture",
+          desktopRect: CGRect(x: 1, y: 2, width: 20, height: 10), width: 40, height: 20,
+          regions: [VisualROI(x: 0, y: 0, width: 1, height: 1)], pixels: [basePixels])
+        ensureVisualSampleState("a")
+        visualSampleStates["a"]?.latest = fakeFrame
+        guard (try visualCommit(["sampleId": "a"]))["committed"] as? Bool == true,
+              visualSampleStates["a"]?.baseline?.width == 40 else {
+            throw DesktopError(message: "visualCommit 未将上次样本设为基线")
+        }
+        resetVisualBaseline("a")
+        guard visualSampleStates["a"]?.baseline == nil, visualSampleStates["a"]?.latest?.width == 40 else {
+            throw DesktopError(message: "reset 未清除基线或错误丢弃当前样本")
+        }
+        for index in 0..<visualSampleCapacity { ensureVisualSampleState("capacity-\(index)") }
+        guard visualSampleStates.count == visualSampleCapacity, visualSampleStates["a"] == nil,
+              visualSampleLRU.count == visualSampleCapacity,
+              (try visualForget(["sampleId": "capacity-7"]))["forgotten"] as? Bool == true,
+              visualSampleStates.count == visualSampleCapacity - 1 else {
+            throw DesktopError(message: "视觉采样缓存容量或 forget 释放策略失败")
+        }
+        visualSampleStates.removeAll(); visualSampleLRU.removeAll()
+        let idle = inputIdle()
+        guard (idle["hidIdleMs"] is NSNull || (idle["hidIdleMs"] as? Double)?.isFinite == true),
+              (idle["combinedIdleMs"] is NSNull || (idle["combinedIdleMs"] as? Double)?.isFinite == true) else {
+            throw DesktopError(message: "Core Graphics 输入空闲采样格式错误")
         }
         guard workBuddyBundleAllowed("com.tencent.workbuddy.mac"),
               !workBuddyBundleAllowed("com.tencent.wework"),
@@ -1025,6 +1357,7 @@ func runNativeSelfTest() -> Never {
         catch { /* Expected rejection of implicit newline. */ }
         writeJSON(["ok": true, "selfTest": "native", "rectCases": ["CGWindowBounds", "lowercase"],
                    "capturePixelSize": [captureSize.width, captureSize.height], "windowFit": true,
+                   "visualSample": true, "visualCapacity": visualSampleCapacity, "inputIdleReadOnly": true,
                    "workBuddyGuards": true, "workBuddyConversationGuard": true, "workBuddyReadbackGuards": true, "workBuddySerializedMatch": true,
                    "workBuddyTextUTF16Limit": workBuddyTextUTF16Limit,
                    "invalidRectsRejected": invalidRects.count,
@@ -1037,7 +1370,8 @@ func runNativeSelfTest() -> Never {
     }
 }
 
-if CommandLine.arguments.contains("--self-test-native") || CommandLine.arguments.contains("--self-test-input-plan") || CommandLine.arguments.contains("--self-test-workbuddy") { runNativeSelfTest() }
+if CommandLine.arguments.contains("--self-test-native") || CommandLine.arguments.contains("--self-test-input-plan") ||
+   CommandLine.arguments.contains("--self-test-workbuddy") || CommandLine.arguments.contains("--self-test-visual") { runNativeSelfTest() }
 
 func handleLine(_ line: String) {
     guard let data = line.data(using: .utf8), let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

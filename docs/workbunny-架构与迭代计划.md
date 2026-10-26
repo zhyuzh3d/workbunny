@@ -1,5 +1,18 @@
 # workbunny 架构与迭代计划
 
+> **2026-10-26 新增设计依据**：[个性化记忆与陪伴系统设计](workbunny-个性化记忆与陪伴系统设计-2026-10-26.md)补充当前源码基线、三场景隔离、滚动上下文、doze/dream、困惑、小本本、情绪与工具经验的具体契约与M1–M6阶段。相关后续实施以该设计及更新后的 concept.md 为准；本文下方的0.2.0基线、拟议SQLCipher等内容是历史方案，不能当作当前实现。当前代码采用逐记录加密与HMAC索引，不应为追求框架或旧方案的一致性而无评估地重建存储。
+
+## 2026-10-26 后续交付顺序
+
+1. **先建立边界**：默认生活，private可读三类、life可读life/work、work只读work；通用人格与本场景补充设定；原生查询预过滤、来源传播、模式切换取消和旧数据迁移一起交付，不能先上线一个没有实际隔离的开关。
+2. **再保证连续性**：完整回合、最近N轮、预算化检索与有来源的分段滚动摘要；长期事实、精确资料和未完事项不依赖反复改写的大摘要。
+3. **实现后台吸收**：doze按新增区间分批处理，事实、标签和摘要共用作业；100轮、每日当地时间05:00、手动触发与补跑去重；事务提交水位。
+4. **实现整理与纠正**：dream先doze，再处理增量受影响簇并轮转冷区；版本、归档、有效时间、受保护小本本与最多3条活跃困惑。密码先走独立本地秘密边界，不能等待普通记忆抽取完成后才过滤。
+5. **增加成长与表现**：版本化工具/经验、真实任务反馈、情绪惯性与统一生活节律；不增加独立复杂工作引擎，不让情绪改变任务履约。
+6. **以独立评估继续优化**：场景/秘密泄漏必须为零；同时测来源与删除、时间更新、同名误认、弃答、压缩覆盖、后台成本和真实响应。只有有收益时再采用新embedding或记忆组件。
+
+本轮仅新增设计文档与目标条款；这些阶段尚未开始实现，不能用已有单库记忆或界面文案替代验收。
+
 > 2026-10-25 责任边界已明确为“情感陪伴 + 用户的小秘书”：复杂开发与工作交由 WorkBuddy 等智能体软件；Bunny 代替用户发送、跟进、检查、验收，直接操作重点在社交与日常。以更新后的 [产品目标](../concept.md) 为准。
 
 > 后续实施：2026-10-25 已推进至 0.3.4，当前存储、桌面协作与实际验收边界见 [桌面协作与授权稳定性](workbunny-0.3.4-桌面协作与授权稳定性.md)，首批基础见 [陪伴与行动基础](workbunny-0.3.0-陪伴与行动基础.md)。本文保留原始方案和当时基线，不作为当前能力清单。
@@ -502,12 +515,12 @@ M4 的接口验证在 M0 就进行；若外部能力受限，可以继续 M1–M
 | 来源 | 本文用途 |
 |---|---|
 | [concept.md](../concept.md) | 产品定位与优先级，长期记忆、本地控制和 WorkBuddy 分工 |
-| [index.js](../workbunny/src/main/index.js) | 历史落盘、think/队列取消、主动提醒、配置 IPC、userData 与日志 |
-| [config.js](../workbunny/src/main/config.js) | PERSONA、WorkBuddy 配置读取、凭据回退、旧 schema |
-| [monitor.js](../workbunny/src/main/monitor.js) | 日志接入、静默完成与关键词判定、会话身份和事件时序 |
-| [llm.js](../workbunny/src/main/llm.js)、[tts.js](../workbunny/src/main/tts.js)、[asr.swift](../workbunny/native/asr.swift) | 模型流式/取消能力、发声引擎与缓存、当前 ASR 版本限制 |
-| [preload.js](../workbunny/src/preload.js)、[panel.js](../workbunny/src/renderer/panel.js) | 现有 IPC、配置与试听语义 |
-| [package.json](../workbunny/package.json)、[package-lock.json](../workbunny/package-lock.json)、[package.sh](../workbunny/tools/package.sh) | 依赖、真实锁定版本、命名与原生资源交付 |
+| [index.js](../src/main/index.js) | 历史落盘、think/队列取消、主动提醒、配置 IPC、userData 与日志 |
+| [config.js](../src/main/config.js) | PERSONA、WorkBuddy 配置读取、凭据回退、旧 schema |
+| [monitor.js](../src/main/monitor.js) | 日志接入、静默完成与关键词判定、会话身份和事件时序 |
+| [llm.js](../src/main/llm.js)、[tts.js](../src/main/tts.js)、[asr.swift](../native/asr.swift) | 模型流式/取消能力、发声引擎与缓存、当前 ASR 版本限制 |
+| [preload.js](../src/preload.js)、[panel.js](../src/renderer/panel.js) | 现有 IPC、配置与试听语义 |
+| [package.json](../package.json)、[package-lock.json](../package-lock.json)、[package.sh](../tools/package.sh) | 依赖、真实锁定版本、命名与原生资源交付 |
 | [Electron 33 safeStorage](https://github.com/electron/electron/blob/v33.4.11/docs/api/safe-storage.md)、[utilityProcess](https://github.com/electron/electron/blob/v33.4.11/docs/api/utility-process.md) | 按当前锁定版本确认本机秘密保护与进程能力 |
 | [SQLCipher 设计](https://www.zetetic.net/sqlcipher/design/)、[API](https://www.zetetic.net/sqlcipher/sqlcipher-api/) | 加密库、日志与临时文件边界、加密导出/检查能力 |
 | [SQLite FTS5](https://www.sqlite.org/fts5.html)、[备份](https://sqlite.org/backup.html)、[损坏与备份风险](https://www.sqlite.org/howtocorrupt.html) | 中文召回方案、派生索引、删除与一致快照的限制 |

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="../../src/renderer/style.css">
+</head>
+<body>
+  <div id="stage"></div>
+  <div id="bubble" class="hidden" tabindex="0" aria-live="polite" aria-label="对话内容，可滚动阅读">
+    <div id="bubbleText"></div>
+    <button id="memoryBasis" class="memory-basis hidden" type="button">记忆依据</button>
+    <div id="bubbleTail"></div>
+  </div>
+  <div id="dock" class="hidden"><input id="input"></div>
+  <script type="module">
+    import { createBubbleController, clampBubbleTop } from '../../src/renderer/bubble-ui.mjs';
+    const bubble = document.getElementById('bubble');
+    const text = document.getElementById('bubbleText');
+    let nextTimer = 0;
+    const timers = new Map();
+    const clock = {
+      setTimeout(fn, ms) { const id = ++nextTimer; timers.set(id, { fn, ms }); return id; },
+      clearTimeout(id) { timers.delete(id); },
+      pending() { return [...timers.values()].map(timer => timer.ms); },
+      fire() { const [id, timer] = timers.entries().next().value || []; if (!timer) return false; timers.delete(id); timer.fn(); return true; },
+    };
+    window.fixture = { controller: createBubbleController(bubble, text, {
+      setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    }), clampBubbleTop, clock };
+  </script>
+</body>
+</html>

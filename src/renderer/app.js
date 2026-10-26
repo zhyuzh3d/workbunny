@@ -6,6 +6,7 @@ import { makeRig, groundClip, soleHeight } from './ground.js';
 import { cutClip, MOTION_WINDOWS } from './motion-cut.js';
 import { processMotionClip, crossFadeMotionAction } from './motion-quality.mjs';
 import { createPCMPlayer } from './pcm-player.mjs';
+import { createBubbleController } from './bubble-ui.mjs';
 
 /* ═══════════ 常量 ═══════════ */
 /* 形象列表由主进程扫 assets/models/*.vrm 得到（丢个文件进来就能换角色），
@@ -727,21 +728,10 @@ stage.addEventListener('mouseleave', () => {
 });
 
 /* ═══════════ 气泡 ═══════════ */
-let bubbleTimer = null;
+const bubbleController = createBubbleController(document.getElementById('bubble'), document.getElementById('bubbleText'));
 
 function showBubble(text, holdMs) {
-  const b = document.getElementById('bubble');
-  const t = document.getElementById('bubbleText');
-  if (!text) return;
-  t.textContent = text;
-  b.classList.remove('hidden');
-  // 重播入场动画
-  b.style.animation = 'none';
-  void b.offsetWidth;
-  b.style.animation = '';
-  if (bubbleTimer) clearTimeout(bubbleTimer);
-  const ms = holdMs || Math.max(2600, Math.min(12000, text.length * 260));
-  bubbleTimer = setTimeout(hideBubble, ms);
+  bubbleController.show(text, holdMs);
 }
 
 function paintRecallButton(entries) {
@@ -753,8 +743,7 @@ function paintRecallButton(entries) {
 }
 
 function hideBubble() {
-  document.getElementById('bubble').classList.add('hidden');
-  if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+  bubbleController.hide();
 }
 document.getElementById('memoryBasis')?.addEventListener('click', () => pet.open('memory'));
 
@@ -1256,10 +1245,7 @@ function frame() {
       const topY = (-_v.y * 0.5 + 0.5) * innerHeight;
       const bubble = document.getElementById('bubble');
       if (!bubble.classList.contains('hidden')) {
-        const h = bubble.offsetHeight || 44;
-        const bottom = Math.min(innerHeight - 8, Math.max(h + 14, innerHeight - topY + 12));
-        bubble.style.top = 'auto';
-        bubble.style.bottom = bottom + 'px';
+        bubbleController.place(topY, innerHeight);
       }
     }
 
@@ -1315,12 +1301,13 @@ function wire() {
         break;
       case 'chat':
         if (ev.role === 'user') { noteMaster(); showBubble(ev.text, 3000); }
-        else if (ev.role === 'assistant') showBubble(ev.text, 9000);
+        else if (ev.role === 'assistant') bubbleController.finish(ev.text, 9000);
         break;
       case 'recall':
         paintRecallButton(ev.entries);
         break;
       case 'delta':
+        bubbleController.appendDelta(ev.text);
         break;
       case 'motion': {
         // 模型给的是槽位名（cheer），也可能是具体 key（手动列表复用这条路）

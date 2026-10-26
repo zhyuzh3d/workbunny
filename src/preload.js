@@ -56,6 +56,11 @@ contextBridge.exposeInMainWorld('pet', {
   taskAccept: () => ipcRenderer.invoke('pet:task-accept'),
   desktopPermission: () => ipcRenderer.invoke('pet:desktop-permission'),
   desktopInsert: (text) => ipcRenderer.invoke('pet:desktop-insert', text),
+  watchList: () => ipcRenderer.invoke('watch:list'),
+  watchPause: (id) => ipcRenderer.invoke('watch:pause', id),
+  watchResume: (id) => ipcRenderer.invoke('watch:resume', id),
+  watchStop: (id) => ipcRenderer.invoke('watch:stop', id),
+  watchCheck: (id) => ipcRenderer.invoke('watch:check', id),
   on: (cb) => {
     ipcRenderer.on('pet:ev', (_e, d) => cb(d));
   },

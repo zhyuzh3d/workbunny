@@ -29,7 +29,14 @@ const { createTTSSession } = require('./tts-session');
 const voiceFiles = require('./qwen-voices');
 const replyPolicy = require('./reply-policy');
 const dialogueActions = require('./dialogue-actions');
-const { Secretary } = require('./secretary');
+const { responseFormat, validateReply, dialogueHistory } = require('./reply-format');
+const { conversationText, presentConversation } = require('./conversation-text');
+const { Secretary, verifyDelivery } = require('./secretary');
+const { WatchService } = require('./watch-service');
+const { WeChatObserver } = require('./wechat-observer');
+const { createWatchJournal } = require('./watch-journal');
+const { ContactDirectory } = require('./contact-directory');
+const { GuiLease } = require('./gui-lease');
 const { observeWorkBuddy } = require('./workbuddy-observation');
 const { createTaskJournal } = require('./task-journal');
 const { prepareVisionPreview } = require('./vision-preview');
@@ -176,6 +183,7 @@ function startWatchdog() {  if (!app.isPackaged) return;
 /* RAM is only the current-session fallback. Durable history lives in the encrypted vault. */
 let memory = null;
 let desktop = null;
+let watchDesktop = null, watches = null, contacts = null;
 let secretary = null;
 let delegationMonitor = null;
 let currentRecall = [];
@@ -203,7 +211,7 @@ function publishRecall(entries = []) {
 
 function queueTaskReport(report) {
   if (report.epoch !== memory?.generation) return;
-  if (taskReports.some(item => item.taskId === report.taskId)) return;
+  if (taskReports.some(item => (item.eventId || item.taskId) === (report.eventId || report.taskId))) return;
   taskReports.push(report);
   if (taskReports.length > 8) taskReports.shift();
   flushTaskReports();
@@ -216,7 +224,9 @@ function flushTaskReports() {
   }
   const report = taskReports.shift();
   if (report.epoch !== memory?.generation) { flushTaskReports(); return; }
-  pushHistory('assistant', report.text, { delivery: 'task-receipt', taskId: report.taskId, sources: report.sources || [] });
+  if (report.persisted) {
+    history.push({ role: 'assistant', content: report.text }); history = history.slice(-24);
+  } else pushHistory('assistant', report.text, { delivery: 'task-receipt', taskId: report.taskId, sources: report.sources || [] });
   send('chat', { role: 'assistant', text: report.text, final: true });
   speak(report.text, { silent: Date.now() < quietUntil });
   if (win && !win.isVisible()) notify(report.status === 'accepted' ? '这件事办好了' : '代办有进展', report.text.slice(0, 100));
@@ -469,6 +479,13 @@ ipcMain.on('pet:drag', (_e, action) => {
 
 /* ── 事件推给渲染层 ── */
 function send(type, payload) {
+  if (['chat', 'delta', 'say'].includes(type) && !(type === 'chat' && payload?.role === 'user') && typeof payload?.text === 'string') {
+    const text = presentConversation(payload.text);
+    if (!text) {
+      if (type !== 'chat') return;
+      payload = { ...payload, text: '这条内容未通过对话显示检查，请重试。' };
+    } else payload = { ...payload, text };
+  }
   if (!win || win.isDestroyed()) return;
   const wc = win.webContents;
   if (!wc || wc.isDestroyed() || wc.isCrashed()) return;
@@ -655,13 +672,15 @@ function prefetchNext() {
   const c = config.load();
   if (!(c.tts.enabled && c.voice.enabled)) return;
   const next = speechQueue[0];
-  if (next) synthBuffer(next.text, next.emo);
+  if (next && presentConversation(next.text)) synthBuffer(presentConversation(next.text), next.emo);
 }
 
 async function pumpSpeech() {
   if (speaking) return;
   const item = speechQueue.shift();
   if (!item) return;
+  item.text = presentConversation(item.text);
+  if (!item.text) { log('[tts] non-dialogue content rejected'); if (speechQueue.length) setImmediate(pumpSpeech); return; }
   speaking = true;
   const gen = speechGen;
   const c = config.load();
@@ -734,7 +753,7 @@ function finishSpeech() {
 }
 
 function speak(text, { motion, emo, silent = false } = {}) {
-  const clean = String(text || '').trim();
+  const clean = presentConversation(text);
   if (!clean) return;
   if (motion) send('motion', { key: motion, once: true });
   if (emo) send('emo', { key: emo });
@@ -803,7 +822,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
   const sys = config.buildSystemPrompt(ctx) + (judge ? JUDGE_RULE : '') + '\n\n' +
     (internal ? '这是内部观察，只能向用户汇报已知状态，不输出操作协议，不发起新的代办。' : dialogueActions.RULE);
   const msgs = [{ role: 'system', content: sys }];
-  for (const h of memoryContext.messages) msgs.push(h);
+  for (const h of internal ? memoryContext.messages : dialogueHistory(memoryContext.messages)) msgs.push(h);
   // 别把同一句主人话塞两遍。调用方有时已经 pushHistory('user') 过了，
   // 这里再无脑 push 一次，模型看到连着两条一模一样的输入，就会开始复读。
   const lastH = memoryContext.messages.at(-1);
@@ -827,7 +846,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     if (silenced || !allowSpeech) return;
     if (/<\s*skip/i.test(s)) { silenced = true; return; }
     const parsed = llm.extractTags(s);
-    const txt = parsed.clean.replace(/<\s*skip\s*\/?>/gi, '').trim();
+    const txt = presentConversation(parsed.clean.replace(/<\s*skip\s*\/?>/gi, ''));
     if (!txt) return;
     streamed = true;
     speechQueue.push({ text: txt });
@@ -841,14 +860,14 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     displayText += text;
     if (!internal) send('delta', { text });
     splitter.push(text);
-  });
+  }, { requireEnvelope: !internal });
 
   try {
     const r = taskControl ? { raw: JSON.stringify({ kind: 'action', intent: taskControl }), model: 'local-task-control', motions: [], emos: [] } : await llm.chat({
       ...L,
       ...(!internal ? { extraBody: { ...L.extraBody,
         ...(L.transport === 'workbuddy' && !Object.hasOwn(L.extraBody || {}, 'reasoning_effort') && ['low', 'high'].includes(L.thinking) ? { reasoning_effort: L.thinking } : {}),
-        response_format: { type: 'json_object' } } } : {}),
+        response_format: responseFormat(L.provider) } } : {}),
       // Hy3 的上限包含内部推理，压到 512 会截断到没有回答；
       // 简短口语由提示词约束，不能靠截断推理来冒充加速。
       maxTokens: L.maxTokens || 4096,
@@ -892,7 +911,8 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       // Task text is data. Tags quoted inside a task cannot animate the pet.
       r.motions = []; r.emos = [];
       if (responseGate.error || !responseGate.intent) {
-        clean = '我没能完整确认这次操作，请再说清楚要办的事和目标。这次没有发起操作。';
+        log('[brain] reply-protocol rejected');
+        const error = new Error('模型返回的回复格式异常，本次没有执行操作，请重试'); error.code = 'E_REPLY_PROTOCOL'; throw error;
       } else {
         if (judge && !voiceTurn) { pushHistory('user', userText); userRemembered = true; }
         await memory?.tail;
@@ -913,6 +933,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       r.text = clean; r.raw = clean;
     }
     r.text = clean;
+    if (clean) clean = r.text = conversationText(clean);
     // 把她实际说的话记下来：回看时才知道"她到底说了什么蠢话"，否则无从优化
     if (clean) log(`[say] ${clean.length} 字`);
     if (clean) {
@@ -1411,6 +1432,7 @@ function invalidateMemoryContext() {
   voiceTurns.reset(); stopSpeaking(); history = []; publishRecall(); taskReports.length = 0;
   tts.clearSpeechCache?.();
   secretary?.invalidate();
+  watches?.invalidate(); watchDesktop?.stop('记忆内容已变更，持续关注已暂停').catch(() => {});
   if (desktop?.task && ['starting', 'running', 'monitoring', 'awaiting', 'verifying', 'review'].includes(desktop.task.status)) {
     desktop.stop('记忆内容已变更，代理已暂停').catch(() => {});
   }
@@ -1485,6 +1507,11 @@ ipcMain.handle('pet:task-start', async (e, v) => {
 });
 ipcMain.handle('pet:task-stop', e => { trustedCompanion(e, 'desktop'); return desktop.stop(); });
 ipcMain.handle('pet:task-accept', e => { trustedCompanion(e, 'desktop'); return desktop.accept(); });
+ipcMain.handle('watch:list', e => { trustedCompanion(e, 'desktop'); return watches?.list() || []; });
+for (const action of ['pause', 'resume', 'stop']) ipcMain.handle('watch:' + action, (e, id) => {
+  trustedCompanion(e, 'desktop'); return watches?.control(action, { id }) || { ok: false, error: '持续关注尚未就绪' };
+});
+ipcMain.handle('watch:check', (e, id) => { trustedCompanion(e, 'desktop'); return watches?.tick(id) || { ok: false, error: '持续关注尚未就绪' }; });
 ipcMain.handle('pet:desktop-insert', (e, text) => { trustedCompanion(e, 'desktop'); return desktop.insert(text); });
 ipcMain.handle('pet:interact', (e, region) => {
   if (e.sender !== win?.webContents) return null;
@@ -1512,6 +1539,7 @@ ipcMain.handle('pet:init', async () => {
     avatars: list,
     monitor: monitor ? snapshotForUi(monitor.view) : null,
     desktop: desktop?.publicStatus() || null,
+    watches: watches?.list() || [],
     currentRecall,
     asrAvailable: hasAsr,
     versions: { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome },
@@ -1691,8 +1719,11 @@ ipcMain.handle('pet:brain-test', async (_e, brain) => {
   const L = config.resolveLLM(c), t0 = Date.now();
   if (L.transport !== 'workbuddy' && !L.apiKey) return { ok: false, error: '请先填写这个服务商的 API Key。' };
   try {
-    const r = await llm.chat({ ...L, messages: [{ role: 'user', content: '只回复“连接成功”。' }] });
-    return { ok: true, provider: L.provider, model: r.model || L.model, text: r.text,
+    const r = await llm.chat({ ...L, extraBody: { ...L.extraBody, response_format: responseFormat(L.provider) },
+      messages: [{ role: 'system', content: config.buildSystemPrompt(nowLine()) + '\n\n' + dialogueActions.RULE },
+        { role: 'user', content: '这次是连接与对话协议测试。只用chat回复“连接成功”，不执行操作。' }] });
+    const validated = validateReply(r.raw || r.text, { allowActions: false });
+    return { ok: true, protocolVerified: true, provider: L.provider, model: r.model || L.model, text: validated.text,
       ms: Date.now() - t0, credit: r.usage?.credit };
   } catch (e) { return { ok: false, error: e.message, ms: Date.now() - t0 }; }
 });
@@ -1996,15 +2027,15 @@ if (!lock) {
         if (panel && !panel.isDestroyed()) panel.webContents.send('pet:ev', event);
       },
     });
-    desktop = new DesktopService({ emit: status => {
+    const guiLease = new GuiLease();
+    const imageResize = png => prepareVisionPreview(nativeImage.createFromBuffer(png));
+    desktop = new DesktopService({ lease: guiLease, owner: 'primary', emit: status => {
       if (status.running) setInteractive(false);
       send('desktop', status);
       secretary?.onStatus(status);
       if (['accepted', 'paused', 'stopped'].includes(status.task?.status)) { delegationMonitor?.stop(); delegationMonitor = null; }
       for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'desktop', ...status });
-    }, imageResize: png => {
-      return prepareVisionPreview(nativeImage.createFromBuffer(png));
-    }, observeWorkBuddy: task => {
+    }, imageResize, observeWorkBuddy: task => {
       let source = monitor?.enabled ? monitor : delegationMonitor;
       if (!source) {
         source = delegationMonitor = new Monitor();
@@ -2012,11 +2043,60 @@ if (!lock) {
       }
       return observeWorkBuddy(source, task);
     }, persist: createTaskJournal(memory) });
-    secretary = new Secretary({ desktop, ready: () => !quitting && !screenLocked && !!memory?.ready,
+    const readyForTasks = () => !quitting && !screenLocked && !!memory?.ready;
+    contacts = new ContactDirectory({ read: () => memory.serial(async () => {
+      const row = (await memory.db.request('get', { ids: ['local-contact-directory'] })).rows[0];
+      return row ? memory.decode(row).value : [];
+    }), write: snapshot => memory.serial(() => memory.write([{ id: 'local-contact-directory', kind: 'task', ts: Date.now(),
+      value: { taskType: 'contacts', ...snapshot, sources: [] } }])) });
+    desktop.contactDirectory = contacts;
+    const observer = new WeChatObserver({ imageResize });
+    watchDesktop = new DesktopService({ lease: guiLease, owner: 'watch', contactDirectory: contacts, imageResize,
+      persist: task => createTaskJournal(memory)({ ...task, taskType: 'watch-operation' }) });
+    const canOperate = async () => {
+      if (!readyForTasks() || busy || speaking || !guiLease.isFree() || secretary?.verifying) return false;
+      const idle = await observer.native.request('inputIdle', {}, 5000);
+      return typeof idle.hidIdleMs === 'number' && idle.hidIdleMs >= 8000;
+    };
+    const executeWatch = async (watch, { operation, message, signal }) => {
+      const stop = () => { void watchDesktop.stop('持续关注已暂停').catch(() => {}); };
+      signal?.addEventListener('abort', stop, { once: true });
+      try {
+        if (signal?.aborted || !readyForTasks()) return { ok: false, error: '关注已暂停' };
+        const goal = operation === 'send' ? `只给「${watch.recipient}」发送这段完整原文一次：${message}` : `打开微信会话「${watch.recipient}」，确认顶部标题匹配。不输入、发送或修改草稿，不向上翻历史。`;
+        const started = await watchDesktop.start({ target: 'wechat', recipient: watch.recipient, recipientAliases: watch.recipientAliases,
+          operation, message, goal, criteria: operation === 'send' ? '指定会话中出现完整已发送气泡；不能只是草稿。' : '指定会话标题可见。',
+          origin: 'watch', inputSource: 'text', sources: [watch.id], privacyEpoch: memory.generation });
+        if (!started.ok) return started;
+        const deadline = Date.now() + 150000;
+        while (watchDesktop.running && Date.now() < deadline && !signal?.aborted) await new Promise(resolve => setTimeout(resolve, 250));
+        if (signal?.aborted) return { ok: false, error: '关注已暂停' };
+        if (watchDesktop.running) { await watchDesktop.stop('微信操作超时，保留实际结果'); return { ok: false, error: '微信操作超时' }; }
+        const task = watchDesktop.task;
+        if (task?.status !== 'review') return { ok: false, error: task?.note || '未完成微信操作' };
+        if (operation === 'send') {
+          const verified = await verifyDelivery({ task, screenshot: watchDesktop.publicStatus().screenshot, signal });
+          if (verified.verdict !== 'pass') return { ok: false, error: verified.report };
+          await watchDesktop.accept({ automatic: true, report: verified.report });
+        }
+        return { ok: true, windowId: task.scope?.windowId };
+      } finally { signal?.removeEventListener('abort', stop); }
+    };
+    watches = new WatchService({ journal: createWatchJournal(memory), sensor: observer,
+      inspect: (w, frame, signal) => observer.inspect(w, frame, signal), propose: (w, message, signal) => observer.propose(w, message, signal),
+      execute: executeWatch, canOperate, report: queueTaskReport, epoch: () => memory.generation, ready: readyForTasks,
+      emit: rows => { send('watches', { watches: rows }); for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'watches', watches: rows }); } });
+    secretary = new Secretary({ desktop, watches, contacts, ready: readyForTasks,
       epoch: () => memory?.generation, report: queueTaskReport });
     async function restoreTask() {
     if (memory.ready && desktop) {
-      const lastTask = (await memory.query('task', 1))[0]?.value;
+      let lastTask = null, cursor = {};
+      for (let page = 0; page < 50 && !lastTask; page++) {
+        const rows = await memory.query('task', 100, cursor);
+        lastTask = rows.find(row => !row.value.taskType && typeof row.value.goal === 'string' && row.value.target)?.value;
+        if (rows.length < 100) break;
+        const tail = rows.at(-1); cursor = { before: tail.ts, beforeId: tail.id };
+      }
       if (lastTask) {
         desktop.task = lastTask;
         if (lastTask.privacyEpoch !== undefined) lastTask.privacyEpoch = memory.generation;
@@ -2038,6 +2118,8 @@ if (!lock) {
         if (!memory.ready) { asrStatus = { ...asrStatus, captureReady: false, note: 'memory-locked' }; send('asrStatus', asrStatus); }
         if (memory.ready && config.load().memory.enabled) await memory.personaRevision(config.load().buddy);
         await restoreTask();
+        contacts.loaded = null;
+        await watches.restore();
         for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'memory-ready' });
         startListen('memory-ready');
       }).finally(() => { vaultOpening = null; });
@@ -2049,6 +2131,7 @@ if (!lock) {
         publishRecall();
         tts.clearSpeechCache?.();
         screenLocked = true; vaultKeyAbort?.abort(); stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.stop('电脑锁屏').catch(() => {});
+        watches.invalidate(); watchDesktop.stop('电脑锁屏').catch(() => {});
         asrStatus = { ...asrStatus, captureReady: false, note: 'locked' }; send('asrStatus', asrStatus);
         if (!memory.ready) { memory.waitingForUnlock = true; memory.error = '电脑已锁屏，解锁后自动载入记忆'; log('[memory] 屏幕锁定，延后钥匙串读取'); }
       },
@@ -2344,7 +2427,7 @@ app.on('before-quit', event => {
     if (!shutdownStarted) {
       shutdownStarted = true;
       Promise.resolve(desktop?.stop('应用退出')).catch(() => {}).then(async () => {
-        await desktop?.close(); return memory.close();
+        await watches?.close(); await watchDesktop?.close(); await desktop?.close(); return memory.close();
       }).catch(() => log('[memory] 退出时写入未完成，保留已提交数据')).finally(() => { shutdownFlushed = true; app.quit(); });
     }
   } else desktop?.close();

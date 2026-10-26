@@ -39,6 +39,11 @@ let holdNextMemoryList = false, heldMemoryListResolve = null;
 let insertFinish = null;
 let failNextMemorySources = false;
 let monitorSnapshot = { tasks: [{ name: 'Fixture 正在整理', status: 'running' }] };
+let watches = [
+  { id: 'watch-wechat-alice', target: 'wechat', recipient: 'Alice', goal: '有新消息时提醒我', mode: 'notify', policy: '只通知我，不自动回复', status: 'active', note: '正在关注', intervalSeconds: 60, expiresAt: Date.now() + 3600000, lastCheckedAt: Date.now() - 60000, eventCount: 2 },
+  { id: 'watch-workbuddy', target: 'workbuddy', recipient: 'WorkBuddy', goal: '观察已有会话', mode: 'reply', policy: '只回复明确询问进度的问题，不提供其他信息', status: 'paused', note: '已暂停', intervalSeconds: 120, lastCheckedAt: 0, eventCount: 0 },
+  { id: 'watch-old', target: 'wechat', recipient: '旧关注', goal: '归档项', mode: 'notify', status: 'stopped', note: '用户停止', intervalSeconds: 60, eventCount: 0 },
+];
 let status = {
   permissions: { accessibilityTrusted: true, screenCaptureAllowed: true, postEventAllowed: false },
   running: false, task: { id: 'task-1', status: 'paused', goal: 'fixture paused task', note: '可以继续检查' },
@@ -60,6 +65,8 @@ fs.writeFileSync(preload, `
     taskStart: (...a) => api('taskStart', ...a), taskStop: (...a) => api('taskStop', ...a),
     taskAccept: (...a) => api('taskAccept', ...a), desktopPermission: (...a) => api('desktopPermission', ...a),
     desktopRefresh: (...a) => api('taskStatus', ...a), desktopInsert: (...a) => api('desktopInsert', ...a),
+    watchList: (...a) => api('watchList', ...a), watchPause: (...a) => api('watchPause', ...a),
+    watchResume: (...a) => api('watchResume', ...a), watchStop: (...a) => api('watchStop', ...a), watchCheck: (...a) => api('watchCheck', ...a),
     __fixture: { failConfig: () => ipcRenderer.invoke('fixture:control', 'failConfig'),
       holdConfig: () => ipcRenderer.invoke('fixture:control', 'holdConfig'),
       releaseConfig: () => ipcRenderer.invoke('fixture:control', 'releaseConfig'),
@@ -67,6 +74,7 @@ fs.writeFileSync(preload, `
       releaseMemoryList: () => ipcRenderer.invoke('fixture:control', 'releaseMemoryList'),
       emitDesktop: value => ipcRenderer.invoke('fixture:control', 'emitDesktop', { type: 'desktop', ...value }),
       emitMonitor: value => ipcRenderer.invoke('fixture:control', 'emitMonitor', value),
+      emitWatches: value => ipcRenderer.invoke('fixture:control', 'emitWatches', value),
       emitRecall: value => ipcRenderer.invoke('fixture:control', 'emitRecall', value),
       failMemorySources: () => ipcRenderer.invoke('fixture:control', 'failMemorySources'),
       emitMemoryChange: () => ipcRenderer.invoke('fixture:control', 'emitMemoryChange'),
@@ -84,6 +92,7 @@ ipcMain.handle('fixture:control', (_event, action, value) => {
   if (action === 'releaseMemoryList') { heldMemoryListResolve?.(); heldMemoryListResolve = null; return true; }
   if (action === 'emitDesktop') { status = value; activeWindow?.webContents.send('fixture:event', value); return true; }
   if (action === 'emitMonitor') { monitorSnapshot = value; activeWindow?.webContents.send('fixture:event', { type: 'monitor', ...value }); return true; }
+  if (action === 'emitWatches') { watches = value; activeWindow?.webContents.send('fixture:event', { type: 'watches', watches: value }); return true; }
   if (action === 'emitRecall') { activeWindow?.webContents.send('fixture:event', { type: 'recall', entries: value }); return true; }
   if (action === 'failMemorySources') { failNextMemorySources = true; return true; }
   if (action === 'emitMemoryChange') {
@@ -96,7 +105,7 @@ ipcMain.handle('fixture:control', (_event, action, value) => {
 });
 ipcMain.handle('fixture:api', async (_event, name, ...args) => {
   called(name, ...args);
-  if (name === 'init') return { monitor: monitorSnapshot, desktop: status, currentRecall: recallEntries };
+  if (name === 'init') return { monitor: monitorSnapshot, desktop: status, currentRecall: recallEntries, watches };
   if (name === 'workbuddyOpen') return { ok: true };
   if (name === 'memoryStats') return { ready: true, counts: emptyCounts(), state: { mood: '愉快', energy: 72, interactions: 5 } };
   if (name === 'config') {
@@ -131,6 +140,16 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
   if (name === 'memoryExport') return { ok: true };
   if (name === 'memoryRestore') return { canceled: true };
   if (name === 'taskStatus') return status;
+  if (name === 'watchList') return watches.map(row => ({ ...row }));
+  if (['watchPause', 'watchResume', 'watchStop', 'watchCheck'].includes(name)) {
+    const id = args[0], row = watches.find(item => item.id === id);
+    if (!row) return { ok: false, error: '关注项不存在' };
+    if (name === 'watchPause') row.status = 'paused';
+    if (name === 'watchResume') row.status = 'active';
+    if (name === 'watchStop') row.status = 'stopped';
+    if (name === 'watchCheck') row.lastCheckedAt = Date.now();
+    return { ok: true };
+  }
   if (name === 'desktopPermission') return status.permissions;
   if (name === 'taskStart') { status = { ...status, running: true, task: { status: 'running', goal: args[0].goal, criteria: args[0].criteria, target: args[0].target, workModel: args[0].workModel, thinking: args[0].workModel === 'hy3' ? 'low' : 'high', note: '运行中' } }; return { ok: true }; }
   if (name === 'taskStop') {
@@ -183,6 +202,7 @@ async function testMemory() {
   assert.equal((calls.memoryUpdate || []).length + (calls.memoryRemove || []).length, memoryWritesBeforeSourceFailure, 'source read failure never edits or removes memory');
   await evalIn(win, "document.querySelector('#currentRecallList .recall-entry button').click(); document.querySelector('#currentRecallList .recall-entry button').click()");
   await waitFor(() => Promise.resolve((calls.memorySources || []).length === 2), 'retry source query');
+  await waitFor(() => evalIn(win, "document.querySelector('#currentRecallList .recall-source-list')?.textContent").then(text => !!text && text.includes('我喜欢海边')), 'retry source list paint');
   assert.match(await evalIn(win, "document.querySelector('#currentRecallList .recall-source-list').textContent"), /我喜欢海边/);
   await evalIn(win, "window.pet.__fixture.emitRecall([])");
   assert.equal(await evalIn(win, "document.getElementById('currentRecallCard').hidden"), true, 'empty recall hides the area');
@@ -300,6 +320,44 @@ async function testDesktop() {
   const win = await loadPage('desktop');
   await waitFor(() => Promise.resolve((calls.taskStatus || []).length > 0), 'initial task status');
   await waitFor(() => evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent").then(text => text.includes('Fixture 正在整理')), 'initial WorkBuddy monitor snapshot');
+  await waitFor(() => evalIn(win, "document.getElementById('watchList').textContent").then(text => text.includes('Alice') && text.includes('WorkBuddy')), 'continuous watch list initializes');
+  const watchText = await evalIn(win, "document.getElementById('watchList').textContent");
+  assert.match(watchText, /仅通知/);
+  assert.match(watchText, /按规则回复/);
+  assert.match(watchText, /上次检查/);
+  assert.match(watchText, /每 60 秒检查/);
+  assert.match(watchText, /到期：/);
+  assert.match(watchText, /持续至手动停止/);
+  assert.match(watchText, /已停止或到期（1）/);
+  assert.equal(await evalIn(win, "document.querySelector('#watchList .watch-inactive').open"), false, 'stopped watches stay folded');
+  assert.equal(await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] .watch-policy').open"), false, 'reply policy starts folded to keep the card compact');
+  assert.match(await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] .watch-policy summary').textContent"), /查看处理规则/);
+  await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] .watch-policy summary').click()");
+  assert.match(await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] .watch-policy').textContent"), /只回复明确询问进度的问题/);
+  await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] .watch-policy summary').click()");
+  await evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice] button').click()");
+  await waitFor(() => Promise.resolve(watches.find(row => row.id === 'watch-wechat-alice').status === 'paused'), 'pause watch action');
+  assert.equal(calls.watchPause.at(-1)[0], 'watch-wechat-alice');
+  await waitFor(() => evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice]').textContent").then(text => text.includes('已暂停')), 'paused watch state refresh');
+  await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] button').click()");
+  await waitFor(() => Promise.resolve(watches.find(row => row.id === 'watch-workbuddy').status === 'active'), 'resume watch action');
+  assert.equal(calls.watchResume.at(-1)[0], 'watch-workbuddy');
+  await evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice] button').click()");
+  await waitFor(() => Promise.resolve(watches.find(row => row.id === 'watch-wechat-alice').status === 'active'), 'resume Alice watch');
+  await waitFor(() => evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice]').querySelectorAll('button').length").then(count => count === 3), 'active watch controls refresh');
+  await evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice] .watch-item-actions button:nth-child(2)').click()");
+  await waitFor(() => Promise.resolve((calls.watchCheck || []).length === 1), 'manual watch check action');
+  assert.equal(calls.watchCheck[0][0], 'watch-wechat-alice');
+  await waitFor(() => evalIn(win, "![...document.querySelectorAll('[data-watch-id=watch-wechat-alice] .watch-item-actions button')].some(button=>button.disabled)"), 'check action settles');
+  await evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice] .watch-item-actions button:nth-child(3)').click()");
+  await waitFor(() => Promise.resolve(watches.find(row => row.id === 'watch-wechat-alice').status === 'stopped'), 'stop watch action');
+  await waitFor(() => evalIn(win, "document.querySelector('#watchList .watch-inactive')?.textContent").then(text => text.includes('Alice')), 'stopped watch moves to archive');
+  await evalIn(win, "window.pet.__fixture.emitWatches([{id:'watch-needs-window',target:'wechat',recipient:'Alice',goal:'提醒新消息',mode:'notify',status:'needs_window',note:'请打开微信',intervalSeconds:90,eventCount:4}])");
+  await waitFor(() => evalIn(win, "document.getElementById('watchList').textContent").then(text => text.includes('需要打开目标应用')), 'watch event updates the list');
+  assert.match(await evalIn(win, "document.getElementById('watchList').textContent"), /已发现 4 条动态/);
+  await evalIn(win, "window.pet.__fixture.emitWatches([])");
+  await waitFor(() => evalIn(win, "document.getElementById('watchList').textContent").then(text => text.includes('帮我关注某位联系人的新消息')) , 'generic empty watch state');
+  assert.doesNotMatch(await evalIn(win, "document.getElementById('watchList').textContent"), /Alice/, 'empty-state guidance does not hard-code a contact');
   assert.match(await evalIn(win, "document.getElementById('taskStateNote').textContent"), /代理已暂停.*可以继续检查/, 'restored paused status is visible as a report, not accepted');
   assert.equal(await evalIn(win, "document.getElementById('taskFormDetails').open"), false, 'manual task form is folded beneath the status view');
   assert.equal(await evalIn(win, "document.getElementById('desktopActions').hidden"), false, 'a paused task offers a continuation control');

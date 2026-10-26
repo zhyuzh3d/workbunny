@@ -229,6 +229,55 @@ class MemoryService {
       return record;
     });
   }
+  addMessageOnce(recordId, role, content, details = {}) {
+    if (!['user', 'assistant'].includes(role) || typeof recordId !== 'string' || !recordId || recordId.length > 256 ||
+        typeof content !== 'string' || !content.trim()) return Promise.reject(new Error('幂等消息格式不合法'));
+    const safeDetails = details && typeof details === 'object' && !Array.isArray(details) ? details : {};
+    if (Object.hasOwn(safeDetails, 'privacyEpoch') && !Number.isSafeInteger(safeDetails.privacyEpoch)) {
+      return Promise.reject(new Error('消息隐私版本不合法'));
+    }
+    const generation = Object.hasOwn(safeDetails, 'privacyEpoch') ? safeDetails.privacyEpoch : this.generation;
+    return this.serial(async () => {
+      if (generation !== this.generation) throw new Error('消息来源的隐私版本已变更');
+      const sources = [];
+      if (role === 'assistant' && safeDetails.sources !== undefined) {
+        if (!Array.isArray(safeDetails.sources) || safeDetails.sources.length > 200 ||
+            safeDetails.sources.some(source => typeof source !== 'string' || !source || source.length > 256)) {
+          throw new Error('assistant 来源数量或格式不合法');
+        }
+        sources.push(...new Set(safeDetails.sources));
+        if (sources.length) {
+          const existing = await this.db.request('get', { ids: sources });
+          if (existing.rows.length !== sources.length) throw new Error('对话来源已删除或不存在');
+        }
+      }
+      const value = { role, content: clipped(content, 12000),
+        ...(role === 'assistant' && ['generated', 'task-receipt'].includes(safeDetails.delivery) ? { delivery: safeDetails.delivery } : {}),
+        ...(role === 'user' ? { userOrdinal: this.userMessagesSeen + 1 } : {}),
+        sources: role === 'assistant' ? sources : [] };
+      const existing = (await this.db.request('get', { ids: [recordId] })).rows[0];
+      if (existing) {
+        if (existing.kind !== 'message') throw new Error('幂等消息 ID 已被其他记录占用');
+        const prior = this.decode(existing).value;
+        const sameSources = JSON.stringify([...(prior.sources || [])].sort()) === JSON.stringify([...value.sources].sort());
+        if (prior.role !== value.role || prior.content !== value.content || prior.delivery !== value.delivery || !sameSources) {
+          throw new Error('幂等消息 ID 已存在，但内容或来源不一致');
+        }
+        return { record: { ...existing, body: undefined, value: prior }, inserted: false };
+      }
+      const record = { id: recordId, kind: 'message', ts: this.clock(), value };
+      await this.write([record]);
+      this.recent.push(record); this.recent = this.recent.slice(-40);
+      if (role === 'user') {
+        this.userMessagesSeen = value.userOrdinal;
+        await this.ruleMemory(record);
+        this.updateMood(content, record.id);
+        await this.saveState();
+        this.scheduleExtraction();
+      }
+      return { record, inserted: true };
+    });
+  }
   async ruleMemory(source) {
     const text = source.value.content;
     const refusal = /(?:别|不要|不用|不想|无需|不必).{0,12}(?:记住|记录|保存|存下来)/.test(text);
