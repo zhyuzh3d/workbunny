@@ -1,5 +1,6 @@
 'use strict';
 
+const actors = require('./message-identity');
 const crypto = require('node:crypto');
 const { rank } = require('./memory-scope');
 const { containsSecret } = require('./conversation-input');
@@ -74,7 +75,7 @@ function isEligibleMemory(record, partition) {
   if (typeof value.content !== 'string' || !value.content.trim() || value.content.length > 4000 || SECRET.test(value.content)) return false;
   if (['archived', 'archived-duplicate', 'deleted'].includes(value.status)) return false;
   if (value.origin === 'deepdream-merged-v1') return false;
-  const isPendingDoze = value.status === 'pending' && ['doze-candidate-v2', 'dream-candidate-v3'].includes(value.origin);
+  const isPendingDoze = value.status === 'pending' && ['doze-candidate-v2', 'dream-candidate-v3', 'dream-observation-v1'].includes(value.origin);
   if (value.status !== 'confirmed' && !isPendingDoze) return false;
   if (value.status === 'pending' && !isPendingDoze) return false;
   if (['password', 'secret', 'credential', 'api-key'].includes(String(value.memoryKind || '').toLowerCase())) return false;
@@ -98,6 +99,8 @@ function semanticNamespace(record) {
 function compatible(a, b) {
   if (!a || !b || a.id === b.id) return false;
   const av = a.value || {}, bv = b.value || {};
+  if ((av.memoryKind === 'observation') !== (bv.memoryKind === 'observation')) return false;
+  if (av.memoryKind === 'observation' && av.evidenceCharacter !== bv.evidenceCharacter) return false;
   const ak = typeof av.key === 'string' ? av.key.trim() : '';
   const bk = typeof bv.key === 'string' ? bv.key.trim() : '';
   if (ak || bk) return !!ak && ak === bk;
@@ -123,8 +126,8 @@ function dailyDue(cursor, now) {
 function makeModelInput(memoryRow, evidence) {
   const value = memoryRow.value;
   if (!evidence || evidence.recordId !== memoryRow.id || evidence.source?.kind !== 'message' ||
-      evidence.source.value?.role !== 'user' || evidence.source.visibilityFloor > memoryRow.visibilityFloor) return null;
-  return { id: memoryRow.id, content: value.content, status: value.status, memoryKind: value.memoryKind || 'fact',
+      (value.memoryKind === 'observation' ? value.evidenceCharacter !== actors.character(evidence.source.value) : !actors.isOwner(evidence.source.value)) || evidence.source.visibilityFloor > memoryRow.visibilityFloor) return null;
+  return { id: memoryRow.id, claimType: value.memoryKind === 'observation' ? 'observation' : 'user-statement', characterId: actors.character(evidence.source.value), content: value.content, status: value.status, memoryKind: value.memoryKind || 'fact',
     key: value.key || '', time: memoryRow.ts,
     evidence: { sourceId: evidence.sourceId, quote: evidence.quote } };
 }
@@ -142,7 +145,7 @@ function validateCitationList(items, inputById, memberIds, evidenceByRecord, { r
     const input = inputById.get(item.recordId);
     if (!input || input.evidence.sourceId !== item.sourceId) return null;
     const evidenceRecord = evidenceByRecord.get(item.recordId);
-    if (!evidenceRecord || evidenceRecord.kind !== 'message' || evidenceRecord.value.role !== 'user' ||
+    if (!evidenceRecord || evidenceRecord.kind !== 'message' || (input.claimType === 'observation' ? input.characterId !== actors.character(evidenceRecord.value) : !actors.isOwner(evidenceRecord.value)) ||
         !evidenceRecord.value.content.includes(item.quote) || SECRET.test(item.quote)) return null;
     if (temporal && !TEMPORAL_CUE.test(item.quote)) return null;
     normalized.push({ recordId: item.recordId, sourceId: item.sourceId, quote: item.quote });
@@ -178,6 +181,9 @@ function validateAnalysis(result, inputs, evidenceByRecord) {
         relation.recordIds.length > MAX_OUTPUT_MEMBERS || new Set(relation.recordIds).size !== relation.recordIds.length ||
         relation.recordIds.some(id => !inputById.has(id))) return null;
     const memberIds = [...relation.recordIds];
+    const observations = memberIds.filter(id => inputById.get(id).claimType === 'observation');
+    if (observations.length && observations.length !== memberIds.length) return null;
+    if (observations.length && !['equivalent', 'contextual'].includes(relation.type)) continue;
     const relationKey = `${relation.type}\n${[...memberIds].sort().join('\n')}`;
     if (seenRelations.has(relationKey)) return null;
     seenRelations.add(relationKey);

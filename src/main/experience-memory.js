@@ -10,6 +10,7 @@ const { collectDeliveryEvidence } = require('./delivery-evidence');
 const { containsSecret } = require('./conversation-input');
 const { rank, scopeOf, canRead } = require('./memory-scope');
 const { snapshotsOf } = require('./memory-evidence');
+const { isOwner } = require('./message-identity');
 
 const EXPERIENCE_MARKER = 'bunny_knowledge_experience';
 const TOOL_MARKER = 'bunny_knowledge_tool';
@@ -357,7 +358,7 @@ function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = d
       const evidence = checked.rows.find(r => r.id === row.value.evidenceSourceId);
       if (!checked.ok || !evidence || typeof row.value.evidence !== 'string' || !evidence.value.content?.includes(row.value.evidence) ||
           checked.rows.some(r => r.kind !== 'message' || containsSecret(r.value.content))) return null;
-      return checked.rows.some(r => r.kind === 'message' && r.value.role === 'user' &&
+      return checked.rows.some(r => r.kind === 'message' && isOwner(r.value) &&
         require('./memory-commands').explicitRequest(r.value.content)) ? { taught: true } : null;
     }
     const epoch = memory.generation;

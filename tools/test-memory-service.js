@@ -490,7 +490,8 @@ async function testContextReferences(temp, safeStorage) {
   assert(included.text.includes('不要把检索相似当作事实'), 'prompt must instruct the model to clarify ambiguous identity/relations');
 
   const oldMessageContext = await service.context('historical transcript-only yellow ziggurat', { budget: 5000 });
-  assert(oldMessageContext.text.includes('historical transcript-only yellow ziggurat marker'));
+  assert([oldMessageContext.text, ...oldMessageContext.messages.map(row => row.content)].some(text => text.includes('historical transcript-only yellow ziggurat marker')),
+    'retrieved text may already be present in the ingestion-ordered recent message lane');
   assert(oldMessageContext.sourceIds.includes('reference-old-message'), 'sourceIds must continue to include injected old messages');
   assert(!oldMessageContext.references.some(r => r.id === 'reference-old-message'), 'old transcript rows never become memory references');
 

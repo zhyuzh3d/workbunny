@@ -4,6 +4,7 @@ const { validateIntent, parseStrictJson } = require('./dialogue-actions');
 const { requestVerification } = require('./verification-transport');
 const { collectDeliveryEvidence } = require('./delivery-evidence');
 const { normalizeScene, rank, canRead, scopeOf } = require('./memory-scope');
+const { isOwner } = require('./message-identity');
 const { makeWorkBuddyOutbound, validateWorkBuddyOutbound } = require('./desktop-service');
 function canReadScope(scene, record) {
   if (!record) return false;
@@ -178,7 +179,7 @@ class Secretary {
             const result = await this.memory.db.request('get', { ids: [requestSourceId], scene });
             const raw = result?.rows?.find(row => row.id === requestSourceId);
             const record = raw && this.memory.decode(raw);
-            if (!record || record.kind !== 'message' || record.state !== 'active' || record.value?.role !== 'user' ||
+            if (!record || record.kind !== 'message' || record.state !== 'active' || !isOwner(record.value) ||
                 !canReadScope(scene, record)) throw new Error('source_invalid');
             sourceFloor = Math.max(sourceFloor, scopeOf(record).visibilityFloor);
           } catch {

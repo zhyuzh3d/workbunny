@@ -120,9 +120,9 @@ async function testHistoricalReferencesAreSeparateAndScoped() {
   system.secretary.close(); await system.desktop.close();
 }
 
-function resumeFixture({ includeUser = true } = {}) {
+function resumeFixture({ includeUser = true, characterId } = {}) {
   const resumeUser = { id: 'resume-user-message', kind: 'message', state: 'active', domain: 'life', visibilityFloor: 1,
-    value: { role: 'user', content: '继续原任务', sources: [] } };
+    value: { role: 'user', ...(characterId ? { characterId } : {}), content: '继续原任务', sources: [] } };
   const contextTask = { id: 'paused-task-id', kind: 'task', state: 'active', domain: 'work', visibilityFloor: 0,
     value: { status: 'paused', sources: ['prior-source'] } };
   const derivedAssistant = { id: 'assistant-derived-context', kind: 'message', state: 'active', domain: 'life', visibilityFloor: 1,
@@ -165,6 +165,12 @@ async function testResumeOnlyAddsVerifiedCurrentUserSource() {
   assert.equal(missing.desktop.resumeArgs, null, 'a missing current user source prevents resuming');
   assert.deepEqual(missing.task.sources, before, 'failed source verification leaves the old task unchanged');
   missing.secretary.close();
+  const external = resumeFixture({ characterId: 'workbuddy' });
+  const denied = await external.secretary.dispatch({ action: 'resume' }, { requestId: 'resume-external-source', userText: '继续原任务',
+    source: 'text', requestSourceId: 'resume-user-message' });
+  assert.match(denied.text, /无法核对/u);
+  assert.equal(external.desktop.resumeArgs, null, 'user API role does not make WorkBuddy an authorizing owner');
+  external.secretary.close();
 }
 
 async function testVoiceCommitInvalidatesOldIntentThenRunsOnce() {

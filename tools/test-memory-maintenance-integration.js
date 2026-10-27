@@ -114,8 +114,9 @@ async function testSqlitePartitionsWatermarkAndRemoval() {
   await service.remove(lifeUser.id);
   assert.equal((await service.db.request('get', { ids: candidates.filter(r => r.domain === 'life').map(r => r.id) })).rows.length, 0,
     'deleting a source cascades to its derived candidate');
-  assert.equal((await service.query('state', 100, { scene: null, domain: 'life', visibilityFloor: 1 })).find(row => row.id === 'maintenance:life:1').value.watermark.ingestionSeq,
-    lifeWatermark.ingestionSeq, 'source deletion does not reset or reuse the partition watermark');
+  assert(Number.isSafeInteger(lifeWatermark.ingestionSeq));
+  assert.equal((await service.query('state', 100, { scene: null, domain: 'life', visibilityFloor: 1 })).find(row => row.id === 'maintenance:life:1').value.watermark,
+    null, 'deleted analysis dependencies rewind the semantic frontier so surviving sources can be processed again');
 
   now += 60_001; // Leave the real 3-calls-per-minute budget window.
   const laterLife = await addMessage(service, 'life', 'user', '稍后我会继续在河边散步。');

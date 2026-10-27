@@ -32,7 +32,7 @@ function formatTime(value) {
 }
 function labelStatus(value) {
   if (value === 'unverified') return '用户传授 · 未实测';
-  const labels = { pending: '待确认', accepted: '已确认', rejected: '已忽略', ready: '已就绪', unavailable: '不可用',
+  const labels = { confirmed: '已确认', pending: '待确认', accepted: '已确认', rejected: '已忽略', ready: '已就绪', unavailable: '不可用',
     enabled: '已启用', disabled: '已停用', running: '运行中', completed: '已完成', failed: '未完成', stopped: '已停止' };
   return labels[String(value)] || String(value ?? '—');
 }
@@ -308,7 +308,13 @@ function renderRecord(row) {
   card.dataset.recordId = row.id || '';
   const top = node('div', 'record-top');
   top.append(node('span', 'record-date', formatTime(row.ts)));
-  if (row.role) top.append(node('span', 'badge', row.role));
+  if (row.role) {
+    const id = row.characterId || (row.role === 'assistant' ? 'bunny' : 'owner');
+    const names = { owner: '主人', bunny: 'Bunny', workbuddy: 'WorkBuddy', system: '系统事件' };
+    top.append(node('span', 'badge', row.characterName && row.characterName !== id ? row.characterName : names[id] || id));
+  }
+  if (row.memoryKind === 'observation') top.append(node('span', 'badge', '来源观察'));
+  if (row.evidenceCharacter && !row.role) top.append(node('span', 'badge', `来源：${row.evidenceCharacter}`));
   for (const tag of (row.tags || []).filter(t => t === '主动记忆' || t === '自动记忆')) top.append(node('span', 'badge', tag));
   if (row.origin === 'deepdream-merged-v1') top.append(node('span', 'badge', '归并版本'));
   if (row.status) top.append(node('span', `badge${row.status === 'pending' ? ' pending' : ''}`, isConflict ? '用户说法待核对' : isModelCandidate ? '整理候选' : labelStatus(row.status)));

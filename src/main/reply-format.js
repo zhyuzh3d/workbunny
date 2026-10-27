@@ -37,6 +37,7 @@ function validateReply(raw, { allowActions = true } = {}) {
   return { text, intent: gate.intent, skipped: gate.skipped };
 }
 function dialogueHistory(messages) {
-  return messages.map(message => message.role === 'assistant' ? { ...message, content: JSON.stringify({ kind: 'chat', text: message.content }) } : { ...message });
+  return messages.map(require('./message-identity').wire);
 }
+
 module.exports = { responseFormat, validateReply, dialogueHistory, schema, CAPABILITIES };

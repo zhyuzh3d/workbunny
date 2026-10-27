@@ -5,7 +5,7 @@ import Darwin
 import Security
 import CryptoKit
 
-let maxLineBytes = 16 * 1024 * 1024
+let maxLineBytes = 64 * 1024 * 1024
 let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 struct VaultError: Error { let code: String }
@@ -620,10 +620,32 @@ final class DB {
             guard let expected=int(p["epoch"]), let id=text(p["recordId"]) else { throw fail("invalid_request") }
             let result = try withTransaction { () -> [String:Any] in
                 guard try epoch()==expected else {throw fail("stale_epoch")}
+                // Metadata only: surviving raw inputs of removed derivatives
+                // identify the earliest Dream work that must be revisited.
+                let rewindQuery=try statement("""
+                    WITH RECURSIVE gone(id) AS (
+                      SELECT id FROM records WHERE id=?
+                      UNION SELECT links.derivedId FROM links JOIN gone ON links.sourceId=gone.id
+                    ), affected AS (
+                      SELECT r.domain,r.visibilityFloor,r.ingestionSeq FROM records r JOIN gone ON gone.id=r.id WHERE r.kind='message'
+                      UNION ALL
+                      SELECT r.domain,r.visibilityFloor,r.ingestionSeq FROM gone JOIN links ON links.derivedId=gone.id
+                        JOIN records r ON r.id=links.sourceId WHERE r.kind='message'
+                    ) SELECT domain,visibilityFloor,MIN(ingestionSeq) FROM affected GROUP BY domain,visibilityFloor
+                    """)
+                bind(rewindQuery,1,id)
+                var rewind:[[String:Any]]=[]
+                while true {
+                    let rc=sqlite3_step(rewindQuery)
+                    if rc==SQLITE_DONE { break }
+                    guard rc==SQLITE_ROW else { sqlite3_finalize(rewindQuery); throw fail("database_operation_failed") }
+                    rewind.append(["domain":columnText(rewindQuery,0),"visibilityFloor":sqlite3_column_int64(rewindQuery,1),"ingestionSeq":sqlite3_column_int64(rewindQuery,2)])
+                }
+                sqlite3_finalize(rewindQuery)
                 let q=try statement("WITH RECURSIVE gone(id) AS (SELECT id FROM records WHERE id=? UNION SELECT links.derivedId FROM links JOIN gone ON links.sourceId=gone.id) SELECT id FROM gone");bind(q,1,id)
                 var gone:[String]=[];while sqlite3_step(q)==SQLITE_ROW{gone.append(columnText(q,0))};sqlite3_finalize(q)
                 for target in gone {let d=try statement("DELETE FROM records WHERE id=?");bind(d,1,target);_=sqlite3_step(d);sqlite3_finalize(d)}
-                return ["epoch":try advanceEpoch(),"removed":gone.count]
+                return ["epoch":try advanceEpoch(),"removed":gone.count,"rewind":rewind]
             }
             try exec("PRAGMA wal_checkpoint(TRUNCATE)"); return result
         case "clear":

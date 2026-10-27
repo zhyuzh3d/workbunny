@@ -1,5 +1,6 @@
 'use strict';
 
+const actors = require('./message-identity');
 const crypto = require('node:crypto');
 const scopes = require('./memory-scope');
 const { containsSecret } = require('./conversation-input');
@@ -113,7 +114,9 @@ async function evidenceFor(memory, record, { scene = null } = {}) {
   const byId = new Map(rows.map(row => [row.id, row]));
   for (const sourceId of sourceIds) {
     const source = byId.get(sourceId);
-    if (!source || source.kind !== 'message' || source.value?.role !== 'user') continue;
+    if (!source || source.kind !== 'message') continue;
+    const observation = value.memoryKind === 'observation';
+    if (observation ? value.evidenceCharacter !== actors.character(source.value) : !actors.isOwner(source.value)) continue;
     let sourceScope;
     try { sourceScope = scopes.scopeOf(source); } catch { continue; }
     if (sourceScope.visibilityFloor > memoryScope.visibilityFloor) continue;

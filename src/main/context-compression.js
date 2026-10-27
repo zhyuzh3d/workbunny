@@ -1,14 +1,15 @@
 'use strict';
 
+const actors = require('./message-identity');
 const crypto = require('node:crypto');
 const { SCENES, rank } = require('./memory-scope');
 
 const MAX_RECENT_ROUNDS = 24;
-const HARD_MAX_MESSAGES = 40;
+const HARD_MAX_MESSAGES = 50;
 const HARD_MAX_CHARS = 28_000;
 const MAX_SEGMENTS = 4;
 const MAX_EXCERPTS = 8;
-const MIN_EXCERPT_CHARS = 3;
+const MIN_EXCERPT_CHARS = 1;
 const MAX_EXCERPT_CHARS = 220;
 const HEAD_TEXT_BUDGET = 1_800;
 const MAX_SOURCE_IDS = 200;
@@ -29,7 +30,7 @@ function compareSeq(a, b) {
 
 function normalizeRecord(row) {
   if (!row || typeof row.id !== 'string' || !Number.isSafeInteger(row.ingestionSeq) || row.ingestionSeq <= 0 ||
-      row.kind !== 'message' || !row.value || !['user', 'assistant'].includes(row.value.role) || typeof row.value.content !== 'string') return null;
+      row.kind !== 'message' || !row.value || typeof row.value.role !== 'string' || typeof row.value.content !== 'string') return null;
   return row;
 }
 
@@ -61,7 +62,7 @@ function groupTurns(rows) {
 function sourceDigest(rows) {
   return digest(JSON.stringify([...rows].sort(compareSeq).map(row => [
     row.id, row.ingestionSeq, row.ts, row.domain, row.visibilityFloor,
-    row.value.role, row.value.turnId || '', row.value.content,
+    row.value.role, row.value.turnId || '', row.value.content, ...(row.value.characterId ? [row.value.characterId, row.value.channel || '', row.value.taskId || '', row.value.conversationId || ''] : []),
   ])), 64);
 }
 
@@ -71,16 +72,16 @@ function immutableHeadId(scene, version, watermark, segmentIds) {
   return IMMUTABLE_HEAD_PREFIX + scene + ':' + digest(JSON.stringify([scene, version,
     watermark.ingestionSeq, watermark.id, [...segmentIds]]), 48);
 }
-function segmentIdentityId(scene, batch) {
+function segmentIdentityId(scene, batch, processed) {
   const identity = batch.map(row => [row.id, row.ingestionSeq, row.updatedAt ?? row.ts]);
-  return SEGMENT_PREFIX + scene + ':' + digest(JSON.stringify([scene, identity]), 48);
+  return SEGMENT_PREFIX + scene + ':' + digest(JSON.stringify([scene, identity, ...(processed ? [processed.map(r => r.id)] : [])]), 48);
 }
 function legacySegmentId(scene, sourceHashValue) {
   return SEGMENT_PREFIX + scene + ':' + digest(`${scene}\n${sourceHashValue}`, 48);
 }
 
 class ContextCompression {
-  constructor({ memory, summarize, clock = Date.now, recentRounds = 8, maxMessages = HARD_MAX_MESSAGES, maxChars = HARD_MAX_CHARS } = {}) {
+  constructor({ memory, summarize, clock = Date.now, recentRounds = 8, recentMessages, maxMessages = HARD_MAX_MESSAGES, maxChars = HARD_MAX_CHARS } = {}) {
     if (!memory || typeof memory.query !== 'function' || typeof memory.write !== 'function' || typeof memory.serial !== 'function')
       throw new TypeError('ContextCompression requires MemoryService query/write/serial');
     if (typeof summarize !== 'function') throw new TypeError('ContextCompression requires a bounded summarize function');
@@ -90,6 +91,7 @@ class ContextCompression {
     this.recentRounds = Math.max(1, Math.min(MAX_RECENT_ROUNDS, Number.isSafeInteger(recentRounds) ? recentRounds : 8));
     this.maxMessages = Math.max(1, Math.min(HARD_MAX_MESSAGES, Number.isSafeInteger(maxMessages) ? maxMessages : HARD_MAX_MESSAGES));
     this.maxChars = Math.max(1, Math.min(HARD_MAX_CHARS, Number.isSafeInteger(maxChars) ? maxChars : HARD_MAX_CHARS));
+    this.recentMessages = recentMessages;
     this.running = null;
   }
 
@@ -227,7 +229,16 @@ class ContextCompression {
 
   emptySnapshot() { return { text: '', sourceIds: [], version: 0, coveredThrough: null, recordId: null, updatedAt: null }; }
 
-  async recentCutoff(scene, signal) {
+  async recentCutoff(scene, signal, afterSeq = 0) {
+    if (this.recentMessages) {
+      const human = (await this.memory.query('message', 80, { scene, sort: 'ingestion', order: 'desc', excludedMarkers: ['bunny_external_message'] })).filter(row => actors.isDialogue(row.value));
+      const external = await this.memory.query('message', 4, { scene, sort: 'ingestion', order: 'desc', requiredMarkers: ['bunny_external_message'], afterSeq });
+      if (external.length >= 4) return ((await this.memory.query('message', 1, { scene, sort: 'ingestion', order: 'desc' }))[0]?.ingestionSeq || 0) + 1;
+      if (human.length <= this.recentMessages) return null;
+      let index = this.recentMessages - 1;
+      if (actors.isBunny(human[index].value) && human[index + 1] && actors.isOwner(human[index + 1].value)) index++;
+      return human[index].ingestionSeq;
+    }
     let beforeSeq;
     let userCount = 0;
     const pageSize = this.maxMessages;
@@ -253,16 +264,29 @@ class ContextCompression {
   toInputRow(row) {
     const accepted = normalizeRecord(row);
     if (!accepted || isReviewed(row) || isReceipt(row)) return null;
-    return {
-      id: row.id,
-      role: row.value.role,
-      content: row.value.content,
-      time: row.ts,
-      ...(row.value.turnId ? { turnId: row.value.turnId } : {}),
-    };
+    return actors.inputRow(row);
   }
 
   async readNextBatch(scene, afterSeq, beforeSeq, signal) {
+    if (this.recentMessages) {
+      let scanAfter = afterSeq, page;
+      for (;;) {
+        if (signal?.aborted) return { rows: [], aborted: true };
+        page = await this.memory.query('message', this.maxMessages + 1, { scene, sort: 'ingestion', order: 'asc', afterSeq: scanAfter, beforeSeq });
+        if (!page.length || page.some(r => !SECRET.test(r.value.content))) break;
+        scanAfter = page.at(-1).ingestionSeq;
+      }
+      const rows = []; let chars = 0;
+      for (const row of page.slice(0, this.maxMessages)) {
+        if (!normalizeRecord(row)) throw new Error('消息格式无法安全整理，水位保留');
+        if (SECRET.test(row.value.content)) continue;
+        if (chars + row.value.content.length > this.maxChars) break;
+        rows.push(row); chars += row.value.content.length;
+      }
+      const next = page[page.findIndex(r => r.id === rows.at(-1)?.id) + 1];
+      if (rows.length && actors.isOwner(rows.at(-1).value) && next && actors.isBunny(next.value) && rows.at(-1).value.turnId === next.value.turnId) rows.pop();
+      return { rows, turns: rows.filter(r => actors.isOwner(r.value)).length, chars, oversized: !rows.length && page.length > 0, skippedSecretRounds: 0 };
+    }
     let scanAfter = afterSeq;
     let current = null;
     const chosen = [];
@@ -397,7 +421,7 @@ class ContextCompression {
           segment.value?.origin !== 'context-segment-v1' || segment.value.scene !== scene ||
           segment.value.version !== meta.version || segment.value.sourceHash !== meta.sourceHash ||
           segment.value.range?.firstSeq !== meta.range.firstSeq || segment.value.range?.lastSeq !== meta.range.lastSeq ||
-          !Array.isArray(segment.value.sources) || segment.value.sources.length > this.maxMessages) return false;
+          !Array.isArray(segment.value.sources) || segment.value.sources.length > MAX_SOURCE_IDS) return false;
       const sources = await this.getDecoded(segment.value.sources, scene);
       if (!sources || sources.length !== segment.value.sources.length) return false;
       if (sources.some(source => source.visibilityFloor > rank(scene) || source.kind !== 'message' ||
@@ -421,7 +445,7 @@ class ContextCompression {
     return normalized.every(Boolean) && sourceDigest(normalized) === expectedHash;
   }
 
-  async findReusableSegment(scene, batch, turns, inputs) {
+  async findReusableSegment(scene, batch, turns, inputs, processed = batch) {
     const sourceHashValue = sourceDigest(batch);
     const id = segmentIdentityId(scene, batch);
     let foundId = id;
@@ -438,7 +462,7 @@ class ContextCompression {
     }
     let segment;
     try { segment = this.memory.decode(raw.rows[0]); } catch { return { invalid: true }; }
-    const first = batch[0], last = batch.at(-1);
+    const first = processed[0], last = processed.at(-1);
     const expectedSources = batch.map(row => row.id);
     const range = segment.value?.range;
     if (segment.kind !== 'state' || segment.id !== foundId || segment.domain !== scene || segment.visibilityFloor !== rank(scene) ||
@@ -446,7 +470,7 @@ class ContextCompression {
         segment.value.sourceHash !== sourceHashValue || !Number.isSafeInteger(segment.value.version) || segment.value.version < 1 ||
         JSON.stringify(segment.value.sources) !== JSON.stringify(expectedSources) ||
         range?.firstSeq !== first.ingestionSeq || range?.firstId !== first.id || range?.lastSeq !== last.ingestionSeq ||
-        range?.lastId !== last.id || range?.turnCount !== turns || range?.messageCount !== batch.length) return { invalid: true };
+        range?.lastId !== last.id || range?.turnCount !== turns || range?.messageCount !== processed.length) return { invalid: true };
     const sources = await this.getDecoded(expectedSources, scene);
     if (!sources || sources.length !== expectedSources.length || sourceDigest(sources) !== sourceHashValue ||
         sources.some(source => typeof source.value?.content !== 'string' || SECRET.test(source.value.content))) return { invalid: true };
@@ -456,9 +480,9 @@ class ContextCompression {
     } catch { return { invalid: true }; }
   }
 
-  makeSegment(scene, batch, summary, turns, sourceHashValue) {
-    const first = batch[0], last = batch.at(-1);
-    const segmentId = segmentIdentityId(scene, batch);
+  makeSegment(scene, batch, summary, turns, sourceHashValue, processed = batch) {
+    const first = processed[0], last = processed.at(-1);
+    const segmentId = segmentIdentityId(scene, batch, this.recentMessages ? processed : undefined);
     return {
       id: segmentId,
       kind: 'state',
@@ -468,11 +492,11 @@ class ContextCompression {
       visibilityFloor: rank(scene),
       value: {
         origin: 'context-segment-v1', scene, version: last.ingestionSeq,
-        range: { firstSeq: first.ingestionSeq, firstId: first.id, lastSeq: last.ingestionSeq, lastId: last.id, turnCount: turns, messageCount: batch.length },
+        range: { firstSeq: first.ingestionSeq, firstId: first.id, lastSeq: last.ingestionSeq, lastId: last.id, turnCount: turns, messageCount: processed.length },
         sourceHash: sourceHashValue,
         content: summary.content,
         excerpts: summary.excerpts,
-        sources: batch.map(row => row.id),
+        sources: batch.map(row => row.id), processedIds: processed.map(row => row.id),
       },
     };
   }
@@ -502,9 +526,9 @@ class ContextCompression {
   }
 
   async commitBatch({ scene, batch, summary, turns, skippedSecretRounds, state, head, oldSegments,
-    generation, sceneEpoch, signal, reusableSegment = null }) {
+    generation, sceneEpoch, signal, reusableSegment = null, processed = batch }) {
     const sourceHashValue = sourceDigest(batch);
-    const segment = reusableSegment || this.makeSegment(scene, batch, summary, turns, sourceHashValue);
+    const segment = reusableSegment || this.makeSegment(scene, batch, summary, turns, sourceHashValue, processed);
     const priorMetadata = head?.value.segments || [];
     const retainedPrior = priorMetadata.slice(-(MAX_SEGMENTS - 1));
     const retainedIds = new Set(retainedPrior.map(item => item.id));
@@ -515,7 +539,7 @@ class ContextCompression {
       id: segment.id, version: segment.value.version, range: segment.value.range, sourceHash: sourceHashValue,
     }].slice(-MAX_SEGMENTS);
     const segmentIds = metadata.map(item => item.id);
-    const last = batch.at(-1);
+    const last = processed.at(-1);
     const version = (head?.value.version || 0) + 1;
     const watermark = { ingestionSeq: last.ingestionSeq, id: last.id, ts: last.ts };
     const nextHead = {
@@ -607,7 +631,7 @@ class ContextCompression {
     return this.running;
   }
 
-  async runInternal({ signal, canRun = () => true, reserveModelCall = () => true } = {}) {
+  async runInternal({ signal, force = false, canRun = () => true, reserveModelCall = () => true } = {}) {
     const controller = signal || new AbortController().signal;
     const processedByScene = Object.fromEntries(SCENES.map(scene => [scene, 0]));
     const skippedByScene = Object.fromEntries(SCENES.map(scene => [scene, 0]));
@@ -630,7 +654,7 @@ class ContextCompression {
       let head = headState.head;
       let version = head?.value.version || 0;
       versions[scene] = version;
-      const cutoffSeq = await this.recentCutoff(scene, controller);
+      const cutoffSeq = await this.recentCutoff(scene, controller, head?.value.watermark.ingestionSeq || 0);
       if (controller.aborted) return outcome('paused');
       if (cutoffSeq === null) continue;
       let cursorSeq = head?.value.watermark.ingestionSeq || 0;
@@ -645,33 +669,47 @@ class ContextCompression {
         if (chosen.aborted) return outcome('paused');
         if (chosen.oversized) return outcome('paused', '单个完整轮超过批次上限，未截断也未推进水位');
         if (!chosen.rows.length) break;
-        const batch = chosen.rows;
+        let batch = chosen.rows;
+        let processed = batch;
         const batchChars = batch.reduce((sum, row) => sum + row.value.content.length, 0);
         if (batch.length > this.maxMessages || batchChars > this.maxChars || batch.some(row => row.visibilityFloor > rank(scene)))
           throw new Error('上下文压缩批次边界校验失败');
-        const inputs = batch.map(row => this.toInputRow(row));
+        let inputs = batch.map(row => this.toInputRow(row));
         const oldSegments = await this.loadSegments(head, scene);
         if (head && !oldSegments) return outcome('paused');
-        const reusable = await this.findReusableSegment(scene, batch, chosen.turns, inputs);
-        if (reusable.invalid) return outcome('paused', '历史压缩段未通过校验，已保留原始对话');
-        let summary, reusableSegment = reusable.segment;
-        if (reusableSegment) summary = reusable.summary;
-        else {
-          const allowed = await reserveModelCall(controller);
-          if (allowed === false || allowed?.ok === false) return outcome('budget');
-          const summaryRaw = await this.summarize(inputs, { scene, signal: controller });
-          if (controller.aborted || this.memory.generation !== runGeneration ||
-              (runSceneEpoch !== undefined && this.memory.sceneEpoch !== runSceneEpoch)) return outcome('paused');
-          summary = this.validateSummary(summaryRaw, inputs);
+        let summary, reusableSegment;
+        if (this.recentMessages && this.memory.blocks) {
+          const overlap = (await this.memory.query('message', 4, { scene, sort: 'ingestion', order: 'desc', beforeSeq: cursorSeq + 1 })).reverse().filter(r => !SECRET.test(r.value.content));
+          batch = [...overlap, ...batch];
+          const planned = await require('./semantic-plan').planBatch(this.memory, { mode: 'doze', scope: { domain: scene, visibilityFloor: rank(scene) },
+            rows: batch, generate: this.summarize, signal: controller, force, afterSeq: cursorSeq, reserveModelCall });
+          if (planned.status !== 'done') return outcome(planned.status);
+          if (!planned.consumed.length) return outcome('deferred', '未完话题保留原文，等待后续');
+          processed = planned.consumed;
+          const through = processed.at(-1).ingestionSeq;
+          summary = this.validateSummary(planned.result, batch.filter(r => r.ingestionSeq <= through).map(actors.inputRow));
+        } else {
+          const reusable = await this.findReusableSegment(scene, batch, chosen.turns, inputs);
+          if (reusable.invalid) return outcome('paused', '历史压缩段未通过校验，已保留原始对话');
+          reusableSegment = reusable.segment;
+          if (reusableSegment) summary = reusable.summary;
+          else {
+            const allowed = await reserveModelCall(controller);
+            if (allowed === false || allowed?.ok === false) return outcome('budget');
+            const summaryRaw = await this.summarize(inputs, { scene, signal: controller });
+            if (controller.aborted || this.memory.generation !== runGeneration ||
+                (runSceneEpoch !== undefined && this.memory.sceneEpoch !== runSceneEpoch)) return outcome('paused');
+            summary = this.validateSummary(summaryRaw, inputs);
+          }
         }
         const committed = await this.commitBatch({ scene, batch, summary, turns: chosen.turns,
           skippedSecretRounds: chosen.skippedSecretRounds || 0, state: headState, head, oldSegments: oldSegments || [],
-          generation: runGeneration, sceneEpoch: runSceneEpoch, signal: controller, reusableSegment });
+          generation: runGeneration, sceneEpoch: runSceneEpoch, signal: controller, reusableSegment, processed });
         if (!committed) return outcome('paused');
-        processedByScene[scene] += batch.length;
+        processedByScene[scene] += processed.length;
         version++;
         versions[scene] = version;
-        const last = batch.at(-1);
+        const last = processed.at(-1);
         cursorSeq = last.ingestionSeq;
         const nextState = await this.inspectState(scene);
         headState.head = nextState.head;
@@ -680,6 +718,7 @@ class ContextCompression {
         headState.invalid = nextState.invalid;
         head = nextState.head;
         if (!head || nextState.invalid || head.value.version !== version) return outcome('paused');
+        if (processed.length < chosen.rows.length) return outcome('deferred', '语义尾部已保留，下次续接');
       }
     }
     return outcome('done');

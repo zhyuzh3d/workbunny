@@ -350,6 +350,11 @@ class Monitor extends EventEmitter {
           if (!e.priming) this.emit('update', s);
         }
       }
+      if (!e.priming && ['user', 'assistant'].includes(o.role)) {
+        const original = rawOf(o.content);
+        if (original.trim()) this.emit('sourceMessage', { snap: { ...s, task: s.task ? { ...s.task } : null, history: [] }, role: o.role, content: original, time: ts,
+          id: createHash('sha256').update(JSON.stringify([s.sessionId, o.id || o.uuid || '', ts, o.role, original])).digest('hex') });
+      }
       return;
     }
 

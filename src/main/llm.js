@@ -57,6 +57,7 @@ function makeSentenceSplitter(onSentence) {
  * @returns {Promise<{text:string,motions:string[],emos:string[],usage:any,ms:number}>}
  */
 function chat(opts) {
+  opts = require('./context-budget').fitRequest(opts);
   if (opts.transport === 'workbuddy') return opts.webSearch === true
     ? require('./conversation-search').chatWithSearch(opts) : require('./workbuddy').chat(opts);
   const {
@@ -104,8 +105,13 @@ function chat(opts) {
       (res) => {
         if (res.statusCode !== 200) {
           // Upstream errors may echo credentials or prompts; keep them out of UI/logs.
-          res.resume();
-          res.on('end', () => reject(new Error(`模型接口返回 HTTP ${res.statusCode}，请检查密钥、所选模型、额度或请求频率`)));
+          let errorBody = '';
+          res.on('data', part => { if (errorBody.length < 8192) errorBody += String(part).slice(0, 8192 - errorBody.length); });
+          res.on('end', () => {
+            const error = new Error(`模型接口返回 HTTP ${res.statusCode}，请检查密钥、所选模型、额度或请求频率`);
+            if (require('./context-budget').isContextError(res.statusCode, errorBody)) error.code = 'E_CONTEXT_WINDOW';
+            reject(error);
+          });
           res.on('error', reject);
           return;
         }

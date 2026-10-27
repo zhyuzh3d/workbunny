@@ -263,7 +263,7 @@ async function testCompressionExportRestoreDeleteAndResume() {
   assert.equal(deletedRaw.rows.length, 0);
   const oldCalls = restored.calls.extract.length;
   await runDoze(restored.worker);
-  assert.equal(restored.calls.extract.length, oldCalls, 'the deleted old message is behind the durable doze watermark');
+  assert(restored.calls.extract.length > oldCalls, 'source deletion rewinds Dream so surviving context is not skipped');
   const afterDelete = await restored.compression.snapshot('private');
   assert(!afterDelete.text.includes(removedSource.value.content), 'a rebuilt higher-scope head cannot resurrect the deleted source');
   const persistedBudget = await decodedById(restored.memory, 'maintenance:budget');

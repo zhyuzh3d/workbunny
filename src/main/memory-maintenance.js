@@ -9,7 +9,7 @@ const PARTITIONS = [
   { domain: 'life', visibilityFloor: 1 }, { domain: 'life', visibilityFloor: 2 },
   { domain: 'private', visibilityFloor: 2 },
 ];
-const MAX_MESSAGES = 40;
+const MAX_MESSAGES = 50;
 const MAX_CHARS = 28000;
 const MAX_CALLS = 3;
 const WINDOW_MS = 60_000;
@@ -43,7 +43,7 @@ function validPartition(row, partition) {
 }
 
 function validRole(row) {
-  return row?.kind === 'message' && ['user', 'assistant'].includes(row.value?.role) && typeof row.value.content === 'string';
+  return row?.kind === 'message' && typeof row.value?.role === 'string' && typeof row.value.content === 'string';
 }
 
 class MemoryMaintenance {
@@ -62,6 +62,7 @@ class MemoryMaintenance {
     this.maxCallsPerDay = Math.max(1, Math.min(1000, Number.isSafeInteger(maxCallsPerDay) ? maxCallsPerDay : DEFAULT_DAILY_CALLS));
     this.queue = [];
     this.dozeDirty = false;
+    this.blocksDirty = false;
     this.requestSources = new Map();
     this.controller = null;
     this.activeMode = null;
@@ -86,10 +87,11 @@ class MemoryMaintenance {
   hasQueued(mode) { return this.queue.includes(mode) || this.activeMode === mode; }
 
   request(mode, { automatic = false } = {}) {
-    if (!['doze', 'dream', 'deepdream'].includes(mode)) return { ok: false, error: '整理模式无效' };
+    if (!['blocks', 'doze', 'dream', 'deepdream'].includes(mode)) return { ok: false, error: '整理模式无效' };
     if (this.closed) return { ok: false, error: '记忆整理器已关闭' };
     if (automatic && this.clock() < this.automaticRetryAfter) return { ok: false, error: '后台整理暂缓，可手动重试' };
     if (mode === 'doze') this.dozeDirty = true;
+    if (mode === 'blocks') this.blocksDirty = true;
     if (!automatic || !this.requestSources.has(mode)) this.requestSources.set(mode, automatic ? 'automatic' : 'manual');
     if (this.hasQueued(mode)) {
       if (!automatic) this.scheduleTick();
@@ -99,7 +101,7 @@ class MemoryMaintenance {
       this.queue.push(mode);
       if (!this.activeMode) this.publish({ processed: 0, scanned: 0, archived: 0 });
     }
-    this.publish({ status: 'queued', mode, note: ({ doze: 'Doze 对话压缩已排队', dream: 'Dream 新记忆提炼已排队', deepdream: 'Deepdream 记忆整理已排队' })[mode] });
+    this.publish({ status: 'queued', mode, note: ({ blocks: '连续消息块已排队', doze: 'Doze 对话压缩已排队', dream: 'Dream 新记忆提炼已排队', deepdream: 'Deepdream 记忆整理已排队' })[mode] });
     this.scheduleTick();
     return { ok: true, queued: true };
   }
@@ -166,7 +168,7 @@ class MemoryMaintenance {
       this.activeMode = mode;
       this.controller = new AbortController();
       this.pauseNote = '';
-      this.publish({ status: 'running', mode, note: ({ doze: '正在压缩历史对话', dream: '正在形成新增记忆', deepdream: '正在整理新记忆及相关历史' })[mode] });
+      this.publish({ status: 'running', mode, note: ({ blocks: '正在整理连续消息块', doze: '正在压缩历史对话', dream: '正在形成新增记忆', deepdream: '正在整理新记忆及相关历史' })[mode] });
       try {
         const canRun = await this.permitted({ mode, signal: this.controller.signal });
         if (!canRun) {
@@ -174,7 +176,7 @@ class MemoryMaintenance {
           this.publish({ status: 'paused', mode, note: '记忆未解锁或当前不适合整理，稍后可继续' });
           break;
         }
-        const outcome = mode === 'doze' ? await this.runDoze(this.controller.signal) : mode === 'dream' ? await this.runExtract(this.controller.signal) : await this.runDeepdream(this.controller.signal);
+        const outcome = mode === 'blocks' ? await this.runBlocks(this.controller.signal) : mode === 'doze' ? await this.runDoze(this.controller.signal) : mode === 'dream' ? await this.runExtract(this.controller.signal) : await this.runDeepdream(this.controller.signal);
         if (outcome === 'budget') {
           this.queue.unshift(mode);
           this.publish({ status: 'queued', mode, note: `${this.budgetReason}，等待后继续` });
@@ -192,8 +194,13 @@ class MemoryMaintenance {
           this.scheduleTick(1500);
           break;
         }
-        if (mode !== 'doze' || this.automaticRetryAfter) await this.saveDailyScheduleIfDue(mode);
-        if (mode === 'doze' && this.dozeDirty && !this.queue.includes(mode)) this.queue.push(mode);
+        if (outcome === 'deferred') {
+          this.requestSources.delete(mode);
+          this.publish({ status: 'idle', mode: null, stage: null, note: '未完话题已保留，等待后续消息或定时整理' });
+          continue;
+        }
+        if ((mode !== 'doze' && mode !== 'blocks') || this.automaticRetryAfter) await this.saveDailyScheduleIfDue(mode);
+        if (((mode === 'doze' && this.dozeDirty) || (mode === 'blocks' && this.blocksDirty)) && !this.queue.includes(mode)) this.queue.push(mode);
         else this.requestSources.delete(mode);
         const finishedAt = this.clock();
         this.publish({ status: 'idle', mode: null, stage: null, note: '整理已完成', lastSuccessAt: finishedAt });
@@ -238,6 +245,8 @@ class MemoryMaintenance {
       E_OUTPUT_LIMIT: '本批输出预算不足，已保留未处理进度',
       E_EMPTY_RESPONSE: '模型没有返回正文，已保留未处理进度',
       E_INVALID_MODEL_OUTPUT: '本批整理结果不完整，未推进进度',
+      E_CONTEXT_BUDGET: '本批超过模型输入预算，原文与水位已保留，请分段或使用更大上下文模型',
+      E_SEMANTIC_BOUNDARY: '模型未给出有效的连续语义边界，原文与水位已保留',
       E_UPSTREAM: 'WorkBuddy 服务暂时不可用，已保留进度，可稍后手动重试',
       E_PAYLOAD_TOO_LARGE: '模型返回超过本地转发上限，已保留进度',
     };
@@ -324,14 +333,16 @@ class MemoryMaintenance {
     for (const item of (Array.isArray(candidates?.memories) ? candidates.memories : []).slice(0, MAX_CANDIDATES)) {
       if (!item || typeof item !== 'object') continue;
       const source = messages.get(item.sourceId);
-      if (!source || source.value.role !== 'user' || !validPartition(source, partition)) continue;
+      if (!source || !validPartition(source, partition)) continue;
       if (typeof item.evidence !== 'string' || item.evidence.length < 3 || item.evidence.length > 2000 || !source.value.content.includes(item.evidence)) continue;
       if (typeof item.content !== 'string' || !item.content.trim() || item.content.length > 400 || SECRET.test(item.content)) continue;
       const content = item.content.trim();
       const key = `${source.id}\n${content}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      outputs.push({ source, content, evidence: item.evidence, tags: normalizeTags(item.tags) });
+      const owner = require('./message-identity').isOwner(source.value);
+      if (!owner && item.claimType !== 'observation') continue;
+      outputs.push({ source, content, evidence: item.evidence, observation: !owner, tags: normalizeTags(item.tags) });
     }
     return outputs;
   }
@@ -343,19 +354,19 @@ class MemoryMaintenance {
       const id = `dream-memory:v3:${digest(`${partition.domain}:${partition.visibilityFloor}:${item.source.id}:${item.evidence}:${item.content}`, 40)}`;
       records.push({ id, kind: 'memory', ts: item.source.ts, domain: partition.domain, visibilityFloor: partition.visibilityFloor,
         searchText: `${item.content} ${item.tags.join(' ')}`.trim(),
-        value: require('./memory-tags').tagged({ content: item.content, memoryKind: 'candidate', status: 'pending', importance: 0.6,
-          evidence: item.evidence, evidenceSourceId: item.source.id, sources: [item.source.id, ...inputSources.filter(source => source !== item.source.id)], origin: 'dream-candidate-v3', ...(item.tags.length ? { tags: item.tags } : {}) }, ['automatic']) });
+        value: require('./memory-tags').tagged({ content: item.content, memoryKind: item.observation ? 'observation' : 'candidate', status: 'pending', importance: 0.6,
+          evidence: item.evidence, evidenceSourceId: item.source.id, sources: [item.source.id, ...inputSources.filter(source => source !== item.source.id)], origin: item.observation ? 'dream-observation-v1' : 'dream-candidate-v3', evidenceCharacter: require('./message-identity').character(item.source.value), ...(item.observation && item.source.value.taskId ? { key: 'event:' + require('./message-identity').character(item.source.value) + ':' + item.source.value.taskId } : {}), ...(item.tags.length ? { tags: item.tags } : {}) }, ['automatic']) });
     }
     const last = consumed.at(-1);
     if (last) records.push({ id: `${CHECKPOINT_PREFIX}${partition.domain}:${partition.visibilityFloor}`, kind: 'state', ts: 0, updatedAt: this.clock(), domain: partition.domain, visibilityFloor: partition.visibilityFloor,
       value: { job: 'dream', domain: partition.domain, visibilityFloor: partition.visibilityFloor,
         watermark: { ingestionSeq: last.ingestionSeq, ts: last.ts, id: last.id }, snapshotEpoch: snapshot.epoch,
-        snapshotHash: snapshot.snapshotHash, processed: (this.currentProcessed || 0) + consumed.length, sources: [] } });
+        snapshotHash: snapshot.snapshotHash, ...(snapshot.deferred ? { deferredReadSeq: snapshot.page.at(-1).ingestionSeq, deferSince: this.clock() } : {}), processed: (this.currentProcessed || 0) + consumed.length, sources: [] } });
     return records;
   }
 
   sourceHash(batch) {
-    return digest(JSON.stringify(batch.map(row => [row.id, row.ingestionSeq, row.ts, row.domain, row.visibilityFloor, row.value.role, row.value.content])), 64);
+    return digest(JSON.stringify(batch.map(row => [row.id, row.ingestionSeq, row.ts, row.domain, row.visibilityFloor, row.value])), 64);
   }
 
   async verifySources(batch, partition, generation) {
@@ -371,7 +382,7 @@ class MemoryMaintenance {
       const row = byId.get(snapshot.id);
       if (!row || row.kind !== 'message' || row.domain !== partition.domain || Number(row.visibilityFloor) !== partition.visibilityFloor) return false;
       const value = this.memory.decode(row).value;
-      return value.role === snapshot.value.role && value.content === snapshot.value.content && row.ts === snapshot.ts && Number(row.ingestionSeq) === snapshot.ingestionSeq;
+      return JSON.stringify(value) === JSON.stringify(snapshot.value) && row.ts === snapshot.ts && Number(row.ingestionSeq) === snapshot.ingestionSeq;
     });
   }
 
@@ -388,6 +399,8 @@ class MemoryMaintenance {
   async runExtract(signal) {
     this.publish({ stage: 'dream' });
     this.currentProcessed = 0;
+    let held = false;
+    const force = this.requestSources.get(this.activeMode) === 'manual' || this.activeMode === 'deepdream' || this.forceDream;
     if (!this.extractionLimit) {
       const saved = (await this.readState('maintenance:extract-tuning'))?.value?.batchSize;
       this.extractionLimit = Number.isSafeInteger(saved) && saved > 0 ? Math.min(saved, this.maxMessages) : this.maxMessages;
@@ -399,27 +412,46 @@ class MemoryMaintenance {
         if (!canRun) return 'paused';
         const snapshot = await this.snapshotPartition(partition, signal);
         if (!snapshot.page.length) break;
+        if (!force && snapshot.state?.value.deferredReadSeq >= snapshot.page.at(-1).ingestionSeq && this.clock() - snapshot.state.value.deferSince < 10 * 60_000) { held = true; break; }
         const { consumed, input } = this.buildBatch(snapshot.page.slice(0, this.extractionLimit));
         if (!consumed.length) break;
         if (consumed.some(row => !Number.isSafeInteger(row.ingestionSeq))) throw new Error('消息缺少稳定入库序号，整理未推进');
         const eligible = consumed.filter(validRole).filter(row => !SECRET.test(row.value.content));
         snapshot.snapshotHash = this.sourceHash(eligible);
         const batchEnd = consumed.at(-1);
-        let candidates = { memories: [], excerpts: [] };
-        if (input.some(item => item.role === 'user')) {
-          const reserved = await this.reserveModelCall(signal);
-          if (!reserved.ok) return 'budget';
-          try { candidates = await this.extract(input, { signal }); }
-          catch (error) {
+        let candidates = { memories: [] }, selected = consumed;
+        if (input.length) {
+          try {
+            if (this.memory.blocks) {
+              const planned = await require('./semantic-plan').planBatch(this.memory, { mode: 'dream', scope: partition, rows: eligible,
+                generate: this.extract, signal, force: !!force || !!(snapshot.state?.value.deferSince && this.clock() - snapshot.state.value.deferSince >= 10 * 60_000), reserveModelCall: s => this.reserveModelCall(s) });
+              if (planned.status !== 'done') return planned.status;
+              candidates = planned.result;
+              if (!planned.consumed.length) {
+                await this.memory.serial(async () => {
+                  if (signal.aborted || this.memory.generation !== snapshot.generation) throw ABORTED;
+                  await this.memory.write([{ id: `${CHECKPOINT_PREFIX}${partition.domain}:${partition.visibilityFloor}`, kind: 'state', ts: 0, ...partition,
+                    value: { ...(snapshot.state?.value || {}), watermark: snapshot.watermark, deferredReadSeq: snapshot.page.at(-1).ingestionSeq, deferSince: snapshot.state?.value.deferSince || this.clock(), sources: [] } }], this.memory.epoch, { notify: false });
+                });
+                held = true; break;
+              }
+              const through = planned.consumed.at(-1).ingestionSeq;
+              selected = consumed.filter(r => r.ingestionSeq <= through);
+              snapshot.deferred = selected.length < consumed.length;
+            } else {
+              const reserved = await this.reserveModelCall(signal);
+              if (!reserved.ok) return 'budget';
+              candidates = await this.extract(input, { signal });
+            }
+          } catch (error) {
             if (signal.aborted || this.closed) return 'paused';
-            if (consumed.length > 1 && ['E_UPSTREAM', 'E_PAYLOAD_TOO_LARGE', 'E_OUTPUT_LIMIT', 'E_INVALID_MODEL_OUTPUT'].includes(error.code)) {
+            if (consumed.length > 1 && ['E_UPSTREAM', 'E_PAYLOAD_TOO_LARGE', 'E_OUTPUT_LIMIT', 'E_INVALID_MODEL_OUTPUT', 'E_CONTEXT_BUDGET', 'E_CONTEXT_WINDOW'].includes(error.code)) {
               this.extractionLimit = Math.max(1, Math.floor(consumed.length / 2));
               await this.memory.serial(async () => {
                 if (signal.aborted || this.memory.generation !== snapshot.generation) throw ABORTED;
                 await this.memory.write([{ id: 'maintenance:extract-tuning', kind: 'state', ts: 0, updatedAt: this.clock(), domain: 'private', visibilityFloor: 2,
                   value: { batchSize: this.extractionLimit, sources: [] } }], this.memory.epoch, { notify: false });
               });
-              this.publish({ note: '本批响应未完成，已保留水位并改用更小批次继续' });
               continue;
             }
             throw error;
@@ -427,17 +459,41 @@ class MemoryMaintenance {
           if (signal.aborted || this.closed) return 'paused';
           if (!candidates || typeof candidates !== 'object' || Array.isArray(candidates)) throw new Error('记忆整理模型返回格式无效');
         }
-        const records = this.buildDreamRecords(candidates, eligible, consumed, partition, snapshot);
+        const acceptedCandidates = { ...candidates, memories: (candidates.memories || []).filter(item => selected.some(row => row.id === item.sourceId)) };
+        const records = this.buildDreamRecords(acceptedCandidates, eligible, selected, partition, snapshot);
         // This watermark update and all derivatives are committed in one native write.
         const committed = await this.commitDream(records, eligible, partition, snapshot);
         if (!committed) return 'paused';
-        this.currentProcessed += consumed.length;
-        this.publish({ status: 'running', mode: this.activeMode, processed: this.statusValue.processed + consumed.length, note: '已保存一批有来源的记忆整理结果' });
+        this.currentProcessed += selected.length;
+        this.publish({ status: 'running', mode: this.activeMode, processed: this.statusValue.processed + selected.length, note: '已保存一批有来源的记忆整理结果' });
+        if (snapshot.deferred) { held = true; break; }
         if (consumed.length < snapshot.page.length || consumed.length >= this.maxMessages) {
           // Continue from the exact last consumed row; the next query detects completion.
         }
         if (batchEnd === snapshot.page.at(-1) && snapshot.page.length < this.maxMessages) break;
       }
+    }
+    this.forceDream = false;
+    return held ? 'deferred' : 'done';
+  }
+
+  async runBlocks(signal) {
+    this.blocksDirty = false;
+    if (!this.memory.blocks) return 'done';
+    const generation = this.memory.generation;
+    for (const partition of PARTITIONS) {
+      if (signal.aborted || !await this.permitted({ mode: 'blocks', signal })) return 'paused';
+      const rid = `blocks:cursor:v1:${partition.domain}:${partition.visibilityFloor}`;
+      const prior = await this.readState(rid);
+      const rows = await this.memory.query('message', 128, { scene: null, ...partition, sort: 'ingestion', order: 'asc', afterSeq: prior?.value.afterSeq || 0 });
+      if (!rows.length) continue;
+      const prepared = await this.memory.blocks.prepare(rows.filter(r => !SECRET.test(r.value.content)), { signal, allowModel: true, reserveModelCall: s => this.reserveModelCall(s) });
+      if (prepared.status !== 'done') return prepared.status;
+      await this.memory.serial(async () => {
+        if (signal.aborted || generation !== this.memory.generation) throw ABORTED;
+        await this.memory.write([{ id: rid, kind: 'state', ts: 0, ...partition, value: { afterSeq: rows.at(-1).ingestionSeq, sources: [] } }], this.memory.epoch, { notify: false });
+      });
+      if (rows.length === 128) return 'continue';
     }
     return 'done';
   }
@@ -446,7 +502,7 @@ class MemoryMaintenance {
     this.dozeDirty = false;
     this.publish({ stage: 'doze' });
     if (!this.compression) return 'done';
-    const result = await this.compression.run({ signal, canRun: details => this.permitted(details),
+    const result = await this.compression.run({ signal, force: this.requestSources.get(this.activeMode) === 'manual', canRun: details => this.permitted(details),
       reserveModelCall: budgetSignal => this.reserveModelCall(budgetSignal) });
     this.pauseNote = result.note || '';
     this.publish({ processed: (this.statusValue.processed || 0) + (result.processed || 0), versions: result.versions });
@@ -480,15 +536,16 @@ class MemoryMaintenance {
   }
 
   async pendingMessages() {
-    let users = 0, any = false;
+    let count = 0, any = false;
     for (const partition of PARTITIONS) {
       const state = await this.readPartitionState(partition.domain, partition.visibilityFloor);
-      const rows = await this.memory.query('message', 200, { scene: null, ...partition, sort: 'ingestion', order: 'asc',
+      const rows = await this.memory.query('message', Math.max(1, 50 - count), { scene: null, ...partition, sort: 'ingestion', order: 'asc',
         afterSeq: state?.value?.watermark?.ingestionSeq || 0 });
       any ||= rows.length > 0;
-      users += rows.filter(row => row.value.role === 'user').length;
+      count += rows.length;
+      if (count >= 50) break;
     }
-    return { any, users };
+    return { any, count };
   }
 
   async checkDue(now = this.clock()) {
@@ -502,10 +559,11 @@ class MemoryMaintenance {
       const date = this.localDayKey(now), hour = new Date(now).getHours();
       const pending = await this.pendingMessages();
       let queued = false;
-      if (this.automaticRetryAfter && ['doze', 'dream', 'deepdream'].includes(schedule?.value?.retryMode)) {
+      if (this.automaticRetryAfter && ['blocks', 'doze', 'dream', 'deepdream'].includes(schedule?.value?.retryMode)) {
         queued = this.request(schedule.value.retryMode, { automatic: true }).ok;
       }
-      if (pending.users >= 100 || (hour >= 4 && schedule?.value?.dreamDate !== date && pending.any)) {
+      if (pending.count >= 50 || (hour >= 4 && schedule?.value?.dreamDate !== date && pending.any)) {
+        if (hour >= 4 && schedule?.value?.dreamDate !== date) this.forceDream = true;
         queued = this.request('dream', { automatic: true }).ok || queued;
       }
       if (hour >= 5 && schedule?.value?.deepdreamDate !== date) queued = this.request('deepdream', { automatic: true }).ok || queued;
@@ -518,7 +576,7 @@ class MemoryMaintenance {
       if (this.closed || this.controller?.signal.aborted) throw ABORTED;
       const existing = await this.readDailySchedule(), now = this.clock();
       const value = { ...(existing?.value || {}), lifecycleVersion: 3, lastSuccessAt: now, retryAfter: 0, retryMode: null, sources: [] };
-      if (mode !== 'doze' && new Date(now).getHours() >= 4) value.dreamDate = this.localDayKey(now);
+      if (['dream', 'deepdream'].includes(mode) && new Date(now).getHours() >= 4) value.dreamDate = this.localDayKey(now);
       if (mode === 'deepdream' && new Date(now).getHours() >= 5) value.deepdreamDate = this.localDayKey(now);
       await this.memory.write([{ id: SCHEDULE_ID, kind: 'state', ts: 0, updatedAt: now, domain: 'private', visibilityFloor: 2, value }], this.memory.epoch);
     });

@@ -1,4 +1,5 @@
 'use strict';
+const actors = require('./message-identity');
 const crypto = require('node:crypto');
 const { containsSecret } = require('./conversation-input');
 const { readRecords, snapshotsOf } = require('./memory-evidence');
@@ -23,12 +24,12 @@ async function rememberRequest(memory, intent, { userRecord, scene = memory.scen
     const current = () => !signal?.aborted && isCurrent() && generation === memory.generation && sceneEpoch === memory.sceneEpoch && scene === memory.scene();
     if (!current() || !memory.getSettings().enabled || !userRecord?.id) throw new Error('本轮记忆请求已失效');
     const request = (await readRecords(memory, [userRecord.id], { scene }))[0];
-    if (!request || request.kind !== 'message' || request.value.role !== 'user' || !explicitRequest(request.value.content))
+    if (!request || request.kind !== 'message' || !actors.isOwner(request.value) || !explicitRequest(request.value.content))
       return { ok: false, text: '如果希望我长期保存，请明确告诉我要记住什么。' };
     const recent = await memory.query('message', 80, { scene, sort: 'ingestion' });
     const sources = [request];
     for (const quote of intent.quotes) {
-      const matches = recent.filter(r => (intent.action === 'learn_experience' || r.value.role === 'user') && r.value.content.includes(quote));
+      const matches = recent.filter(r => (intent.action === 'learn_experience' || actors.isOwner(r.value)) && r.value.content.includes(quote));
       // Repeated identical quotes are safe only within the same partition and text.
       if (!matches.length || new Set(matches.map(r => `${r.domain}:${r.visibilityFloor}:${r.value.content}`)).size > 1)
         return { ok: false, text: '这段内容的来源还不够明确，请告诉我具体要记住哪一条。' };
@@ -40,7 +41,7 @@ async function rememberRequest(memory, intent, { userRecord, scene = memory.scen
     if ((await readRecords(memory, [rid], { scene })).length) return { ok: true, duplicate: true, text: '这条已经记下了。', id: rid };
     const same = (await memory.search(intent.content, ['memory'], 20, scope)).find(r => r.value.content === intent.content && r.value.sources.includes(request.id));
     if (same && intent.action === 'remember') return { ok: true, duplicate: true, text: '已经记住了。', id: same.id };
-    const evidence = unique.find(r => r.value.role === 'user' && intent.quotes.some(q => r.value.content.includes(q))) || request;
+    const evidence = unique.find(r => actors.isOwner(r.value) && intent.quotes.some(q => r.value.content.includes(q))) || request;
     const quote = intent.quotes.find(q => evidence.value.content.includes(q)) || request.value.content.slice(0, 500);
     const experience = intent.action === 'learn_experience';
     const value = tagged({ content: intent.content, origin: experience ? 'user-experience-v1' : 'user-statement',

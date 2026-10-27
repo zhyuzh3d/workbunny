@@ -7,7 +7,8 @@ const vc = require('./vault-crypto');
 const { timeContext, elapsedLabel } = require('./companion-time');
 const scopes = require('./memory-scope');
 const { containsSecret } = require('./conversation-input');
-const { recentRounds } = require('./recent-rounds');
+const actors = require('./message-identity');
+const { recentMessages } = require('./recent-rounds');
 const { CompanionAffect } = require('./companion-affect');
 const { factFromStatement, factFromMemory, keysForQuestion } = require('./user-facts');
 const knowledge = require('./knowledge-records');
@@ -143,6 +144,7 @@ class MemoryService {
     this.extracting = false; this.extractTimer = null; this.lastExtractCount = 0;
     this.userMessagesSeen = 0; this.moodSourceId = null;
     this.sceneEpoch = 0;
+    this.blocks = new (require('./message-blocks').MessageBlocks)({ memory: this, clock });
     this.knowledge = createMemoryKnowledge({ memory: this, clock });
     this.experiences = createExperienceMemory({ memory: this, clock });
     this.affect = new CompanionAffect({ clock });
@@ -171,7 +173,7 @@ class MemoryService {
         this.moodSourceId = typeof moodSourceId === 'string' ? moodSourceId : null;
         if (this.moodSourceId) {
           const source = (await this.db.request('get', { ids: [this.moodSourceId] })).rows[0];
-          if (!source || source.kind !== 'message' || this.decode(source).value.role !== 'user') {
+          if (!source || source.kind !== 'message' || !actors.isOwner(this.decode(source).value)) {
             this.moodSourceId = null;
             this.state = { ...this.state, mood: '平静', updatedAt: this.clock() };
             await this.saveState();
@@ -196,7 +198,7 @@ class MemoryService {
     this.recent = [];
     if (this.ready) {
       await this.tail;
-      const rows = conversationMessages(await this.query('message', 80, { scene, sort: 'ingestion' })).reverse();
+      const rows = conversationMessages(await this.query('message', 80, { scene, sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse();
       if (token === this.sceneEpoch) this.recent = rows;
     }
   }
@@ -207,6 +209,8 @@ class MemoryService {
     return { id: record.id, kind: record.kind, ts: record.ts, updatedAt: record.updatedAt || record.ts, state: record.state || 'active', expiresAt: record.expiresAt || null,
       ...scope, ...(restoreSequence ? { ingestionSeq: record.ingestionSeq } : {}), body: vc.seal(this.key, { ...record.value, _scopeV1: scope }, record.id + ':' + record.kind),
       tokens: vc.tokenKeys(this.key, knowledge.markersOf(record).join(' ') + ' ' +
+        (record.kind === 'message' && !actors.isOwner(record.value) && !actors.isBunny(record.value) ? 'bunny_external_message ' : '') +
+        (record.kind === 'state' && record.value.origin === 'message-block-v1' ? 'bunny_message_block ' : '') +
         (record.kind === 'memory' && record.value.origin === 'deepdream-merged-v1' ? 'bunny_memory_merged ' : '') +
         (record.kind === 'state' && ['context-head-v2', 'context-current-v2'].includes(record.value.origin) ? 'bunny_context_head ' : '') +
         (record.kind === 'memory' && record.value.origin === 'user-reviewed-doubt' && Array.isArray(record.value.supersedes) ? record.value.supersedes.slice(0, 12).map(replacementMarker).join(' ') + ' ' : '') +
@@ -303,14 +307,16 @@ class MemoryService {
   }
   addMessage(role, content, details = {}) {
     if (containsSecret(content)) return Promise.reject(new Error('普通对话不能保存密码或密钥'));
-    if (!this.getSettings().enabled || !['user', 'assistant'].includes(role) || !String(content || '').trim()) return Promise.resolve(null);
+    if (!this.getSettings().enabled || !String(content || '').trim()) return Promise.resolve(null);
+    content = actors.validateText(content);
+    const meta = actors.identity(role, details); role = meta.role;
     const generation = this.generation;
     const scene = scopes.normalizeScene(details?.scene, this.scene());
     return this.serial(async () => {
       if (generation !== this.generation) return null;
       const safeDetails = details && typeof details === 'object' ? details : {};
       let sources = [];
-      if (role === 'assistant' && safeDetails.sources !== undefined) {
+      if (!actors.isOwner(meta) && safeDetails.sources !== undefined) {
         if (!Array.isArray(safeDetails.sources) || safeDetails.sources.length > 200 || safeDetails.sources.some(source => typeof source !== 'string' || !source || source.length > 256)) {
           throw new Error('assistant 来源数量或格式不合法');
         }
@@ -320,33 +326,36 @@ class MemoryService {
           if (existing.rows.length !== sources.length) throw new Error('对话来源已删除或不存在');
         }
       }
-      const ordinal = role === 'user' ? this.userMessagesSeen + 1 : undefined;
+      const ordinal = actors.isOwner(meta) ? this.userMessagesSeen + 1 : undefined;
       const recordId = id();
+      const turnId = safeDetails.turnId || (actors.isOwner(meta) ? recordId : actors.isBunny(meta) ? this.recent.filter(r => actors.isOwner(r.value)).at(-1)?.value.turnId : undefined);
       const record = { id: recordId, kind: 'message', ts: this.clock(), domain: details.domain ?? scene,
         ...(details.visibilityFloor !== undefined ? { visibilityFloor: details.visibilityFloor } : {}), value: {
-        role, content: clipped(content, 12000),
-        turnId: safeDetails.turnId || (role === 'user' ? recordId : this.recent.filter(r => r.value.role === 'user').at(-1)?.value.turnId),
+        ...meta, content,
+        ...(turnId ? { turnId } : {}),
         ...(role === 'assistant' && safeDetails.delivery === 'generated' ? { delivery: 'generated' } : {}),
         ...(role === 'assistant' && Array.isArray(safeDetails.webSources) ? { webSources: safeDetails.webSources.slice(0, 6)
           .flatMap(item => { const url = require('./workbuddy-search').publicURL(item?.url);
             return url && typeof item.title === 'string' ? [{ url, title: item.title.slice(0, 180) }] : []; }) } : {}),
-        ...(ordinal ? { userOrdinal: ordinal } : {}), sources: role === 'assistant' ? sources : [],
+        ...(ordinal ? { userOrdinal: ordinal } : {}), sources: actors.isOwner(meta) ? [] : sources,
       } };
       await this.write([record]); if (scopes.canRead(this.scene(), record)) this.recent.push(record); this.recent = this.recent.slice(-80);
-      if (role === 'user') {
+      if (actors.isOwner(meta)) {
         this.userMessagesSeen = ordinal;
         await this.ruleMemory(record);
         this.updateMood(content, record.id, record);
         await this.saveState();
-        this.scheduleExtraction();
       }
+      this.scheduleExtraction();
       return record;
     });
   }
   addMessageOnce(recordId, role, content, details = {}) {
     if (containsSecret(content)) return Promise.reject(new Error('普通对话不能保存密码或密钥'));
-    if (!['user', 'assistant'].includes(role) || typeof recordId !== 'string' || !recordId || recordId.length > 256 ||
+    if (typeof recordId !== 'string' || !recordId || recordId.length > 256 ||
         typeof content !== 'string' || !content.trim()) return Promise.reject(new Error('幂等消息格式不合法'));
+    content = actors.validateText(content);
+    const meta = actors.identity(role, details); role = meta.role;
     const safeDetails = details && typeof details === 'object' && !Array.isArray(details) ? details : {};
     if (Object.hasOwn(safeDetails, 'privacyEpoch') && !Number.isSafeInteger(safeDetails.privacyEpoch)) {
       return Promise.reject(new Error('消息隐私版本不合法'));
@@ -355,7 +364,7 @@ class MemoryService {
     return this.serial(async () => {
       if (generation !== this.generation) throw new Error('消息来源的隐私版本已变更');
       const sources = [];
-      if (role === 'assistant' && safeDetails.sources !== undefined) {
+      if (!actors.isOwner(meta) && safeDetails.sources !== undefined) {
         if (!Array.isArray(safeDetails.sources) || safeDetails.sources.length > 200 ||
             safeDetails.sources.some(source => typeof source !== 'string' || !source || source.length > 256)) {
           throw new Error('assistant 来源数量或格式不合法');
@@ -366,16 +375,16 @@ class MemoryService {
           if (existing.rows.length !== sources.length) throw new Error('对话来源已删除或不存在');
         }
       }
-      const value = { role, content: clipped(content, 12000),
+      const value = { ...meta, content,
         ...(role === 'assistant' && ['generated', 'task-receipt'].includes(safeDetails.delivery) ? { delivery: safeDetails.delivery } : {}),
-        ...(role === 'user' ? { userOrdinal: this.userMessagesSeen + 1 } : {}),
-        sources: role === 'assistant' ? sources : [] };
+        ...(actors.isOwner(meta) ? { userOrdinal: this.userMessagesSeen + 1 } : {}),
+        sources: actors.isOwner(meta) ? [] : sources };
       const existing = (await this.db.request('get', { ids: [recordId] })).rows[0];
       if (existing) {
         if (existing.kind !== 'message') throw new Error('幂等消息 ID 已被其他记录占用');
         const prior = this.decode(existing).value;
         const sameSources = JSON.stringify([...(prior.sources || [])].sort()) === JSON.stringify([...value.sources].sort());
-        if (prior.role !== value.role || prior.content !== value.content || prior.delivery !== value.delivery || !sameSources) {
+        if (actors.character(prior) !== meta.characterId || prior.role !== value.role || prior.content !== value.content || prior.delivery !== value.delivery || !sameSources) {
           throw new Error('幂等消息 ID 已存在，但内容或来源不一致');
         }
         return { record: { ...existing, body: undefined, value: prior }, inserted: false };
@@ -384,17 +393,18 @@ class MemoryService {
         ...(safeDetails.visibilityFloor !== undefined ? { visibilityFloor: safeDetails.visibilityFloor } : {}), value };
       await this.write([record]);
       if (scopes.canRead(this.scene(), record)) this.recent.push(record); this.recent = this.recent.slice(-80);
-      if (role === 'user') {
+      if (actors.isOwner(meta)) {
         this.userMessagesSeen = value.userOrdinal;
         await this.ruleMemory(record);
         this.updateMood(content, record.id, record);
         await this.saveState();
-        this.scheduleExtraction();
       }
+      this.scheduleExtraction();
       return { record, inserted: true };
     });
   }
   async ruleMemory(source) {
+    if (!actors.isOwner(source.value)) return;
     const text = source.value.content;
     const refusal = /(?:别|不要|不用|不想|无需|不必).{0,12}(?:记住|记录|保存|存下来)/.test(text);
     const englishRefusal = /\b(?:do\s+not|don['’]t|never)\s+(?:save|remember)\b/i.test(text);
@@ -445,7 +455,7 @@ class MemoryService {
           !value.conflictWith.length || value.conflictWith.length > 2 || value.conflictWith.some(id => typeof id !== 'string' || !value.sources.includes(id))) continue;
         const ids = [...new Set([value.evidenceSourceId, ...value.conflictWith].filter(Boolean))];
         const rows = (await this.db.request('get', { ids, scene })).rows.map(row => this.decode(row));
-        const evidence = rows.find(row => row.id === value.evidenceSourceId && row.kind === 'message' && row.value.role === 'user');
+        const evidence = rows.find(row => row.id === value.evidenceSourceId && row.kind === 'message' && actors.isOwner(row.value));
         const parents = rows.filter(row => value.conflictWith.includes(row.id) && row.kind === 'memory' && row.state === 'active' &&
           row.value.status === 'confirmed' && row.value.key === key && row.domain === record.domain && row.visibilityFloor === record.visibilityFloor);
         if (!evidence || !value.sources.includes(evidence.id) || typeof value.evidence !== 'string' || !evidence.value.content.includes(value.evidence) || parents.length !== value.conflictWith.length) continue;
@@ -469,7 +479,7 @@ class MemoryService {
         typeof value.evidenceSourceId !== 'string' || !Array.isArray(value.sources) || !Array.isArray(value.conflictWith) || !value.conflictWith.length || value.conflictWith.length > 2 ||
         value.conflictWith.some(id => typeof id !== 'string' || !value.sources.includes(id)) || !factFromMemory(value)) throw new Error('这条记录不是可采用的用户说法');
       const rows = (await this.db.request('get', { ids: [value.evidenceSourceId, ...value.conflictWith], scene })).rows.map(row => this.decode(row));
-      const evidence = rows.find(row => row.id === value.evidenceSourceId && row.kind === 'message' && row.value.role === 'user');
+      const evidence = rows.find(row => row.id === value.evidenceSourceId && row.kind === 'message' && actors.isOwner(row.value));
       const parents = rows.filter(row => value.conflictWith.includes(row.id) && row.kind === 'memory' && row.state === 'active' &&
         row.value.status === 'confirmed' && row.value.key === value.key && row.domain === selected.domain && row.visibilityFloor === selected.visibilityFloor);
       if (!evidence || parents.length !== value.conflictWith.length || !value.sources.includes(evidence.id) || typeof value.evidence !== 'string' || !evidence.value.content.includes(value.evidence)) throw new Error('对照来源已变化，请重新核对');
@@ -578,6 +588,8 @@ class MemoryService {
     }
     await this.tail;
     const compression = !internal && this.compression ? await this.compression.snapshot(scene) : null;
+    const visibleRecent = conversationMessages(await this.query('message', 80, { scene, sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse();
+    const recentIds = new Set(recentMessages(visibleRecent, { count: this.getSettings().recentMessages || 20, budget: Math.floor(charBudget * .5) }).rows.map(row => row.id));
     let memories = [], episodes = [], doubts = [], tentative = [];
     const knowledgeContext = !internal ? await this.knowledge.context(userText, { scene, budget: 1000 }) : { text: '', sourceIds: [], suppressedIds: [] };
     if (!internal) {
@@ -593,7 +605,7 @@ class MemoryService {
       const seen = new Set();
       const effective = await this.knowledge.projectMemories([...found.filter(r => r.kind === 'memory'), ...pinned, ...dated], { scene });
       tentative = effective.filter(r => r.kind === 'memory' && r.value.status === 'pending' &&
-        ['dream-candidate-v3', 'doze-candidate-v2', 'deepdream-merged-v1'].includes(r.value.origin) && (r.score || 0) > 0 &&
+        ['dream-candidate-v3', 'dream-observation-v1', 'doze-candidate-v2', 'deepdream-merged-v1'].includes(r.value.origin) && (r.score || 0) > 0 &&
         !doubtfulKeys.has(r.value.key) && (!r.expiresAt || r.expiresAt > now)).slice(0, 3);
       memories = effective
         .filter(r => r.kind === 'memory' && r.value.status === 'confirmed' && !doubtfulKeys.has(r.value.key) && (!r.expiresAt || r.expiresAt > now) && !seen.has(r.id) && seen.add(r.id))
@@ -605,8 +617,8 @@ class MemoryService {
       tentative = tentative.filter(row => !suppressed.has(row.id) && !memories.some(m => m.value.content === row.value.content));
       const shownMemorySources = new Set(memories.flatMap(r => r.value.sources || []));
       const olderSegments = this.compression ? (await this.search(userText, ['state'], 8,
-        { scene, domain: scene, visibilityFloor: scopes.rank(scene), excludedMarkers: [knowledge.marker('all'), 'bunny_context_head'] })).filter(r => r.value.origin === 'context-segment-v1' && r.value.scene === scene && safeModelRow(r)) : [];
-      episodes = [...found, ...olderSegments].filter(r => r.kind !== 'memory' && r.value.source !== 'user-reviewed' && !this.recent.some(x => x.id === r.id) && !shownMemorySources.has(r.id))
+        { scene, domain: scene, visibilityFloor: scopes.rank(scene), excludedMarkers: [knowledge.marker('all'), 'bunny_context_head', 'bunny_message_block'] })).filter(r => r.value.origin === 'context-segment-v1' && r.value.scene === scene && safeModelRow(r)) : [];
+      episodes = [...found, ...olderSegments].filter(r => r.kind !== 'memory' && r.value.source !== 'user-reviewed' && !recentIds.has(r.id) && !shownMemorySources.has(r.id))
         .sort((a, b) => (b.score || 0) - (a.score || 0) || b.ts - a.ts).slice(0, 5);
     }
     const affectIds = [...new Set(this.affect.serialize(now).events.map(event => event.sourceId))];
@@ -619,7 +631,6 @@ class MemoryService {
     const styles = ['这轮先直说重点，语气自然。', '这轮留一点轻松感，但不强行开玩笑。', '这轮温和简洁，避免复用最近的开头。'].filter(s => s !== this.state.lastStyle);
     const style = styles[Math.min(styles.length - 1, Math.floor(this.random() * styles.length))];
     this.state.lastStyle = style;
-    const visibleRecent = conversationMessages(await this.query('message', 80, { scene, sort: 'ingestion' })).reverse();
     const latest = visibleRecent.at(-1);
     const latestLine = latest ? (latest.value.timeUnknown ? '最近一条共同对话来自旧记录，具体时间未知。' : `最近一条共同对话在${elapsedLabel(now - latest.ts)}。`) : '这是新的对话起点，没有已知共同经历。';
     const fixedParts = [latestLine, `${expression}${style}`,
@@ -647,7 +658,7 @@ class MemoryService {
         const reviewTime = r.value.resolvedAt ?? r.value.correctedAt;
         const review = ['user-reviewed', 'user-reviewed-conflict', 'user-reviewed-doubt'].includes(r.value.origin) && r.value.status === 'confirmed'
           ? ` 用户已核对${Number.isSafeInteger(reviewTime) ? '于' + new Date(reviewTime).toISOString() : ''}，作为当前有效信息${r.value.resolvedFrom?.length ? '并替代此前不同说法' : ''}` : '';
-        const line = `[${r.id.slice(0, 8)} ${new Date(r.ts).toISOString()} ${r.value.role || r.value.memoryKind || '摘要'}${review}] ${JSON.stringify(clipped(textOf(r.value), r.kind === 'message' ? 350 : 600))}`;
+        const line = `[${r.id.slice(0, 8)} ${new Date(r.ts).toISOString()} ${r.value.role ? actors.character(r.value) : r.value.memoryKind || '摘要'}${r.value.evidenceCharacter ? ' 来源:' + r.value.evidenceCharacter : ''}${review}] ${JSON.stringify(clipped(textOf(r.value), r.kind === 'message' ? 350 : 600))}`;
         const cost = line.length + (section.length ? 1 : heading.length + 2);
         if (cost > historyRemaining) break;
         historyRemaining -= cost;
@@ -688,14 +699,19 @@ class MemoryService {
     }
     let remaining = charBudget - used(), messages = [];
     const source = visibleRecent.length ? visibleRecent : recent.filter(r => scopes.canRead(scene, r)).map(r => ({ id: r.id, value: r }));
-    const selected = recentRounds(source, { rounds: this.getSettings().recentRounds || 8, budget: remaining });
-    for (const r of selected.rows) { messages.push({ role: r.value.role, content: r.value.content }); includeSource(r.id); }
+    const selected = recentMessages(source, { count: this.getSettings().recentMessages || 20, budget: remaining });
+    for (const r of selected.rows) { messages.push(actors.inputRow(r)); includeSource(r.id); }
     remaining -= selected.used;
-    return { text: chunks.join('\n'), messages, epoch, scene, compressionVersion: compression?.version || 0, recalled: memories.length + episodes.length, used: charBudget - remaining, sourceIds: [...includedSources], references };
+    const externalRows = (await this.query('message', 80, { scene, sort: 'ingestion', excludedMarkers: [], requiredMarkers: ['bunny_external_message'] })).reverse().filter(safeModelRow);
+    const preparedExternal = this.blocks ? await this.blocks.prepare(externalRows) : { units: externalRows.map(actors.inputRow) };
+    const externalMessages = (preparedExternal.units || []).slice(-8);
+    for (const row of externalMessages) for (const id of row.sourceIds || [row.id]) includeSource(id);
+    return { externalMessages, text: chunks.join('\n'), messages, epoch, scene, compressionVersion: compression?.version || 0, recalled: memories.length + episodes.length, used: charBudget - remaining, sourceIds: [...includedSources], references };
   }
   scheduleExtraction() {
     if (this.maintenance) {
       if (!this.getSettings().enabled || !this.maintenance.allowAutomatic()) return;
+      this.maintenance.request('blocks', { automatic: true });
       this.maintenance.request('doze', { automatic: true });
       return;
     }
@@ -710,11 +726,11 @@ class MemoryService {
     await this.tail; this.check();
     const batch = this.recent.slice(-12).filter(r => !SECRET.test(r.value.content)), epoch = this.epoch, generation = this.generation;
     const userCount = this.userMessagesSeen;
-    if (batch.filter(x => x.value.role === 'user').length < 4) return;
+    if (batch.filter(x => actors.isOwner(x.value)).length < 4) return;
     this.extracting = true;
     const controller = new AbortController(); this.extractionAbort = controller;
     try {
-      const candidates = await this.extract(batch.map(r => ({ id: r.id, role: r.value.role, content: r.value.content, time: r.ts })), { signal: controller.signal });
+      const candidates = await this.extract(batch.map(actors.inputRow), { signal: controller.signal });
       if (controller.signal.aborted) return;
       if (!candidates || generation !== this.generation || epoch !== this.epoch) return;
       await this.serial(async () => {
@@ -723,7 +739,7 @@ class MemoryService {
         if (existing.length !== batch.length) return;
         const records = [];
         for (const m of (Array.isArray(candidates.memories) ? candidates.memories : []).slice(0, 6)) {
-          const source = batch.find(r => r.id === m.sourceId && r.value.role === 'user');
+          const source = batch.find(r => r.id === m.sourceId && actors.isOwner(r.value));
           if (!source || typeof m.evidence !== 'string' || m.evidence.length < 3 || !source.value.content.includes(m.evidence) || typeof m.content !== 'string' || !m.content.trim() || m.content.length > 400 || SECRET.test(m.content)) continue;
           // Model inference is a reviewable candidate, never silently a confirmed user fact.
           if ((await this.search(m.content, ['memory'], 8)).some(r => r.value.content === m.content)) continue;
@@ -731,12 +747,12 @@ class MemoryService {
         }
         // Compression uses original excerpts, not recursive model prose; every line retains a source.
         const excerpts = Array.isArray(candidates.excerpts) && candidates.excerpts.length ? candidates.excerpts
-          : batch.filter(r => r.value.role === 'user').map(r => ({ sourceId: r.id, quote: r.value.content.slice(0, 180) }));
+          : batch.filter(r => actors.isOwner(r.value)).map(r => ({ sourceId: r.id, quote: r.value.content.slice(0, 180) }));
         const lines = [], sources = [];
         for (const x of excerpts.slice(0, 8)) {
           const source = batch.find(r => r.id === x.sourceId);
           if (!source || typeof x.quote !== 'string' || x.quote.length < 3 || x.quote.length > 220 || !source.value.content.includes(x.quote)) continue;
-          lines.push(`${source.value.role === 'user' ? '用户说' : '助手答'}：${x.quote}`); sources.push(source.id);
+          lines.push(`${actors.isOwner(source.value) ? '用户说' : actors.isBunny(source.value) ? '助手答' : actors.character(source.value)}：${x.quote}`); sources.push(source.id);
         }
         if (lines.length) records.push({ id: id(), kind: 'summary', ts: this.clock(), value: { content: lines.join('\n'), sources: [...new Set(sources)], from: batch[0].ts, to: batch.at(-1).ts, origin: 'source-excerpts-v1' } });
         if (records.length) await this.write(records, epoch);
@@ -784,6 +800,27 @@ class MemoryService {
       compression: { version: snapshot?.version || 0, updatedAt: snapshot?.updatedAt || null, coveredThrough: snapshot?.coveredThrough || null },
       state: { mood: '平静', energy: this.state.energy, warmth: this.state.warmth } };
   }
+  async rewindDreamFor(rows) {
+    const earliest = new Map();
+    for (const raw of rows) {
+      const row = raw.value ? raw : this.decode(raw);
+      if (row.kind !== 'message' || !Number.isSafeInteger(row.ingestionSeq)) continue;
+      const key = `${row.domain}:${row.visibilityFloor}`;
+      if (!earliest.has(key) || row.ingestionSeq < earliest.get(key).ingestionSeq) earliest.set(key, row);
+    }
+    for (const row of earliest.values()) {
+      const rid = `maintenance:${row.domain}:${row.visibilityFloor}`;
+      const raw = (await this.db.request('get', { ids: [rid] })).rows[0];
+      if (!raw) continue;
+      const checkpoint = this.decode(raw);
+      if (Math.max(checkpoint.value.watermark?.ingestionSeq || 0, checkpoint.value.deferredReadSeq || 0) < row.ingestionSeq) continue;
+      const previous = (await this.query('message', 1, { scene: null, domain: row.domain, visibilityFloor: row.visibilityFloor,
+        sort: 'ingestion', order: 'desc', beforeSeq: Math.min(row.ingestionSeq, (checkpoint.value.watermark?.ingestionSeq ?? (row.ingestionSeq - 1)) + 1) }))[0];
+      await this.write([{ id: rid, kind: 'state', ts: 0, updatedAt: this.clock(), domain: row.domain, visibilityFloor: row.visibilityFloor,
+        value: { job: 'dream', watermark: previous ? { ingestionSeq: previous.ingestionSeq, id: previous.id, ts: previous.ts } : null,
+          rewindReason: 'source-forgotten-or-corrected', sources: [] } }], this.epoch, { notify: false });
+    }
+  }
   updateMemory(recordId, content) {
     this.cancelExtraction(); this.generation++; clearTimeout(this.extractTimer); this.extractTimer = null;
     return this.serial(async () => {
@@ -799,17 +836,18 @@ class MemoryService {
       const sourceIds = [...new Set(Array.isArray(r.value.sources) ? r.value.sources : [])];
       const sourceRows = sourceIds.length ? (await this.db.request('get', { ids: sourceIds })).rows : [];
       const originalMessages = evidenceMessages(r, sourceRows);
-      const forgottenUserSources = originalMessages.filter(x => this.decode(x).value.role === 'user').map(x => x.id);
-      let removed = 0;
+      const forgottenUserSources = originalMessages.filter(x => actors.isOwner(this.decode(x).value)).map(x => x.id);
+      let removed = 0; const rewindHints = [];
       const roots = originalMessages.length ? originalMessages.map(x => x.id) : [recordId];
       for (const rootId of roots) {
         const result = await this.db.request('remove', { epoch: this.epoch, id: rootId });
-        this.epoch = result.epoch; removed += result.removed;
+        this.epoch = result.epoch; removed += result.removed; rewindHints.push(...(result.rewind || []));
       }
       if ((await this.db.request('get', { ids: [recordId] })).rows.length) {
         const result = await this.db.request('remove', { epoch: this.epoch, id: recordId });
-        this.epoch = result.epoch; removed += result.removed;
+        this.epoch = result.epoch; removed += result.removed; rewindHints.push(...(result.rewind || []));
       }
+      await this.rewindDreamFor([...originalMessages, ...rewindHints.map(item => ({ ...item, kind: 'message', value: {} }))]);
       await this.resetMoodForForgottenSources(forgottenUserSources);
       const sourceId = id();
       await this.write([{ id: sourceId, kind: 'message', ts, domain: r.domain, visibilityFloor: r.visibilityFloor, value: { role: 'user', content: corrected, source: 'user-reviewed', sources: [] } }], this.epoch, { notify: false });
@@ -819,7 +857,7 @@ class MemoryService {
         ...(stableCorrection ? { canonicalValue: stableCorrection.canonicalValue, ...(stableCorrection.anniversary ? { anniversary: stableCorrection.anniversary } : {}) } : {}),
         importance: r.value.importance || 0.7, status: 'confirmed', evidence: corrected,
         ...(r.value.protected ? { protected: r.value.protected } : {}), ...(r.value.pinned ? { pinned: r.value.pinned } : {}),
-        sources: [sourceId], evidenceSourceId: sourceId, origin: 'user-reviewed', correctedAt: ts,
+        sources: [sourceId], evidenceSourceId: sourceId, ...(r.value.memoryKind === 'observation' ? { evidenceCharacter: 'owner' } : {}), origin: 'user-reviewed', correctedAt: ts,
       } }], this.epoch, { notify: false });
       this.recent = conversationMessages(await this.query('message', 40)).reverse();
       await this.notifyChange();
@@ -835,19 +873,20 @@ class MemoryService {
       if (decoded?.value.origin === 'deepdream-merged-v1' && !(await verifySnapshots(this, decoded.value.analysisSnapshots, { scene: this.scene() })).ok) throw new Error('归并依据已变化，请刷新后再删除');
       const sourceIds = decoded?.kind === 'memory' && Array.isArray(decoded.value.sources) ? [...new Set(decoded.value.sources)] : [];
       const sourceRows = sourceIds.length ? (await this.db.request('get', { ids: sourceIds })).rows : [];
-      const originalMessages = decoded?.kind === 'memory' ? evidenceMessages(decoded, sourceRows) : [];
-      const forgottenUserSources = originalMessages.filter(x => this.decode(x).value.role === 'user').map(x => x.id);
-      if (decoded?.kind === 'message' && decoded.value.role === 'user') forgottenUserSources.push(decoded.id);
+      const originalMessages = decoded?.kind === 'memory' ? evidenceMessages(decoded, sourceRows) : decoded?.kind === 'message' ? [row] : [];
+      const forgottenUserSources = originalMessages.filter(x => actors.isOwner(this.decode(x).value)).map(x => x.id);
+      if (decoded?.kind === 'message' && actors.isOwner(decoded.value)) forgottenUserSources.push(decoded.id);
       const roots = decoded?.kind === 'memory' && originalMessages.length ? originalMessages.map(x => x.id) : [recordId];
-      let removed = 0;
+      let removed = 0; const rewindHints = [];
       for (const rootId of [...new Set(roots)]) {
         const result = await this.db.request('remove', { epoch: this.epoch, id: rootId });
-        this.epoch = result.epoch; removed += result.removed;
+        this.epoch = result.epoch; removed += result.removed; rewindHints.push(...(result.rewind || []));
       }
       if (decoded?.kind === 'memory' && (await this.db.request('get', { ids: [recordId] })).rows.length) {
         const result = await this.db.request('remove', { epoch: this.epoch, id: recordId });
-        this.epoch = result.epoch; removed += result.removed;
+        this.epoch = result.epoch; removed += result.removed; rewindHints.push(...(result.rewind || []));
       }
+      await this.rewindDreamFor([...originalMessages, ...rewindHints.map(item => ({ ...item, kind: 'message', value: {} }))]);
       await this.resetMoodForForgottenSources(forgottenUserSources);
       this.recent = conversationMessages(await this.query('message', 40)).reverse();
       await this.notifyChange();
@@ -915,7 +954,7 @@ class MemoryService {
         this.moodSourceId = typeof moodSourceId === 'string' ? moodSourceId : null;
         if (this.moodSourceId) {
           const source = (await this.db.request('get', { ids: [this.moodSourceId] })).rows[0];
-          if (!source || source.kind !== 'message' || this.decode(source).value.role !== 'user') {
+          if (!source || source.kind !== 'message' || !actors.isOwner(this.decode(source).value)) {
             this.moodSourceId = null;
             this.state = { ...this.state, mood: '平静', updatedAt: this.clock() };
             await this.saveState();

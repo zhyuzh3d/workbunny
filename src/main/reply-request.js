@@ -85,23 +85,25 @@ async function requestReply({ chat, request, maxRepairs = MAX_REPAIRS, allowActi
   const deadline = clock() + totalTimeoutMs;
   const originalDelta = request.onDelta;
   const originalSentence = request.onSentence;
-  let repaired = false;
+  let repaired = false, formatRepairs = 0, contextRetried = false;
 
-  for (let attempt = 0; attempt <= repairs; attempt++) {
+  for (let attempt = 0; attempt <= repairs + 1; attempt++) {
     if (!active(request)) throwAborted();
     const remainingTimeout = deadline - clock();
     if (remainingTimeout <= 0) throw timeoutError();
-    const reminder = attempt === 0 ? BASE_REMINDER : `${BASE_REMINDER}\n${REPAIR_REMINDER}`;
+    const reminder = formatRepairs === 0 ? BASE_REMINDER : `${BASE_REMINDER}\n${REPAIR_REMINDER}`;
     const messages = cloneMessagesWithReminder(request.messages, reminder);
     let result;
     // Transport errors are allowed through unchanged and are never retried as
     // formatting failures. Only the local validator can trigger one repair.
     const options = makeChatOptions(request, messages);
+    if (contextRetried) options.budgetScale = .5;
     options.timeoutMs = Math.min(totalTimeoutMs, remainingTimeout);
     try {
       result = await chat(options);
     } catch (error) {
       if (active(request) && deadline - clock() <= 0) throw timeoutError();
+      if (active(request) && error.code === 'E_CONTEXT_WINDOW' && !contextRetried) { contextRetried = true; continue; }
       throw error;
     }
     if (!active(request)) throwAborted();
@@ -112,7 +114,7 @@ async function requestReply({ chat, request, maxRepairs = MAX_REPAIRS, allowActi
       validated = validateReply(raw, { allowActions });
     } catch (error) {
       if (error?.code !== 'E_REPLY_PROTOCOL') throw error;
-      if (attempt < repairs && active(request)) { repaired = true; continue; }
+      if (formatRepairs < repairs && active(request)) { formatRepairs++; repaired = true; continue; }
       throw protocolError();
     }
     if (!active(request)) throwAborted();
@@ -123,7 +125,7 @@ async function requestReply({ chat, request, maxRepairs = MAX_REPAIRS, allowActi
       splitter.push(validated.text);
       splitter.flush();
     }
-    return { ...result, attempts: attempt + 1, protocolVerified: true, reply: validated, repaired };
+    return { ...result, attempts: attempt + 1, protocolVerified: true, reply: validated, repaired, ...(contextRetried ? { contextRetried: true } : {}) };
   }
   throw protocolError();
 }

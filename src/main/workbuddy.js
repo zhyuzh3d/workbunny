@@ -101,6 +101,7 @@ function request(params, { signal, timeoutMs = 55000 } = {}) {
               // Do not surface raw upstream responses that may contain account data.
               const error = new Error(`WorkBuddy 账号接口返回 ${r.status}，请检查模型、账号额度或登录状态。`);
               Object.defineProperty(error, 'responseBody', { value: body });
+              if (require('./context-budget').isContextError(r.status, body)) error.code = 'E_CONTEXT_WINDOW';
               throw error;
             }
             finish(null, { body, status: r.status, headers: r.headers || {} });
@@ -259,6 +260,7 @@ function parseChatBody(body, model = 'hy3') {
   return { raw, model: usedModel, usage, finishReason, hasReasoning, ...(toolCalls?.length ? { toolCalls } : {}) };
 }
 async function chatWithTransport(opts, transport) {
+  opts = require('./context-budget').fitRequest({ ...opts, provider: 'workbuddy' });
   const { model = 'hy3', signal, onDelta, onSentence } = opts;
   const payload = chatPayload(opts);
   const r = await transport({ method: 'POST', path: '/v2/chat/completions',

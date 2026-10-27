@@ -68,7 +68,9 @@ function normalize(provider, items) {
     const name = clean(item.name || item.display_name || id);
     const label = name === id ? id : `${name} · ${id}`;
     const maxOutputTokens = Number(item.max_output_tokens || item.maxOutputTokens);
-    models.push({ id, label, thinking, ...(Number.isSafeInteger(maxOutputTokens) && maxOutputTokens > 0 ? { maxOutputTokens } : {}) });
+    const maxInputTokens = Number(item.max_input_tokens || item.maxInputTokens);
+    const contextWindow = Number(item.context_window || item.contextWindow || item.context_length || item.contextLength || maxInputTokens);
+    models.push({ id, label, thinking, ...(Number.isSafeInteger(contextWindow) && contextWindow > 0 ? { contextWindow } : {}), ...(Number.isSafeInteger(maxInputTokens) && maxInputTokens > 0 ? { maxInputTokens } : {}), ...(Number.isSafeInteger(maxOutputTokens) && maxOutputTokens > 0 ? { maxOutputTokens } : {}) });
     seen.add(id);
   }
   if (!models.length) throw new Error('当前账号没有返回可用的对话模型');

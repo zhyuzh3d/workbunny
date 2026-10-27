@@ -278,7 +278,7 @@ const TTS_ENGINES = [
 
 const DEFAULTS = {
   version: 2,
-  memory: { enabled: true, extract: true, scene: 'life', recentRounds: 8 },
+  memory: { enabled: true, extract: true, scene: 'life', recentRounds: 8, recentMessages: 20 },
   motions: { disabled: [] },
   avatar: 'D',
   buddy: { name: 'baby', ownerName: '主人', sceneProfiles: { private: '', life: '', work: '' },

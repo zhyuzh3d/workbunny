@@ -61,3 +61,21 @@ test('abandoned and superseded outcomes retain their existing semantics',t=>{
  assert.equal(e.snap.history[0].endReason,'abandoned');
  assert.deepEqual(done,[]);
 });
+test('source events capture the new task and keep an immutable full-text identity',t=>{
+ const {m,e}=fixture(t),events=[];m.on('sourceMessage',event=>events.push(event));
+ addMessage(m,e,'user','第一个任务：检查交付。',5000);
+ const first=events[0],firstTask=first.snap.task;
+ assert.equal(firstTask.userText,'第一个任务：检查交付。');
+ const original='完整原文'.repeat(4000);
+ addMessage(m,e,'assistant',original,5100);
+ assert.equal(events[1].content,original,'display clipping must not truncate the source');
+ assert.notEqual(firstTask,e.snap.task,'async ingestion must not retain the mutable live task');
+ assert.equal(firstTask.summary,'','later reports must not alter the saved event snapshot');
+ addMessage(m,e,'user','第二个任务：检查另一项。',5200);
+ assert.equal(events[2].snap.task.userText,'第二个任务：检查另一项。');
+ assert.notEqual(events[2].snap.task.messageKey,firstTask.messageKey);
+ m.handleEvent({type:'reasoning',content:'内部思考',timestamp:5300},e);
+ m.handleEvent({type:'function_call_result',content:'工具数据',timestamp:5400},e);
+ assert.equal(events.length,3,'reasoning and tool results are not conversational messages');
+ e.priming=true;addMessage(m,e,'assistant','历史回放',5500);assert.equal(events.length,3);
+});

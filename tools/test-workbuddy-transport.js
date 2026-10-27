@@ -94,7 +94,7 @@ async function testFreeMemoryExtractionUsesOneBoundedFreeCall() {
     assert.deepEqual(result, { memories: [], excerpts: [] });
     assert.equal(chatCalls, 1, 'does not hide a retry that consumes worker budget');
     assert.equal(captured.model, 'hy3');
-    assert.equal(captured.maxTokens, 8192);
+    assert.equal(captured.maxTokens, 4096);
     assert.equal(captured.thinking, 'low');
     assert.deepEqual(captured.extraBody, { reasoning_effort: 'low', response_format: { type: 'json_object' } });
   } finally { wb.request = oldRequest; wb.chat = oldChat; }

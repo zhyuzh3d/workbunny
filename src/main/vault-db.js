@@ -2,7 +2,7 @@
 
 const { spawn } = require('child_process');
 
-const MAX_LINE = 16 * 1024 * 1024;
+const MAX_LINE = 64 * 1024 * 1024;
 
 class VaultDB {
   constructor({ bin, file, timeoutMs = 30000 } = {}) {

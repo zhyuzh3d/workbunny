@@ -99,7 +99,7 @@ async function stagesAndSchedule() {
 }
 async function adaptiveExtraction() {
   const { m } = await service('adaptive');
-  for (let i = 0; i < 10; i++) await m.addMessage('user', `Adaptive extraction source message ${i}.`);
+  for (let i = 0; i < 10; i++) await m.addMessage('user', `Adaptive extraction source message ${i}.`, { conversationId: String(i % 2) });
   const lengths = [];
   const w = worker(m, { extract: async rows => {
     lengths.push(rows.length);
