@@ -1,6 +1,6 @@
 # workbunny
 
-以长期记忆维系关系的 macOS 桌面伙伴，也是替你指挥 WorkBuddy 的小秘书。产品目标见 [concept.md](concept.md)，当前版本为 **0.8.0**。
+以长期记忆维系关系的 macOS 桌面伙伴，也是替你指挥 WorkBuddy 的小秘书。产品目标见 [concept.md](concept.md)，当前版本为 **0.8.1**。
 
 直接说话或输入文字即可交代事情，例如：
 
@@ -41,6 +41,6 @@ zsh tools/package.sh
 
 ## 验证与后续
 
-[本轮Dream语义、困惑核对与经验复用](docs/workbunny-0.8.0-Dream语义与经验复用.md)；[记忆检索、规模和候选方案评估](docs/workbunny-0.4.0-记忆检索评估.md)。
+[当前对话自动联网](docs/workbunny-0.8.1-对话自动联网.md)；[Dream语义、困惑核对与经验复用](docs/workbunny-0.8.0-Dream语义与经验复用.md)；[记忆检索、规模和候选方案评估](docs/workbunny-0.4.0-记忆检索评估.md)。
 
 当前仍是持续迭代的产品。合成数据规模测试、隔离测试和本机实际操作各自说明证据范围，不将它们等同于多年陪伴质量或所有设备上的稳定性。

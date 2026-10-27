@@ -319,6 +319,9 @@ class MemoryService {
         role, content: clipped(content, 12000),
         turnId: safeDetails.turnId || (role === 'user' ? recordId : this.recent.filter(r => r.value.role === 'user').at(-1)?.value.turnId),
         ...(role === 'assistant' && safeDetails.delivery === 'generated' ? { delivery: 'generated' } : {}),
+        ...(role === 'assistant' && Array.isArray(safeDetails.webSources) ? { webSources: safeDetails.webSources.slice(0, 6)
+          .flatMap(item => { const url = require('./workbuddy-search').publicURL(item?.url);
+            return url && typeof item.title === 'string' ? [{ url, title: item.title.slice(0, 180) }] : []; }) } : {}),
         ...(ordinal ? { userOrdinal: ordinal } : {}), sources: role === 'assistant' ? sources : [],
       } };
       await this.write([record]); if (scopes.canRead(this.scene(), record)) this.recent.push(record); this.recent = this.recent.slice(-80);

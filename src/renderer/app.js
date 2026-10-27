@@ -742,6 +742,54 @@ function paintRecallButton(entries) {
   button.textContent = count ? `记忆依据 · ${count}` : '记忆依据';
 }
 
+function clearWebSources() {
+  const container = document.getElementById('webSources');
+  const links = document.getElementById('webSourceLinks');
+  if (!container || !links) return;
+  links.replaceChildren();
+  container.classList.add('hidden');
+  document.getElementById('bubble')?.classList.remove('has-web-sources');
+}
+
+function paintWebSources(event) {
+  clearWebSources();
+  if (event?.used !== true || !Array.isArray(event.sources)) return;
+  const container = document.getElementById('webSources');
+  const links = document.getElementById('webSourceLinks');
+  const bubble = document.getElementById('bubble');
+  if (!container || !links || !bubble) return;
+  const seen = new Set();
+  const sources = [];
+  for (const source of event.sources) {
+    if (!source || typeof source.title !== 'string' || typeof source.url !== 'string' || source.url.length > 2048) continue;
+    let parsed;
+    try { parsed = new URL(source.url); } catch { continue; }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || seen.has(parsed.href)) continue;
+    const title = source.title.trim().slice(0, 120);
+    if (!title) continue;
+    seen.add(parsed.href);
+    sources.push({ title, url: parsed.href });
+    if (sources.length === 3) break;
+  }
+  if (!sources.length) return;
+  for (const source of sources) {
+    const button = document.createElement('button');
+    button.className = 'web-source-link';
+    button.type = 'button';
+    button.textContent = source.title;
+    button.title = source.title;
+    button.setAttribute('aria-label', `打开参考来源：${source.title}`);
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      if (typeof pet.openWebSource !== 'function') return;
+      try { Promise.resolve(pet.openWebSource(source.url)).catch(() => {}); } catch {}
+    });
+    links.append(button);
+  }
+  container.classList.remove('hidden');
+  bubble.classList.add('has-web-sources');
+}
+
 function hideBubble() {
   bubbleController.hide();
 }
@@ -913,6 +961,7 @@ function onPetClick(e) {
 async function sendText() {
   const v = input.value.trim();
   if (!v) return;
+  clearWebSources();
   noteMaster();
   input.value = '';
   pendingHeard = '';
@@ -1279,6 +1328,7 @@ function wire() {
     switch (ev.type) {
       case 'scene':
         bubbleController.hide();
+        clearWebSources();
         paintHeard('', false); paintLive(''); paintRecallButton([]);
         break;
       case 'config':
@@ -1304,14 +1354,18 @@ function wire() {
         showBubble(ev.text);
         break;
       case 'chat':
-        if (ev.role === 'user') { noteMaster(); showBubble(ev.text, 3000); }
+        if (ev.role === 'user') { clearWebSources(); noteMaster(); showBubble(ev.text, 3000); }
         else if (ev.role === 'assistant') bubbleController.finish(ev.text, 9000);
         break;
       case 'recall':
         paintRecallButton(ev.entries);
         break;
       case 'delta':
+        clearWebSources();
         bubbleController.appendDelta(ev.text);
+        break;
+      case 'webSources':
+        paintWebSources(ev);
         break;
       case 'motion': {
         // 模型给的是槽位名（cheer），也可能是具体 key（手动列表复用这条路）
@@ -1325,6 +1379,7 @@ function wire() {
       case 'think':
         thinkingNow = !!ev.on;
         if (thinkingNow) {
+          clearWebSources();
           ambientTimer = 30;
           if (!speakingNow) {
             // think 槽 5 条轮换；一条都没载入就退回张望

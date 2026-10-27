@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('pet', {
   stopSpeak: () => ipcRenderer.send('pet:stop-speak'),
   log: (m) => ipcRenderer.send('pet:log', m),
   open: (what) => ipcRenderer.send('pet:open', what),
+  openWebSource: url => ipcRenderer.invoke('pet:open-web-source', url),
   // 独立窗口（设置 / 动作列表）用：拿初始数据、把动作转给角色窗口演
   panelInit: () => ipcRenderer.invoke('pet:panel-init'),
   panelMotion: (key) => ipcRenderer.send('pet:panel-motion', key),

@@ -10,6 +10,10 @@
   <div id="bubble" class="hidden" tabindex="0" aria-live="polite" aria-label="对话内容，可滚动阅读">
     <div id="bubbleText"></div>
     <button id="memoryBasis" class="memory-basis hidden" type="button">记忆依据</button>
+    <div id="webSources" class="web-sources hidden" role="group" aria-label="参考来源">
+      <span class="web-sources-label">参考来源</span>
+      <div id="webSourceLinks" class="web-source-links"></div>
+    </div>
     <div id="bubbleTail"></div>
   </div>
   <div id="dock" class="hidden"><input id="input"></div>
@@ -25,9 +29,16 @@
       pending() { return [...timers.values()].map(timer => timer.ms); },
       fire() { const [id, timer] = timers.entries().next().value || []; if (!timer) return false; timers.delete(id); timer.fn(); return true; },
     };
+    const openedSources = [];
+    window.pet = { openWebSource(url) { openedSources.push(url); return Promise.resolve({ ok: true }); } };
     window.fixture = { controller: createBubbleController(bubble, text, {
       setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
-    }), clampBubbleTop, clock };
+    }), clampBubbleTop, clock, openedSources,
+      installSourcePainter(source) {
+        const api = new Function('document', 'pet', `${source}; return { paintWebSources, clearWebSources };`)(document, window.pet);
+        this.paintSources = api.paintWebSources;
+        this.clearSources = api.clearWebSources;
+      } };
   </script>
 </body>
 </html>

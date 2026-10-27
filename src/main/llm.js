@@ -57,7 +57,8 @@ function makeSentenceSplitter(onSentence) {
  * @returns {Promise<{text:string,motions:string[],emos:string[],usage:any,ms:number}>}
  */
 function chat(opts) {
-  if (opts.transport === 'workbuddy') return require('./workbuddy').chat(opts);
+  if (opts.transport === 'workbuddy') return opts.webSearch === true
+    ? require('./conversation-search').chatWithSearch(opts) : require('./workbuddy').chat(opts);
   const {
     baseURL, apiKey, model, messages,
     temperature = 0.8, maxTokens = 220, timeoutMs = 30000,

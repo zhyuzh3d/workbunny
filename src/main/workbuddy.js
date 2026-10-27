@@ -141,8 +141,70 @@ function sanitizeUsage(value) {
 function hasReasoningContent(value) {
   return !!value && typeof value === 'object' && [value.reasoning_content, value.reasoning].some(v => typeof v === 'string' && v.length > 0);
 }
+const MAX_TOOL_CALLS = 4;
+const MAX_TOOL_ARGUMENTS = 8000;
+function toolProtocolError() {
+  const error = new Error('WorkBuddy 工具调用格式无效，请重试。');
+  error.code = 'E_TOOL_PROTOCOL';
+  return error;
+}
+function appendToolCall(calls, index, fragment) {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_TOOL_CALLS ||
+      !fragment || typeof fragment !== 'object' || Array.isArray(fragment)) throw toolProtocolError();
+  let call = calls.get(index);
+  if (!call) {
+    if (calls.size >= MAX_TOOL_CALLS) throw toolProtocolError();
+    call = { id: '', type: 'function', hasType: false, name: '', arguments: '' };
+    calls.set(index, call);
+  }
+  if (fragment.id !== undefined) {
+    if (typeof fragment.id !== 'string' || call.id.length + fragment.id.length > 200) throw toolProtocolError();
+    call.id += fragment.id;
+  }
+  if (fragment.type !== undefined) {
+    if (fragment.type !== 'function') throw toolProtocolError();
+    call.hasType = true;
+  }
+  const fn = fragment.function;
+  if (fn !== undefined) {
+    if (!fn || typeof fn !== 'object' || Array.isArray(fn)) throw toolProtocolError();
+    if (fn.name !== undefined) {
+      if (typeof fn.name !== 'string' || call.name.length + fn.name.length > 128) throw toolProtocolError();
+      call.name += fn.name;
+    }
+    if (fn.arguments !== undefined) {
+      if (typeof fn.arguments !== 'string' || call.arguments.length + fn.arguments.length > MAX_TOOL_ARGUMENTS)
+        throw toolProtocolError();
+      call.arguments += fn.arguments;
+    }
+  }
+}
+function collectCompleteToolCalls(fragments) {
+  if (!Array.isArray(fragments) || fragments.length > MAX_TOOL_CALLS) throw toolProtocolError();
+  const calls = new Map();
+  fragments.forEach((fragment, i) => appendToolCall(calls, i, fragment));
+  return finishToolCalls(calls);
+}
+function finishToolCalls(calls) {
+  const result = [];
+  for (const [index, call] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
+    if (index !== result.length || !call.hasType ||
+        typeof call.id !== 'string' || !call.id || !/^[A-Za-z0-9_.:-]{1,200}$/.test(call.id) ||
+        typeof call.name !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(call.name) ||
+        typeof call.arguments !== 'string' || !call.arguments || call.arguments.length > MAX_TOOL_ARGUMENTS)
+      throw toolProtocolError();
+    let parsed;
+    try { parsed = JSON.parse(call.arguments); } catch { throw toolProtocolError(); }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw toolProtocolError();
+    result.push({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } });
+  }
+  if (result.length > MAX_TOOL_CALLS) throw toolProtocolError();
+  return result;
+}
 function parseChatBody(body, model = 'hy3') {
   let raw = '', usedModel = model, usage = null, finishReason = null, hasReasoning = false;
+  const streamedCalls = new Map();
+  let completeCalls = null;
   let object;
   try { object = JSON.parse(body); } catch { /* Older brokers may still return SSE. */ }
   if (object) {
@@ -154,12 +216,16 @@ function parseChatBody(body, model = 'hy3') {
     hasReasoning = hasReasoningContent(choice?.message);
     const content = choice?.message?.content;
     raw = typeof content === 'string' ? content : '';
+    if (choice?.message?.tool_calls !== undefined) completeCalls = collectCompleteToolCalls(choice.message.tool_calls);
   } else for (const line of body.split('\n')) {
     if (!line.startsWith('data:')) continue;
     const text = line.slice(5).trim();
     if (!text || text === '[DONE]') continue;
     let event;
-    try { event = JSON.parse(text); } catch { continue; }
+    try { event = JSON.parse(text); } catch {
+      if (/"tool_calls"|"function"|"arguments"/u.test(text)) throw toolProtocolError();
+      continue;
+    }
     const data = event.data?.choices ? event.data : event;
     if (data.model) usedModel = data.model;
     if (data.usage) usage = sanitizeUsage(data.usage);
@@ -167,9 +233,21 @@ function parseChatBody(body, model = 'hy3') {
     if (choice?.finish_reason !== undefined && choice.finish_reason !== null) finishReason = sanitizeFinishReason(choice.finish_reason);
     const delta = choice?.delta;
     if (hasReasoningContent(delta)) hasReasoning = true;
-    raw += delta?.content || '';
+    if (typeof delta?.content === 'string') raw += delta.content;
+    if (delta?.tool_calls !== undefined) {
+      if (!Array.isArray(delta.tool_calls)) throw toolProtocolError();
+      for (const fragment of delta.tool_calls) appendToolCall(streamedCalls, fragment?.index, fragment);
+    }
+    if (choice?.message?.tool_calls !== undefined) {
+      if (completeCalls) throw toolProtocolError();
+      completeCalls = collectCompleteToolCalls(choice.message.tool_calls);
+    }
   }
+  let toolCalls = completeCalls || (streamedCalls.size ? finishToolCalls(streamedCalls) : null);
+  if (finishReason === 'tool_calls' && !toolCalls?.length) throw toolProtocolError();
+  if (toolCalls?.length) raw = ''; // Do not surface model preambles beside tool requests.
   if (!raw.trim()) {
+    if (toolCalls?.length) return { raw: '', model: usedModel, usage, finishReason, hasReasoning, toolCalls };
     const limited = ['length', 'max_tokens', 'max_output_tokens', 'token_limit'].includes(String(finishReason || '').toLowerCase());
     const error = new Error(limited ? 'WorkBuddy 输出达到 token 上限，整理结果不完整。' : 'WorkBuddy 没有返回可用回答，请重试。');
     error.code = limited ? 'E_OUTPUT_LIMIT' : 'E_EMPTY_RESPONSE';
@@ -178,16 +256,17 @@ function parseChatBody(body, model = 'hy3') {
     error.hasReasoning = hasReasoning;
     throw error;
   }
-  return { raw, model: usedModel, usage, finishReason, hasReasoning };
+  return { raw, model: usedModel, usage, finishReason, hasReasoning, ...(toolCalls?.length ? { toolCalls } : {}) };
 }
-async function chat(opts) {
+async function chatWithTransport(opts, transport) {
   const { model = 'hy3', signal, onDelta, onSentence } = opts;
   const payload = chatPayload(opts);
-  const r = await request({ method: 'POST', path: '/v2/chat/completions',
+  const r = await transport({ method: 'POST', path: '/v2/chat/completions',
     headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
     body_b64: Buffer.from(JSON.stringify(payload)).toString('base64'),
   }, { signal, timeoutMs: opts.timeoutMs });
-  const { raw, model: usedModel, usage } = parseChatBody(r.body, model);
+  const { raw, model: usedModel, usage, toolCalls } = parseChatBody(r.body, model);
+  if (toolCalls?.length) return { text: '', raw: '', model: usedModel, usage, provider: 'workbuddy', toolCalls };
   if (onDelta) onDelta(raw);
   const { extractTags, makeSentenceSplitter } = require('./llm');
   if (onSentence) { const split = makeSentenceSplitter(onSentence); split.push(raw); split.flush(); }
@@ -195,4 +274,6 @@ async function chat(opts) {
   return { ...parsed, text: parsed.clean.trim(), raw, model: usedModel, usage, provider: 'workbuddy' };
 }
 
-module.exports = { chat, request, discovery, chatPayload, parseChatBody, openApplication, sanitizeUsage };
+async function chat(opts) { return chatWithTransport(opts, request); }
+
+module.exports = { chat, request, discovery, chatPayload, parseChatBody, openApplication, sanitizeUsage, chatWithTransport };

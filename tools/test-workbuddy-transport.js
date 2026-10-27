@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { chatPayload, parseChatBody } = require('../src/main/workbuddy');
+const { chatPayload, parseChatBody, chatWithTransport } = require('../src/main/workbuddy');
 
 const content = '你好，主人。';
 const message = { model: 'deepseek-v4.1-flash', choices: [{ message: { content, reasoning_content: 'internal reasoning must not be spoken' }, finish_reason: 'stop' }], usage: { total_tokens: 31, prompt_tokens: 12, completion_tokens: 19, private_field: 'omit' } };
@@ -19,6 +19,45 @@ const events = [
 ];
 const sse = ': keepalive\n' + events.map(event => 'data: ' + JSON.stringify(event)).join('\n\n') + '\n\ndata: [DONE]\n';
 assert.deepEqual(parseChatBody(sse), { raw: content, model: 'deepseek-v4.1-flash', usage: { total_tokens: 31 }, finishReason: 'stop', hasReasoning: true });
+
+const calls = [{ id: 'call_search1', type: 'function', function: { name: 'conversation_search', arguments: '{"query":"公开信息","type":"text2text","max_results":3}' } }];
+for (const response of [
+  { model: 'deepseek-v4.1-flash', choices: [{ message: { tool_calls: calls, content: '隐藏的工具前言' }, finish_reason: 'tool_calls' }], usage: { total_tokens: 13 } },
+  { data: { model: 'deepseek-v4.1-flash', choices: [{ message: { tool_calls: calls }, finish_reason: 'tool_calls' }], usage: { total_tokens: 13 } } },
+]) {
+  const result = parseChatBody(JSON.stringify(response));
+  assert.deepEqual(result, { raw: '', model: 'deepseek-v4.1-flash', usage: { total_tokens: 13 },
+    finishReason: 'tool_calls', hasReasoning: false, toolCalls: calls });
+}
+
+const fragmentedToolSSE = [
+  { choices: [{ delta: { tool_calls: [
+    { index: 0, id: 'call_', type: 'function', function: { name: 'conversation_', arguments: '{"query":"公开' } },
+  ] } }] },
+  { choices: [{ delta: { tool_calls: [
+    { index: 0, id: 'search1', function: { name: 'search', arguments: '信息","type":"text2text","max_results":3}' } },
+  ] } }] },
+  { choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { total_tokens: 13 } },
+];
+const fragmentedResult = parseChatBody(fragmentedToolSSE.map(event => 'data: ' + JSON.stringify(event)).join('\n\n') + '\n\ndata: [DONE]\n');
+assert.deepEqual(fragmentedResult.toolCalls, calls, 'tool IDs, names, and JSON arguments assemble across SSE fragments');
+assert.equal(fragmentedResult.raw, '', 'tool preamble is not exposed as assistant speech');
+
+const twoCalls = [calls[0], { id: 'call_search2', type: 'function', function: { name: 'conversation_search', arguments: '{"query":"另一个公开问题"}' } }];
+assert.equal(parseChatBody(JSON.stringify({ choices: [{ message: { tool_calls: twoCalls } }] })).toolCalls.length, 2);
+for (const malformed of [
+  { choices: [{ message: { tool_calls: [{ type: 'function', function: { name: 'conversation_search', arguments: '{}' } }] } }] },
+  { choices: [{ message: { tool_calls: [{ id: 'call_x', type: 'function', function: { name: 'conversation_search', arguments: '{"query":' } }] } }] },
+  { choices: [{ message: { tool_calls: [{ id: 'call_x', type: 'function', function: { name: 'conversation_search', arguments: '[]' } }] } }] },
+  { choices: [{ message: { tool_calls: [{ id: 'call_x', type: 'function', function: { name: 'search', arguments: '{"q":"' + 'x'.repeat(8000) + '"}' } }] } }] },
+  { choices: [{ message: { tool_calls: Array.from({ length: 5 }, (_, i) => ({ id: 'call_' + i, type: 'function', function: { name: 'search', arguments: '{}' } })) } }] },
+]) assert.throws(() => parseChatBody(JSON.stringify(malformed)), error => error.code === 'E_TOOL_PROTOCOL');
+assert.throws(() => parseChatBody([
+  'data: ' + JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, type: 'function', function: { name: 'search', arguments: '{}' } }] } }] }),
+  'data: ' + JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+].join('\n\n')), error => error.code === 'E_TOOL_PROTOCOL', 'incomplete streamed call without an id is rejected');
+assert.throws(() => parseChatBody(JSON.stringify({ choices: [{ message: { tool_calls: [] }, finish_reason: 'tool_calls' }] })),
+  error => error.code === 'E_TOOL_PROTOCOL', 'tool_calls finish without a call is rejected');
 for (const empty of ['', 'data: [DONE]\n', '{"choices":[{"message":{"reasoning_content":"only reasoning"}}]}', '{"error":{"message":"must not expose upstream secrets"}}']) {
   assert.throws(() => parseChatBody(empty), error => error.code === 'E_EMPTY_RESPONSE' && error.message === 'WorkBuddy 没有返回可用回答，请重试。');
 }
@@ -61,6 +100,23 @@ async function testFreeMemoryExtractionUsesOneBoundedFreeCall() {
   } finally { wb.request = oldRequest; wb.chat = oldChat; }
 }
 
+async function testToolCallProducesNoSpeechCallbacks() {
+  const callbacks = [];
+  let requests = 0;
+  const result = await chatWithTransport({ messages: [], onDelta: value => callbacks.push(['delta', value]),
+    onSentence: value => callbacks.push(['sentence', value]) }, async (params, options) => {
+      requests++;
+      assert.equal(params.path, '/v2/chat/completions');
+      assert.equal(options.timeoutMs, undefined);
+      return { body: JSON.stringify({ choices: [{ message: { content: '不可见的工具前言', tool_calls: calls }, finish_reason: 'tool_calls' }] }) };
+    });
+  assert.equal(requests, 1);
+  assert.equal(result.text, '');
+  assert.equal(result.raw, '');
+  assert.deepEqual(result.toolCalls, calls);
+  assert.deepEqual(callbacks, [], 'tool requests do not enter speech or sentence callbacks');
+}
+
 async function testNoFreeModelHasStableCodeWithoutPaidFallback() {
   const { spawnSync } = require('node:child_process');
   const script = `const wb=require('./src/main/workbuddy'); wb.request=async()=>({body:JSON.stringify({code:0,data:{models:[{id:'paid-model',credits:'x1'}]}})}); require('./src/main/workbuddy-free').freeModel().then(()=>process.exit(2),e=>{if(e.code!=='E_FREE_MODEL_UNAVAILABLE')process.exit(3); process.stdout.write(e.message);});`;
@@ -72,6 +128,7 @@ async function testNoFreeModelHasStableCodeWithoutPaidFallback() {
 
 (async () => {
   await testFreeMemoryExtractionUsesOneBoundedFreeCall();
+  await testToolCallProducesNoSpeechCallbacks();
   await testNoFreeModelHasStableCodeWithoutPaidFallback();
   assert.throws(() => require('../src/main/workbuddy-free').parseObject(''), error => error.code === 'E_EMPTY_RESPONSE');
   console.log('WorkBuddy transport response checks passed');

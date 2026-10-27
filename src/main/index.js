@@ -224,6 +224,16 @@ function publishRecall(entries = []) {
   const panel = panels.get('memory');
   if (panel && !panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'recall', entries: currentRecall });
 }
+let currentWebSources = new Set();
+function publishWebSources(sources = []) {
+  const { publicURL } = require('./workbuddy-search');
+  const visible = sources.flatMap(source => {
+    const url = publicURL(source?.url);
+    return url && typeof source.title === 'string' ? [{ title: source.title.slice(0, 180), url }] : [];
+  }).slice(0, 3);
+  currentWebSources = new Set(visible.map(source => source.url));
+  send('webSources', { used: visible.length > 0, sources: visible });
+}
 
 function queueTaskReport(report) {
   if (report.epoch !== memory?.generation) return;
@@ -774,6 +784,7 @@ function finishSpeech() {
 function speak(text, { motion, emo, silent = false } = {}) {
   const clean = presentConversation(text);
   if (!clean) return;
+  publishWebSources();
   if (motion) send('motion', { key: motion, once: true });
   if (emo) send('emo', { key: emo });
   send('say', { text: clean });
@@ -833,6 +844,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
   const controller = new AbortController();
   activeThought = controller;
   busy = true;
+  publishWebSources();
   send('think', { on: true });
   memory?.cancelExtraction();
   log(`[brain] provider=${L.provider} model=${L.model}`);
@@ -891,6 +903,8 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     const requestDialogue = internal ? llm.chat : request => requestReply({ chat: llm.chat, request });
     const r = taskControl ? { raw: JSON.stringify({ kind: 'action', intent: taskControl }), model: 'local-task-control', motions: [], emos: [] } : await requestDialogue({
       ...L,
+      webSearch: !internal && L.transport === 'workbuddy' && require('./conversation-search').mayUseWebSearch(userText),
+      searchCache: new Map(),
       ...(!internal ? { extraBody: { ...L.extraBody,
         ...(L.transport === 'workbuddy' && !Object.hasOwn(L.extraBody || {}, 'reasoning_effort') && ['low', 'high'].includes(L.thinking) ? { reasoning_effort: L.thinking } : {}),
         response_format: responseFormat(L.provider) } } : {}),
@@ -974,7 +988,8 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     // 把她实际说的话记下来：回看时才知道"她到底说了什么蠢话"，否则无从优化
     if (clean) log(`[say] ${clean.length} 字`);
     if (clean) {
-      if (!internal) pushHistory('assistant', clean, { delivery: 'generated', sources: replySources, turnId: userRecord?.value.turnId ?? voiceTurn?.turnId, scene });
+      if (!internal) pushHistory('assistant', clean, { delivery: 'generated', sources: replySources, webSources: r.webSearch?.sources,
+        turnId: userRecord?.value.turnId ?? voiceTurn?.turnId, scene });
       if (!internal) {
         send('chat', { role: 'assistant', text: clean, final: true });
       }
@@ -984,6 +999,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     }
     if (r.motions && r.motions[0]) send('motion', { key: r.motions[0], once: true });
     if (r.emos && r.emos[0]) send('emo', { key: r.emos[0] });
+    if (!internal && clean) publishWebSources(r.webSearch?.sources || []);
     // 注意：这里绝不能调 finishSpeech() —— 句子是流水线朗读的，
     // 真正的收尾由渲染层播完音频回 pet:audio-done 驱动。
     return r;
@@ -1498,6 +1514,7 @@ function trustedCompanion(event, kind) {
   throw new Error('此窗口无权执行该操作');
 }
 function invalidateMemoryContext() {
+  publishWebSources();
   contextEpoch++; activeThought?.abort();
   voiceTurns.reset(); stopSpeaking(); history = []; publishRecall(); taskReports.length = 0;
   tts.clearSpeechCache?.();
@@ -1515,6 +1532,12 @@ function clearTaskView() {
   delegationMonitor?.stop(); delegationMonitor = null;
 }
 ipcMain.handle('pet:memory-stats', e => { trustedCompanion(e); return memory?.stats() || { ready: false }; });
+ipcMain.handle('pet:open-web-source', async (e, value) => {
+  if (e.sender !== win?.webContents) throw new Error('来源只能从当前对话打开');
+  const url = require('./workbuddy-search').publicURL(value);
+  if (screenLocked || !url || !currentWebSources.has(url)) throw new Error('这不是当前对话的搜索来源');
+  await shell.openExternal(url); return { ok: true };
+});
 ipcMain.handle('pet:memory-maintenance-status', e => { trustedCompanion(e, 'memory'); return maintenance?.status() || { status: 'idle', note: '等待记忆解锁' }; });
 ipcMain.handle('pet:memory-maintain', (e, mode) => {
   trustedCompanion(e, 'memory');
@@ -1616,6 +1639,7 @@ ipcMain.handle('pet:interact', (e, region) => {
   if (busy || speaking || Date.now() - lastSpokeAt < 1200 || operatingDesktop) return null;
   const reaction = interactions.pick(region, { quiet: Date.now() < quietUntil });
   if (!reaction) return null;
+  publishWebSources();
   send('motion', { key: reaction.slot, once: true }); send('emo', { key: reaction.emo }); send('say', { text: reaction.text });
   if (reaction.sound) { speechQueue.push({ text: reaction.text, emo: reaction.emo, interaction: true }); pumpSpeech(); }
   return { slot: reaction.slot };
@@ -1689,6 +1713,7 @@ async function applySettings(patch) {
     send('think', { on: false });
   }
   if (c.memory.scene !== previous.memory.scene) {
+    publishWebSources();
     const resumeListening = alwaysOn;
     if (resumeListening) {
       alwaysOn = false;
@@ -2297,7 +2322,7 @@ if (!lock) {
       onLocked: () => {
         publishRecall();
         tts.clearSpeechCache?.();
-        screenLocked = true; vaultKeyAbort?.abort(); stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.stop('电脑锁屏').catch(() => {});
+        screenLocked = true; publishWebSources(); vaultKeyAbort?.abort(); stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.stop('电脑锁屏').catch(() => {});
         watches.invalidate(); watchDesktop.stop('电脑锁屏').catch(() => {});
         asrStatus = { ...asrStatus, captureReady: false, note: 'locked' }; send('asrStatus', asrStatus);
         if (!memory.ready) { memory.waitingForUnlock = true; memory.error = '电脑已锁屏，解锁后自动载入记忆'; log('[memory] 屏幕锁定，延后钥匙串读取'); }

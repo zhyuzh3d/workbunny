@@ -121,6 +121,53 @@ async function testHoverAndFocusPauseAndResumeHideTimer() {
     'the bubble still hides after the restarted timer expires');
 }
 
+async function testWebSourcesStayLocalAndOpenOnlyValidatedTitles() {
+  const sourcePainter = appJs.match(/function clearWebSources\(\) \{[\s\S]*?(?=\nfunction hideBubble\(\))/u)?.[0];
+  assert(sourcePainter, 'the production source painter can be isolated from the WebGL controller');
+  assert.match(appJs, /case 'webSources':\s*paintWebSources\(ev\)/u, 'the backend reference event is consumed');
+  assert.match(appJs, /case 'chat':[\s\S]{0,100}clearWebSources\(\)/u, 'a new user turn clears prior references');
+  assert.match(appJs, /case 'delta':[\s\S]{0,80}clearWebSources\(\)/u, 'a new streamed reply clears prior references');
+  assert.match(sourcePainter, /button\.textContent = source\.title/u);
+  assert.match(sourcePainter, /pet\.openWebSource\(source\.url\)/u);
+  assert.doesNotMatch(sourcePainter, /innerHTML|textContent\s*=\s*source\.url/u, 'URLs are neither rendered nor injected as markup');
+  await evaluate(`window.fixture.installSourcePainter(${JSON.stringify(sourcePainter)})`);
+  await evaluate(`window.fixture.paintSources({used:false,sources:[{title:'隐藏来源',url:'https://example.com'}]})`);
+  assert.equal(await evaluate("document.getElementById('webSources').classList.contains('hidden')"), true,
+    'unused search results stay hidden');
+
+  const sources = [
+    { title: '标题很长'.repeat(20), url: 'https://example.com/one' },
+    { title: '第二条参考', url: 'https://example.org/two' },
+    { title: '不安全协议', url: 'javascript:alert(1)' },
+    { title: '第三条参考', url: 'http://example.net/three' },
+    { title: '超出展示上限', url: 'https://example.edu/four' },
+  ];
+  await evaluate(`window.fixture.controller.show(${JSON.stringify('回答内容'.repeat(36))},60000); window.fixture.controller.place(innerHeight/2,innerHeight); window.fixture.paintSources(${JSON.stringify({ used: true, sources })})`);
+  const rendered = await evaluate(`(() => {
+    const b=document.getElementById('bubble'), c=document.getElementById('webSources'), links=[...document.querySelectorAll('.web-source-link')];
+    const rect=c.getBoundingClientRect(), br=b.getBoundingClientRect(), style=getComputedStyle(links[0]);
+    return {hidden:c.classList.contains('hidden'),titles:links.map(x=>x.textContent),labels:links.map(x=>x.getAttribute('aria-label')),
+      count:links.length,withinBubble:rect.left>=br.left && rect.right<=br.right,scroll:b.scrollHeight>b.clientHeight,
+      maxHeight:parseFloat(getComputedStyle(b).maxHeight),innerHeight,hoverColor:getComputedStyle(links[0],':hover').color,baseColor:style.color};
+  })()`);
+  assert.equal(rendered.hidden, false);
+  assert.equal(rendered.count, 3, 'only three valid unique references are displayed');
+  assert.deepEqual(rendered.titles.slice(1), ['第二条参考', '第三条参考']);
+  assert.match(rendered.labels[0], /打开参考来源/u);
+  assert.equal(rendered.withinBubble, true, 'reference row stays within the compact bubble width');
+  assert.equal(rendered.scroll, true, 'long content and references use the existing bounded scroll region');
+  assert.notEqual(rendered.hoverColor, rendered.baseColor, 'hover gives a visible text contrast change');
+  assert.ok(rendered.maxHeight <= rendered.innerHeight - 16, 'source layout remains bounded by available window height');
+  await evaluate("document.querySelector('.web-source-link').click()");
+  assert.deepEqual(await evaluate('window.fixture.openedSources'), ['https://example.com/one'],
+    'click delegates the validated HTTP URL to the preload opener');
+
+  await evaluate('window.fixture.clearSources()');
+  assert.equal(await evaluate("document.getElementById('webSources').classList.contains('hidden')"), true,
+    'clearing a turn removes the old reference row');
+  assert.equal(await evaluate("document.getElementById('bubble').classList.contains('has-web-sources')"), false);
+}
+
 app.whenReady().then(async () => {
   win = new BrowserWindow({ width: 560, height: 760, show: false, webPreferences: { contextIsolation: false, nodeIntegration: false, sandbox: true } });
   await win.loadFile(fixture);
@@ -130,7 +177,8 @@ app.whenReady().then(async () => {
   await testShortTextCompactAndNewTurnResetsScroll();
   await testMouseAndKeyboardScrollInput();
   await testHoverAndFocusPauseAndResumeHideTimer();
-  console.log('bubble UI fixture: viewport bounds, five-line cap, scale, stream preservation, mouse/keyboard scrolling, and hide timer interaction passed');
+  await testWebSourcesStayLocalAndOpenOnlyValidatedTitles();
+  console.log('bubble UI fixture: viewport bounds, five-line cap, references, source validation, stream preservation, mouse/keyboard scrolling, and hide timer interaction passed');
   win.destroy();
   fs.rmSync(temp, { recursive: true, force: true });
   app.quit();
