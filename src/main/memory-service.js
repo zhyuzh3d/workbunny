@@ -25,6 +25,13 @@ const factMarker = (prefix, key) => `bunny_${prefix}_${String(key).replace(/[^a-
 // Full model-input provenance is wider than a fact's evidence. Forgetting or
 // correcting one fact must not delete unrelated raw conversations in its batch.
 function evidenceMessages(record, rows) {
+  if (record.value?.origin === 'deepdream-merged-v1') {
+    const ids = record.value.memberEvidenceIds;
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > 6 || ids.some(id => typeof id !== 'string' || !record.value.sources.includes(id))) throw new Error('归并记忆的证据不完整');
+    const selected = rows.filter(row => row.kind === 'message' && ids.includes(row.id));
+    if (selected.length !== ids.length) throw new Error('归并记忆的证据已变化');
+    return selected;
+  }
   const evidenceId = record.value?.evidenceSourceId;
   if (evidenceId !== undefined) {
     if (typeof evidenceId !== 'string' || !(record.value.sources || []).includes(evidenceId)) throw new Error('记忆证据来源不完整');
@@ -200,10 +207,11 @@ class MemoryService {
     return { id: record.id, kind: record.kind, ts: record.ts, updatedAt: record.updatedAt || record.ts, state: record.state || 'active', expiresAt: record.expiresAt || null,
       ...scope, ...(restoreSequence ? { ingestionSeq: record.ingestionSeq } : {}), body: vc.seal(this.key, { ...record.value, _scopeV1: scope }, record.id + ':' + record.kind),
       tokens: vc.tokenKeys(this.key, knowledge.markersOf(record).join(' ') + ' ' +
+        (record.kind === 'memory' && record.value.origin === 'deepdream-merged-v1' ? 'bunny_memory_merged ' : '') +
         (record.kind === 'state' && ['context-head-v2', 'context-current-v2'].includes(record.value.origin) ? 'bunny_context_head ' : '') +
         (record.kind === 'memory' && record.value.origin === 'user-reviewed-doubt' && Array.isArray(record.value.supersedes) ? record.value.supersedes.slice(0, 12).map(replacementMarker).join(' ') + ' ' : '') +
-        (knowledge.typeOf(record) && Array.isArray(record.value.tags) ? record.value.tags.slice(0, 8).join(' ') + ' ' : '') + (record.searchText ?? textOf(record.value)) +
-        (record.kind === 'memory' && Array.isArray(record.value.tags) ? ' ' + record.value.tags.slice(0, 8).join(' ') : '') +
+        (knowledge.typeOf(record) && Array.isArray(record.value.tags) ? record.value.tags.slice(0, 10).join(' ') + ' ' : '') + (record.searchText ?? textOf(record.value)) +
+        (record.kind === 'memory' && Array.isArray(record.value.tags) ? ' ' + record.value.tags.slice(0, 10).join(' ') : '') +
         (record.kind === 'memory' && record.value.key ? ` ${record.value.key}` : '') +
         (record.kind === 'memory' && record.value.key && record.value.status === 'confirmed' ? ` ${factMarker('confirmed_fact', record.value.key)}` : '') +
         (record.kind === 'memory' && record.value.origin === 'user-key-conflict-v1' && record.value.status === 'pending' ? ` ${factMarker('conflict', record.value.key)}` : '') +
@@ -414,16 +422,16 @@ class MemoryService {
     const keyed = key ? await this.search(`${factMarker('confirmed_fact', key)} ${key}`, ['memory'], 50, partition) : [];
     const comparable = [...new Map([...keyed, ...nearby].filter(m => m.value.key === key && m.value.status === 'confirmed' &&
       ['user-statement', 'user-reviewed', 'user-reviewed-conflict', 'user-reviewed-doubt'].includes(m.value.origin)).map(row => [row.id, row])).values()];
-    if (stableFact && comparable.some(row => factFromMemory(row.value)?.canonicalValue === stableFact.canonicalValue)) return;
-    if (nearby.some(m => m.value.content === content)) return;
+    if (stableFact && comparable.some(row => factFromMemory(row.value)?.canonicalValue === stableFact.canonicalValue &&
+      (!explicit || require('./memory-tags').provenance(row.value).includes('active')))) return;
     const conflicts = stableFact ? comparable.filter(row => factFromMemory(row.value)?.canonicalValue !== stableFact.canonicalValue).slice(0, 2) : [];
     await this.write([{ id: id(), kind: 'memory', ts: source.ts, expiresAt, domain: source.domain, visibilityFloor: source.visibilityFloor,
-      value: { content, key, memoryKind: kind, importance, ...(anniversary ? { anniversary } : {}),
+      value: require('./memory-tags').tagged({ content, key, memoryKind: kind, importance, ...(anniversary ? { anniversary } : {}),
         ...(stableFact ? { canonicalValue: stableFact.canonicalValue } : {}),
         status: conflicts.length || unparsedBirthday ? 'pending' : 'confirmed', evidence: text, evidenceSourceId: source.id,
         sources: [source.id, ...conflicts.map(row => row.id)],
         origin: conflicts.length ? 'user-key-conflict-v1' : unparsedBirthday ? 'user-unparsed-fact' : 'user-statement',
-        ...(conflicts.length ? { conflictWith: conflicts.map(row => row.id) } : {}) },
+        ...(conflicts.length ? { conflictWith: conflicts.map(row => row.id) } : {}) }, [explicit ? 'active' : 'automatic']),
     }]);
   }
   async relevantConflicts(userText, { scene = this.scene() } = {}) {
@@ -570,7 +578,7 @@ class MemoryService {
     }
     await this.tail;
     const compression = !internal && this.compression ? await this.compression.snapshot(scene) : null;
-    let memories = [], episodes = [], doubts = [];
+    let memories = [], episodes = [], doubts = [], tentative = [];
     const knowledgeContext = !internal ? await this.knowledge.context(userText, { scene, budget: 1000 }) : { text: '', sourceIds: [], suppressedIds: [] };
     if (!internal) {
       doubts = await this.relevantConflicts(userText, { scene });
@@ -583,13 +591,18 @@ class MemoryService {
       const dated = [];
       for (const query of anniversaryQueries) dated.push(...(await this.search(query, ['memory'], 50, { scene })).filter(safeModelRow));
       const seen = new Set();
-      memories = [...found, ...pinned.filter(r => (r.value.importance || 0) >= 0.95 || r.value.memoryKind === 'anniversary'), ...dated]
+      const effective = await this.knowledge.projectMemories([...found.filter(r => r.kind === 'memory'), ...pinned, ...dated], { scene });
+      tentative = effective.filter(r => r.kind === 'memory' && r.value.status === 'pending' &&
+        ['dream-candidate-v3', 'doze-candidate-v2', 'deepdream-merged-v1'].includes(r.value.origin) && (r.score || 0) > 0 &&
+        !doubtfulKeys.has(r.value.key) && (!r.expiresAt || r.expiresAt > now)).slice(0, 3);
+      memories = effective
         .filter(r => r.kind === 'memory' && r.value.status === 'confirmed' && !doubtfulKeys.has(r.value.key) && (!r.expiresAt || r.expiresAt > now) && !seen.has(r.id) && seen.add(r.id))
         .sort((a, b) => ((b.anchorOnly ? 0 : b.score || 0) * 10 + (b.value.importance || 0)) - ((a.anchorOnly ? 0 : a.score || 0) * 10 + (a.value.importance || 0))).slice(0, 10);
       const resolved = await this.knowledge.applyResolutions([...memories, ...doubts], { scene });
       const suppressed = new Set([...resolved.suppressed, ...knowledgeContext.suppressedIds]);
       memories = [...resolved.facts, ...memories.filter(row => !suppressed.has(row.id))].filter((row, i, rows) => rows.findIndex(other => other.id === row.id) === i).slice(0, 10);
       doubts = doubts.filter(row => !suppressed.has(row.id));
+      tentative = tentative.filter(row => !suppressed.has(row.id) && !memories.some(m => m.value.content === row.value.content));
       const shownMemorySources = new Set(memories.flatMap(r => r.value.sources || []));
       const olderSegments = this.compression ? (await this.search(userText, ['state'], 8,
         { scene, domain: scene, visibilityFloor: scopes.rank(scene), excludedMarkers: [knowledge.marker('all'), 'bunny_context_head'] })).filter(r => r.value.origin === 'context-segment-v1' && r.value.scene === scene && safeModelRow(r)) : [];
@@ -667,6 +680,7 @@ class MemoryService {
       }
     }
     append('相关长期记忆（用户陈述，有来源）：', memories);
+    append('自动提炼的候选参考（未确认；不能据此覆盖明确用户陈述，不确定时回查或核对）：', tentative);
     append('相关旧对话与分段摘要：', episodes);
     if (!internal && !compression?.text) {
       const summaries = (await this.query('summary', 2, { scene })).filter(safeModelRow);
@@ -681,11 +695,7 @@ class MemoryService {
   }
   scheduleExtraction() {
     if (this.maintenance) {
-      if (!this.getSettings().enabled || !this.getSettings().extract) return;
-      const users = this.recent.filter(r => r.value.role === 'user').length;
-      if (users <= (this.getSettings().recentRounds || 8) + 2 && this.userMessagesSeen - (this.lastMaintenanceQueued || 0) < 100) return;
-      if (this.userMessagesSeen - (this.lastMaintenanceQueued || 0) < 4) return;
-      this.lastMaintenanceQueued = this.userMessagesSeen;
+      if (!this.getSettings().enabled || !this.maintenance.allowAutomatic()) return;
       this.maintenance.request('doze', { automatic: true });
       return;
     }
@@ -748,7 +758,7 @@ class MemoryService {
     // The accumulator owns its own serial section; nesting it above deadlocks.
     return this.experiences.recordAcceptedTask(report.taskId, { epoch: this.generation });
   }
-  async list({ kind = 'memory', category, query = '', before, beforeId } = {}) {
+  async list({ kind = 'memory', category, query = '', before, beforeId, effective = false } = {}) {
     const sceneEpoch = this.sceneEpoch;
     await this.tail; this.check();
     if (kind === 'knowledge') {
@@ -757,7 +767,11 @@ class MemoryService {
     }
     const rows = query ? await this.search(clipped(query, 300), [kind], 50) : await this.query(kind, 50, { before, beforeId });
     if (sceneEpoch !== this.sceneEpoch) return [];
-    return rows.map(({ id, kind, ts, state, expiresAt, domain, visibilityFloor, value }) => ({ id, kind, ts, state, expiresAt, ...value, domain, visibilityFloor }));
+    const selected = effective && kind === 'memory' ? await this.knowledge.projectMemories(rows) : rows;
+    if (sceneEpoch !== this.sceneEpoch) return [];
+    const shown = selected.map(({ id, kind, ts, state, expiresAt, domain, visibilityFloor, value }) => ({ id, kind, ts, state, expiresAt, ...require('./memory-tags').tagged(value), domain, visibilityFloor }));
+    const last = rows.at(-1);
+    return effective && kind === 'memory' ? { rows: shown, next: last ? { ts: last.ts, id: last.id } : null, hasMore: !query && rows.length === 50 } : shown;
   }
   async stats() {
     await this.tail;
@@ -777,6 +791,7 @@ class MemoryService {
       const previous = (await this.db.request('get', { ids: [recordId], scene: this.scene() })).rows[0];
       if (!previous || previous.kind !== 'memory') throw new Error('记忆已不存在');
       const r = this.decode(previous), ts = this.clock();
+      if (r.value.origin === 'deepdream-merged-v1' && !(await verifySnapshots(this, r.value.analysisSnapshots, { scene: this.scene() })).ok) throw new Error('归并依据已变化，请刷新后再编辑');
       if (r.value.origin === 'user-key-conflict-v1' && r.value.status === 'pending') throw new Error('请使用“采用这次说法”核对冲突，或删除这条说法');
       const corrected = content.trim();
       const stableCorrection = factFromStatement(corrected) || (r.value.key === 'user.name' ? factFromStatement('我叫' + corrected)
@@ -817,6 +832,7 @@ class MemoryService {
       const row = (await this.db.request('get', { ids: [recordId], scene: this.scene() })).rows[0];
       if (!row) throw new Error('当前场景不可见或记录已不存在');
       const decoded = row ? this.decode(row) : null;
+      if (decoded?.value.origin === 'deepdream-merged-v1' && !(await verifySnapshots(this, decoded.value.analysisSnapshots, { scene: this.scene() })).ok) throw new Error('归并依据已变化，请刷新后再删除');
       const sourceIds = decoded?.kind === 'memory' && Array.isArray(decoded.value.sources) ? [...new Set(decoded.value.sources)] : [];
       const sourceRows = sourceIds.length ? (await this.db.request('get', { ids: sourceIds })).rows : [];
       const originalMessages = decoded?.kind === 'memory' ? evidenceMessages(decoded, sourceRows) : [];

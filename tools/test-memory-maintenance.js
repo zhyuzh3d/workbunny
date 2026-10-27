@@ -25,6 +25,7 @@ class FakeMemory {
     this.writes = [];
     this.decode = row => ({ ...row, value: row.value });
     this.db = { request: async (op, payload) => {
+      if (op === 'memory_sample') return { rows: [], count: 0 };
       if (op !== 'get') throw new Error(`unexpected fake db op ${op}`);
       return { rows: payload.ids.map(id => this.records.get(id)).filter(Boolean).map(row => ({ ...row, value: row.value })) };
     } };
@@ -45,6 +46,8 @@ class FakeMemory {
     else rows.sort((a, b) => cursor.order === 'asc' ? a.ts - b.ts || a.id.localeCompare(b.id) : b.ts - a.ts || b.id.localeCompare(a.id));
     return rows.slice(0, limit).map(row => ({ ...row, value: { ...row.value, sources: [...(row.value.sources || [])] } }));
   }
+  markerTokens() { return []; }
+  async search() { return []; }
   async write(records, epoch = this.epoch) {
     if (epoch !== this.epoch) throw Object.assign(new Error('stale epoch'), { code: 'stale_epoch' });
     if (records.length > 200) throw new Error('write batch limit');
@@ -86,7 +89,7 @@ function makeWorker(memory, options = {}) {
 }
 async function waitForIdle(worker) { await until(() => worker.status().status === 'idle', 'worker idle'); }
 
-async function testDozeValidationAndCheckpoint() {
+async function testDreamValidationAndCheckpoint() {
   const memory = new FakeMemory();
   memory.seed(message('u-1', 'user', '我喜欢沿海步道，周末会去散步。', 100));
   memory.seed(message('a-1', 'assistant', '听起来你喜欢海边散步。', 101));
@@ -108,7 +111,7 @@ async function testDozeValidationAndCheckpoint() {
       ],
     };
   } });
-  assert.deepEqual(worker.request('doze'), { ok: true, queued: true });
+  assert.deepEqual(worker.request('dream'), { ok: true, queued: true });
   await waitForIdle(worker);
   assert.equal(calls.length, 1, 'one batch uses one existing extraction call');
   assert.deepEqual(calls[0].map(x => x.id), ['u-1', 'a-1', 'u-2']);
@@ -119,16 +122,13 @@ async function testDozeValidationAndCheckpoint() {
   assert.deepEqual(memories[0].value.sources, ['u-1', 'a-1', 'u-2'], 'every model input is provenance, even when not selected as evidence');
   assert.equal(memories[0].domain, 'private');
   assert.equal(memories[0].visibilityFloor, 2);
-  assert.deepEqual(memories[0].value.tags, ['散步', '休闲', '音乐', '标签4', '标签5', '标签6', '标签7', '标签8']);
-  const summary = [...memory.records.values()].find(r => r.kind === 'summary');
-  assert.equal(summary.value.content, '用户说：我喜欢沿海步道\n助手答：听起来你喜欢海边散步。');
-  assert.deepEqual(summary.value.sources, ['u-1', 'a-1', 'u-2']);
-  assert.equal(summary.domain, 'private');
+  assert.deepEqual(memories[0].value.tags, ['自动记忆', '散步', '休闲', '音乐', '标签4', '标签5', '标签6', '标签7', '标签8']);
+  assert.equal([...memory.records.values()].filter(r => r.kind === 'summary').length, 0, 'Dream does not create a conversation summary');
   const checkpoint = memory.records.get('maintenance:private:2');
   assert.deepEqual(checkpoint.value.watermark, { ingestionSeq: memory.records.get('u-2').ingestionSeq, ts: 102, id: 'u-2' });
   assert.equal(checkpoint.ts, 0, 'maintenance state cannot outrank companion-state in latest-state queries');
-  assert.equal(memory.writes.at(-1).some(r => r.id === checkpoint.id), true, 'derivatives and checkpoint share one atomic write');
-  await worker.request('doze');
+  assert(memory.writes.some(batch => batch.some(r => r.id === checkpoint.id) && batch.some(r => r.id === memories[0].id)), 'derivatives and checkpoint share one atomic write');
+  await worker.request('dream');
   await waitForIdle(worker);
   assert.equal(calls.length, 1, 'a completed watermark is not re-extracted');
   await worker.close();
@@ -141,15 +141,14 @@ async function testPartitionBoundariesAndRestart() {
   const seen = [];
   const extract = async batch => { seen.push(batch[0].id); return { memories: [], excerpts: [{ sourceId: batch[0].id, quote: batch[0].content }] }; };
   let worker = makeWorker(memory, { extract });
-  worker.request('doze'); await waitForIdle(worker); await worker.close();
+  worker.request('dream'); await waitForIdle(worker); await worker.close();
   assert.deepEqual(seen.sort(), ['life-msg', 'work-msg']);
   assert.equal(memory.records.get('maintenance:life:1').value.watermark.id, 'life-msg');
   assert.equal(memory.records.get('maintenance:work:0').value.watermark.id, 'work-msg');
-  assert.equal([...memory.records.values()].filter(r => r.kind === 'summary').find(r => r.value.sources.includes('life-msg')).visibilityFloor, 1);
-  assert.equal([...memory.records.values()].filter(r => r.kind === 'summary').find(r => r.value.sources.includes('work-msg')).visibilityFloor, 0);
+  assert.equal([...memory.records.values()].filter(r => r.kind === 'summary').length, 0);
   memory.seed(message('life-next', 'user', '稍后新增的生活原文', 22, 'life', 1));
   worker = makeWorker(memory, { extract });
-  worker.request('doze'); await waitForIdle(worker);
+  worker.request('dream'); await waitForIdle(worker);
   assert.deepEqual(seen.sort(), ['life-msg', 'life-next', 'work-msg'], 'a restarted worker resumes from each partition watermark');
   assert.equal(memory.records.get('maintenance:life:1').value.watermark.id, 'life-next');
   await worker.close();
@@ -169,7 +168,7 @@ async function testIngestionCursorSameMillisecondRollbackAndRestart() {
     return { memories: [], excerpts: [{ sourceId: batch[0].id, quote: batch[0].content }] };
   };
   let worker = makeWorker(memory, { maxMessages: 1, extract });
-  worker.request('doze'); await waitForIdle(worker); await worker.close();
+  worker.request('dream'); await waitForIdle(worker); await worker.close();
   assert.equal(calls, 2, 'new ingestion after the snapshot is picked up by monotonic sequence');
   assert.equal(memory.records.get('maintenance:private:2').value.watermark.id, 'a-later');
   assert.equal(memory.records.get('maintenance:private:2').value.watermark.ingestionSeq, memory.records.get('a-later').ingestionSeq);
@@ -177,7 +176,7 @@ async function testIngestionCursorSameMillisecondRollbackAndRestart() {
 
   memory.seed(message('0-restarted', 'user', '重启后追加，时间回拨。', 20));
   worker = makeWorker(memory, { maxMessages: 1, extract });
-  worker.request('doze'); await waitForIdle(worker); await worker.close();
+  worker.request('dream'); await waitForIdle(worker); await worker.close();
   assert.equal(calls, 3, 'restart resumes strictly after the persisted ingestion sequence');
   assert.equal(memory.records.get('maintenance:private:2').value.watermark.id, '0-restarted');
 }
@@ -193,13 +192,13 @@ async function testAbortAndGenerationChangeDoNotAdvance() {
       signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
     });
   } });
-  worker.request('doze'); await started; worker.cancel();
+  worker.request('dream'); await started; worker.cancel();
   await until(() => worker.status().status === 'paused', 'cancel pause');
   assert.equal(memory.records.has('maintenance:private:2'), false, 'abort does not advance the checkpoint');
   await worker.close();
 
   worker = makeWorker(memory, { extract: async () => { memory.generation++; return { memories: [], excerpts: [] }; } });
-  worker.request('doze');
+  worker.request('dream');
   await until(() => worker.status().status === 'paused', 'generation invalidation pause');
   assert.equal(memory.records.has('maintenance:private:2'), false, 'privacy generation changes reject late extraction output');
   await worker.close();
@@ -213,7 +212,7 @@ async function testBatchAndBudget() {
   const worker = makeWorker(memory, { clock: () => now, maxMessages: 1, maxCalls: 3, extract: async batch => {
     calls++; assert.equal(batch.length, 1); return { memories: [], excerpts: [{ sourceId: batch[0].id, quote: batch[0].content }] };
   } });
-  worker.request('doze');
+  worker.request('dream');
   await until(() => worker.status().status === 'queued' && worker.status().note.includes('预算'), '3-call budget pause');
   assert.equal(calls, 3);
   for (let round = 0; round < 20 && worker.status().status !== 'idle'; round++) {
@@ -228,7 +227,7 @@ async function testBatchAndBudget() {
   const longMemory = new FakeMemory();
   longMemory.seed(message('too-long', 'user', '一'.repeat(30), 1));
   const oversized = makeWorker(longMemory, { maxChars: 10, extract: async () => { throw new Error('must not run'); } });
-  oversized.request('doze');
+  oversized.request('dream');
   await until(() => oversized.status().status === 'failed', 'oversized message stop');
   assert.equal(longMemory.records.has('maintenance:private:2'), false, 'oversized input is neither truncated nor skipped');
   await oversized.close();
@@ -242,13 +241,13 @@ async function testPersistedDailyBudgetAcrossRestart() {
   let calls = 0;
   const extract = async batch => { calls++; return { memories: [], excerpts: [{ sourceId: batch[0].id, quote: batch[0].content }] }; };
   let worker = makeWorker(memory, { clock: () => now, maxMessages: 1, maxCallsPerDay: 1, extract });
-  worker.request('doze');
+  worker.request('dream');
   await until(() => worker.status().status === 'queued' && worker.status().note.includes('每日'), 'daily budget pause');
   assert.equal(calls, 1);
   await worker.close();
 
   worker = makeWorker(memory, { clock: () => now, maxMessages: 1, maxCallsPerDay: 1, extract });
-  worker.request('doze');
+  worker.request('dream');
   await until(() => worker.status().status === 'queued' && worker.status().note.includes('每日'), 'daily budget survives restart');
   assert.equal(calls, 1, 'restart cannot reset the persisted daily call budget');
   now += 24 * 60 * 60_000 + 1;
@@ -258,7 +257,7 @@ async function testPersistedDailyBudgetAcrossRestart() {
   await worker.close();
 }
 
-async function testDreamExactDuplicateOnlyAndDozeFirst() {
+async function testDeepdreamPreservesOriginalsAndExtractsFirst() {
   const memory = new FakeMemory();
   memory.seed(message('doze-first', 'user', '先吸收新增，再归档旧重复。', 1));
   memory.seed({ id: 'm-1', kind: 'memory', ts: 2, domain: 'private', visibilityFloor: 2, value: { content: '完全相同的普通事实', status: 'confirmed', importance: 0.6, memoryKind: 'fact', sources: ['doze-first'] } });
@@ -270,12 +269,12 @@ async function testDreamExactDuplicateOnlyAndDozeFirst() {
   const worker = makeWorker(memory, { extract: async batch => {
     order.push('extract'); return { memories: [], excerpts: [{ sourceId: batch[0].id, quote: batch[0].content }] };
   } });
-  worker.request('dream'); await waitForIdle(worker);
+  worker.request('deepdream'); await waitForIdle(worker);
   assert.equal(order[0], 'extract', 'dream completes doze before archiving');
   assert.equal(memory.records.get('m-1').state, 'active', 'oldest exact duplicate remains canonical');
-  assert.equal(memory.records.get('m-2').state, 'archived');
+  assert.equal(memory.records.get('m-2').state, 'active', 'without semantic evidence Deepdream preserves both originals');
   assert.equal(memory.records.get('m-2').value.content, '完全相同的普通事实', 'archive preserves the original content');
-  assert([...memory.records.values()].some(row => row.id.startsWith('dream-archive-v1:') && row.value.status === 'archived-duplicate'));
+  assert(![...memory.records.values()].some(row => row.id.startsWith('dream-archive-v1:')));
   assert.equal(memory.records.get('m-pinned').state, 'active', 'pinned records are never archived');
   assert.equal(memory.records.get('m-work').state, 'active', 'identical content in another partition is not a duplicate');
   assert.equal(memory.records.get('m-other-kind').state, 'active', 'same text with a different memory kind is kept conservatively');
@@ -291,7 +290,7 @@ async function testDailyDueAndTags() {
   now = new Date(2026, 9, 26, 5, 0, 0, 0).getTime();
   assert.equal(await worker.checkDue(now), true, 'daily due work starts at local 05:00');
   await waitForIdle(worker);
-  assert.equal(memory.records.get('maintenance:daily-schedule').value.lastDueLocalDate, '2026-10-26');
+  assert.equal(memory.records.get('maintenance:daily-schedule').value.deepdreamDate, '2026-10-26');
   assert.equal(await worker.checkDue(now + 60_000), false, 'daily work is deduplicated for the local date');
   await worker.close();
 }
@@ -300,11 +299,11 @@ async function testAutomaticPreferenceAndManualOverride() {
   const memory = new FakeMemory(); memory.seed(message('automatic-source', 'user', '关闭自动整理时仍保留这条原文。', 1));
   let calls = 0, automatic = false;
   const worker = makeWorker(memory, { allowAutomatic: () => automatic, extract: async () => { calls++; return { memories: [], excerpts: [] }; } });
-  worker.request('doze', { automatic: true });
+  worker.request('dream', { automatic: true });
   await until(() => worker.status().status === 'paused', 'automatic disabled pause');
   assert.equal(calls, 0);
   assert.equal(memory.records.has('maintenance:private:2'), false);
-  worker.request('doze');
+  worker.request('dream');
   await waitForIdle(worker);
   assert.equal(calls, 1, 'an explicit manual request can run while automatic organization is disabled');
   assert.equal(memory.records.get('maintenance:private:2').value.watermark.id, 'automatic-source');
@@ -315,19 +314,19 @@ async function testAutomaticPreferenceAndManualOverride() {
   const pending = makeWorker(pendingMemory, { allowAutomatic: () => automatic, extract: async (_batch, { signal }) => {
     started(); await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); return { memories: [], excerpts: [] };
   } });
-  pending.request('doze', { automatic: true }); await begin; automatic = false; pending.cancel(); await pending.tick();
+  pending.request('dream', { automatic: true }); await begin; automatic = false; pending.cancel(); await pending.tick();
   assert.equal(pendingMemory.records.has('maintenance:private:2'), false, 'late automatic results cannot advance progress after cancellation');
   await pending.tick(); assert.equal(pending.status().status, 'paused'); await pending.close();
 }
 
 async function main() {
-  await testDozeValidationAndCheckpoint();
+  await testDreamValidationAndCheckpoint();
   await testPartitionBoundariesAndRestart();
   await testIngestionCursorSameMillisecondRollbackAndRestart();
   await testAbortAndGenerationChangeDoNotAdvance();
   await testBatchAndBudget();
   await testPersistedDailyBudgetAcrossRestart();
-  await testDreamExactDuplicateOnlyAndDozeFirst();
+  await testDeepdreamPreservesOriginalsAndExtractsFirst();
   await testDailyDueAndTags();
   await testAutomaticPreferenceAndManualOverride();
   console.log('memory-maintenance fixtures passed (synthetic in-memory store; no production vault or model calls)');

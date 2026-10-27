@@ -89,6 +89,7 @@ async function writeBatches(memory, records) {
 }
 
 async function runDoze(worker) {
+  assert.equal(await worker.runExtract(new AbortController().signal), 'done');
   const outcome = await worker.runDoze(new AbortController().signal);
   assert.equal(outcome, 'done');
 }

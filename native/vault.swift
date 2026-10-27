@@ -492,6 +492,35 @@ final class DB {
                 }
                 return ["epoch": try epoch(), "written": records.count]
             }
+        case "memory_sample":
+            guard let partitions=p["partitions"] as? [[String: Any]], partitions.count <= 6,
+                  let percent=int(p["percent"]), [5,10].contains(percent), let now=int(p["now"]) else { throw fail("invalid_request") }
+            var filters:[String]=[], binds:[(String?,Int64?)]=[]
+            for part in partitions {
+                guard let domain=text(part["domain"]), let minimum=domainFloor(domain),
+                      let floor=int(part["visibilityFloor"]), floor >= minimum, floor <= 2,
+                      let cutoff=int(part["cutoff"]) else { throw fail("invalid_request") }
+                filters.append("(domain=? AND visibilityFloor=? AND ingestionSeq<=?)")
+                binds += [(domain,nil),(nil,floor),(nil,cutoff)]
+            }
+            guard !filters.isEmpty else { return ["rows": [], "count": 0] }
+            var predicate="kind='memory' AND state='active' AND (expiresAt IS NULL OR expiresAt>?) AND (" + filters.joined(separator:" OR ") + ")"
+            var allBinds:[(String?,Int64?)]=[(nil,now)] + binds
+            if let floor=try requestedSceneFloor(p) { predicate += " AND visibilityFloor<=?"; allBinds.append((nil,floor)) }
+            let required=try tokenFilters(p,"requiredTokens"), excluded=try tokenFilters(p,"excludedTokens")
+            appendTokenFilters(required,excluded,"records.id",&predicate,&allBinds)
+            let countQuery=try statement("SELECT COUNT(*) FROM records WHERE " + predicate)
+            defer { sqlite3_finalize(countQuery) }
+            for (i,v) in allBinds.enumerated() { if let t=v.0 { bind(countQuery,Int32(i+1),t) } else if let n=v.1 { bind(countQuery,Int32(i+1),n) } }
+            guard sqlite3_step(countQuery)==SQLITE_ROW else { throw fail("database_operation_failed") }
+            let count=Int(sqlite3_column_int64(countQuery,0)), take=min(50,(count*Int(percent)+99)/100)
+            var offsets=Set<Int>()
+            while offsets.count < take { offsets.insert(Int.random(in: 0..<count)) }
+            var sampled:[[String: Any]]=[]
+            for offset in offsets.sorted() {
+                sampled += try rows("SELECT id,kind,ts,updatedAt,state,expiresAt,body,domain,visibilityFloor,ingestionSeq FROM records WHERE " + predicate + " ORDER BY ingestionSeq LIMIT 1 OFFSET \(offset)", allBinds)
+            }
+            return ["rows":sampled,"count":count]
         case "query":
             let rawLimit: Int64
             if let raw = p["limit"] { guard let value=int(raw) else { throw fail("invalid_request") }; rawLimit=value }

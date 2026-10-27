@@ -6,6 +6,7 @@ const TYPES = Object.freeze(Object.keys(ORIGINS));
 const LABELS = Object.freeze({ relation: '相关陈述', doubt: '待核对', experience: '经验', tool: '工具', decision: '核对记录' });
 function typeOf(record) {
   if (record?.kind !== 'state') return null;
+  if (record.value?.origin === 'user-experience-v1') return 'experience';
   return TYPES.find(type => record.value?.origin === ORIGINS[type]) || null;
 }
 function marker(type) {

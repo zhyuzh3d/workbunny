@@ -121,10 +121,11 @@ async function testFullMaintenanceChainAndSharedBudget() {
     setTimer: timers.setTimer, clearTimer: timers.clearTimer,
   });
 
-  assert.equal(maintenance.request('dream').ok, true);
+  assert.equal(maintenance.request('deepdream').ok, true);
+  maintenance.request('doze');
   await maintenance.tick();
   assert.equal(maintenance.status().status, 'queued', 'the shared three-calls-per-minute budget pauses the full chain');
-  assert.equal(modelCalls.extract.length, 3, 'Doze processed the three original scene partitions before the pause');
+  assert.equal(modelCalls.extract.length, 3, 'Dream processed the three original scene partitions before the pause');
   assert.equal(modelCalls.semantic.length, 0);
 
   let semanticBudgetPaused = false;
@@ -155,9 +156,9 @@ async function testFullMaintenanceChainAndSharedBudget() {
   assert.equal(allDoubts.rows.length, partitions.length, 'private scene can see the four scope-valid semantic doubts');
 
   const experiences = await memory.knowledge.list({ category: 'experience', scene: 'work' });
-  assert(experiences.rows.some(row => row.id.startsWith('experience:')), 'Dream backfilled the accepted historical task experience');
+  assert(experiences.rows.some(row => row.id.startsWith('experience:')), 'Deepdream backfilled the accepted historical task experience');
   assert.equal(new Set(modelCalls.extract.map(ids => JSON.stringify(ids))).size, modelCalls.extract.length,
-    'budget resumes continue after committed Doze batches without repeating model extraction');
+    'budget resumes continue after committed Dream batches without repeating model extraction');
   assert.equal(new Set(modelCalls.semantic).size, modelCalls.semantic.length, 'semantic analysis is not repeated after cache commit');
   assert(modelCalls.summarize.every(call => ['work', 'life', 'private'].includes(call.scene)));
   assert(['work', 'life', 'private'].every(scene => modelCalls.summarize.some(call => call.scene === scene)),
@@ -173,7 +174,7 @@ async function testInvalidSemanticOutputDoesNotAdvance() {
   const maintenance = new MemoryMaintenance({ memory, extract: async () => ({ memories: [], excerpts: [] }),
     analyzeRelations: async () => ({ relations: [{ type: 'unsupported', recordIds: [] }] }),
     clock: () => now++, setTimer: timers.setTimer, clearTimer: timers.clearTimer });
-  maintenance.request('dream');
+  maintenance.request('deepdream');
   await maintenance.tick();
   assert.equal(maintenance.status().status, 'failed');
   assert.match(maintenance.status().note, /E_INVALID_MODEL_OUTPUT/u);
@@ -194,13 +195,13 @@ async function testFailedDreamCooldownSurvivesRestartAndManualRetry() {
   const invalid = new MemoryMaintenance({ memory, extract: async () => ({ memories: [], excerpts: [] }),
     analyzeRelations: async () => ({ relations: [{ type: 'unsupported', recordIds: [] }] }),
     clock: () => now++, setTimer: timers.setTimer, clearTimer: timers.clearTimer });
-  assert.equal(invalid.request('dream').ok, true);
+  assert.equal(invalid.request('deepdream').ok, true);
   await invalid.tick();
   assert.equal(invalid.status().status, 'failed');
   const failedAt = now;
   const schedule = await readSchedule(memory);
   assert(schedule.value.retryAfter >= failedAt + 29 * 60_000, 'failure persists a bounded automatic retry cooldown');
-  assert.equal(invalid.request('dream', { automatic: true }).ok, false, 'the same worker suppresses automatic retries');
+  assert.equal(invalid.request('deepdream', { automatic: true }).ok, false, 'the same worker suppresses automatic retries');
   await invalid.close();
   await memory.close();
 
@@ -214,9 +215,9 @@ async function testFailedDreamCooldownSurvivesRestartAndManualRetry() {
     analyzeRelations: async inputs => { semanticCalls++; return validContradiction(inputs); },
     clock: () => now++, setTimer: restartedTimers.setTimer, clearTimer: restartedTimers.clearTimer });
   assert.equal(await restarted.checkDue(now), false, 'persisted cooldown blocks automatic retry after worker restart');
-  assert.equal(restarted.request('dream', { automatic: true }).ok, false);
+  assert.equal(restarted.request('deepdream', { automatic: true }).ok, false);
   assert.equal(semanticCalls, 0);
-  assert.equal(restarted.request('dream').ok, true, 'manual retry bypasses the automatic cooldown');
+  assert.equal(restarted.request('deepdream').ok, true, 'manual retry bypasses the automatic cooldown');
   await restarted.tick();
   assert.equal(restarted.status().status, 'idle');
   assert.equal(semanticCalls, 1);
@@ -253,7 +254,7 @@ async function testDelayedScheduleReadCannotOverrideFailureOrSuccess() {
   const staleBeforeFailure = delayNextScheduleRead(worker);
   const firstCheck = worker.checkDue(now);
   await staleBeforeFailure.started;
-  assert.equal(worker.request('dream').ok, true);
+  assert.equal(worker.request('deepdream').ok, true);
   await worker.tick();
   assert.equal(worker.status().status, 'failed');
   const failureCooldown = worker.automaticRetryAfter;
@@ -269,7 +270,7 @@ async function testDelayedScheduleReadCannotOverrideFailureOrSuccess() {
   const staleBeforeSuccess = delayNextScheduleRead(worker);
   const secondCheck = worker.checkDue(now);
   await staleBeforeSuccess.started;
-  assert.equal(worker.request('dream').ok, true, 'manual retry remains available during the cooldown');
+  assert.equal(worker.request('deepdream').ok, true, 'manual retry remains available during the cooldown');
   await worker.tick();
   assert.equal(worker.status().status, 'idle');
   assert.equal(worker.automaticRetryAfter, 0);
@@ -290,7 +291,7 @@ async function testCanRunFalseDoesNotWrite() {
   const maintenance = new MemoryMaintenance({ memory, extract: async () => { calls++; return { memories: [], excerpts: [] }; },
     canRun: () => false, clock: () => now++, setTimer: timers.setTimer, clearTimer: timers.clearTimer });
   const epoch = memory.epoch;
-  maintenance.request('doze');
+  maintenance.request('dream');
   await maintenance.tick();
   assert.equal(maintenance.status().status, 'paused');
   assert.equal(memory.epoch, epoch, 'a denied canRun check writes no watermark or derivative record');
@@ -318,7 +319,8 @@ async function testSemanticScheduleVersionUpgrade() {
   await worker.tick();
   const upgraded = await readSchedule(memory);
   assert.equal(upgraded.value.lastDueLocalDate, scheduleDate);
-  assert.equal(upgraded.value.semanticVersion, 1);
+  assert.equal(upgraded.value.lifecycleVersion, 3);
+  assert.equal(upgraded.value.deepdreamDate, scheduleDate);
   assert.equal(await worker.checkDue(now), false, 'successful version-1 Dream suppresses another same-day upgrade run');
   await worker.close();
 
@@ -333,7 +335,7 @@ async function testSemanticScheduleVersionUpgrade() {
   const due = await disabled.checkDue(now);
   assert.equal(due, false, 'disabled automatic work does not queue an upgrade run');
   assert.equal(semanticCalls, 0, 'automatic maintenance disabled prevents the semantic upgrade scan');
-  assert.notEqual((await readSchedule(disabledMemory)).value.semanticVersion, 1, 'disabled automatic work does not mark the upgrade as complete');
+  assert.notEqual((await readSchedule(disabledMemory)).value.lifecycleVersion, 3, 'disabled automatic work does not mark the upgrade as complete');
   await disabled.close();
 }
 

@@ -279,7 +279,7 @@ async function testMemory() {
   const win = await loadPage('memory');
   await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .record').length" ).then(n => n === 2), 'memory list');
   await waitFor(() => evalIn(win, "document.getElementById('maintenanceStatus').textContent").then(text => text.includes('空闲')), 'initial maintenance status');
-  assert.match(await evalIn(win, "document.querySelector('.maintenance-scope').textContent"), /同义.*变化.*待核对.*保留原文/);
+  assert.match(await evalIn(win, "document.querySelector('.maintenance-scope').textContent"), /Doze.*Dream.*04:00.*Deepdream.*05:00.*场景边界/);
   assert.match(await evalIn(win, "document.getElementById('contextStatus').textContent"), /生活.*压缩版本 2/);
   await click(win, 'maintenanceDoze');
   await waitFor(() => Promise.resolve((calls.memoryMaintain || []).length === 1), 'doze request');
@@ -291,6 +291,10 @@ async function testMemory() {
   await click(win, 'maintenanceDream');
   await waitFor(() => Promise.resolve((calls.memoryMaintain || []).length === 2), 'dream request');
   assert.equal(calls.memoryMaintain[1][0], 'dream');
+  await waitFor(() => evalIn(win, '!document.getElementById("maintenanceDeepdream").disabled'), 'deepdream button enabled');
+  await click(win, 'maintenanceDeepdream');
+  await waitFor(() => Promise.resolve((calls.memoryMaintain || []).length === 3), 'deepdream request');
+  assert.equal(calls.memoryMaintain[2][0], 'deepdream');
   assert.equal(await evalIn(win, "document.getElementById('memoryScene').value"), 'life', 'life is the default scene');
   assert.equal(await evalIn(win, "document.getElementById('memorySceneScope').textContent"), '生活：可按需参考生活与工作资料');
   assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '生活补充', 'the life overlay loads independently of the common profile');

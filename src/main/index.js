@@ -966,7 +966,11 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
         log('[brain] reply-protocol rejected');
         const error = new Error('模型返回的回复格式异常，本次没有执行操作，请重试'); error.code = 'E_REPLY_PROTOCOL'; throw error;
       } else {
-        const result = await secretary.dispatch(responseGate.intent, {
+        const memoryIntent = ['remember', 'learn_experience'].includes(responseGate.intent.action);
+        const result = memoryIntent ? await require('./memory-commands').rememberRequest(memory, responseGate.intent, {
+          userRecord, scene, signal: controller.signal,
+          isCurrent: () => !controller.signal.aborted && requestEpoch === contextEpoch && (!voiceTurn || voiceTurn.isCurrent()),
+        }) : await secretary.dispatch(responseGate.intent, {
           requestId: voiceTurn ? `voice-${voiceTurn.turnId}` : randomUUID(), userText,
           requestSourceId: userRecord?.id,
           source: voiceTurn ? 'voice' : 'text',
@@ -976,7 +980,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
           isCurrent: () => !controller.signal.aborted && requestEpoch === contextEpoch && (!voiceTurn || voiceTurn.isCurrent()),
         });
         if (controller.signal.aborted || (voiceTurn && !voiceTurn.isCurrent())) return null;
-        for (const sourceId of [result.taskId, result.watchId]) if (sourceId && !replySources.includes(sourceId)) replySources.push(sourceId);
+        for (const sourceId of [result.taskId, result.watchId, ...(memoryIntent && result.ok && result.id ? [result.id] : [])]) if (sourceId && !replySources.includes(sourceId)) replySources.push(sourceId);
         if (replySources.length > 200) throw new Error('本轮参考资料过多，请缩小问题范围');
         clean = result.text;
       }
@@ -1741,7 +1745,7 @@ async function applySettings(patch) {
   }
   if (patch?.memory && c.memory.extract !== previous.memory.extract) {
     if (!c.memory.extract) memory?.cancelExtraction();
-    else maintenance?.tick().catch(() => {});
+    else { maintenance?.request('doze', { automatic: true }); maintenance?.tick().catch(() => {}); }
   }
   if (patch?.monitor && JSON.stringify(previous.monitor) !== JSON.stringify(c.monitor)) startMonitor();
   if (patch?.avatar && c.avatar !== previous.avatar) send('avatar', { key: c.avatar });
@@ -2269,6 +2273,7 @@ if (!lock) {
         const panel = panels.get('memory');
         if (panel && !panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'memory-maintenance', ...status });
       } });
+    if (config.load().memory.extract) maintenance.request('doze', { automatic: true });
     maintenanceTimer = setInterval(() => {
       if (!readyForTasks()) return;
       if (config.load().memory.extract) maintenance.checkDue().catch(() => {});
@@ -2311,7 +2316,7 @@ if (!lock) {
         if (!memory.ready) { asrStatus = { ...asrStatus, captureReady: false, note: 'memory-locked' }; send('asrStatus', asrStatus); }
         if (memory.ready && config.load().memory.enabled) await memory.personaRevision(config.load().buddy);
         await recoverTaskViews();
-        if (config.load().memory.extract) maintenance.checkDue().catch(() => {});
+        if (config.load().memory.extract) { maintenance.request('doze', { automatic: true }); maintenance.checkDue().catch(() => {}); }
         for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'memory-ready' });
         startListen('memory-ready');
       }).finally(() => { vaultOpening = null; });

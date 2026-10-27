@@ -31,6 +31,7 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? String(value) : new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 function labelStatus(value) {
+  if (value === 'unverified') return '用户传授 · 未实测';
   const labels = { pending: '待确认', accepted: '已确认', rejected: '已忽略', ready: '已就绪', unavailable: '不可用',
     enabled: '已启用', disabled: '已停用', running: '运行中', completed: '已完成', failed: '未完成', stopped: '已停止' };
   return labels[String(value)] || String(value ?? '—');
@@ -106,8 +107,8 @@ async function loadMaintenanceStatus() {
 async function requestMemoryMaintenance(mode) {
   if (maintenanceBusy) return;
   maintenanceBusy = true;
-  $('maintenanceDoze').disabled = $('maintenanceDream').disabled = true;
-  $('maintenanceStatus').textContent = mode === 'doze' ? '正在排入小憩…' : '正在排入记忆整理…';
+  $('maintenanceDoze').disabled = $('maintenanceDream').disabled = $('maintenanceDeepdream').disabled = true;
+  $('maintenanceStatus').textContent = `正在排入 ${mode}…`;
   try {
     const result = await api('memoryMaintain', mode);
     if (!result?.ok) throw new Error(result?.error || '请求没有排入');
@@ -116,7 +117,7 @@ async function requestMemoryMaintenance(mode) {
     $('maintenanceStatus').textContent = error.message || '整理请求没有完成';
   } finally {
     maintenanceBusy = false;
-    $('maintenanceDoze').disabled = $('maintenanceDream').disabled = false;
+    $('maintenanceDoze').disabled = $('maintenanceDream').disabled = $('maintenanceDeepdream').disabled = false;
   }
 }
 function memoryConfigFrom(result) {
@@ -302,12 +303,14 @@ function renderSources(card, rows) {
 function renderRecord(row) {
   if (memoryKind === 'knowledge') return renderKnowledgeRecord(row);
   const isConflict = row.origin === 'user-key-conflict-v1' && row.status === 'pending';
-  const isModelCandidate = /^(?:doze-candidate|model-candidate)/u.test(row.origin || '') && row.status === 'pending';
+  const isModelCandidate = /^(?:doze-candidate|dream-candidate|model-candidate)/u.test(row.origin || '') && row.status === 'pending';
   const card = node('article', 'record');
   card.dataset.recordId = row.id || '';
   const top = node('div', 'record-top');
   top.append(node('span', 'record-date', formatTime(row.ts)));
   if (row.role) top.append(node('span', 'badge', row.role));
+  for (const tag of (row.tags || []).filter(t => t === '主动记忆' || t === '自动记忆')) top.append(node('span', 'badge', tag));
+  if (row.origin === 'deepdream-merged-v1') top.append(node('span', 'badge', '归并版本'));
   if (row.status) top.append(node('span', `badge${row.status === 'pending' ? ' pending' : ''}`, isConflict ? '用户说法待核对' : isModelCandidate ? '整理候选' : labelStatus(row.status)));
   card.append(top);
   card.append(node('div', `record-content${row.role ? ' role' : ''}`, row.content || '（空内容）'));
@@ -401,6 +404,7 @@ function renderKnowledgeRecord(raw) {
   const top = node('div', 'record-top');
   top.append(node('span', 'record-date', formatTime(row.ts)));
   top.append(node('span', 'badge', row.label || knowledgeTypeLabel(row.knowledgeType)));
+  for (const tag of (row.tags || []).filter(t => t === '主动记忆' || t === '自动记忆')) top.append(node('span', 'badge', tag));
   if (row.status) top.append(node('span', `badge${['pending', 'open', 'unresolved', 'snoozed'].includes(row.status) ? ' pending' : ''}`,
     row.knowledgeType === 'experience' && row.status === 'candidate' ? '单次已验收' : knowledgeStatusLabel(row.status)));
   card.append(top, node('div', 'record-content', row.content || '（空内容）'));
@@ -570,7 +574,7 @@ function resultHasMemoryMore(result, rows, query) {
   return rows.length > 0;
 }
 function memoryListOptions(view, cursor) {
-  const options = { kind: view.kind, query: view.query };
+  const options = { kind: view.kind, query: view.query, ...(view.kind === 'memory' ? { effective: true } : {}) };
   if (view.kind === 'knowledge') options.category = view.category;
   if (cursor) { options.before = cursor.ts; options.beforeId = cursor.id; }
   return options;
@@ -589,7 +593,7 @@ async function loadMemoryList(reset = false) {
     if (revision !== memoryViewRevision) return;
     if (hasOpenMemoryEditor()) { memoryRefreshPending = true; return; }
     const rows = rowsFromMemoryResult(result);
-    memoryRows = reset ? rows : memoryRows.concat(rows);
+    memoryRows = [...new Map((reset ? rows : memoryRows.concat(rows)).map(row => [row.id, row])).values()];
     if (rows.length) memoryPageCount = reset ? 1 : memoryPageCount + 1;
     const target = $('memoryList'); target.replaceChildren(...memoryRows.map(renderRecord));
     const nextCursor = cursorFromMemoryResult(result, rows);
@@ -633,7 +637,7 @@ async function refreshMemoryView() {
       hasMore = resultHasMemoryMore(result, batch, view.query);
       if (!batch.length || !hasMore) break;
     }
-    memoryRows = rows;
+    memoryRows = [...new Map(rows.map(row => [row.id, row])).values()];
     memoryCursor = cursor;
     memoryHasMore = hasMore;
     $('memoryList').replaceChildren(...memoryRows.map(renderRecord));
@@ -663,6 +667,7 @@ async function initMemory() {
 }
 $('maintenanceDoze').addEventListener('click', () => { void requestMemoryMaintenance('doze'); });
 $('maintenanceDream').addEventListener('click', () => { void requestMemoryMaintenance('dream'); });
+$('maintenanceDeepdream').addEventListener('click', () => { void requestMemoryMaintenance('deepdream'); });
 $('memoryUnlock').addEventListener('click', async () => { try { paintMemoryStats(await api('memoryUnlock')); await loadMemoryList(true); } catch (error) { showError(error); } });
 $('memoryTabs').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-kind]');

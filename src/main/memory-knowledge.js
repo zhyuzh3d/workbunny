@@ -19,8 +19,10 @@ const relationLabels = { equivalent: '同义陈述', update: '随时间变化', 
 function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
   if (!memory?.serial || !memory?.query) throw new TypeError('MemoryKnowledge requires MemoryService');
 
+  const consolidation = require('./memory-consolidation').createMemoryConsolidation({ memory, clock });
+
   async function validRelation(row, scene) {
-    if (typeOf(row) !== 'relation' || row.state !== 'active' || !Array.isArray(row.value.memberIds) ||
+    if (typeOf(row) !== 'relation' || row.state !== 'active' || row.value.status !== 'proposed' || !Array.isArray(row.value.memberIds) ||
         row.value.memberIds.length < 2 || row.value.memberIds.length > 6 ||
         !Array.isArray(row.value.analysisSnapshots) || row.value.analysisSnapshots.length > 32) return null;
     const verified = await verifySnapshots(memory, row.value.analysisSnapshots, { scene });
@@ -73,13 +75,18 @@ function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
     // A durable cursor bounds work even for a vault with years of relations.
     return memory.serial(async () => {
       if (signal?.aborted || !await canRun()) return { status: 'paused', created: 0, more: true };
-      const checkpointId = 'knowledge:doubt-cursor:v1';
+      const checkpointId = 'knowledge:organize-cursor:v2';
       const checkpoint = (await readRecords(memory, [checkpointId]))[0];
       const rows = (await memory.query('state', 40, { scene: null, sort: 'ingestion', order: 'asc',
         afterSeq: checkpoint?.value.afterSeq || 0, requiredMarkers: [marker('relation')] }));
       let created = 0;
       for (const row of rows) {
         if (signal?.aborted || !await canRun()) return { status: 'paused', created, more: true };
+        if (row.value.relation === 'equivalent') {
+          const equivalent = await validRelation(row, ['work', 'life', 'private'][row.visibilityFloor]);
+          if (equivalent) await consolidation.link(row, equivalent.members);
+          continue;
+        }
         if (!['contradiction', 'uncertain'].includes(row.value.relation)) continue;
         const scene = ['work', 'life', 'private'][row.visibilityFloor];
         const checked = await validRelation(row, scene);
@@ -204,11 +211,11 @@ function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
         choices = projection.checked.members.map(item => ({ id: item.id, content: item.value.content, evidence: item.evidence.quote }));
       } else {
         // Validate task receipts on read; merely finding an index is not proof.
-        const task = (await readRecords(memory, [row.value.taskId], { scene }))[0];
-        if (!task || !await memory.experiences?.validateRecord(row, { scene })) continue;
+        if (!await memory.experiences?.validateRecord(row, { scene })) continue;
       }
       result.push({ id: row.id, kind: row.kind, ts: row.ts, domain: row.domain, visibilityFloor: row.visibilityFloor,
         knowledgeType: type, label: type === 'relation' ? relationLabels[row.value.relation] : LABELS[type], status,
+        tags: require('./memory-tags').tagged(row.value).tags,
         content: String(row.value.content || '').replace(/^bunny_knowledge_\w+\s*/u, ''),
         memberChoices: choices, sources: row.value.sources || [],
         ...(type === 'tool' ? { artifact: row.value.artifact, snapshotAvailable: typeof row.value.code === 'string', fileStatus: 'unknown' } : {}) });
@@ -282,7 +289,7 @@ function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
     return { status: 'done', more: rows.length === 30, processed };
   }
 
-  return { sync, resolve, list, context, applyResolutions, backfillExperiences, validRelation, projectQuestion };
+  return { projectMemories: consolidation.project, sync, resolve, list, context, applyResolutions, backfillExperiences, validRelation, projectQuestion };
 }
 
 module.exports = { createMemoryKnowledge, replacementMarker };

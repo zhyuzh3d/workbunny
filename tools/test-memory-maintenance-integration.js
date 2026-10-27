@@ -76,7 +76,7 @@ async function testSqlitePartitionsWatermarkAndRemoval() {
   for (const [scene, role, content] of input) sources.push({ scene, ...(await addMessage(service, scene, role, content)) });
   const calls = [];
   const worker = createWorker(service, extractor(calls), { clock: () => now });
-  worker.request('doze');
+  worker.request('dream');
   await until(() => worker.status().status === 'idle' && calls.length >= 3, 'three scene batches');
   await worker.tick();
   assert.equal(calls.length, 3, 'private/life/work each use one extraction batch');
@@ -85,13 +85,13 @@ async function testSqlitePartitionsWatermarkAndRemoval() {
   assert.equal(candidates.length, 3, 'one pending candidate is stored for each user source');
   for (const row of candidates) {
     assert.equal(row.value.status, 'pending');
-    assert.deepEqual(row.value.tags, ['散步', '沿海', 'integration-tag']);
+    assert.deepEqual(row.value.tags, ['自动记忆', '散步', '沿海', 'integration-tag']);
     const source = sources.find(item => item.id === row.value.sources[0]);
     assert(source && row.domain === source.scene, 'candidate scope follows its source scene');
     assert(Number.isSafeInteger(row.ingestionSeq));
   }
   const summaries = await service.query('summary', 100, { scene: null });
-  assert.equal(summaries.length, 3, 'each scope receives a source-linked excerpt summary');
+  assert.equal(summaries.length, 0, 'Dream creates memories only; Doze owns summaries');
   for (const row of summaries) {
     assert(row.value.sources.length >= 1);
     assert(row.value.sourceRange.firstSeq <= row.value.sourceRange.lastSeq);
@@ -104,7 +104,7 @@ async function testSqlitePartitionsWatermarkAndRemoval() {
     assert(checkpoint?.value.watermark && Number.isSafeInteger(checkpoint.value.watermark.ingestionSeq));
   }
 
-  worker.request('doze');
+  worker.request('dream');
   await worker.tick();
   assert.equal(calls.length, 3, 'zero new messages means zero extraction calls');
   assert.equal((await service.query('memory', 100, { scene: null })).length, 3, 'repeated doze does not create duplicate candidates');
@@ -119,7 +119,7 @@ async function testSqlitePartitionsWatermarkAndRemoval() {
 
   now += 60_001; // Leave the real 3-calls-per-minute budget window.
   const laterLife = await addMessage(service, 'life', 'user', '稍后我会继续在河边散步。');
-  worker.request('doze');
+  worker.request('dream');
   await until(() => worker.status().status === 'idle' && calls.length === 4, 'life post-delete append');
   assert(calls.at(-1).includes(laterLife.id), 'a lower timestamp after deletion is still found by ingestion sequence');
   const laterCandidates = await service.query('memory', 100, { scene: null });
@@ -136,7 +136,7 @@ async function testExportRestoreSequenceAndNewAppend() {
   const b = await addMessage(source, 'life', 'user', '导出前较晚的生活消息。');
   const calls = [];
   const worker = createWorker(source, extractor(calls), { clock: () => now });
-  worker.request('doze'); await until(() => worker.status().status === 'idle' && calls.length === 2, 'source doze before export');
+  worker.request('dream'); await until(() => worker.status().status === 'idle' && calls.length === 2, 'source doze before export');
   const before = await source.query(undefined, 200, { scene: null, state: 'all', sort: 'ingestion', order: 'asc' });
   const beforeSeq = new Map(before.map(row => [row.id, row.ingestionSeq]));
   const backup = await source.export(passphrase);
@@ -160,7 +160,7 @@ async function testExportRestoreSequenceAndNewAppend() {
   const restoredWorker = createWorker(restored, extractor(restoredCalls), { clock: () => now });
   now = Date.UTC(2025, 11, 31); // Deliberate wall-clock rollback after restore.
   const newMessage = await addMessage(restored, 'life', 'user', '恢复后新增且时间回拨的生活消息。');
-  restoredWorker.request('doze');
+  restoredWorker.request('dream');
   await until(() => restoredCalls.length > 0 || restoredWorker.status().status === 'failed' || restoredWorker.status().note.includes('预算'), 'restored worker consumes append');
   assert(restoredCalls.length > 0, `restored append did not reach extractor: ${JSON.stringify(restoredWorker.status())}`);
   await until(() => ['idle', 'paused', 'failed'].includes(restoredWorker.status().status) ||
@@ -189,7 +189,7 @@ async function testSceneChangeCancelsUncommittedExtraction() {
     extractionStarted();
     await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new Error('synthetic interrupted')), { once: true }));
   });
-  worker.request('doze'); await started;
+  worker.request('dream'); await started;
   await service.changeScene('work');
   await until(() => worker.status().status === 'paused', 'scene change abort');
   assert.equal((await service.query('memory', 50, { scene: null })).length, 0, 'scene switch abort prevents candidate commit');
@@ -209,13 +209,13 @@ async function testPersistedBudgetOnRealVault() {
   let calls = 0;
   const extract = async batch => { calls++; return { memories: [], excerpts: [{ sourceId: batch[0].id, quote: batch[0].content }] }; };
   let worker = createWorker(service, extract, { clock: () => now, maxCallsPerDay: 1 });
-  worker.request('doze');
+  worker.request('dream');
   await until(() => worker.status().status === 'queued' && worker.status().note.includes('每日'), 'daily budget reached');
   assert.equal(calls, 1);
   await worker.close();
 
   worker = createWorker(service, extract, { clock: () => now, maxCallsPerDay: 1 });
-  worker.request('doze');
+  worker.request('dream');
   await until(() => worker.status().status === 'queued' && worker.status().note.includes('每日'), 'daily budget survives worker restart');
   assert.equal(calls, 1, 'restart cannot bypass the persisted daily cap');
   now += 24 * 60 * 60_000 + 1;
@@ -229,7 +229,7 @@ async function testEmptyVaultAndSafeErrors() {
   await service.init();
   let calls = 0;
   const worker = createWorker(service, async () => { calls++; return { memories: [], excerpts: [] }; });
-  worker.request('doze'); await worker.tick();
+  worker.request('dream'); await worker.tick();
   assert.equal(calls, 0, 'an empty vault causes no model call');
   assert.equal(worker.safeError({ message: '解析失败，原文含秘密：FIXTURE_PRIVATE_SENTINEL' }), '整理暂未完成，请稍后再试');
   assert.equal(worker.safeError({ code: 'ERR_PARSE', message: 'FIXTURE_PRIVATE_SENTINEL' }), '整理暂未完成（错误码 ERR_PARSE）');

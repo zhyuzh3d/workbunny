@@ -136,11 +136,12 @@ async function testLegacyCredentialsStayLocalButNeverEnterContextOrModelInputs()
         return { memories: [], excerpts: firstSafe ? [{ sourceId: firstSafe.id, quote: firstSafe.content.slice(0, 80) }] : [] };
       } });
     memory.maintenance = worker; workers.add(worker);
-    const result = await worker.runDoze(new AbortController().signal);
+    const result = await worker.runExtract(new AbortController().signal);
+    assert.equal(await worker.runDoze(new AbortController().signal), 'done');
     assert.equal(result, 'done');
     const sentToExtract = JSON.stringify(extractInputs);
-    assert(!sentToExtract.includes(SECRET_A) && !sentToExtract.includes(SECRET_B), 'Doze stub receives no credential text');
-    assert(sentToExtract.includes('NORMAL_HISTORY_TURN_02'), 'Doze continues with ordinary user history');
+    assert(!sentToExtract.includes(SECRET_A) && !sentToExtract.includes(SECRET_B), 'Dream stub receives no credential text');
+    assert(sentToExtract.includes('NORMAL_HISTORY_TURN_02'), 'Dream continues with ordinary user history');
     assert(compressionInputs.length > 0, 'compression is exercised on old rounds');
     const sentToSummarize = JSON.stringify(compressionInputs);
     assert(!sentToSummarize.includes(SECRET_A) && !sentToSummarize.includes(SECRET_B), 'compression excludes every message in a credential turn');
@@ -159,7 +160,7 @@ async function testLegacyCredentialsStayLocalButNeverEnterContextOrModelInputs()
   }
 }
 
-async function testSecretCandidateIsDroppedAndMalformedDozeDoesNotAdvance() {
+async function testSecretCandidateIsDroppedAndMalformedDreamDoesNotAdvance() {
   const timer = clock(Date.UTC(2026, 2, 1));
   const { memory } = await createMemory('bad-candidate', { enabled: true, extract: false, scene: 'life' }, timer);
   let worker;
@@ -176,9 +177,9 @@ async function testSecretCandidateIsDroppedAndMalformedDozeDoesNotAdvance() {
         ], excerpts: [{ sourceId: user.id, quote: '我每周二会散步' }] };
       } });
     workers.add(worker); memory.maintenance = worker;
-    const outcome = await worker.runDoze(new AbortController().signal);
+    const outcome = await worker.runExtract(new AbortController().signal);
     assert.equal(outcome, 'done', 'a single invalid secret candidate is dropped without blocking valid work');
-    const candidates = (await queryAll(memory, 'memory')).filter(row => row.value.origin === 'doze-candidate-v2');
+    const candidates = (await queryAll(memory, 'memory')).filter(row => row.value.origin === 'dream-candidate-v3');
     assert.equal(candidates.length, 1);
     assert.equal(candidates[0].value.content, '普通安全候选：每周二散步');
     assert.equal(candidates.some(row => row.value.content.includes(SECRET_A)), false);
@@ -199,8 +200,8 @@ async function testSecretCandidateIsDroppedAndMalformedDozeDoesNotAdvance() {
     malformedWorker = new MemoryMaintenance({ memory: malformed.memory, clock: malformedClock.now, maxCallsPerDay: 100,
       extract: async () => { malformedClock.advanceMinute(); return null; } });
     workers.add(malformedWorker); malformed.memory.maintenance = malformedWorker;
-    await assert.rejects(malformedWorker.runDoze(new AbortController().signal));
-    assert.equal(await decoded(malformed.memory, 'maintenance:life:1'), null, 'malformed whole Doze response does not advance the watermark');
+    await assert.rejects(malformedWorker.runExtract(new AbortController().signal));
+    assert.equal(await decoded(malformed.memory, 'maintenance:life:1'), null, 'malformed whole Dream response does not advance the watermark');
     assert.equal((await malformed.memory.db.request('get', { ids: [source.id] })).rows.length, 1, 'malformed output preserves original input');
     assert.equal((await queryAll(malformed.memory, 'summary')).length, 0);
   } finally {
@@ -245,7 +246,7 @@ async function main() {
   try {
     await testCorrectionRejectsSecretWithoutDeletingSource();
     await testLegacyCredentialsStayLocalButNeverEnterContextOrModelInputs();
-    await testSecretCandidateIsDroppedAndMalformedDozeDoesNotAdvance();
+    await testSecretCandidateIsDroppedAndMalformedDreamDoesNotAdvance();
     await testSecretCompressionOutputNeverCommitsHeadOrDeletesSources();
     console.log('memory secret-boundary SQLite integration passed (temporary vaults, no model/provider calls)');
   } finally {

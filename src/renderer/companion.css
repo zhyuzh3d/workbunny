@@ -78,7 +78,7 @@ textarea { resize: vertical; min-height: 62px; line-height: 1.55; -webkit-user-s
 input { -webkit-user-select: text; user-select: text; }
 .records { display: grid; gap: 8px; }
 .record { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
-.record-top { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 7px; }
+.record-top { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0; margin-bottom: 7px; }
 .record-date { min-width: 0; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .record-content { display: block; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; -webkit-user-select: text; user-select: text; }
 .record-content.role { color: var(--muted); }

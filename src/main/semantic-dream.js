@@ -73,7 +73,8 @@ function isEligibleMemory(record, partition) {
   const value = record.value || {};
   if (typeof value.content !== 'string' || !value.content.trim() || value.content.length > 4000 || SECRET.test(value.content)) return false;
   if (['archived', 'archived-duplicate', 'deleted'].includes(value.status)) return false;
-  const isPendingDoze = value.status === 'pending' && value.origin === 'doze-candidate-v2';
+  if (value.origin === 'deepdream-merged-v1') return false;
+  const isPendingDoze = value.status === 'pending' && ['doze-candidate-v2', 'dream-candidate-v3'].includes(value.origin);
   if (value.status !== 'confirmed' && !isPendingDoze) return false;
   if (value.status === 'pending' && !isPendingDoze) return false;
   if (['password', 'secret', 'credential', 'api-key'].includes(String(value.memoryKind || '').toLowerCase())) return false;
@@ -99,11 +100,10 @@ function compatible(a, b) {
   const av = a.value || {}, bv = b.value || {};
   const ak = typeof av.key === 'string' ? av.key.trim() : '';
   const bk = typeof bv.key === 'string' ? bv.key.trim() : '';
-  const ap = semanticNamespace(a), bp = semanticNamespace(b);
-  if (ap.startsWith('protected:') || bp.startsWith('protected:')) return ap === bp && ak && ak === bk;
-  if (ak && bk) return ak === bk && ap === bp;
-  const aTags = new Set(normalizedTags(av.tags));
-  return normalizedTags(bv.tags).some(tag => aTags.has(tag));
+  if (ak || bk) return !!ak && ak === bk;
+  const tags = require('./memory-tags').topics;
+  const aTags = new Set(tags(av.tags));
+  return tags(bv.tags).some(tag => aTags.has(tag)) || av.content === bv.content || (a.score || b.score || 0) > 0;
 }
 
 function sortedUnique(rows) {
@@ -305,7 +305,7 @@ function createSemanticDream({ memory, analyze, clock = Date.now, pageSize = PAG
   async function neighborRows(anchor, partition, cutoffSeq) {
     const value = anchor.value || {};
     const queryText = typeof value.key === 'string' && value.key.trim() ? value.key.trim()
-      : normalizedTags(value.tags).slice(0, 3).join(' ') || value.content.slice(0, 180);
+      : require('./memory-tags').topics(value.tags).slice(0, 3).join(' ') || value.content.slice(0, 180);
     if (!queryText) return [];
     const found = await memory.search(queryText, ['memory'], 12, { scene: sceneFor(partition),
       domain: partition.domain, visibilityFloor: partition.visibilityFloor });
@@ -401,7 +401,7 @@ function createSemanticDream({ memory, analyze, clock = Date.now, pageSize = PAG
     return updates;
   }
 
-  async function processPage(partition, loaded, signal, canRun, reserveModelCall) {
+  async function processPage(partition, loaded, signal, canRun, reserveModelCall, commitCursor = true) {
     const { page, cursor, value, generation, isLast, cutoffSeq } = loaded;
     let epoch = loaded.epoch;
     const groupKeys = new Set();
@@ -421,6 +421,9 @@ function createSemanticDream({ memory, analyze, clock = Date.now, pageSize = PAG
       if (cache.exists) continue;
       const reserved = await reserveModelCall(signal);
       if (reserved === false || reserved?.ok === false) return { status: 'budget', analyzed, relations: relationCount };
+      // The durable shared budget reservation is itself a vault write.
+      // Rebase the epoch; exact source snapshots are revalidated at commit.
+      epoch = memory.epoch;
       const raw = await analyze(group.inputs, { signal, partition: { ...partition } });
       if (signal?.aborted || memory.generation !== generation || memory.epoch !== epoch) return { status: 'paused', analyzed, relations: relationCount };
       const relations = validateAnalysis(raw, group.inputs, group.evidenceRows);
@@ -453,6 +456,7 @@ function createSemanticDream({ memory, analyze, clock = Date.now, pageSize = PAG
       relationCount += relations.length;
     }
     if (signal?.aborted || memory.generation !== generation || memory.epoch !== epoch) return { status: 'paused', analyzed, relations: relationCount };
+    if (!commitCursor) return { status: 'done', scanned: page.length, analyzed, relations: relationCount, more: false };
     const nextCursor = isLast
       ? { cycle: value.cycle, cursorSeq: 0, cutoffSeq: null, lastCompletedCutoff: cutoffSeq,
           lastCompletedAt: clock(), lastCompletedLocalDate: localDate(clock()), sources: [] }
@@ -505,7 +509,16 @@ function createSemanticDream({ memory, analyze, clock = Date.now, pageSize = PAG
     return { status: 'done', scanned, analyzed, relations, more };
   }
 
-  return { run };
+  async function review(rows, partition, { signal = new AbortController().signal, canRun = async () => true,
+    reserveModelCall = async () => ({ ok: true }) } = {}) {
+    if (!PARTITIONS.some(p => p.domain === partition.domain && p.visibilityFloor === partition.visibilityFloor) ||
+        !Array.isArray(rows) || rows.length > PAGE_SIZE || rows.some(row => !isExactPartition(row, partition))) throw new Error('invalid_review_scope');
+    const cursor = await getCursor(partition);
+    const latest = await latestSequence(partition);
+    return processPage(partition, { page: rows, cursor, value: cursor.value, generation: memory.generation,
+      epoch: memory.epoch, cutoffSeq: latest, isLast: true }, signal, canRun, reserveModelCall, false);
+  }
+  return { run, review };
 }
 
 module.exports = { PARTITIONS, PAGE_SIZE, MAX_PER_PARTITION, MAX_GROUP_ITEMS, MAX_GROUP_CHARS,
