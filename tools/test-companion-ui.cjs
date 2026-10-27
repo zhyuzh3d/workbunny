@@ -32,6 +32,16 @@ let rows = [
   { id: 'memory-confirmed-2', kind: 'memory', ts: Date.now() - 1000, content: '安静的音乐', status: 'confirmed', sources: [] },
   { id: 'message-1', kind: 'message', ts: Date.now(), role: 'user', content: '你好' },
 ];
+let knowledgeRows = [
+  { id: 'knowledge-relation', kind: 'state', ts: 180, domain: 'work', visibilityFloor: 0, knowledgeType: 'relation', label: '相关陈述', status: 'active', content: '合成关系记录', sources: [] },
+  { id: 'doubt-choose', kind: 'state', ts: 170, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '待核对', status: 'pending', content: '合成冲突：周五或周六', memberChoices: [{ id: 'choice-fri', content: '周五' }, { id: 'choice-sat', content: '周六' }], sources: ['source-1'] },
+  { id: 'doubt-snooze', kind: 'state', ts: 160, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '待核对', status: 'pending', content: '合成冲突：早上或下午', memberChoices: [{ id: 'choice-am', content: '早上' }, { id: 'choice-pm', content: '下午' }], sources: ['source-1'] },
+  { id: 'doubt-both', kind: 'state', ts: 150, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '待核对', status: 'pending', content: '合成冲突：工作日或周末', memberChoices: [{ id: 'choice-weekday', content: '工作日' }, { id: 'choice-weekend', content: '周末' }], sources: ['source-1'] },
+  { id: 'doubt-dismiss', kind: 'state', ts: 140, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '待核对', status: 'pending', content: '合成冲突：地点A或地点B', memberChoices: [{ id: 'choice-a', content: '地点A' }, { id: 'choice-b', content: '地点B' }], sources: ['source-1'] },
+  { id: 'doubt-stale', kind: 'state', ts: 130, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '待核对', status: 'pending', content: '合成冲突：新场景下不可见', memberChoices: [{ id: 'choice-old', content: '旧场景说法' }, { id: 'choice-new', content: '另一说法' }], sources: ['source-1'] },
+  { id: 'knowledge-tool', kind: 'state', ts: 120, domain: 'life', visibilityFloor: 1, knowledgeType: 'tool', label: '工具', status: 'verified', fileStatus: 'unknown', artifact: '/private/tmp/fixture-tool/helper.js', snapshotAvailable: true, code: 'FIXTURE_CODE_SHOULD_NOT_RENDER', content: '合成工具验收记录', sources: [] },
+  { id: 'knowledge-experience', kind: 'state', ts: 110, domain: 'work', visibilityFloor: 0, knowledgeType: 'experience', label: '经验', status: 'active', content: '合成工作经验', sources: [] },
+];
 let settings = {
   memory: { enabled: true, extract: true, scene: 'life' },
   buddy: { name: 'Fixture', ownerName: '主人', profile: '共通角色设定', sceneProfiles: { private: '私聊补充', life: '生活补充', work: '工作补充' } },
@@ -41,6 +51,7 @@ let settings = {
 let failConfig = false;
 let holdConfig = false, heldConfigResolve = null;
 let holdNextMemoryList = false, heldMemoryListResolve = null;
+let holdNextDoubtResolve = false, heldDoubtResolve = null;
 let insertFinish = null;
 let failNextMemorySources = false;
 let maintenanceStatus = { status: 'idle', mode: null, processed: 0, note: '暂无待整理内容', lastSuccessAt: null };
@@ -66,6 +77,7 @@ fs.writeFileSync(preload, `
     memoryStats: (...a) => api('memoryStats', ...a), memoryList: (...a) => api('memoryList', ...a),
     memoryUpdate: (...a) => api('memoryUpdate', ...a), memoryRemove: (...a) => api('memoryRemove', ...a),
     memoryResolveConflict: (...a) => api('memoryResolveConflict', ...a),
+    memoryResolveDoubt: (...a) => api('memoryResolveDoubt', ...a),
     memoryClear: (...a) => api('memoryClear', ...a), memorySources: (...a) => api('memorySources', ...a),
     memoryExport: (...a) => api('memoryExport', ...a), memoryRestore: (...a) => api('memoryRestore', ...a),
     memoryMaintain: (...a) => api('memoryMaintain', ...a), memoryMaintenanceStatus: (...a) => api('memoryMaintenanceStatus', ...a),
@@ -80,6 +92,8 @@ fs.writeFileSync(preload, `
       releaseConfig: () => ipcRenderer.invoke('fixture:control', 'releaseConfig'),
       holdNextMemoryList: () => ipcRenderer.invoke('fixture:control', 'holdNextMemoryList'),
       releaseMemoryList: () => ipcRenderer.invoke('fixture:control', 'releaseMemoryList'),
+      holdNextDoubtResolve: () => ipcRenderer.invoke('fixture:control', 'holdNextDoubtResolve'),
+      releaseDoubtResolve: () => ipcRenderer.invoke('fixture:control', 'releaseDoubtResolve'),
       emitDesktop: value => ipcRenderer.invoke('fixture:control', 'emitDesktop', { type: 'desktop', ...value }),
       emitMonitor: value => ipcRenderer.invoke('fixture:control', 'emitMonitor', value),
       emitWatches: value => ipcRenderer.invoke('fixture:control', 'emitWatches', value),
@@ -101,6 +115,8 @@ ipcMain.handle('fixture:control', (_event, action, value) => {
   if (action === 'releaseConfig') { holdConfig = false; heldConfigResolve?.(); heldConfigResolve = null; return true; }
   if (action === 'holdNextMemoryList') { holdNextMemoryList = true; return true; }
   if (action === 'releaseMemoryList') { heldMemoryListResolve?.(); heldMemoryListResolve = null; return true; }
+  if (action === 'holdNextDoubtResolve') { holdNextDoubtResolve = true; return true; }
+  if (action === 'releaseDoubtResolve') { heldDoubtResolve?.(); heldDoubtResolve = null; return true; }
   if (action === 'emitDesktop') { status = value; activeWindow?.webContents.send('fixture:event', value); return true; }
   if (action === 'emitMonitor') { monitorSnapshot = value; activeWindow?.webContents.send('fixture:event', { type: 'monitor', ...value }); return true; }
   if (action === 'emitWatches') { watches = value; activeWindow?.webContents.send('fixture:event', { type: 'watches', watches: value }); return true; }
@@ -160,14 +176,38 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
   }
   if (name === 'memoryList') {
     const options = args[0] || {};
-    let found = rows.filter(row => row.kind === options.kind);
-    if (options.query) found = found.filter(row => row.content.toLowerCase().includes(options.query.toLowerCase()));
-    const result = { rows: found, hasMore: true };
+    const knowledge = options.kind === 'knowledge';
+    const rank = { work: 0, life: 1, private: 2 }[settings.memory.scene] ?? 1;
+    let found = (knowledge ? knowledgeRows : rows).filter(row => knowledge ? row.kind === 'state' : row.kind === options.kind);
+    if (knowledge && options.category && options.category !== 'all') found = found.filter(row => row.knowledgeType === options.category);
+    if (knowledge) found = found.filter(row => Number(row.visibilityFloor ?? 2) <= rank);
+    if (options.query) found = found.filter(row => String(row.content || '').toLowerCase().includes(options.query.toLowerCase()));
+    if (knowledge) found.sort((a, b) => b.ts - a.ts || String(b.id).localeCompare(String(a.id)));
+    if (knowledge && Number.isSafeInteger(options.before)) found = found.filter(row => row.ts < options.before || (row.ts === options.before && String(row.id) < String(options.beforeId || '')));
+    const pageSize = knowledge ? 2 : found.length;
+    const page = found.slice(0, pageSize);
+    const result = { rows: page, hasMore: knowledge ? found.length > page.length : true,
+      ...(knowledge && found.length > page.length && page.length ? { next: { ts: page.at(-1).ts, id: page.at(-1).id } } : {}) };
     if (holdNextMemoryList) {
       holdNextMemoryList = false;
       return new Promise(resolve => { heldMemoryListResolve = () => resolve(result); });
     }
     return result;
+  }
+  if (name === 'memoryResolveDoubt') {
+    const [id, resolution] = args;
+    const row = knowledgeRows.find(item => item.id === id && item.knowledgeType === 'doubt' && item.status === 'pending');
+    const apply = () => {
+      if (!row) return { ok: false, error: '该待核对项已不可用' };
+      row.status = resolution.action === 'snooze' ? 'snoozed' : resolution.action === 'dismiss' ? 'dismissed' : 'resolved';
+      row.resolution = { ...resolution };
+      return { ok: true };
+    };
+    if (holdNextDoubtResolve) {
+      holdNextDoubtResolve = false;
+      return new Promise(resolve => { heldDoubtResolve = () => resolve(apply()); });
+    }
+    return apply();
   }
   if (name === 'memoryUpdate') {
     const [id, content] = args, row = rows.find(item => item.id === id);
@@ -239,7 +279,7 @@ async function testMemory() {
   const win = await loadPage('memory');
   await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .record').length" ).then(n => n === 2), 'memory list');
   await waitFor(() => evalIn(win, "document.getElementById('maintenanceStatus').textContent").then(text => text.includes('空闲')), 'initial maintenance status');
-  assert.match(await evalIn(win, "document.querySelector('.maintenance-scope').textContent"), /分批轮查更早.*完全重复/);
+  assert.match(await evalIn(win, "document.querySelector('.maintenance-scope').textContent"), /同义.*变化.*待核对.*保留原文/);
   assert.match(await evalIn(win, "document.getElementById('contextStatus').textContent"), /生活.*压缩版本 2/);
   await click(win, 'maintenanceDoze');
   await waitFor(() => Promise.resolve((calls.memoryMaintain || []).length === 1), 'doze request');
@@ -304,6 +344,7 @@ async function testMemory() {
   assert.equal(await evalIn(win, "document.getElementById('memoryScene').value"), 'life', 'failed scene write restores the last saved scene');
   assert.equal(await evalIn(win, "document.getElementById('memorySceneScope').textContent"), '生活：可按需参考生活与工作资料');
 
+  await evalIn(win, `window.pet.__fixture.emitRecall(${JSON.stringify(recallEntries)})`);
   assert.equal(await evalIn(win, "document.getElementById('currentRecallCard').hidden"), false, 'actual recall entries reveal the current-recall area');
   assert.equal(await evalIn(win, "document.querySelectorAll('#currentRecallList .recall-entry').length"), 2);
   const recallButtons = await evalIn(win, "[...document.querySelectorAll('#currentRecallList .recall-entry')].map(card=>[...card.querySelectorAll('button')].map(button=>button.textContent))");
@@ -454,6 +495,79 @@ async function testMemory() {
   assert.equal(await evalIn(win, "document.getElementById('memorySearch').value"), '海边', 'change event preserves search text');
   await evalIn(win, "document.querySelector('#memoryList .record button').click()");
   await waitFor(() => evalIn(win, "[...document.querySelectorAll('#memoryList .record-content')].some(el=>el.textContent==='海边新记忆')"), 'deferred memory list refresh');
+  win.hide();
+}
+
+async function testKnowledge() {
+  const win = await loadPage('memory');
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryTabs [data-kind=knowledge]') !== null"), 'knowledge tab ready');
+  const listStart = (calls.memoryList || []).length;
+  await evalIn(win, "document.querySelector('#memoryTabs [data-kind=knowledge]').click()");
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=knowledge-relation]') !== null"), 'knowledge tab first page');
+  await waitFor(() => Promise.resolve((calls.memoryList || []).length > listStart), 'knowledge category all IPC');
+  assert.deepEqual(calls.memoryList.at(-1)[0], { kind: 'knowledge', query: '', category: 'all' }, 'knowledge IPC sends its category');
+  assert.equal(await evalIn(win, "document.querySelectorAll('#memoryList .record').length"), 2, 'knowledge results are paged');
+  assert.equal(await evalIn(win, "document.getElementById('knowledgeFilters').hidden"), false);
+
+  await evalIn(win, "document.getElementById('knowledgeCategory').value='doubt'; document.getElementById('knowledgeCategory').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .knowledge-card').length").then(n => n === 2), 'first doubt page');
+  assert.equal(calls.memoryList.at(-1)[0].category, 'doubt');
+  assert.equal(await evalIn(win, "[...document.querySelectorAll('#memoryList .record')].every(card=>card.textContent.includes('待核对'))"), true);
+  await evalIn(win, "[...document.querySelector('#memoryList [data-record-id=doubt-choose]').querySelectorAll('button')].find(b=>b.textContent==='采用第 1 项').click()");
+  await waitFor(() => Promise.resolve((calls.memoryResolveDoubt || []).length === 1), 'choose doubt');
+  assert.deepEqual(calls.memoryResolveDoubt[0], ['doubt-choose', { action: 'choose', choiceId: 'choice-fri' }]);
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=doubt-choose] .badge:last-of-type')?.textContent").then(t => t === '已核对'), 'choose result refreshed');
+
+  // Snooze the second row on the first page. The first resolved item remains listed.
+  await evalIn(win, "[...document.querySelector('#memoryList [data-record-id=doubt-snooze]').querySelectorAll('button')].find(b=>b.textContent==='稍后').click()");
+  await waitFor(() => Promise.resolve((calls.memoryResolveDoubt || []).length === 2), 'snooze doubt');
+  assert.deepEqual(calls.memoryResolveDoubt[1], ['doubt-snooze', { action: 'snooze' }]);
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=doubt-snooze] .badge:last-of-type')?.textContent").then(t => t === '稍后查看'), 'snooze result refreshed');
+
+  await click(win, 'memoryMore');
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=doubt-both]') !== null"), 'second doubt page');
+  const pageCall = calls.memoryList.at(-1)[0];
+  assert.equal(pageCall.category, 'doubt');
+  assert.equal(pageCall.before, 160);
+  assert.equal(pageCall.beforeId, 'doubt-snooze', 'pagination carries a stable tie-break cursor');
+  await evalIn(win, "[...document.querySelector('#memoryList [data-record-id=doubt-both]').querySelectorAll('button')].find(b=>b.textContent==='两种都适用').click()");
+  assert.equal(await evalIn(win, "document.querySelector('#memoryList .knowledge-both-editor textarea') !== null"), true, 'both action asks inline for conditions');
+  const listCallsBeforeBothRefresh = (calls.memoryList || []).length;
+  await evalIn(win, "const field=document.querySelector('#memoryList .knowledge-both-editor textarea'); field.value='工作日按第一种，周末按第二种'; document.querySelector('#memoryList .knowledge-both-editor button.primary').click()");
+  await waitFor(() => Promise.resolve((calls.memoryResolveDoubt || []).length === 3), 'save both conditions');
+  assert.deepEqual(calls.memoryResolveDoubt[2], ['doubt-both', { action: 'both', note: '工作日按第一种，周末按第二种' }]);
+  await waitFor(() => Promise.resolve((calls.memoryList || []).length > listCallsBeforeBothRefresh), 'both result refresh');
+  await click(win, 'memoryMore');
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=doubt-dismiss]') !== null"), 'dismiss doubt page after refresh');
+  await evalIn(win, "[...document.querySelector('#memoryList [data-record-id=doubt-dismiss]').querySelectorAll('button')].find(b=>b.textContent==='不再提醒').click()");
+  await waitFor(() => Promise.resolve((calls.memoryResolveDoubt || []).length === 4), 'dismiss doubt');
+  assert.deepEqual(calls.memoryResolveDoubt[3], ['doubt-dismiss', { action: 'dismiss' }]);
+
+  await evalIn(win, "document.getElementById('knowledgeCategory').value='tool'; document.getElementById('knowledgeCategory').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=knowledge-tool]') !== null"), 'tool knowledge');
+  const toolText = await evalIn(win, "document.querySelector('#memoryList [data-record-id=knowledge-tool]').textContent");
+  assert.match(toolText, /helper\.js/);
+  assert.match(toolText, /历史验收；当前文件未复验/);
+  assert.doesNotMatch(toolText, /FIXTURE_CODE_SHOULD_NOT_RENDER|\/private\/tmp/, 'tool cards hide code and full paths');
+
+  await evalIn(win, "document.getElementById('knowledgeCategory').value='doubt'; document.getElementById('knowledgeCategory').dispatchEvent(new Event('change',{bubbles:true}))");
+  await click(win, 'memoryMore');
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=doubt-both]') !== null"), 'second page before stale doubt');
+  await click(win, 'memoryMore');
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=doubt-stale]') !== null"), 'stale doubt page');
+  await evalIn(win, 'window.pet.__fixture.holdNextDoubtResolve()');
+  await evalIn(win, "[...document.querySelector('#memoryList [data-record-id=doubt-stale]').querySelectorAll('button')].find(b=>b.textContent==='采用第 1 项').click()");
+  await waitFor(() => Promise.resolve(!!heldDoubtResolve), 'delayed doubt resolution held');
+  const beforeSceneSwitchCalls = (calls.memoryList || []).length;
+  await evalIn(win, "document.getElementById('memoryScene').value='work'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => Promise.resolve(settings.memory.scene === 'work'), 'switch to work scene during pending resolution');
+  await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .record').length").then(n => n === 0), 'life-only knowledge hidden in work scene');
+  const afterSceneRefreshCalls = (calls.memoryList || []).length;
+  assert(afterSceneRefreshCalls > beforeSceneSwitchCalls, 'scene switch refreshed scoped knowledge');
+  await evalIn(win, 'window.pet.__fixture.releaseDoubtResolve()');
+  await delay(250);
+  assert.equal((calls.memoryList || []).length, afterSceneRefreshCalls, 'late resolve from prior scene does not refresh the new scene');
+  assert.equal(await evalIn(win, "document.querySelectorAll('#memoryList .record').length"), 0, 'late resolution cannot reinsert old-scene rows');
   win.hide();
 }
 
@@ -656,8 +770,9 @@ async function run() {
   await app.whenReady();
   try {
     await testMemory();
+    await testKnowledge();
     await testDesktop();
-    console.log('companion Electron fixture: memory and desktop flows passed (hidden windows, stub APIs, isolated userData)');
+    console.log('companion Electron fixture: memory, knowledge and desktop flows passed (hidden windows, stub APIs, isolated userData)');
     for (const win of fixtureWindows) if (!win.isDestroyed()) win.destroy();
     app.exit(0);
   } catch (error) {

@@ -954,6 +954,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       } else {
         const result = await secretary.dispatch(responseGate.intent, {
           requestId: voiceTurn ? `voice-${voiceTurn.turnId}` : randomUUID(), userText,
+          requestSourceId: userRecord?.id,
           source: voiceTurn ? 'voice' : 'text',
           voiceTurn,
           signal: controller.signal,
@@ -1523,8 +1524,8 @@ ipcMain.handle('pet:memory-maintain', (e, mode) => {
 ipcMain.handle('pet:memory-unlock', async e => { trustedCompanion(e, 'memory'); if (screenLocked) throw new Error('请先解锁电脑'); await unlockMemory(); return memory.stats(); });
 ipcMain.handle('pet:memory-list', (e, options = {}) => {
   trustedCompanion(e, 'memory');
-  if (!['memory', 'message', 'summary', 'persona', 'task'].includes(options.kind || 'memory')) throw new Error('不支持的记忆类型');
-  return memory.list({ kind: options.kind, query: String(options.query || '').slice(0, 300), before: Number.isSafeInteger(options.before) ? options.before : undefined, beforeId: typeof options.beforeId === 'string' ? options.beforeId.slice(0, 256) : undefined });
+  if (!['memory', 'message', 'summary', 'persona', 'task', 'knowledge'].includes(options.kind || 'memory')) throw new Error('不支持的记忆类型');
+  return memory.list({ kind: options.kind, category: options.category, query: String(options.query || '').slice(0, 300), before: Number.isSafeInteger(options.before) ? options.before : undefined, beforeId: typeof options.beforeId === 'string' ? options.beforeId.slice(0, 256) : undefined });
 });
 ipcMain.handle('pet:memory-sources', async (e, ids) => {
   const requestEpoch = contextEpoch;
@@ -1542,6 +1543,14 @@ ipcMain.handle('pet:memory-update', async (e, v = {}) => {
 ipcMain.handle('pet:memory-resolve-conflict', async (e, id) => {
   trustedCompanion(e, 'memory'); invalidateMemoryContext();
   return memory.resolveConflict(String(id || '').slice(0, 256));
+});
+ipcMain.handle('pet:memory-resolve-doubt', async (e, options = {}) => {
+  trustedCompanion(e, 'memory'); invalidateMemoryContext();
+  if (!memory?.ready || !config.load().memory.enabled || screenLocked) throw new Error('请先启用并解锁记忆');
+  return memory.knowledge.resolve(String(options.id || '').slice(0, 256), {
+    action: options.action, choiceId: typeof options.choiceId === 'string' ? options.choiceId.slice(0, 256) : undefined,
+    note: typeof options.note === 'string' ? options.note : '', scene: currentScene(),
+  });
 });
 ipcMain.handle('pet:memory-remove', async (e, id) => {
   trustedCompanion(e, 'memory');
@@ -2222,14 +2231,16 @@ if (!lock) {
       inspect: (w, frame, signal) => observer.inspect(w, frame, signal), propose: (w, message, signal) => observer.propose(w, message, signal),
       execute: executeWatch, canOperate, report: queueTaskReport, epoch: () => memory.generation, ready: readyForTasks,
       emit: rows => { send('watches', { watches: rows }); for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'watches', watches: rows }); } });
-    secretary = new Secretary({ desktop, watches, contacts, getScene: currentScene, ready: readyForTasks,
+    secretary = new Secretary({ desktop, watches, contacts, memory, getScene: currentScene, ready: readyForTasks,
       epoch: () => memory?.generation, report: queueTaskReport });
     memory.compression = new ContextCompression({ memory, summarize: require('./workbuddy-free').summarizeContext });
     maintenance = memory.maintenance = new MemoryMaintenance({ memory, compression: memory.compression,
       extract: require('./workbuddy-free').extractMemories,
+      analyzeRelations: require('./workbuddy-free').analyzeRelations,
       allowAutomatic: () => config.load().memory.extract,
       canRun: () => readyForTasks() && config.load().memory.enabled && !activeThought && !busy && !speaking && !desktop?.running && !secretary?.verifying,
       onStatus: status => {
+        if (status.status === 'failed') log(`[memory] maintenance stage=${status.stage || status.mode || 'unknown'} ${status.note}`);
         const panel = panels.get('memory');
         if (panel && !panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'memory-maintenance', ...status });
       } });

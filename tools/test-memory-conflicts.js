@@ -133,6 +133,59 @@ async function testConflictContextAndResolution() {
   assert.equal(afterOldSourceDeletion.value.status, 'confirmed');
 }
 
+async function testCrossFloorResolutionIsScoped() {
+  const { memory, settings } = createService('work-to-private', 'work');
+  await memory.init();
+  const { oldSource, oldFact, newSource, conflict } = await birthdayConflict(memory,
+    '我的生日是3月4日', '我出生于4月5日', { domain: 'work', visibilityFloor: 0 });
+  const oldBefore = (await memory.db.request('get', { ids: [oldFact.id], scene: 'private' })).rows.map(row => memory.decode(row))[0];
+  const conflictBefore = (await memory.db.request('get', { ids: [conflict.id], scene: 'private' })).rows.map(row => memory.decode(row))[0];
+
+  settings.scene = 'private';
+  await memory.changeScene('private');
+  const resolved = await memory.resolveConflict(conflict.id);
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.scoped, true);
+  const newFact = (await memory.db.request('get', { ids: [resolved.factId], scene: 'private' })).rows.map(row => memory.decode(row))[0];
+  assert(newFact);
+  assert.equal(newFact.domain, 'work');
+  assert.equal(newFact.visibilityFloor, 2);
+  assert.equal(newFact.value.origin, 'user-reviewed-doubt');
+  assert.equal(newFact.value.status, 'confirmed');
+  assert.equal(newFact.value.content, conflict.value.content);
+  assert.deepEqual(newFact.value.sources.slice(1), [newSource.id], 'private fact cites only its new review and selected source');
+  assert.equal(newFact.value.evidenceSourceId, newSource.id);
+  assert.deepEqual(new Set(newFact.value.supersedes), new Set([conflict.id, oldFact.id]));
+  const snapshotIds = new Set(newFact.value.supersedesSnapshots.map(item => item.id));
+  assert.deepEqual(snapshotIds, new Set([conflict.id, oldFact.id, newSource.id, oldSource.id]),
+    'supersession snapshots cover each root and its user source');
+
+  const oldAfter = (await memory.db.request('get', { ids: [oldFact.id], scene: 'private' })).rows.map(row => memory.decode(row))[0];
+  const conflictAfter = (await memory.db.request('get', { ids: [conflict.id], scene: 'private' })).rows.map(row => memory.decode(row))[0];
+  assert.deepEqual({ state: oldAfter.state, value: oldAfter.value }, { state: oldBefore.state, value: oldBefore.value },
+    'cross-floor resolution leaves the original work fact unchanged');
+  assert.deepEqual({ state: conflictAfter.state, value: conflictAfter.value }, { state: conflictBefore.state, value: conflictBefore.value },
+    'cross-floor resolution leaves the work pending conflict unchanged');
+
+  const duplicate = await memory.resolveConflict(conflict.id);
+  assert.equal(duplicate.duplicate, true, 'repeated cross-floor click is idempotent');
+  assert.equal(duplicate.factId, resolved.factId);
+  const crossFloorFacts = (await memories(memory, 'private')).filter(row => row.domain === 'work' && row.visibilityFloor === 2 &&
+    row.value.origin === 'user-reviewed-doubt' && row.value.evidenceSourceId === newSource.id);
+  assert.equal(crossFloorFacts.length, 1, 'duplicate clicks do not create extra facts');
+
+  const workPending = await memory.relevantConflicts('我生日是哪天？', { scene: 'work' });
+  assert.equal(workPending.length, 1, 'the work view retains its unresolved lower-floor conflict');
+  const workRows = await memories(memory, 'work');
+  assert(workRows.some(row => row.id === oldFact.id && row.value.content === '我的生日是3月4日'));
+  assert(workRows.some(row => row.id === conflict.id && row.value.status === 'pending'));
+  assert(!workRows.some(row => row.id === resolved.factId), 'private reviewed fact is not visible in work');
+  const privateContext = await memory.context('我生日是哪天？', { scene: 'private', budget: 6000 });
+  assert(privateContext.text.includes('用户已核对于'), privateContext.text);
+  assert(privateContext.text.includes('我出生于4月5日'), 'private context can use the new scoped reviewed fact');
+  assert(!privateContext.text.includes('待核对的相关用户说法'), 'private overlay resolves the matching pending conflict in its own scope');
+}
+
 async function testPendingCandidateIsNotConflictAndSourceDeletion() {
   const { memory } = createService('candidate-and-delete');
   await memory.init();
@@ -195,6 +248,7 @@ async function main() {
   try {
     await testCanonicalSameBirthdayAndScopedConflict();
     await testConflictContextAndResolution();
+    await testCrossFloorResolutionIsScoped();
     await testPendingCandidateIsNotConflictAndSourceDeletion();
     await testChangedSourceRejected();
     await testStructuredFactEditing();

@@ -11,7 +11,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { MemoryService } = require('../src/main/memory-service');
 const { MemoryMaintenance } = require('../src/main/memory-maintenance');
-const { ContextCompression } = require('../src/main/context-compression');
+const { ContextCompression, currentId } = require('../src/main/context-compression');
 const { rank } = require('../src/main/memory-scope');
 
 const root = path.resolve(__dirname, '..');
@@ -124,7 +124,7 @@ async function assertSceneContext(system, scene, expectations) {
   const snapshot = await system.compression.snapshot(scene);
   assert(snapshot.version > 0, `${scene} context head exists`);
   assert(snapshot.text.includes(`FIXTURE_HEAD_${scene}`), `${scene} head has an independent lane summary`);
-  const head = await decodedById(system.memory, `context-head:v1:${scene}`);
+  const head = await decodedById(system.memory, snapshot.recordId);
   assert(head);
   assert.equal(head.domain, scene);
   assert.equal(head.visibilityFloor, rank(scene));
@@ -228,7 +228,10 @@ async function testCompressionExportRestoreDeleteAndResume() {
   // Pick a life source inside a compressed segment, excluding the selected
   // literal excerpt. Its links must invalidate that lane and higher-visibility
   // private projection, while the unrelated work-only head remains intact.
-  const lifeHead = await decodedById(restored.memory, 'context-head:v1:life');
+  const lifeSnapshotBeforeDelete = await restored.compression.snapshot('life');
+  const privateSnapshotBeforeDelete = await restored.compression.snapshot('private');
+  const workSnapshotBeforeDelete = await restored.compression.snapshot('work');
+  const lifeHead = await decodedById(restored.memory, lifeSnapshotBeforeDelete.recordId);
   const lifeSegmentIds = lifeHead.value.segments.map(item => item.id);
   const lifeSegments = await Promise.all(lifeSegmentIds.map(id => decodedById(restored.memory, id)));
   let target = null;
@@ -247,12 +250,14 @@ async function testCompressionExportRestoreDeleteAndResume() {
   assert.equal(removedSource.domain, 'life');
   restored.settings.scene = 'private';
   await restored.memory.remove(target.id);
-  assert.equal((await restored.memory.db.request('get', { ids: ['context-head:v1:life'] })).rows.length, 0,
-    'deleting a non-excerpt life source cascades to the life head');
-  assert.equal((await restored.memory.db.request('get', { ids: ['context-head:v1:private'] })).rows.length, 0,
+  assert.equal((await restored.memory.db.request('get', { ids: [lifeSnapshotBeforeDelete.recordId] })).rows.length, 0,
+    'deleting a non-excerpt life source cascades to the immutable life head');
+  assert.equal((await restored.memory.db.request('get', { ids: [privateSnapshotBeforeDelete.recordId] })).rows.length, 0,
     'deleting a life source cascades to private projections that depend on it');
-  assert.equal((await restored.memory.db.request('get', { ids: ['context-head:v1:work'] })).rows.length, 1,
+  assert.equal((await restored.memory.db.request('get', { ids: [workSnapshotBeforeDelete.recordId] })).rows.length, 1,
     'deleting life data does not invalidate the independent work head');
+  assert.equal((await restored.memory.db.request('get', { ids: [currentId('life'), currentId('private')] })).rows.length, 0,
+    'mutable pointers cascade with the removed immutable heads');
   const deletedRaw = await restored.memory.db.request('get', { ids: [target.id] });
   assert.equal(deletedRaw.rows.length, 0);
   const oldCalls = restored.calls.extract.length;
@@ -302,8 +307,8 @@ async function testLateSummaryCannotCommitAfterSceneEpochChange() {
   const result = await running;
   assert.equal(result.status, 'paused');
   for (const scene of ['work', 'life', 'private']) {
-    assert.equal((await system.memory.db.request('get', { ids: [`context-head:v1:${scene}`] })).rows.length, 0,
-      'late summary after scene epoch change must not commit any head');
+    assert.equal((await system.memory.db.request('get', { ids: [currentId(scene), `context-head:v1:${scene}`] })).rows.length, 0,
+      'late summary after scene epoch change must not commit a pointer or legacy head');
   }
 }
 

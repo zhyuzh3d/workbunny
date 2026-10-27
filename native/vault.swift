@@ -247,9 +247,88 @@ final class DB {
         let s=try statement("SELECT 1 FROM records WHERE id=? LIMIT 1"); defer{sqlite3_finalize(s)}
         bind(s,1,id); return sqlite3_step(s)==SQLITE_ROW
     }
-    func createsCycle(source: String, derived: String) throws -> Bool {
-        let s=try statement("WITH RECURSIVE reachable(id) AS (SELECT ? UNION SELECT links.derivedId FROM links JOIN reachable ON links.sourceId=reachable.id) SELECT 1 FROM reachable WHERE id=? LIMIT 1")
-        defer{sqlite3_finalize(s)}; bind(s,1,derived); bind(s,2,source); return sqlite3_step(s)==SQLITE_ROW
+    func validHMACToken(_ value: String) -> Bool {
+        value.utf8.count == 22 && value.unicodeScalars.allSatisfy {
+            ($0.value >= 48 && $0.value <= 57) || ($0.value >= 65 && $0.value <= 90) ||
+            ($0.value >= 97 && $0.value <= 122) || $0.value == 45 || $0.value == 95
+        }
+    }
+    func tokenFilters(_ p: [String: Any], _ key: String) throws -> [String] {
+        guard let raw = p[key] else { return [] }
+        guard let values = raw as? [String], values.count <= 8, values.allSatisfy(validHMACToken) else { throw fail("invalid_request") }
+        return Array(Set(values))
+    }
+    func appendTokenFilters(_ required: [String], _ excluded: [String], _ idExpr: String,
+                            _ sql: inout String, _ binds: inout [(String?, Int64?)]) {
+        for token in required {
+            sql += " AND EXISTS(SELECT 1 FROM tokens AS required_token WHERE required_token.recordId=\(idExpr) AND required_token.token=?)"
+            binds.append((token,nil))
+        }
+        for token in excluded {
+            sql += " AND NOT EXISTS(SELECT 1 FROM tokens AS excluded_token WHERE excluded_token.recordId=\(idExpr) AND excluded_token.token=?)"
+            binds.append((token,nil))
+        }
+    }
+    func validateProspectiveCycles(_ records: [[String: Any]]) throws {
+        // Ordinary source-free inserts (messages, most state updates) never
+        // touch or scan the graph. Only a changed source set can add a cycle.
+        var finalByID: [String: Set<String>] = [:]
+        for record in records {
+            guard let id = text(record["id"]), let sources = record["sources"] as? [String] else { throw fail("invalid_record") }
+            finalByID[id] = Set(sources)
+        }
+        guard !finalByID.isEmpty else { return }
+        let ids = Array(finalByID.keys)
+        let marks = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        let old = try statement("SELECT derivedId,sourceId FROM links WHERE derivedId IN (\(marks))")
+        defer { sqlite3_finalize(old) }
+        for (index, id) in ids.enumerated() { bind(old, Int32(index + 1), id) }
+        var oldByID: [String: Set<String>] = [:]
+        while true {
+            let rc = sqlite3_step(old)
+            if rc == SQLITE_DONE { break }
+            guard rc == SQLITE_ROW else { throw fail("database_operation_failed") }
+            oldByID[columnText(old, 0), default: []].insert(columnText(old, 1))
+        }
+        var changed = Set<String>(), hasAddition = false
+        for (id, next) in finalByID {
+            let previous = oldByID[id] ?? []
+            if previous != next { changed.insert(id) }
+            if !next.isSubset(of: previous) { hasAddition = true }
+        }
+        guard hasAddition else { return } // Edge deletion cannot create a cycle.
+
+        try exec("CREATE TEMP TABLE IF NOT EXISTS staged_link_children(derivedId TEXT PRIMARY KEY); CREATE TEMP TABLE IF NOT EXISTS staged_links(sourceId TEXT NOT NULL,derivedId TEXT NOT NULL,PRIMARY KEY(sourceId,derivedId))")
+        try exec("DELETE FROM staged_links; DELETE FROM staged_link_children")
+        let childInsert = try statement("INSERT INTO staged_link_children(derivedId) VALUES(?)")
+        defer { sqlite3_finalize(childInsert) }
+        let linkInsert = try statement("INSERT INTO staged_links(sourceId,derivedId) VALUES(?,?)")
+        defer { sqlite3_finalize(linkInsert) }
+        for id in changed {
+            sqlite3_reset(childInsert); sqlite3_clear_bindings(childInsert); bind(childInsert,1,id)
+            guard sqlite3_step(childInsert) == SQLITE_DONE else { throw fail("database_operation_failed") }
+            for source in finalByID[id] ?? [] {
+                sqlite3_reset(linkInsert); sqlite3_clear_bindings(linkInsert); bind(linkInsert,1,source); bind(linkInsert,2,id)
+                guard sqlite3_step(linkInsert) == SQLITE_DONE else { throw fail("database_operation_failed") }
+            }
+        }
+        let cycle = try statement("""
+            WITH RECURSIVE reachable(startSource,node) AS (
+              SELECT sourceId,derivedId FROM staged_links
+              UNION
+              SELECT reachable.startSource,links.derivedId FROM reachable
+                JOIN links ON links.sourceId=reachable.node
+                WHERE links.derivedId NOT IN (SELECT derivedId FROM staged_link_children)
+              UNION
+              SELECT reachable.startSource,staged_links.derivedId FROM reachable
+                JOIN staged_links ON staged_links.sourceId=reachable.node
+            )
+            SELECT 1 FROM reachable WHERE node=startSource LIMIT 1
+            """)
+        defer { sqlite3_finalize(cycle) }
+        let cycleResult = sqlite3_step(cycle)
+        if cycleResult == SQLITE_ROW { throw fail("invalid_source") }
+        guard cycleResult == SQLITE_DONE else { throw fail("database_operation_failed") }
     }
     func sceneFloor(_ scene: String) -> Int64? {
         switch scene { case "work": return 0; case "life": return 1; case "private": return 2; default: return nil }
@@ -357,6 +436,7 @@ final class DB {
                     let floor = int(r["visibilityFloor"]) ?? 2
                     return (id, floor)
                 }, uniquingKeysWith: { _, latest in latest })
+                try validateProspectiveCycles(records)
                 for r in records {
                     guard let id=text(r["id"]), !id.isEmpty, id.utf8.count <= 256,
                           let kind=text(r["kind"]), ["message","memory","summary","state","task","persona"].contains(kind),
@@ -407,7 +487,6 @@ final class DB {
                     let unlink=try statement("DELETE FROM links WHERE derivedId=?"); bind(unlink,1,id); _=sqlite3_step(unlink); sqlite3_finalize(unlink)
                     for token in Set(tokens) { let q=try statement("INSERT INTO tokens(recordId,token) VALUES(?,?)"); bind(q,1,id); bind(q,2,token); guard sqlite3_step(q)==SQLITE_DONE else { sqlite3_finalize(q); throw fail("invalid_record") }; sqlite3_finalize(q) }
                     for source in Set(sources) {
-                        guard try !createsCycle(source:source,derived:id) else { throw fail("invalid_source") }
                         let q=try statement("INSERT INTO links(sourceId,derivedId) VALUES(?,?)"); bind(q,1,source); bind(q,2,id); guard sqlite3_step(q)==SQLITE_DONE else { sqlite3_finalize(q); throw fail("invalid_source") }; sqlite3_finalize(q)
                     }
                 }
@@ -467,6 +546,9 @@ final class DB {
             }
             if let beforeSeq { sql += " AND ingestionSeq<?"; binds.append((nil,beforeSeq)) }
             if let afterSeq { sql += " AND ingestionSeq>?"; binds.append((nil,afterSeq)) }
+            let requiredTokens = try tokenFilters(p, "requiredTokens")
+            let excludedTokens = try tokenFilters(p, "excludedTokens")
+            appendTokenFilters(requiredTokens, excludedTokens, "records.id", &sql, &binds)
             if sort == "ingestion" { sql += order == "asc" ? " ORDER BY ingestionSeq ASC LIMIT \(limit)" : " ORDER BY ingestionSeq DESC LIMIT \(limit)" }
             else { sql += order == "asc" ? " ORDER BY ts ASC,id ASC LIMIT \(limit)" : " ORDER BY ts DESC,id DESC LIMIT \(limit)" }
             return ["rows": try rows(sql,binds)]
@@ -480,6 +562,8 @@ final class DB {
             return ["rows": try rows(sql,binds)]
         case "search":
             guard let tokens=p["tokens"] as? [String], tokens.count <= 128, let now=int(p["now"]) else { throw fail("invalid_request") }
+            let requiredTokens = try tokenFilters(p, "requiredTokens")
+            let excludedTokens = try tokenFilters(p, "excludedTokens")
             if tokens.isEmpty { return ["rows": []] }
             let kinds = (p["kinds"] as? [String]) ?? (text(p["kind"]).map{[$0]} ?? [])
             let limit=min(50,max(1,Int(int(p["limit"]) ?? 20)))
@@ -496,6 +580,7 @@ final class DB {
                 sql += " AND r.visibilityFloor=?"; vals.append((nil,floor))
             }
             if !kinds.isEmpty { sql += " AND r.kind IN (\(Array(repeating:"?",count:kinds.count).joined(separator:",")))"; vals += kinds.map{($0,nil)} }
+            appendTokenFilters(requiredTokens, excludedTokens, "r.id", &sql, &vals)
             sql += " GROUP BY r.id ORDER BY score DESC,r.ts DESC,r.id DESC LIMIT \(limit)"
             let s=try statement(sql); defer{sqlite3_finalize(s)}
             for (i,v) in vals.enumerated(){ if let t=v.0 {bind(s,Int32(i+1),t)} else if let n=v.1 {bind(s,Int32(i+1),n)} }

@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { containsSecret } = require('./conversation-input');
 const SECRET = { test: containsSecret };
 const { createMemoryDream } = require('./memory-dream');
+const { createSemanticDream } = require('./semantic-dream');
 
 const PARTITIONS = [
   { domain: 'work', visibilityFloor: 0 }, { domain: 'work', visibilityFloor: 1 }, { domain: 'work', visibilityFloor: 2 },
@@ -49,13 +50,15 @@ function validRole(row) {
 }
 
 class MemoryMaintenance {
-  constructor({ memory, extract, compression, canRun = () => true, allowAutomatic = () => true, onStatus = () => {}, clock = Date.now,
+  constructor({ memory, extract, compression, analyzeRelations, canRun = () => true, allowAutomatic = () => true, onStatus = () => {}, clock = Date.now,
     maxMessages = MAX_MESSAGES, maxChars = MAX_CHARS, maxCalls = MAX_CALLS, windowMs = WINDOW_MS, maxCallsPerDay = DEFAULT_DAILY_CALLS,
     setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
     if (!memory || typeof memory.query !== 'function' || typeof memory.write !== 'function' || typeof memory.serial !== 'function')
       throw new TypeError('MemoryMaintenance requires MemoryService query/write/serial');
     if (typeof extract !== 'function') throw new TypeError('MemoryMaintenance requires the verified free-model extract function');
     Object.assign(this, { memory, extract, compression, canRun, allowAutomatic, onStatus, clock, maxMessages, maxChars, maxCalls, windowMs, maxCallsPerDay, setTimer, clearTimer });
+    this.analyzeRelations = analyzeRelations;
+    this.semantic = null;
     this.maxMessages = Math.max(1, Math.min(MAX_MESSAGES, Number.isSafeInteger(maxMessages) ? maxMessages : MAX_MESSAGES));
     this.maxChars = Math.max(1, Math.min(MAX_CHARS, Number.isSafeInteger(maxChars) ? maxChars : MAX_CHARS));
     this.maxCalls = Math.max(1, Math.min(MAX_CALLS, Number.isSafeInteger(maxCalls) ? maxCalls : MAX_CALLS));
@@ -72,6 +75,8 @@ class MemoryMaintenance {
     this.budgetReason = '达到每分钟整理预算';
     this.budgetDelayMs = WINDOW_MS;
     this.dueDate = null;
+    this.automaticRetryAfter = 0;
+    this.scheduleRevision = 0;
     this.statusValue = { status: 'idle', mode: null, processed: 0, note: '', lastSuccessAt: null };
   }
 
@@ -87,6 +92,7 @@ class MemoryMaintenance {
   request(mode, { automatic = false } = {}) {
     if (!['doze', 'dream'].includes(mode)) return { ok: false, error: '整理模式无效' };
     if (this.closed) return { ok: false, error: '记忆整理器已关闭' };
+    if (automatic && this.clock() < this.automaticRetryAfter) return { ok: false, error: '后台整理暂缓，可手动重试' };
     if (!automatic || !this.requestSources.has(mode)) this.requestSources.set(mode, automatic ? 'automatic' : 'manual');
     if (this.hasQueued(mode)) {
       if (!automatic) this.scheduleTick();
@@ -189,16 +195,31 @@ class MemoryMaintenance {
           this.scheduleTick(1500);
           break;
         }
-        if (mode === 'dream') await this.saveDailyScheduleIfDue();
+        if (mode === 'dream') {
+          if (!this.dueDate && this.automaticRetryAfter) this.dueDate = this.localDayKey(this.clock());
+          await this.saveDailyScheduleIfDue();
+        }
         this.requestSources.delete(mode);
         const finishedAt = this.clock();
-        this.publish({ status: 'idle', mode: null, note: '整理已完成', lastSuccessAt: finishedAt });
+        this.publish({ status: 'idle', mode: null, stage: null, note: '整理已完成', lastSuccessAt: finishedAt });
       } catch (error) {
         if (this.controller?.signal.aborted || error === ABORTED) {
           if (!this.closed && !this.queue.includes(mode)) this.queue.unshift(mode);
           this.publish({ status: 'paused', mode, note: '整理已暂停，进度可从上次水位继续' });
         } else {
           this.requestSources.delete(mode);
+          // A failed automatic daily check otherwise requeues every 15 seconds.
+          // Persist a cooldown; manual retry remains available immediately.
+          const retryAfter = this.clock() + 30 * 60_000;
+          this.automaticRetryAfter = retryAfter;
+          this.scheduleRevision++;
+          try {
+            await this.memory.serial(async () => {
+              const previous = await this.readDailySchedule();
+              await this.memory.write([{ id: SCHEDULE_ID, kind: 'state', ts: 0, updatedAt: this.clock(), domain: 'private', visibilityFloor: 2,
+                value: { ...(previous?.value || {}), retryAfter, sources: [] } }], this.memory.epoch, { notify: false });
+            });
+          } catch { /* A failed store must not hide the original failure. */ }
           this.publish({ status: 'failed', mode, note: this.safeError(error) });
         }
         break;
@@ -213,7 +234,7 @@ class MemoryMaintenance {
     const code = typeof error?.code === 'string' && /^[A-Za-z0-9_.-]{1,64}$/u.test(error.code) ? error.code : '';
     const known = {
       stale_epoch: '本地记忆刚有更新，整理没有提交',
-      invalid_source: '来源记录已变化，整理没有提交',
+      invalid_source: '来源依赖校验未通过，已保留原文与进度',
       invalid_record: '本地记录校验未通过，整理没有提交',
       database_operation_failed: '本地记忆暂时无法整理',
       request_timed_out: '本地记忆响应超时，整理可稍后继续',
@@ -222,6 +243,8 @@ class MemoryMaintenance {
       E_OUTPUT_LIMIT: '本批输出预算不足，已保留未处理进度',
       E_EMPTY_RESPONSE: '模型没有返回正文，已保留未处理进度',
       E_INVALID_MODEL_OUTPUT: '本批整理结果不完整，未推进进度',
+      E_UPSTREAM: 'WorkBuddy 服务暂时不可用，已保留进度，可稍后手动重试',
+      E_PAYLOAD_TOO_LARGE: '模型返回超过本地转发上限，已保留进度',
     };
     if (code && known[code]) return `${known[code]}（${code}）`;
     return code ? `整理暂未完成（错误码 ${code}）` : '整理暂未完成，请稍后再试';
@@ -397,6 +420,7 @@ class MemoryMaintenance {
   }
 
   async runDoze(signal) {
+    this.publish({ stage: 'doze' });
     this.currentProcessed = 0;
     for (const partition of PARTITIONS) {
       for (;;) {
@@ -432,6 +456,7 @@ class MemoryMaintenance {
       }
     }
     if (this.compression) {
+      this.publish({ stage: 'compression' });
       const result = await this.compression.run({ signal, canRun: details => this.permitted(details),
         reserveModelCall: budgetSignal => this.reserveModelCall(budgetSignal) });
       this.pauseNote = result.note || '';
@@ -443,13 +468,35 @@ class MemoryMaintenance {
   async runDream(signal) {
     const doze = await this.runDoze(signal);
     if (doze !== 'done') return doze;
+    this.publish({ stage: 'dedup' });
     this.dream ||= createMemoryDream({ memory: this.memory, clock: this.clock });
     const result = await this.dream.run({ signal, canRun: details => this.permitted(details) });
     if (result.status !== 'done') return result.status;
     this.publish({ status: 'running', mode: 'dream', processed: this.statusValue.processed,
       scanned: (this.statusValue.scanned || 0) + result.scanned, archived: (this.statusValue.archived || 0) + result.archived,
       note: `本批检查 ${result.scanned} 条旧记忆，归档 ${result.archived} 条完全重复项` });
-    return result.more ? 'continue' : 'done';
+    let more = result.more;
+    if (this.analyzeRelations) {
+      this.publish({ stage: 'semantic' });
+      this.semantic ||= createSemanticDream({ memory: this.memory, analyze: this.analyzeRelations, clock: this.clock });
+      const semantic = await this.semantic.run({ signal, canRun: details => this.permitted(details),
+        reserveModelCall: budgetSignal => this.reserveModelCall(budgetSignal) });
+      if (semantic.status !== 'done') return semantic.status;
+      more ||= semantic.more;
+      this.publish({ semanticRelations: (this.statusValue.semanticRelations || 0) + semantic.relations,
+        note: `语义检查 ${semantic.scanned} 条，保留 ${semantic.relations} 组有来源的关系` });
+    }
+    if (this.memory.knowledge) {
+      this.publish({ stage: 'knowledge' });
+      const doubts = await this.memory.knowledge.sync({ signal, canRun: () => this.permitted({ mode: 'dream', signal }) });
+      if (doubts.status !== 'done') return doubts.status;
+      more ||= doubts.more;
+      this.publish({ stage: 'experience' });
+      const experiences = await this.memory.knowledge.backfillExperiences({ signal, canRun: () => this.permitted({ mode: 'dream', signal }) });
+      if (experiences.status !== 'done') return experiences.status;
+      more ||= experiences.more;
+    }
+    return more ? 'continue' : 'done';
   }
 
   localDayKey(value) {
@@ -458,12 +505,17 @@ class MemoryMaintenance {
   }
 
   async checkDue(now = this.clock()) {
-    if (this.closed) return false;
+    if (this.closed || !this.allowAutomatic()) return false;
     const date = new Date(now);
     if (date.getHours() < 5) return false;
     try {
+      const revision = this.scheduleRevision;
       const schedule = await this.readDailySchedule();
-      if (typeof schedule?.value?.lastDueLocalDate === 'string' && schedule.value.lastDueLocalDate >= this.localDayKey(now)) return false;
+      if (revision !== this.scheduleRevision) return false;
+      this.automaticRetryAfter = Number.isSafeInteger(schedule?.value?.retryAfter) ? schedule.value.retryAfter : 0;
+      if (now < this.automaticRetryAfter) return false;
+      const semanticReady = !this.analyzeRelations || schedule?.value?.semanticVersion === 1;
+      if (semanticReady && typeof schedule?.value?.lastDueLocalDate === 'string' && schedule.value.lastDueLocalDate >= this.localDayKey(now)) return false;
     } catch { return false; }
     this.dueDate = this.localDayKey(now);
     this.request('dream', { automatic: true });
@@ -474,12 +526,15 @@ class MemoryMaintenance {
     const dueDate = this.dueDate;
     if (!dueDate) return;
     const existing = await this.readDailySchedule();
-    const value = { ...(existing?.value || {}), lastDueLocalDate: dueDate, lastSuccessAt: this.clock(), sources: [] };
+    const value = { ...(existing?.value || {}), lastDueLocalDate: dueDate, lastSuccessAt: this.clock(),
+      ...(this.analyzeRelations ? { semanticVersion: 1 } : {}), retryAfter: 0, sources: [] };
     await this.memory.serial(async () => {
       if (this.closed || this.controller?.signal.aborted) throw ABORTED;
       await this.memory.write([{ id: SCHEDULE_ID, kind: 'state', ts: 0, updatedAt: this.clock(), domain: 'private', visibilityFloor: 2, value }], this.memory.epoch);
     });
     this.dueDate = null;
+    this.automaticRetryAfter = 0;
+    this.scheduleRevision++;
   }
 }
 

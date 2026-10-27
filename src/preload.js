@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('pet', {
   memorySources: (ids) => ipcRenderer.invoke('pet:memory-sources', ids),
   memoryUpdate: (id, content) => ipcRenderer.invoke('pet:memory-update', { id, content }),
   memoryResolveConflict: (id) => ipcRenderer.invoke('pet:memory-resolve-conflict', id),
+  memoryResolveDoubt: (id, options) => ipcRenderer.invoke('pet:memory-resolve-doubt', { id, ...(options || {}) }),
   memoryRemove: (id) => ipcRenderer.invoke('pet:memory-remove', id),
   memoryClear: () => ipcRenderer.invoke('pet:memory-clear'),
   memoryExport: (passphrase) => ipcRenderer.invoke('pet:memory-export', passphrase),

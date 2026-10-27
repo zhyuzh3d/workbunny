@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { MemoryService } = require('../src/main/memory-service');
-const { ContextCompression, HEAD_TEXT_BUDGET, MAX_SEGMENTS } = require('../src/main/context-compression');
+const { ContextCompression, HEAD_TEXT_BUDGET, MAX_SEGMENTS, currentId, headId } = require('../src/main/context-compression');
 const { rank } = require('../src/main/memory-scope');
 
 const root = path.resolve(__dirname, '..');
@@ -20,6 +20,12 @@ async function until(predicate, label, timeout = 3000) {
   }
   throw new Error(`timeout: ${label}`);
 }
+
+function currentHeadId(memory, scene) {
+  return memory.records.get(currentId(scene))?.value?.headId || headId(scene);
+}
+
+function currentHead(memory, scene) { return memory.records.get(currentHeadId(memory, scene)); }
 
 class FakeMemory {
   constructor() {
@@ -157,16 +163,16 @@ async function testSceneLanesRecentTailAndIdempotency() {
   assert(privateInput.some(row => row.id.startsWith('private-')) && privateInput.some(row => row.id.startsWith('life-')) && privateInput.some(row => row.id.startsWith('work-')));
   for (const call of calls) {
     assert(!call.messages.some(row => /-(?:user|assistant)-(?:5|6)$/.test(row.id)), `${call.scene} tail turns must not be compressed`);
-    const head = memory.records.get(`context-head:v1:${call.scene}`);
-    assert.equal(head.value.origin, 'context-head-v1');
+    const head = currentHead(memory, call.scene);
+    assert.equal(head.value.origin, 'context-head-v2');
     assert.equal(head.domain, call.scene);
     assert.equal(head.visibilityFloor, rank(call.scene));
     assert.equal(head.value.segments.length, 1);
     const segment = memory.records.get(head.value.segments[0].id);
     assert.equal(segment.value.origin, 'context-segment-v1');
     assert.deepEqual(segment.value.sources, call.messages.map(row => row.id), 'segment source coverage equals every summarize input');
-    assert(head.value.sources.includes(segment.value.sources[0]));
-    assert.equal(head.value.sources.includes(segment.id), false, 'head must not point to its same-batch segment');
+    assert(head.value.sources.includes(segment.id), 'head cites the already-persisted immutable segment');
+    assert.equal(head.value.sources.includes(segment.value.sources[0]), false, 'raw batch sources remain below the segment');
     assert(head.value.text.length <= HEAD_TEXT_BUDGET);
     const snap = await worker.snapshot(call.scene);
     assert.equal(snap.version, 1);
@@ -174,6 +180,7 @@ async function testSceneLanesRecentTailAndIdempotency() {
     assert.equal(snap.recordId, head.id);
     assert.equal(snap.updatedAt, head.updatedAt);
     assert.equal(snap.sourceIds[0], head.id, 'the exact head version is available as a downstream source');
+    assert(!snap.sourceIds.includes(currentId(call.scene)), 'the mutable navigation pointer is never exposed as a source');
     assert(snap.sourceIds.length <= 200);
   }
   const writesBefore = memory.writes.length, callsBefore = calls.length;
@@ -184,7 +191,7 @@ async function testSceneLanesRecentTailAndIdempotency() {
   assert.equal(reservations, reservationsBefore, 'no eligible messages do not reserve model-call budget');
   assert.equal(memory.writes.length, writesBefore, 'no eligible work means no state/version writes');
 
-  const priorHeadIds = ['context-head:v1:work', 'context-head:v1:life', 'context-head:v1:private'];
+  const priorHeadIds = ['work', 'life', 'private'].map(scene => currentHeadId(memory, scene));
   memory.removeCascade('work-turn-1-user');
   assert(priorHeadIds.every(id => !memory.records.has(id)), 'deleting a source cascades through every view that cited it');
   assert.equal((await worker.snapshot('private')).version, 0, 'a deleted source cannot remain visible through a stale head');
@@ -229,13 +236,13 @@ async function testPaginationRetainsWholeRoundsAndCapsHead() {
   const workCalls = calls.filter(call => call.scene === 'work');
   assert.equal(workCalls.length, 6, 'bounded pages split only between complete turns');
   for (const call of workCalls) assert.equal(call.messages.length, 4, 'each model batch contains complete pairs of turns');
-  const head = memory.records.get('context-head:v1:work');
+  const head = currentHead(memory, 'work');
   assert.equal(head.value.segments.length, MAX_SEGMENTS);
   assert(head.value.text.length <= 1800);
   for (const segmentMeta of head.value.segments) assert(memory.records.has(segmentMeta.id), 'head metadata references persisted immutable segments');
   const refs = head.value.sources.filter(id => id.startsWith('context-segment:v1:'));
-  assert.equal(refs.length, 3, 'head sources retain up to three previous segments alongside this batch raw sources');
-  assert.equal(head.value.sources.includes(head.value.segments.at(-1).id), false, 'current segment is not a parent of the same-write head');
+  assert.equal(refs.length, MAX_SEGMENTS, 'head sources cite only the bounded immutable segment set');
+  assert(head.value.sources.includes(head.value.segments.at(-1).id), 'head cites its already-persisted latest segment');
   const latestSegment = memory.records.get(head.value.segments.at(-1).id);
   assert(head.value.text.startsWith(latestSegment.value.content), 'head always preserves the latest full summary first');
   assert(head.value.text.length <= HEAD_TEXT_BUDGET);
@@ -262,7 +269,7 @@ async function testHeadPrioritizesFullLatestSummary() {
   }) });
   const result = await worker.run();
   assert.equal(result.status, 'done');
-  const head = memory.records.get('context-head:v1:work');
+  const head = currentHead(memory, 'work');
   const latest = memory.records.get(head.value.segments.at(-1).id);
   assert.equal(latest.value.content, longContent);
   assert(head.value.text.startsWith(longContent), 'full latest content wins over excerpts that exceed the remaining budget');
@@ -282,7 +289,7 @@ async function testOversizeTurnAndExcerptValidation() {
   const result = await worker.run();
   assert.equal(result.status, 'paused', 'single over-budget round is preserved rather than truncated');
   assert.equal(calls.length, 0);
-  assert.equal(memory.records.has('context-head:v1:work'), false);
+  assert.equal(currentHead(memory, 'work'), undefined);
 
   const tooManyMemory = new FakeMemory();
   seedMessage(tooManyMemory, { id: 'wide-turn-user', role: 'user', content: 'wide turn', scene: 'work', turnId: 'wide-turn', ts: 1 });
@@ -293,7 +300,7 @@ async function testOversizeTurnAndExcerptValidation() {
   const tooMany = await tooManyWorker.run();
   assert.equal(tooMany.status, 'paused', 'a 41-message turn is not split to fit the source cap');
   assert.equal(tooManyCalls.length, 0);
-  assert.equal(tooManyMemory.records.has('context-head:v1:work'), false);
+  assert.equal(currentHead(tooManyMemory, 'work'), undefined);
 
   const validationMemory = new FakeMemory();
   seedTurns(validationMemory, 'work', 9);
@@ -301,7 +308,7 @@ async function testOversizeTurnAndExcerptValidation() {
     content: 'navigation', excerpts: [{ sourceId: 'unrelated', quote: 'fabricated' }],
   }) });
   await assert.rejects(invalidWorker.run(), /格式|校验/);
-  assert.equal(validationMemory.records.has('context-head:v1:work'), false, 'invalid source excerpts never commit a checkpoint');
+  assert.equal(currentHead(validationMemory, 'work'), undefined, 'invalid source excerpts never commit a checkpoint');
 
   for (const invalidSummary of [
     { content: '', excerpts: [] },
@@ -312,7 +319,7 @@ async function testOversizeTurnAndExcerptValidation() {
     seedTurns(invalidMemory, 'work', 9);
     const invalid = makeWorker(invalidMemory, [], { recentRounds: 2, summarize: async () => invalidSummary });
     await assert.rejects(invalid.run(), /无效|为空|引文/);
-    assert.equal(invalidMemory.records.has('context-head:v1:work'), false, 'empty or trivial summaries do not advance the lane');
+    assert.equal(currentHead(invalidMemory, 'work'), undefined, 'empty or trivial summaries do not advance the lane');
   }
 
   const corruptMemory = new FakeMemory();
@@ -320,7 +327,7 @@ async function testOversizeTurnAndExcerptValidation() {
   const corruptCalls = [];
   const corruptWorker = makeWorker(corruptMemory, corruptCalls, { recentRounds: 2 });
   assert.equal((await corruptWorker.run()).status, 'done');
-  const corruptHead = corruptMemory.records.get('context-head:v1:work');
+  const corruptHead = currentHead(corruptMemory, 'work');
   corruptHead.value.origin = 'unknown-head-format';
   const callsBefore = corruptCalls.length;
   const writesBefore = corruptMemory.writes.length;
@@ -334,7 +341,7 @@ async function testOversizeTurnAndExcerptValidation() {
   const immutableCalls = [];
   const immutableWorker = makeWorker(immutableMemory, immutableCalls, { recentRounds: 2 });
   assert.equal((await immutableWorker.run()).status, 'done');
-  const immutableHead = immutableMemory.records.get('context-head:v1:work');
+  const immutableHead = currentHead(immutableMemory, 'work');
   const immutableSegmentId = immutableHead.value.segments[0].id;
   const immutableSegment = immutableMemory.records.get(immutableSegmentId);
   const savedContent = immutableSegment.value.content;
@@ -342,6 +349,7 @@ async function testOversizeTurnAndExcerptValidation() {
   // Simulate a lost pointer while the immutable segment remains. Reuse must
   // rebuild the head without calling a possibly nondeterministic summarizer.
   immutableMemory.records.delete(immutableHead.id);
+  immutableMemory.records.delete(currentId('work'));
   immutableMemory.epoch++;
   const changedCalls = [];
   const changedWorker = makeWorker(immutableMemory, changedCalls, { recentRounds: 2, summarize: async (...args) => {
@@ -352,11 +360,12 @@ async function testOversizeTurnAndExcerptValidation() {
   assert.equal(retry.status, 'done');
   assert.equal(changedCalls.length, 0, 'valid orphan immutable segment is reused before reserving/calling a model');
   assert.equal(immutableMemory.records.get(immutableSegmentId).value.content, savedContent);
-  assert.equal(immutableMemory.writes.length, savedWrites + 1, 'only the missing head is rebuilt');
-  assert.equal(immutableMemory.records.get('context-head:v1:work').value.segments[0].id, immutableSegmentId);
+  assert.equal(immutableMemory.writes.length, savedWrites + 2, 'the missing immutable head and navigation pointer are rebuilt separately');
+  assert.equal(currentHead(immutableMemory, 'work').value.segments[0].id, immutableSegmentId);
 
   // Corrupt deterministic content is not regenerated over or trusted.
-  immutableMemory.records.delete('context-head:v1:work');
+  immutableMemory.records.delete(currentHeadId(immutableMemory, 'work'));
+  immutableMemory.records.delete(currentId('work'));
   immutableMemory.records.get(immutableSegmentId).value.excerpts[0].quote = 'fabricated quote';
   immutableMemory.epoch++;
   const writesBeforeBadSegment = immutableMemory.writes.length;
@@ -402,7 +411,7 @@ async function testSecretRoundsNeverReachSummarizer() {
   assert.equal(secretOnlyResult.skippedSecretRounds.work, 1);
   assert.equal(secretOnlyCalls.length, 0, 'secret-only eligible history requires no model call');
   assert.equal(secretOnlyReservations, 0, 'secret-only eligible history reserves no model budget');
-  assert.equal(secretOnly.records.has('context-head:v1:work'), false, 'secret-only history is not summarized into a head');
+  assert.equal(currentHead(secretOnly, 'work'), undefined, 'secret-only history is not summarized into a head');
 }
 
 async function testBudgetAndCancellationBoundaries() {
@@ -413,7 +422,7 @@ async function testBudgetAndCancellationBoundaries() {
   const budget = await budgetWorker.run({ reserveModelCall: async () => ({ ok: false }) });
   assert.equal(budget.status, 'budget');
   assert.equal(calls.length, 0);
-  assert.equal(budgetMemory.records.has('context-head:v1:work'), false);
+  assert.equal(currentHead(budgetMemory, 'work'), undefined);
 
   const canceledMemory = new FakeMemory();
   seedTurns(canceledMemory, 'work', 10);
@@ -436,7 +445,7 @@ async function testBudgetAndCancellationBoundaries() {
   releaseResolve();
   const result = await running;
   assert.equal(result.status, 'paused');
-  assert.equal(canceledMemory.records.has('context-head:v1:work'), false, 'late model result cannot commit after cancellation/source deletion');
+  assert.equal(currentHead(canceledMemory, 'work'), undefined, 'late model result cannot commit after cancellation/source deletion');
 }
 
 async function testRealSqliteContract(temp) {
@@ -466,6 +475,7 @@ async function testRealSqliteContract(temp) {
       calls.push({ scene, ids: messages.map(row => row.id) });
       return { content: `native ${scene} summary`, excerpts: [{ sourceId: messages[0].id, quote: messages[0].content }] };
     } });
+    service.compression = worker;
     const result = await worker.run({ reserveModelCall: async () => ({ ok: true }) });
     assert.equal(result.status, 'done');
     assert.equal(calls.length, 3);
@@ -473,7 +483,7 @@ async function testRealSqliteContract(temp) {
       const snapshot = await worker.snapshot(scene);
       assert.equal(snapshot.version, 1);
       assert(snapshot.text.includes(`native ${scene} summary`));
-      const head = (await service.db.request('get', { ids: [`context-head:v1:${scene}`], scene })).rows[0];
+      const head = (await service.db.request('get', { ids: [snapshot.recordId], scene })).rows[0];
       assert(head, `native scene-filtered lookup returns ${scene} head`);
       const decoded = service.decode(head);
       assert.equal(decoded.domain, scene);
@@ -482,6 +492,31 @@ async function testRealSqliteContract(temp) {
     const none = await worker.run({ reserveModelCall: async () => ({ ok: true }) });
     assert.equal(none.status, 'done');
     assert.equal(calls.length, 3, 'native checkpoint restart does not call summarizer for unchanged ranges');
+
+    // A later assistant may cite an immutable snapshot. A subsequent
+    // compression publishes a new immutable head without updating that source.
+    const firstSnapshot = await worker.snapshot('work');
+    assert(firstSnapshot.recordId && firstSnapshot.sourceIds[0] === firstSnapshot.recordId);
+    const firstHeadRow = (await service.db.request('get', { ids: [firstSnapshot.recordId], scene: 'work' })).rows[0];
+    const firstHead = service.decode(firstHeadRow);
+    const firstHeadValue = structuredClone(firstHead.value);
+    await service.addMessage('user', 'work follow-up turn five question', { scene: 'work' });
+    const context = await service.context('work follow-up turn five question', { scene: 'work' });
+    assert(context.sourceIds.includes(firstSnapshot.recordId), 'context cites the immutable snapshot');
+    assert(!context.sourceIds.includes(currentId('work')), 'context never cites the mutable pointer');
+    await service.addMessage('assistant', 'work follow-up turn five answer', { scene: 'work', sources: context.sourceIds });
+    await service.addMessage('user', 'work follow-up turn six question', { scene: 'work' });
+    await service.addMessage('assistant', 'work follow-up turn six answer', { scene: 'work' });
+    const secondRun = await worker.run({ reserveModelCall: async () => ({ ok: true }) });
+    assert.equal(secondRun.status, 'done', 'new immutable checkpoint can be published after an assistant cites the old one');
+    const secondSnapshot = await worker.snapshot('work');
+    assert.equal(secondSnapshot.version, firstSnapshot.version + 1);
+    assert.notEqual(secondSnapshot.recordId, firstSnapshot.recordId);
+    const stillFirstRow = (await service.db.request('get', { ids: [firstSnapshot.recordId], scene: 'work' })).rows[0];
+    assert(stillFirstRow, 'old immutable checkpoint remains reachable from the assistant provenance');
+    const stillFirst = service.decode(stillFirstRow);
+    assert.deepEqual(stillFirst.value, firstHeadValue, 'publishing a new checkpoint never mutates the old snapshot');
+
     const workSource = calls.find(call => call.scene === 'work').ids[0];
     await service.remove(workSource);
     for (const scene of ['work', 'life', 'private']) assert.equal((await worker.snapshot(scene)).version, 0,

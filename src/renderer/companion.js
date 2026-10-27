@@ -37,7 +37,7 @@ function labelStatus(value) {
 }
 
 /* ── 记忆 ── */
-let memoryKind = 'memory', memoryQuery = '', memoryCursor = null, memoryHasMore = false, memoryPageCount = 0;
+let memoryKind = 'memory', memoryCategory = 'all', memoryQuery = '', memoryCursor = null, memoryHasMore = false, memoryPageCount = 0;
 let memoryRows = [], memoryStats = null, memoryCfg = {}, savedMemoryCfg = {}, memoryCfgWriting = false;
 let memoryCfgPending = false;
 const SCENES = ['private', 'life', 'work'];
@@ -53,7 +53,7 @@ let sceneProfileDrafts = { private: '', life: '', work: '' };
 const sceneProfileRevisions = { private: 0, life: 0, work: 0 };
 let profileWritePending = 0, profileWriteTail = Promise.resolve();
 let memoryRefreshPending = false, memoryRefreshTimer = null, memoryRefreshBusy = false;
-let memoryViewRevision = 0;
+let memoryViewRevision = 0, memoryStatsRevision = 0;
 let memoryListBusyRevision = 0;
 let currentRecallEntries = [];
 let maintenanceBusy = false;
@@ -181,6 +181,12 @@ function changeMemoryScene(scene) {
   if (!SCENES.includes(scene) || scene === activeScene) return;
   activeScene = scene;
   const revision = ++sceneRevision;
+  memoryViewRevision++;
+  memoryStatsRevision++;
+  memoryCursor = null; memoryRows = []; memoryPageCount = 0; memoryHasMore = false;
+  $('memoryList').replaceChildren(); $('memoryMore').hidden = true;
+  $('memoryListNote').textContent = '正在切换场景…';
+  paintCurrentRecall([]);
   paintSceneSettings();
   setNote('memorySceneScope', SCENE_SCOPE_TEXT[scene]);
   setNote('sceneProfileNote', (sceneProfileDrafts[scene] || '') !== (savedSceneProfiles[scene] || '') ? '有未保存的场景设定' : '');
@@ -191,12 +197,16 @@ function changeMemoryScene(scene) {
       const result = await api('config', { memory: { scene } });
       if (result?.ok === false) throw new Error(result.error || '保存失败');
       savedScene = scene;
-      if (revision === sceneRevision) setNote('memoryConfigNote', '场景已切换');
+      if (revision === sceneRevision) {
+        setNote('memoryConfigNote', '场景已切换');
+        await loadMemoryStats(); await loadMemoryList(true);
+      }
     } catch (error) {
       if (revision === sceneRevision) {
         activeScene = savedScene;
         paintSceneSettings();
         setNote('memoryConfigNote', `场景切换失败，已恢复原场景。${error.message || '请重试。'}`, true);
+        await loadMemoryStats(); await loadMemoryList(true);
       }
     } finally { sceneWritePending--; }
   });
@@ -272,6 +282,10 @@ function rowSourceIds(row) {
   const sources = Array.isArray(row.sources) ? row.sources : [];
   return sources.map((source) => typeof source === 'string' ? source : source?.id).filter(Boolean);
 }
+function normalizeMemoryRow(row) {
+  if (!row?.value || typeof row.value !== 'object' || Array.isArray(row.value)) return row || {};
+  return { ...row.value, ...row };
+}
 function addAction(container, text, callback, className = 'button quiet') {
   const button = node('button', className, text); button.type = 'button';
   button.addEventListener('click', callback); container.append(button); return button;
@@ -286,6 +300,7 @@ function renderSources(card, rows) {
   card.append(region);
 }
 function renderRecord(row) {
+  if (memoryKind === 'knowledge') return renderKnowledgeRecord(row);
   const isConflict = row.origin === 'user-key-conflict-v1' && row.status === 'pending';
   const isModelCandidate = /^(?:doze-candidate|model-candidate)/u.test(row.origin || '') && row.status === 'pending';
   const card = node('article', 'record');
@@ -356,6 +371,126 @@ function renderRecord(row) {
   card.append(actions);
   return card;
 }
+function knowledgeTypeLabel(type) {
+  return ({ relation: '相关陈述', doubt: '待核对', experience: '经验', tool: '工具', decision: '核对记录' })[type] || '整理资料';
+}
+function knowledgeStatusLabel(status) {
+  return ({ pending: '待处理', open: '待处理', unresolved: '待处理', snoozed: '稍后查看', dismissed: '不再提醒',
+    resolved: '已核对', accepted: '已采纳', verified: '历史验收', superseded: '已更新', archived: '已归档' })[status] || labelStatus(status);
+}
+function toolDetails(row) {
+  const metadata = row.toolMetadata || row.tool || row.metadata || {};
+  const artifact = row.artifact;
+  const file = row.fileName || metadata.fileName || metadata.filename ||
+    (typeof artifact === 'string' ? artifact : artifact?.fileName || artifact?.filename || artifact?.path);
+  const status = row.validationStatus ?? row.status ?? metadata.validationStatus ?? metadata.validation?.status;
+  const fileStatus = row.fileStatus ?? metadata.fileStatus;
+  const available = row.snapshotAvailable ?? metadata.snapshotAvailable;
+  const details = [];
+  if (typeof file === 'string' && file.trim()) details.push(`文件：${file.split(/[\\/]/u).filter(Boolean).at(-1) || file}`);
+  if (fileStatus === 'unknown') details.push(status === 'verified' ? '历史验收；当前文件未复验' : '当前文件未复验');
+  else if (typeof fileStatus === 'string' && fileStatus) details.push(`当前文件：${labelStatus(fileStatus)}`);
+  else if (typeof status === 'string' || typeof status === 'boolean') details.push(`历史验收：${typeof status === 'boolean' ? (status ? '通过' : '未通过') : labelStatus(status)}`);
+  if (typeof available === 'boolean') details.push(`快照：${available ? '可用' : '不可用'}`);
+  return details;
+}
+function renderKnowledgeRecord(raw) {
+  const row = normalizeMemoryRow(raw);
+  const card = node('article', 'record knowledge-card');
+  card.dataset.recordId = row.id || '';
+  const top = node('div', 'record-top');
+  top.append(node('span', 'record-date', formatTime(row.ts)));
+  top.append(node('span', 'badge', row.label || knowledgeTypeLabel(row.knowledgeType)));
+  if (row.status) top.append(node('span', `badge${['pending', 'open', 'unresolved', 'snoozed'].includes(row.status) ? ' pending' : ''}`,
+    row.knowledgeType === 'experience' && row.status === 'candidate' ? '单次已验收' : knowledgeStatusLabel(row.status)));
+  card.append(top, node('div', 'record-content', row.content || '（空内容）'));
+
+  const choices = Array.isArray(row.memberChoices) ? row.memberChoices.filter(choice =>
+    choice && typeof choice.id === 'string' && choice.id.length > 0 && typeof choice.content === 'string') : [];
+  if (choices.length) {
+    const region = node('div', 'knowledge-choices');
+    region.append(node('div', 'inline-note', '可核对的说法'));
+    for (const choice of choices) {
+      const item = node('div', 'knowledge-choice');
+      item.append(node('div', 'record-content', choice.content));
+      region.append(item);
+    }
+    card.append(region);
+  }
+  if (row.knowledgeType === 'tool') {
+    const details = toolDetails(row);
+    if (details.length) card.append(node('div', 'knowledge-tool-meta', details.join(' · ')));
+  }
+
+  const actions = node('div', 'record-actions');
+  const note = node('div', 'knowledge-action-note inline-note');
+  note.setAttribute('role', 'status'); note.hidden = true;
+  const isOpenDoubt = row.knowledgeType === 'doubt' && !['resolved', 'accepted', 'dismissed', 'superseded', 'archived'].includes(row.status);
+  if (isOpenDoubt) {
+    const actionButtons = [];
+    const resolve = async (action, choiceId, suppliedNote) => {
+      let noteText;
+      if (action === 'both') {
+        noteText = String(suppliedNote || '').trim().slice(0, 500);
+        if (!noteText) { note.textContent = '请补充两种说法分别适用的条件后再提交。'; note.classList.add('bad-text'); note.hidden = false; return; }
+      }
+      note.hidden = true; note.classList.remove('bad-text');
+      const sceneAtStart = activeScene;
+      actionButtons.forEach(button => { button.disabled = true; });
+      try {
+        const result = await api('memoryResolveDoubt', row.id, { action, ...(choiceId ? { choiceId } : {}), ...(noteText ? { note: noteText } : {}) });
+        if (!result?.ok) throw new Error(result?.error || '核对没有完成，请稍后重试。');
+        if (sceneAtStart !== activeScene) return;
+        setNote('memoryActionNote', action === 'dismiss' ? '已设为不再提醒' : action === 'snooze' ? '已稍后处理' : '核对结果已保存');
+        await loadMemoryStats(); await loadMemoryList(true);
+      } catch (error) {
+        if (card.isConnected && sceneAtStart === activeScene) {
+          note.textContent = error?.message || '操作失败，请稍后重试。';
+          note.classList.add('bad-text'); note.hidden = false;
+        }
+      } finally { actionButtons.forEach(button => { if (button.isConnected) button.disabled = false; }); }
+    };
+    let bothEditor = null;
+    const openBothEditor = () => {
+      if (bothEditor?.isConnected) { bothEditor.querySelector('textarea')?.focus(); return; }
+      bothEditor = node('div', 'knowledge-both-editor');
+      const field = node('textarea'); field.rows = 2; field.maxLength = 500;
+      field.placeholder = '例如：工作日按第一种安排，出差时按第二种安排';
+      field.setAttribute('aria-label', '两种说法分别适用的条件');
+      const controls = node('div', 'record-actions');
+      const cancel = addAction(controls, '取消', () => { bothEditor?.remove(); bothEditor = null; }, 'button quiet');
+      const submit = addAction(controls, '保存适用条件', () => resolve('both', undefined, field.value), 'button primary');
+      actionButtons.push(cancel, submit);
+      bothEditor.append(field, controls);
+      card.insertBefore(bothEditor, actions);
+      field.focus();
+    };
+    for (const [index, choice] of choices.entries()) {
+      actionButtons.push(addAction(actions, `采用第 ${index + 1} 项`, () => resolve('choose', choice.id), 'button primary'));
+    }
+    if (choices.length >= 2) actionButtons.push(addAction(actions, '两种都适用', openBothEditor, 'button quiet'));
+    actionButtons.push(addAction(actions, '稍后', () => resolve('snooze'), 'button quiet'));
+    actionButtons.push(addAction(actions, '不再提醒', () => resolve('dismiss'), 'button quiet'));
+  }
+  const ids = rowSourceIds(row);
+  if (ids.length) addAction(actions, '查看来源', async () => {
+    const existing = card.querySelector('.record-source.details');
+    if (existing) { existing.remove(); return; }
+    try {
+      const sources = await api('memorySources', ids.slice(0, 30));
+      const list = Array.isArray(sources) ? sources : (sources?.rows || []);
+      const region = node('div', 'record-source details');
+      if (!list.length) region.textContent = '没有可显示的来源';
+      else {
+        if (ids.length > 30) region.append(node('div', 'inline-note', '来源较多，仅显示前 30 条'));
+        for (const source of list) region.append(node('div', '', [formatTime(source.ts), source.role || '', source.content || source.title || source.evidence || ''].filter(Boolean).join(' · ')));
+      }
+      card.append(region);
+    } catch (error) { card.append(node('div', 'record-source details bad-text', `来源暂时无法读取：${error?.message || '请稍后重试'}`)); }
+  });
+  card.append(actions, note);
+  return card;
+}
 function paintCurrentRecall(entries) {
   currentRecallEntries = Array.isArray(entries) ? entries.filter(entry => entry &&
     typeof entry.id === 'string' && ['memory', 'summary'].includes(entry.kind) && typeof entry.content === 'string') : [];
@@ -392,7 +527,12 @@ function paintCurrentRecall(entries) {
       memoryKind = entry.kind;
       memoryQuery = memoryRows.some(row => row.id === entry.id) ? '' : entry.content.slice(0, 100).trim();
       $('memorySearch').value = memoryQuery;
-      for (const tab of $('memoryTabs').querySelectorAll('.tab')) tab.classList.toggle('active', tab.dataset.kind === memoryKind);
+      for (const tab of $('memoryTabs').querySelectorAll('.tab')) {
+        const active = tab.dataset.kind === memoryKind;
+        tab.classList.toggle('active', active); tab.setAttribute('aria-selected', String(active));
+      }
+      $('knowledgeFilters').hidden = memoryKind !== 'knowledge';
+      $('memorySearch').placeholder = memoryKind === 'knowledge' ? '搜索整理与经验' : '搜索内容';
       await loadMemoryList(true);
       document.querySelector('.memory-main').scrollTop = 0;
       document.querySelector(`[data-record-id="${CSS.escape(entry.id)}"]`)?.scrollIntoView({ block: 'center' });
@@ -401,31 +541,61 @@ function paintCurrentRecall(entries) {
   }
 }
 async function loadMemoryStats() {
-  try { paintMemoryStats(await api('memoryStats')); }
-  catch (error) { paintMemoryStats({ ready: false, error: error.message }); }
+  const revision = ++memoryStatsRevision;
+  try {
+    const stats = await api('memoryStats');
+    if (revision === memoryStatsRevision) paintMemoryStats(stats);
+  } catch (error) {
+    if (revision === memoryStatsRevision) paintMemoryStats({ ready: false, error: error.message });
+  }
+}
+function rowsFromMemoryResult(result) {
+  const rows = Array.isArray(result) ? result : (result?.rows || []);
+  return rows.map(normalizeMemoryRow);
+}
+function cursorFromMemoryResult(result, rows) {
+  const next = result?.next;
+  if (next && typeof next === 'object') {
+    const ts = Number.isSafeInteger(next.ts) ? next.ts : next.before;
+    const id = typeof next.id === 'string' ? next.id : next.beforeId;
+    if (Number.isSafeInteger(ts) && typeof id === 'string' && id) return { ts, id };
+  }
+  const last = rows.at(-1);
+  return last ? { ts: last.ts, id: last.id } : null;
+}
+function resultHasMemoryMore(result, rows, query) {
+  if (query) return false;
+  if (typeof result?.hasMore === 'boolean') return result.hasMore;
+  if (Object.hasOwn(result || {}, 'next')) return !!result.next;
+  return rows.length > 0;
+}
+function memoryListOptions(view, cursor) {
+  const options = { kind: view.kind, query: view.query };
+  if (view.kind === 'knowledge') options.category = view.category;
+  if (cursor) { options.before = cursor.ts; options.beforeId = cursor.id; }
+  return options;
 }
 async function loadMemoryList(reset = false) {
   const revision = ++memoryViewRevision;
   hideError();
   if (reset) { memoryCursor = null; memoryRows = []; memoryPageCount = 0; }
-  const view = { kind: memoryKind, query: memoryQuery, cursor: memoryCursor && { ...memoryCursor } };
+  const view = { kind: memoryKind, category: memoryCategory, query: memoryQuery, cursor: memoryCursor && { ...memoryCursor } };
   memoryListBusyRevision = revision;
   $('memoryListNote').textContent = '正在读取…'; $('memoryMore').hidden = true;
   try {
-    const options = { kind: view.kind, query: view.query };
-    if (view.cursor) { options.before = view.cursor.ts; options.beforeId = view.cursor.id; }
+    const options = memoryListOptions(view, view.cursor);
     const result = await api('memoryList', options);
     if (memoryListBusyRevision === revision) memoryListBusyRevision = 0;
     if (revision !== memoryViewRevision) return;
     if (hasOpenMemoryEditor()) { memoryRefreshPending = true; return; }
-    const rows = Array.isArray(result) ? result : (result?.rows || []);
+    const rows = rowsFromMemoryResult(result);
     memoryRows = reset ? rows : memoryRows.concat(rows);
     if (rows.length) memoryPageCount = reset ? 1 : memoryPageCount + 1;
     const target = $('memoryList'); target.replaceChildren(...memoryRows.map(renderRecord));
-    const last = rows.at(-1);
-    memoryCursor = last ? { ts: last.ts, id: last.id } : memoryCursor;
-    memoryHasMore = !memoryQuery && (typeof result?.hasMore === 'boolean' ? result.hasMore : rows.length > 0);
-    $('memoryMore').hidden = !memoryHasMore || !last;
+    const nextCursor = cursorFromMemoryResult(result, rows);
+    memoryCursor = nextCursor || memoryCursor;
+    memoryHasMore = resultHasMemoryMore(result, rows, memoryQuery);
+    $('memoryMore').hidden = !memoryHasMore || !memoryCursor;
     $('memoryListNote').textContent = rows.length ? `${memoryRows.length} 条内容` : (reset ? '没有找到内容' : '没有更多内容');
   } catch (error) {
     if (memoryListBusyRevision === revision) memoryListBusyRevision = 0;
@@ -441,7 +611,7 @@ function scheduleMemoryRefresh() {
 }
 async function refreshMemoryView() {
   const revision = ++memoryViewRevision;
-  const view = { kind: memoryKind, query: memoryQuery, pageCount: memoryQuery ? 1 : Math.max(1, memoryPageCount) };
+  const view = { kind: memoryKind, category: memoryCategory, query: memoryQuery, pageCount: memoryQuery ? 1 : Math.max(1, memoryPageCount) };
   if (memoryRefreshBusy) { memoryRefreshPending = true; return; }
   memoryRefreshBusy = true;
   memoryRefreshPending = false;
@@ -453,17 +623,15 @@ async function refreshMemoryView() {
     if (hasOpenMemoryEditor()) { memoryRefreshPending = true; return; }
     let cursor = null, rows = [], hasMore = false;
     for (let page = 0; page < view.pageCount; page++) {
-      const options = { kind: view.kind, query: view.query };
-      if (cursor) { options.before = cursor.ts; options.beforeId = cursor.id; }
+      const options = memoryListOptions(view, cursor);
       const result = await api('memoryList', options);
       if (revision !== memoryViewRevision) return;
       if (hasOpenMemoryEditor()) { memoryRefreshPending = true; return; }
-      const batch = Array.isArray(result) ? result : (result?.rows || []);
+      const batch = rowsFromMemoryResult(result);
       rows.push(...batch);
-      const last = batch.at(-1);
-      if (last) cursor = { ts: last.ts, id: last.id };
-      hasMore = !view.query && (typeof result?.hasMore === 'boolean' ? result.hasMore : batch.length > 0);
-      if (!last || !hasMore) break;
+      cursor = cursorFromMemoryResult(result, batch) || cursor;
+      hasMore = resultHasMemoryMore(result, batch, view.query);
+      if (!batch.length || !hasMore) break;
     }
     memoryRows = rows;
     memoryCursor = cursor;
@@ -500,7 +668,17 @@ $('memoryTabs').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-kind]');
   if (!button) return;
   memoryKind = button.dataset.kind;
-  for (const tab of $('memoryTabs').querySelectorAll('.tab')) tab.classList.toggle('active', tab === button);
+  for (const tab of $('memoryTabs').querySelectorAll('.tab')) {
+    const active = tab === button;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+  }
+  $('knowledgeFilters').hidden = memoryKind !== 'knowledge';
+  $('memorySearch').placeholder = memoryKind === 'knowledge' ? '搜索整理与经验' : '搜索内容';
+  loadMemoryList(true);
+});
+$('knowledgeCategory').addEventListener('change', event => {
+  memoryCategory = ['all', 'relation', 'doubt', 'experience', 'tool'].includes(event.target.value) ? event.target.value : 'all';
   loadMemoryList(true);
 });
 $('memorySearchBtn').addEventListener('click', () => { memoryQuery = $('memorySearch').value.trim(); loadMemoryList(true); });

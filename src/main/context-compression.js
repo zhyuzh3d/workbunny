@@ -12,7 +12,9 @@ const MIN_EXCERPT_CHARS = 3;
 const MAX_EXCERPT_CHARS = 220;
 const HEAD_TEXT_BUDGET = 1_800;
 const MAX_SOURCE_IDS = 200;
-const HEAD_PREFIX = 'context-head:v1:';
+const HEAD_PREFIX = 'context-head:v1:'; // frozen legacy head IDs
+const IMMUTABLE_HEAD_PREFIX = 'context-head:v2:';
+const CURRENT_PREFIX = 'context-current:v2:';
 const SEGMENT_PREFIX = 'context-segment:v1:';
 const { containsSecret } = require('./conversation-input');
 const SECRET = { test: containsSecret };
@@ -64,6 +66,18 @@ function sourceDigest(rows) {
 }
 
 function headId(scene) { return HEAD_PREFIX + scene; }
+function currentId(scene) { return CURRENT_PREFIX + scene; }
+function immutableHeadId(scene, version, watermark, segmentIds) {
+  return IMMUTABLE_HEAD_PREFIX + scene + ':' + digest(JSON.stringify([scene, version,
+    watermark.ingestionSeq, watermark.id, [...segmentIds]]), 48);
+}
+function segmentIdentityId(scene, batch) {
+  const identity = batch.map(row => [row.id, row.ingestionSeq, row.updatedAt ?? row.ts]);
+  return SEGMENT_PREFIX + scene + ':' + digest(JSON.stringify([scene, identity]), 48);
+}
+function legacySegmentId(scene, sourceHashValue) {
+  return SEGMENT_PREFIX + scene + ':' + digest(`${scene}\n${sourceHashValue}`, 48);
+}
 
 class ContextCompression {
   constructor({ memory, summarize, clock = Date.now, recentRounds = 8, maxMessages = HARD_MAX_MESSAGES, maxChars = HARD_MAX_CHARS } = {}) {
@@ -94,7 +108,7 @@ class ContextCompression {
     return decoded;
   }
 
-  isValidHead(head, scene) {
+  isValidLegacyHead(head, scene) {
     const value = head?.value;
     const segmentMeta = Array.isArray(value?.segments) ? value.segments : [];
     const segmentIds = segmentMeta.map(item => item?.id);
@@ -113,7 +127,7 @@ class ContextCompression {
       typeof value.batchSourceHash === 'string' && Number.isSafeInteger(value.skippedSecretRounds) && value.skippedSecretRounds >= 0;
   }
 
-  async inspectHead(scene) {
+  async inspectLegacyHead(scene) {
     const raw = await this.memory.db.request('get', { ids: [headId(scene)], scene });
     if (!raw?.rows?.length) {
       // A fixed lane ID that exists under another visibility floor is a
@@ -123,23 +137,92 @@ class ContextCompression {
     }
     let head;
     try { head = this.memory.decode(raw.rows[0]); } catch { return { head: null, invalid: true }; }
-    return this.isValidHead(head, scene) ? { head, invalid: false } : { head: null, invalid: true };
+    return this.isValidLegacyHead(head, scene) ? { head, invalid: false } : { head: null, invalid: true };
+  }
+
+  isValidPointer(pointer, scene) {
+    const value = pointer?.value;
+    return !!pointer && pointer.kind === 'state' && pointer.state === 'active' && pointer.id === currentId(scene) &&
+      pointer.domain === scene && pointer.visibilityFloor === rank(scene) && value?.origin === 'context-current-v2' &&
+      value.scene === scene && typeof value.headId === 'string' && value.headId.startsWith(IMMUTABLE_HEAD_PREFIX + scene + ':') &&
+      Number.isSafeInteger(value.version) && value.version >= 1 && value.watermark &&
+      Number.isSafeInteger(value.watermark.ingestionSeq) && value.watermark.ingestionSeq > 0 &&
+      typeof value.watermark.id === 'string' && Array.isArray(value.sources) && value.sources.length === 1 && value.sources[0] === value.headId;
+  }
+
+  isValidImmutableHead(head, scene) {
+    const value = head?.value;
+    const segments = Array.isArray(value?.segments) ? value.segments : [];
+    const ids = segments.map(item => item?.id);
+    const sourceIds = Array.isArray(value?.sources) ? value.sources : [];
+    if (!head || head.kind !== 'state' || head.state !== 'active' || head.domain !== scene ||
+        head.visibilityFloor !== rank(scene) || value?.origin !== 'context-head-v2' || value.scene !== scene ||
+        !Number.isSafeInteger(value.version) || value.version < 1 || !value.watermark ||
+        !Number.isSafeInteger(value.watermark.ingestionSeq) || value.watermark.ingestionSeq <= 0 ||
+        typeof value.watermark.id !== 'string' || typeof value.text !== 'string' || value.text.length > HEAD_TEXT_BUDGET ||
+        SECRET.test(value.text) || segments.length < 1 || segments.length > MAX_SEGMENTS || new Set(ids).size !== ids.length ||
+        JSON.stringify(sourceIds) !== JSON.stringify(ids) || !Number.isSafeInteger(value.skippedSecretRounds) ||
+        value.skippedSecretRounds < 0 || segments.some(item => !item || typeof item.id !== 'string' ||
+          typeof item.sourceHash !== 'string' || !item.range || !Number.isSafeInteger(item.range.firstSeq) ||
+          !Number.isSafeInteger(item.range.lastSeq) || typeof item.range.firstId !== 'string' || typeof item.range.lastId !== 'string')) return false;
+    const last = segments.at(-1);
+    return last.range.lastSeq === value.watermark.ingestionSeq && last.range.lastId === value.watermark.id &&
+      head.id === immutableHeadId(scene, value.version, value.watermark, ids);
+  }
+
+  async verifyImmutableHeadGraph(head, scene) {
+    if (!this.isValidImmutableHead(head, scene)) return false;
+    const segments = await this.loadSegments(head, scene);
+    if (!segments || segments.length !== head.value.segments.length) return false;
+    return this.composeHeadText([...segments].reverse()) === head.value.text;
+  }
+
+  async inspectCurrent(scene) {
+    const pointerId = currentId(scene);
+    const rawPointer = await this.memory.db.request('get', { ids: [pointerId], scene });
+    if (!rawPointer?.rows?.length) {
+      const anyScope = await this.memory.db.request('get', { ids: [pointerId] });
+      return anyScope?.rows?.length ? { head: null, pointer: null, invalid: true, format: 'v2' }
+        : { head: null, pointer: null, invalid: false, format: 'v2' };
+    }
+    let pointer;
+    try { pointer = this.memory.decode(rawPointer.rows[0]); } catch { return { head: null, pointer: null, invalid: true, format: 'v2' }; }
+    if (!this.isValidPointer(pointer, scene)) return { head: null, pointer, invalid: true, format: 'v2' };
+    const rawHead = await this.memory.db.request('get', { ids: [pointer.value.headId], scene });
+    if (!rawHead?.rows?.length) return { head: null, pointer, invalid: true, format: 'v2' };
+    let head;
+    try { head = this.memory.decode(rawHead.rows[0]); } catch { return { head: null, pointer, invalid: true, format: 'v2' }; }
+    if (head.value?.version !== pointer.value.version || head.value?.watermark?.ingestionSeq !== pointer.value.watermark.ingestionSeq ||
+        head.value?.watermark?.id !== pointer.value.watermark.id || !await this.verifyImmutableHeadGraph(head, scene))
+      return { head: null, pointer, invalid: true, format: 'v2' };
+    return { head, pointer, invalid: false, format: 'v2' };
+  }
+
+  async inspectState(scene) {
+    const current = await this.inspectCurrent(scene);
+    if (current.invalid || current.head) return current;
+    const legacy = await this.inspectLegacyHead(scene);
+    if (legacy.invalid) return { head: null, pointer: null, invalid: true, format: 'legacy' };
+    if (legacy.head && !await this.verifyOldHeadGraph(legacy.head, scene))
+      return { head: null, pointer: null, invalid: true, format: 'legacy' };
+    return { head: legacy.head, pointer: null, invalid: false, format: legacy.head ? 'legacy' : 'v2' };
   }
 
   async snapshot(scene) {
     rank(scene);
     if (!this.memory.db?.request || typeof this.memory.decode !== 'function') return this.emptySnapshot();
-    const { head, invalid } = await this.inspectHead(scene);
-    if (!head || invalid || containsSecret(head.value.text)) return this.emptySnapshot();
-    return {
-      text: head.value.text,
-      sourceIds: [...new Set([head.id, ...head.value.sources])],
-      version: head.value.version,
-      coveredThrough: { ...head.value.watermark },
-      recordId: head.id,
-      updatedAt: head.updatedAt,
-      scene,
-    };
+    const current = await this.inspectState(scene);
+    if (current.invalid) return this.emptySnapshot();
+    if (current.head) {
+      if (!containsSecret(current.head.value.text)) return this.snapshotForHead(current.head, scene);
+      return this.emptySnapshot();
+    }
+    return this.emptySnapshot();
+  }
+
+  snapshotForHead(head, scene) {
+    return { text: head.value.text, sourceIds: [head.id], version: head.value.version,
+      coveredThrough: { ...head.value.watermark }, recordId: head.id, updatedAt: head.updatedAt, scene };
   }
 
   emptySnapshot() { return { text: '', sourceIds: [], version: 0, coveredThrough: null, recordId: null, updatedAt: null }; }
@@ -340,18 +423,25 @@ class ContextCompression {
 
   async findReusableSegment(scene, batch, turns, inputs) {
     const sourceHashValue = sourceDigest(batch);
-    const id = SEGMENT_PREFIX + scene + ':' + digest(`${scene}\n${sourceHashValue}`, 48);
-    const raw = await this.memory.db.request('get', { ids: [id], scene });
+    const id = segmentIdentityId(scene, batch);
+    let foundId = id;
+    let raw = await this.memory.db.request('get', { ids: [id], scene });
     if (!raw?.rows?.length) {
-      const anyScope = await this.memory.db.request('get', { ids: [id] });
-      return anyScope?.rows?.length ? { invalid: true } : { invalid: false, segment: null, sourceHash: sourceHashValue };
+      // Reuse an exact orphan created by the old v1 writer after a crash.
+      const priorId = legacySegmentId(scene, sourceHashValue);
+      const prior = await this.memory.db.request('get', { ids: [priorId], scene });
+      if (prior?.rows?.length) { raw = prior; foundId = priorId; }
+      else {
+        const anyScope = await this.memory.db.request('get', { ids: [id, priorId] });
+        return anyScope?.rows?.length ? { invalid: true } : { invalid: false, segment: null, sourceHash: sourceHashValue };
+      }
     }
     let segment;
     try { segment = this.memory.decode(raw.rows[0]); } catch { return { invalid: true }; }
     const first = batch[0], last = batch.at(-1);
     const expectedSources = batch.map(row => row.id);
     const range = segment.value?.range;
-    if (segment.kind !== 'state' || segment.id !== id || segment.domain !== scene || segment.visibilityFloor !== rank(scene) ||
+    if (segment.kind !== 'state' || segment.id !== foundId || segment.domain !== scene || segment.visibilityFloor !== rank(scene) ||
         segment.value?.origin !== 'context-segment-v1' || segment.value.scene !== scene ||
         segment.value.sourceHash !== sourceHashValue || !Number.isSafeInteger(segment.value.version) || segment.value.version < 1 ||
         JSON.stringify(segment.value.sources) !== JSON.stringify(expectedSources) ||
@@ -368,7 +458,7 @@ class ContextCompression {
 
   makeSegment(scene, batch, summary, turns, sourceHashValue) {
     const first = batch[0], last = batch.at(-1);
-    const segmentId = SEGMENT_PREFIX + scene + ':' + digest(`${scene}\n${sourceHashValue}`, 48);
+    const segmentId = segmentIdentityId(scene, batch);
     return {
       id: segmentId,
       kind: 'state',
@@ -411,72 +501,102 @@ class ContextCompression {
     return blocks.join('\n');
   }
 
-  async commitBatch({ scene, batch, summary, turns, skippedSecretRounds, head, oldSegments, generation, sceneEpoch, signal, reusableSegment = null }) {
+  async commitBatch({ scene, batch, summary, turns, skippedSecretRounds, state, head, oldSegments,
+    generation, sceneEpoch, signal, reusableSegment = null }) {
     const sourceHashValue = sourceDigest(batch);
     const segment = reusableSegment || this.makeSegment(scene, batch, summary, turns, sourceHashValue);
     const priorMetadata = head?.value.segments || [];
     const retainedPrior = priorMetadata.slice(-(MAX_SEGMENTS - 1));
-    const retainedSegmentRecords = oldSegments.filter(row => retainedPrior.some(meta => meta.id === row.id));
+    const retainedIds = new Set(retainedPrior.map(item => item.id));
+    const retainedSegmentRecords = oldSegments.filter(row => retainedIds.has(row.id));
+    if (retainedSegmentRecords.length !== retainedPrior.length) return false;
     const allSegmentsNewestFirst = [segment, ...retainedSegmentRecords.slice().reverse()];
     const metadata = [...retainedPrior, {
       id: segment.id, version: segment.value.version, range: segment.value.range, sourceHash: sourceHashValue,
     }].slice(-MAX_SEGMENTS);
-    const sourceIds = [...new Set([
-      ...batch.map(row => row.id),
-      ...retainedPrior.map(item => item.id),
-    ])];
-    if (sourceIds.length > MAX_SOURCE_IDS) throw new Error('上下文摘要来源数量超限');
+    const segmentIds = metadata.map(item => item.id);
     const last = batch.at(-1);
+    const version = (head?.value.version || 0) + 1;
+    const watermark = { ingestionSeq: last.ingestionSeq, id: last.id, ts: last.ts };
     const nextHead = {
-      id: headId(scene), kind: 'state', ts: 0, updatedAt: this.clock(), domain: scene, visibilityFloor: rank(scene),
+      id: immutableHeadId(scene, version, watermark, segmentIds), kind: 'state', ts: last.ts,
+      updatedAt: this.clock(), domain: scene, visibilityFloor: rank(scene),
       value: {
-        origin: 'context-head-v1', scene, version: (head?.value.version || 0) + 1,
-        watermark: { ingestionSeq: last.ingestionSeq, id: last.id, ts: last.ts },
-        coveredThrough: { ingestionSeq: last.ingestionSeq, id: last.id, ts: last.ts },
-        segments: metadata,
-        text: this.composeHeadText(allSegmentsNewestFirst),
-        batchSourceIds: batch.map(row => row.id),
-        batchSourceHash: sourceHashValue,
+        origin: 'context-head-v2', scene, version, watermark, coveredThrough: watermark,
+        segments: metadata, text: this.composeHeadText(allSegmentsNewestFirst),
+        batchSourceIds: batch.map(row => row.id), batchSourceHash: sourceHashValue,
         skippedSecretRounds: (head?.value.skippedSecretRounds || 0) + skippedSecretRounds,
-        sources: sourceIds,
+        // Every source already exists before the immutable head is written.
+        sources: segmentIds,
       },
     };
+    if (!nextHead.value.text || segmentIds.length > MAX_SEGMENTS || new Set(segmentIds).size !== segmentIds.length)
+      throw new Error('上下文摘要头部校验失败');
+    const pointer = {
+      id: currentId(scene), kind: 'state', ts: 0, updatedAt: this.clock(), domain: scene, visibilityFloor: rank(scene),
+      value: { origin: 'context-current-v2', scene, headId: nextHead.id, version,
+        watermark, sources: [nextHead.id] },
+    };
+    const sameState = (a, b) => a.format === b.format && (a.head?.id || null) === (b.head?.id || null) &&
+      (a.head?.value.version || 0) === (b.head?.value.version || 0) &&
+      (a.head?.value.watermark?.ingestionSeq || 0) === (b.head?.value.watermark?.ingestionSeq || 0) &&
+      (!a.head || JSON.stringify(a.head.value) === JSON.stringify(b.head.value));
 
     return this.memory.serial(async () => {
-      if (signal?.aborted || this.memory.closed || this.memory.generation !== generation ||
-          (sceneEpoch !== undefined && this.memory.sceneEpoch !== sceneEpoch)) return false;
-      const currentRaw = await this.memory.db.request('get', { ids: [headId(scene)], scene });
-      let currentHead = null;
-      if (currentRaw?.rows?.length) {
-        try { currentHead = this.memory.decode(currentRaw.rows[0]); } catch { return false; }
-        if (!this.isValidHead(currentHead, scene)) return false;
-      } else {
-        const anyScope = await this.memory.db.request('get', { ids: [headId(scene)] });
-        if (anyScope?.rows?.length) return false;
-      }
-      if ((head?.value.version || 0) !== (currentHead?.value?.version || 0)) return false;
-      if (head && (!currentHead || currentHead.value.watermark?.ingestionSeq !== head.value.watermark?.ingestionSeq ||
-          !(await this.verifyOldHeadGraph(currentHead, scene)))) return false;
+      const allowed = () => !signal?.aborted && !this.memory.closed && this.memory.generation === generation &&
+        (sceneEpoch === undefined || this.memory.sceneEpoch === sceneEpoch);
+      if (!allowed()) return false;
+      const current = await this.inspectState(scene);
+      if (current.invalid || !sameState(state, current)) return false;
       if (!await this.verifyCurrentBatch(batch, scene, sourceHashValue)) return false;
+
+      // Phase 1: immutable segment. If interrupted afterward, the next run
+      // finds and reuses this exact segment without another model call.
       const existingSegment = await this.memory.db.request('get', { ids: [segment.id], scene });
-      let writeSegment = true;
+      let storedSegment;
       if (existingSegment?.rows?.length) {
-        let prior;
-        try { prior = this.memory.decode(existingSegment.rows[0]); } catch { return false; }
-        if (prior.kind !== 'state' || prior.domain !== scene || prior.visibilityFloor !== rank(scene) ||
-            prior.value?.origin !== 'context-segment-v1' || prior.value.scene !== scene ||
-            prior.value.sourceHash !== segment.value.sourceHash || prior.value.version !== segment.value.version ||
-            JSON.stringify(prior.value.sources) !== JSON.stringify(segment.value.sources) ||
-            JSON.stringify(prior.value.range) !== JSON.stringify(segment.value.range) ||
-            prior.value.content !== segment.value.content || JSON.stringify(prior.value.excerpts) !== JSON.stringify(segment.value.excerpts)) return false;
-        writeSegment = false;
+        try { storedSegment = this.memory.decode(existingSegment.rows[0]); } catch { return false; }
+        if (storedSegment.kind !== 'state' || storedSegment.domain !== scene || storedSegment.visibilityFloor !== rank(scene) ||
+            storedSegment.value?.origin !== 'context-segment-v1' || storedSegment.value.scene !== scene ||
+            storedSegment.value.sourceHash !== segment.value.sourceHash || storedSegment.value.version !== segment.value.version ||
+            JSON.stringify(storedSegment.value.sources) !== JSON.stringify(segment.value.sources) ||
+            JSON.stringify(storedSegment.value.range) !== JSON.stringify(segment.value.range) ||
+            storedSegment.value.content !== segment.value.content || JSON.stringify(storedSegment.value.excerpts) !== JSON.stringify(segment.value.excerpts)) return false;
       } else {
         const anyScope = await this.memory.db.request('get', { ids: [segment.id] });
-        if (anyScope?.rows?.length) return false;
+        if (anyScope?.rows?.length || !allowed()) return false;
+        await this.memory.write([segment], this.memory.epoch, { notify: false });
       }
-      if (signal?.aborted || this.memory.generation !== generation ||
-          (sceneEpoch !== undefined && this.memory.sceneEpoch !== sceneEpoch)) return false;
-      await this.memory.write(writeSegment ? [segment, nextHead] : [nextHead], this.memory.epoch, { notify: false });
+      if (!allowed() || !await this.verifyCurrentBatch(batch, scene, sourceHashValue)) return false;
+
+      // Phase 2: immutable head. Its deterministic ID lets recovery reuse a
+      // committed head if the mutable pointer was not advanced before shutdown.
+      const currentAfterSegment = await this.inspectState(scene);
+      if (currentAfterSegment.invalid || !sameState(state, currentAfterSegment)) return false;
+      const existingHead = await this.memory.db.request('get', { ids: [nextHead.id], scene });
+      if (existingHead?.rows?.length) {
+        let storedHead;
+        try { storedHead = this.memory.decode(existingHead.rows[0]); } catch { return false; }
+        if (!this.isValidImmutableHead(storedHead, scene) || JSON.stringify(storedHead.value) !== JSON.stringify(nextHead.value) ||
+            !await this.verifyImmutableHeadGraph(storedHead, scene)) return false;
+      } else {
+        const anyScope = await this.memory.db.request('get', { ids: [nextHead.id] });
+        if (anyScope?.rows?.length || !allowed()) return false;
+        await this.memory.write([nextHead], this.memory.epoch, { notify: false });
+      }
+      if (!allowed() || !await this.verifyCurrentBatch(batch, scene, sourceHashValue)) return false;
+
+      // Phase 3: advance the private navigation pointer only after the full
+      // immutable graph is durable. The pointer is never exposed as a source.
+      const currentBeforePointer = await this.inspectState(scene);
+      if (currentBeforePointer.invalid || !sameState(state, currentBeforePointer)) return false;
+      const pointerExists = await this.memory.db.request('get', { ids: [currentId(scene)], scene });
+      if (!pointerExists?.rows?.length) {
+        const anyPointer = await this.memory.db.request('get', { ids: [currentId(scene)] });
+        if (anyPointer?.rows?.length) return false;
+      }
+      if (!allowed()) return false;
+      await this.memory.write([pointer], this.memory.epoch, { notify: false });
       return true;
     });
   }
@@ -505,13 +625,11 @@ class ContextCompression {
           (runSceneEpoch !== undefined && this.memory.sceneEpoch !== runSceneEpoch))
         return outcome('paused');
       if (!await canRun({ mode: 'context-compression', scene, signal: controller })) return outcome('paused');
-      const headState = await this.inspectHead(scene);
+      const headState = await this.inspectState(scene);
       if (headState.invalid) return outcome('paused', '场景压缩索引未通过校验，已保留原始对话');
       let head = headState.head;
       let version = head?.value.version || 0;
       versions[scene] = version;
-      if (head && !await this.verifyOldHeadGraph(head, scene))
-        return outcome('paused', '场景压缩来源已变化，未提交新的版本');
       const cutoffSeq = await this.recentCutoff(scene, controller);
       if (controller.aborted) return outcome('paused');
       if (cutoffSeq === null) continue;
@@ -547,7 +665,7 @@ class ContextCompression {
           summary = this.validateSummary(summaryRaw, inputs);
         }
         const committed = await this.commitBatch({ scene, batch, summary, turns: chosen.turns,
-          skippedSecretRounds: chosen.skippedSecretRounds || 0, head, oldSegments: oldSegments || [],
+          skippedSecretRounds: chosen.skippedSecretRounds || 0, state: headState, head, oldSegments: oldSegments || [],
           generation: runGeneration, sceneEpoch: runSceneEpoch, signal: controller, reusableSegment });
         if (!committed) return outcome('paused');
         processedByScene[scene] += batch.length;
@@ -555,7 +673,11 @@ class ContextCompression {
         versions[scene] = version;
         const last = batch.at(-1);
         cursorSeq = last.ingestionSeq;
-        const nextState = await this.inspectHead(scene);
+        const nextState = await this.inspectState(scene);
+        headState.head = nextState.head;
+        headState.pointer = nextState.pointer;
+        headState.format = nextState.format;
+        headState.invalid = nextState.invalid;
         head = nextState.head;
         if (!head || nextState.invalid || head.value.version !== version) return outcome('paused');
       }
@@ -597,5 +719,6 @@ class ContextCompression {
 
 module.exports = {
   ContextCompression, groupTurns, sourceDigest, HEAD_TEXT_BUDGET,
-  MAX_SEGMENTS, MAX_SOURCE_IDS, HEAD_PREFIX, SEGMENT_PREFIX,
+  MAX_SEGMENTS, MAX_SOURCE_IDS, HEAD_PREFIX, IMMUTABLE_HEAD_PREFIX, CURRENT_PREFIX,
+  SEGMENT_PREFIX, currentId, headId, immutableHeadId,
 };

@@ -231,8 +231,8 @@ async function testSecretCompressionOutputNeverCommitsHeadOrDeletesSources() {
       } });
     await assert.rejects(compression.run({ reserveModelCall: async () => ({ ok: true }) }), /摘要|格式|无效/,
       'a credential-bearing summary is rejected');
-    assert.equal((await memory.db.request('get', { ids: ['context-head:v1:life'] })).rows.length, 0,
-      'rejected compression output does not write or advance a head');
+    assert.equal((await memory.db.request('get', { ids: ['context-current:v2:life', 'context-head:v1:life'] })).rows.length, 0,
+      'rejected compression output does not write or advance a pointer or legacy head');
     assert.equal((await queryAll(memory, 'state')).filter(row => row.id.startsWith('context-segment:v1:')).length, 0,
       'rejected compression output does not persist a segment');
     assert.equal((await memory.db.request('get', { ids: records.map(row => row.id) })).rows.length, records.length,

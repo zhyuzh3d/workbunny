@@ -49,14 +49,25 @@
 
       <section class="card maintenance-card" aria-labelledby="maintenanceHeading">
         <div class="section-heading"><div><h2 id="maintenanceHeading">整理记忆</h2><p id="maintenanceStatus" role="status">正在读取整理状态…</p></div></div>
-        <p class="inline-note maintenance-scope">小憩吸收新增对话并更新场景压缩；整理记忆会分批轮查更早的记忆，只归档完全重复项，保留重要信息。</p>
+        <p class="inline-note maintenance-scope">小憩吸收新对话并更新场景压缩；整理记忆梳理同义、变化与待核对内容，保留原文和来源。</p>
         <div class="button-row"><button id="maintenanceDoze" class="button quiet">小憩</button><button id="maintenanceDream" class="button quiet">整理记忆</button></div>
       </section>
 
       <div class="tabs" id="memoryTabs" role="tablist" aria-label="记忆内容">
-        <button class="tab active" data-kind="memory" role="tab">长期记忆</button>
-        <button class="tab" data-kind="message" role="tab">聊天</button>
-        <button class="tab" data-kind="summary" role="tab">摘要</button>
+        <button class="tab active" data-kind="memory" role="tab" aria-selected="true">长期记忆</button>
+        <button class="tab" data-kind="message" role="tab" aria-selected="false">聊天</button>
+        <button class="tab" data-kind="summary" role="tab" aria-selected="false">摘要</button>
+        <button class="tab" data-kind="knowledge" role="tab" aria-selected="false">整理与经验</button>
+      </div>
+      <div id="knowledgeFilters" class="knowledge-filters" hidden>
+        <label class="inline-note" for="knowledgeCategory">分类</label>
+        <select id="knowledgeCategory" aria-label="整理与经验分类">
+          <option value="all">全部</option>
+          <option value="relation">相关陈述</option>
+          <option value="doubt">待核对</option>
+          <option value="experience">经验</option>
+          <option value="tool">工具</option>
+        </select>
       </div>
       <div class="search-row"><input id="memorySearch" type="search" placeholder="搜索内容" aria-label="搜索记忆内容"><button id="memorySearchBtn" class="button quiet">搜索</button></div>
       <div id="memoryList" class="records" aria-live="polite"></div>
