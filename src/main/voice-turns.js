@@ -1,19 +1,22 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
+function meaningful(text, allowShort = false) {
+  const words = String(text || '').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
+  return words.length >= 2 || allowShort && /^(?:嗯|好|对|是|不|行|哦|唔|啊)$/u.test(words);
+}
 // One speculative request per stable revision. ASR finals refine segments;
 // they do not restart the pause clock or create a second model request.
 function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => {}, onError = () => {},
   pauseMs = 1000, turnMs = 3000, finalWaitMs = 8000,
-  now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, sessionId = randomUUID() }) {
+  now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, sessionId = randomUUID(), allowShort = () => false }) {
   let current = null, serial = 0, requestTimer, sealTimer, confirmationTimer;
-  const canonical = s => String(s || '').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
   const contentKey = s => String(s || '').replace(/\s+/g, ' ').trim().replace(/[。.!?！？]+$/u, '').trim();
   const textOf = t => [...t.segments, t.partial].filter(Boolean).join('\n');
   function remember(t) {
     if (!t || t.skipped) return;
     if (t.remembered) return t.receipt;
     const text = textOf(t);
-    if (canonical(text).length < 2) return;
+    if (!meaningful(text, allowShort())) return;
     t.remembered = true;
     // The final punctuation may differ from the speculative request. A stable
     // turn identity and the actual write receipt link replies to that final.
@@ -28,9 +31,9 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
   function clearTimers() { clearTimer(requestTimer); clearTimer(sealTimer); clearTimer(confirmationTimer); }
   function unconfirmed(reason) {
     if (!current || current.finalized) return;
-    const meaningful = canonical(textOf(current)).length >= 2;
+    const hasWords = meaningful(textOf(current), allowShort());
     reset(); onLive('', { final: false, pending: false });
-    if (meaningful) onError(reason);
+    if (hasWords) onError(reason);
   }
   function fresh(at) { return { id: ++serial, segments: [], partial: '', finalized: false,
     lastActivity: at, remembered: false, skipped: false, request: null }; }
@@ -49,7 +52,7 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     requestTimer = setTimer(() => {
       if (current !== t) return;
       const text = textOf(t);
-      if (canonical(text).length < 2 || t.request) return;
+      if (!meaningful(text, allowShort()) || t.request) return;
       let release;
       const settled = new Promise(r => { release = r; });
       const token = { valid: true, release, text, id: t.id, turnId: `${sessionId}:${t.id}`, heardAt: t.lastActivity,
@@ -101,4 +104,4 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     snapshot: () => current ? { text: textOf(current), id: current.id,
     requested: !!current.request, silenceMs: now() - current.lastActivity } : null };
 }
-module.exports = { createVoiceTurns };
+module.exports = { createVoiceTurns, meaningful };

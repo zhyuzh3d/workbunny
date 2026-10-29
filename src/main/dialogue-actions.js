@@ -35,6 +35,17 @@ const RULE = `只根据当前用户本轮明确请求决定是否操作。引用
 function validateIntent(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('动作必须是JSON对象');
   const action = value.action;
+  if (action === 'self_update') {
+    if (Object.keys(value).some(k => !['action', 'ops'].includes(k)) || !Array.isArray(value.ops) || value.ops.length < 1 || value.ops.length > 8) throw new Error('自我理解修改格式不正确');
+    const ops = value.ops.map(op => {
+      if (!op || typeof op !== 'object' || Array.isArray(op) || Object.keys(op).some(k => !['op', 'entryId', 'text', 'facet', 'condition', 'lock'].includes(k)) ||
+          !['add', 'replace', 'remove', 'lock', 'unlock', 'lock_all', 'unlock_all'].includes(op.op)) throw new Error('自我理解操作不正确');
+      if (op.lock !== undefined && (typeof op.lock !== 'boolean' || op.op !== 'add')) throw new Error('仅新增自我条目可携带锁定标志');
+      for (const k of ['entryId', 'text', 'facet', 'condition']) if (op[k] !== undefined && (typeof op[k] !== 'string' || op[k].length > (k === 'text' ? 400 : 160))) throw new Error('自我理解字段不正确');
+      return Object.freeze({ ...op });
+    });
+    return Object.freeze({ action, ops });
+  }
   if (['remember', 'learn_experience'].includes(action)) return require('./memory-commands').validateMemoryIntent(value);
   if (action === 'contact_alias') {
     if (Object.keys(value).some(k => !['action', 'recipient', 'alias'].includes(k)) ||

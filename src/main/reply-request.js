@@ -67,7 +67,7 @@ function makeChatOptions(request, messages) {
   const provider = request.provider || (request.transport === 'workbuddy' ? 'workbuddy' : undefined);
   options.extraBody = {
     ...(request.extraBody || {}),
-    response_format: request.extraBody?.response_format || responseFormat(provider),
+    response_format: request.cognitive ? responseFormat(provider, undefined, { cognitive: true }) : request.extraBody?.response_format || responseFormat(provider),
   };
   return options;
 }
@@ -91,7 +91,8 @@ async function requestReply({ chat, request, maxRepairs = MAX_REPAIRS, allowActi
     if (!active(request)) throwAborted();
     const remainingTimeout = deadline - clock();
     if (remainingTimeout <= 0) throw timeoutError();
-    const reminder = formatRepairs === 0 ? BASE_REMINDER : `${BASE_REMINDER}\n${REPAIR_REMINDER}`;
+    const base = request.cognitive ? require('./dialogue-cognition').RULE : BASE_REMINDER;
+    const reminder = formatRepairs === 0 ? base : `${base}\n上一输出未通过格式校验，请按原始请求重新生成完整协议，不能重排上一输出。`;
     const messages = cloneMessagesWithReminder(request.messages, reminder);
     let result;
     // Transport errors are allowed through unchanged and are never retried as
@@ -111,7 +112,7 @@ async function requestReply({ chat, request, maxRepairs = MAX_REPAIRS, allowActi
     const raw = typeof result?.raw === 'string' ? result.raw : (typeof result?.text === 'string' ? result.text : '');
     let validated;
     try {
-      validated = validateReply(raw, { allowActions });
+      validated = validateReply(raw, { allowActions, cognitive: request.cognitive === true });
     } catch (error) {
       if (error?.code !== 'E_REPLY_PROTOCOL') throw error;
       if (formatRepairs < repairs && active(request)) { formatRepairs++; repaired = true; continue; }
@@ -119,13 +120,16 @@ async function requestReply({ chat, request, maxRepairs = MAX_REPAIRS, allowActi
     }
     if (!active(request)) throwAborted();
 
-    if (typeof originalDelta === 'function') originalDelta(raw);
-    if (typeof originalSentence === 'function' && validated.text) {
+    const visibleRaw = validated.innerRaw || raw;
+    if (typeof originalDelta === 'function' && !request.deferPresentation) originalDelta(visibleRaw);
+    if (!request.deferPresentation && typeof originalSentence === 'function' && validated.text) {
       const splitter = makeSentenceSplitter(originalSentence);
       splitter.push(validated.text);
       splitter.flush();
     }
-    return { ...result, attempts: attempt + 1, protocolVerified: true, reply: validated, repaired, ...(contextRetried ? { contextRetried: true } : {}) };
+    const tags = require('./llm').extractTags(validated.taggedText || validated.text || '');
+    return { ...result, raw: visibleRaw, text: tags.clean, motions: tags.motions, emos: tags.emos, cognition: validated.cognition,
+      attempts: attempt + 1, protocolVerified: true, reply: validated, repaired, ...(contextRetried ? { contextRetried: true } : {}) };
   }
   throw protocolError();
 }

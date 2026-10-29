@@ -7,12 +7,14 @@ import { cutClip, MOTION_WINDOWS } from './motion-cut.js';
 import { processMotionClip, crossFadeMotionAction } from './motion-quality.mjs';
 import { createPCMPlayer } from './pcm-player.mjs';
 import { createBubbleController } from './bubble-ui.mjs';
+import { characterText } from './character-name.mjs';
 
 /* ═══════════ 常量 ═══════════ */
 /* 形象列表由主进程扫 assets/models/*.vrm 得到（丢个文件进来就能换角色），
  * 这里只留一份兜底，主进程没给的时候至少还能显示官方样例。 */
 let AVATAR_LIST = [];
 let AVATARS = {};
+let hiddenAvatarMeshes = [];
 const FALLBACK_AVATARS = [
   { key: 'AvatarSample_D.vrm', file: 'AvatarSample_D.vrm', label: 'D' },
   { key: 'AvatarSample_E.vrm', file: 'AvatarSample_E.vrm', label: 'E' },
@@ -508,7 +510,7 @@ async function playWav(u8) {
   } catch (e) {
     if (revision !== audioRevision) return;
     console.warn('decode 失败', e);
-    pet.audioDone();
+    pet.audioDone(false);
     return;
   }
   if (revision !== audioRevision) return;
@@ -542,7 +544,7 @@ function playPCM(event) {
   if (event.start) {
     stopAudio(true);
     const ctx = ensureAudio();
-    if (ctx.state === 'suspended') ctx.resume().catch(() => { pcmPlayer.stop(event.id); pet.audioDone(); });
+    if (ctx.state === 'suspended') ctx.resume().catch(() => { pcmPlayer.stop(event.id); pet.audioDone(false); });
     pcmPlayer.begin(event.id);
   }
   if (event.stop) pcmPlayer?.stop(event.id);
@@ -593,6 +595,12 @@ function loadAvatar(key) {
     vrm = gltf.userData.vrm;
     if (!vrm) { loading = false; setLoading(false); resolve(false); return; }
     softenCutoutEdges(vrm.scene);
+    hiddenAvatarMeshes = [];
+    vrm.scene.traverse(object => {
+      const source = gltf.parser.associations.get(object);
+      const name = gltf.parser.json.meshes?.[source?.meshes]?.name;
+      if (name && info.hiddenMeshes?.includes(name)) { object.visible = false; hiddenAvatarMeshes.push(name); }
+    });
     if (vrm.meta?.metaVersion === '0') vrm.scene.rotation.y = Math.PI;
     vrm.scene.traverse((o) => { o.frustumCulled = false; });
     if (vrm.humanoid) vrm.humanoid.autoUpdateHumanBones = true;
@@ -652,20 +660,33 @@ function setLoading(on, txt) {
 /* ═══════════ 命中测试（决定窗口哪块能点） ═══════════ */
 const hitBones = ['head', 'neck', 'hips', 'leftHand', 'rightHand', 'leftFoot', 'rightFoot', 'leftUpperArm', 'rightUpperArm'];
 const _v = new THREE.Vector3();
+const _headHit = new THREE.Vector3();
 function characterRect() {
   if (!vrm || !vrm.humanoid) return null;
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, n = 0;
+  const include = point => {
+    point.project(camera);
+    if (!isFinite(point.x) || !isFinite(point.y)) return;
+    const x = (point.x * 0.5 + 0.5) * innerWidth;
+    const y = (-point.y * 0.5 + 0.5) * innerHeight;
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    n++;
+  };
   for (const b of hitBones) {
     const node = vrm.humanoid.getRawBoneNode(b) || vrm.humanoid.getNormalizedBoneNode(b);
     if (!node) continue;
     node.getWorldPosition(_v);
-    _v.project(camera);
-    if (!isFinite(_v.x) || !isFinite(_v.y)) continue;
-    const x = (_v.x * 0.5 + 0.5) * innerWidth;
-    const y = (-_v.y * 0.5 + 0.5) * innerHeight;
-    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
-    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
-    n++;
+    if (b === 'head') _headHit.copy(_v);
+    include(_v);
+    if (b === 'head') {
+      // The head bone sits near the face center. Include the skull and hair,
+      // using the same crown height as bubble placement, at every view scale.
+      _v.copy(_headHit); _v.y += fitInfo.modelH * .115; include(_v);
+      for (const side of [-1, 1]) {
+        _v.copy(_headHit); _v.x += side * fitInfo.modelH * .09; include(_v);
+      }
+    }
   }
   if (!n) return null;
   const pad = 16;
@@ -950,7 +971,8 @@ function onPetClick(e) {
   if (onBody) {
     if (performance.now() - lastInterruptedAt < 900 || thinkingNow) return;
     const region = bodyRegionAt(e.clientX, e.clientY) || 'upper';
-    pet.interact(region).catch(() => {});
+    const motions = MOTIONS.filter(m => motionEnabled(m.key) && clips.has(m.key)).map(m => m.key);
+    pet.interact({ region, motions }).catch(() => {});
     ambientTimer = 26;
     return;
   }
@@ -1335,6 +1357,7 @@ function wire() {
         cfg = ev.config;
         if (currentMotion && !motionEnabled(currentMotion)) toIdle(0.25);
         paintMute();
+        paintActivity(lastWorkSnap || {});
         break;
       case 'listen':
         listening = !!ev.on;
@@ -1395,6 +1418,7 @@ function wire() {
         break;
       case 'speaking':
         speakingNow = !!ev.on;
+        bubbleController.setSpeaking(!!ev.on && cfg?.tts?.enabled !== false && cfg?.voice?.enabled !== false);
         if (ev.on) {
           if (shownHeard && shownState !== 'skip') shownState = 'ready';
           ambientTimer = 30;
@@ -1406,7 +1430,7 @@ function wire() {
         paintEar();
         break;
       case 'audio':
-        if (ev.stop) { stopAudio(true); break; }
+        if (ev.stop) { stopAudio(true); hideBubble(); break; }
         if (ev.stream) { playPCM(ev.stream); break; }
         if (ev.buffer) {
           playWav(ev.buffer);
@@ -1573,7 +1597,7 @@ function activityLines(snap) {
     const active = ['starting', 'running', 'awaiting', 'monitoring', 'verifying', 'review'].includes(status) || lastDesktopEvent.running === true;
     const recentTerminal = ['paused', 'stopped', 'accepted', 'failed'].includes(status) && Date.now() < desktopRecentUntil;
     const key = `desktop#${desktopTask.id || ''}#${status}`;
-    if (text && !actSeen.has(key) && (active || (recentTerminal && running.length === 0))) return [{ key, text }];
+    if (text && !actSeen.has(key) && (active || (recentTerminal && running.length === 0))) return [{ key, text: characterText(text, cfg) }];
   }
   running.forEach((t, i) => out.push({ key: actKey(t), text: actNode(t, i, running.length) }));
   for (const t of tasks) {
@@ -1798,6 +1822,7 @@ window.__pet = () => ({
   talkLevel: +talkLevel.toFixed(3), recording, avatarKey,
   audio: !!currentSource, emo: emoTimer > 0,
   hit: lastHit, dockOpen: dockMode === 'open',
+  hiddenMeshes: [...new Set(hiddenAvatarMeshes)],
   asr: asrStat, listening, bootErr: window.__bootErr || null,
 });
 window.__play = (k) => { playOneShot(k, 0.18); return k; };
@@ -1808,11 +1833,14 @@ window.__openSettings = () => { openSettings(); return true; };
 window.__motions = () => ({ count: MOTIONS.length, groups: MOTION_GROUPS.length, slots: [...new Set(MOTIONS.map((m) => m.slot))] });
 window.__playSlot = (slot) => playSlot(slot, 0.2);
 window.__scale = (k) => { setScale(k); return viewScale; };
-window.__light = () => ({
+window.__light = (scale) => {
+  if (scale !== undefined) { applyAvatarLight(scale); renderer.render(scene, camera); }
+  return {
   ambient: +ambient.intensity.toFixed(2),
   key: +keyLight.intensity.toFixed(2),
   factor: +((ambient.intensity || 0) / LIGHT_BASE.ambient).toFixed(2),
-});
+  };
+};
 /* 取景自检：把关键点投到屏幕上，验证"半身/全身"两种构图到底落在哪几行像素 */
 window.__frame = () => {
   if (!vrm || !vrm.humanoid) return null;

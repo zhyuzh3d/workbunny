@@ -280,11 +280,14 @@ class ContextCompression {
       for (const row of page.slice(0, this.maxMessages)) {
         if (!normalizeRecord(row)) throw new Error('消息格式无法安全整理，水位保留');
         if (SECRET.test(row.value.content)) continue;
-        if (chars + row.value.content.length > this.maxChars) break;
+        if (chars + row.value.content.length > this.maxChars) { if (!rows.length) { rows.push(row); chars += row.value.content.length; } break; }
         rows.push(row); chars += row.value.content.length;
       }
       const next = page[page.findIndex(r => r.id === rows.at(-1)?.id) + 1];
-      if (rows.length && actors.isOwner(rows.at(-1).value) && next && actors.isBunny(next.value) && rows.at(-1).value.turnId === next.value.turnId) rows.pop();
+      if (rows.length && rows.at(-1).value.content.length <= this.maxChars && actors.isOwner(rows.at(-1).value) && next && actors.isBunny(next.value) && rows.at(-1).value.turnId === next.value.turnId) {
+        if (rows.length === 1 && Math.max(rows[0].value.content.length, next.value.content.length) > 12000) { rows.push(next); chars += next.value.content.length; }
+        else rows.pop();
+      }
       return { rows, turns: rows.filter(r => actors.isOwner(r.value)).length, chars, oversized: !rows.length && page.length > 0, skippedSecretRounds: 0 };
     }
     let scanAfter = afterSeq;
@@ -672,7 +675,7 @@ class ContextCompression {
         let batch = chosen.rows;
         let processed = batch;
         const batchChars = batch.reduce((sum, row) => sum + row.value.content.length, 0);
-        if (batch.length > this.maxMessages || batchChars > this.maxChars || batch.some(row => row.visibilityFloor > rank(scene)))
+        if (batch.length > this.maxMessages || batchChars > this.maxChars && !(this.recentMessages && batch.length <= 2 && batch.some(r => r.value.content.length > 12000)) || batch.some(row => row.visibilityFloor > rank(scene)))
           throw new Error('上下文压缩批次边界校验失败');
         let inputs = batch.map(row => this.toInputRow(row));
         const oldSegments = await this.loadSegments(head, scene);

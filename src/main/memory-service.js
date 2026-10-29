@@ -8,12 +8,14 @@ const { timeContext, elapsedLabel } = require('./companion-time');
 const scopes = require('./memory-scope');
 const { containsSecret } = require('./conversation-input');
 const actors = require('./message-identity');
+const references = require('./memory-references');
+const { CognitionRepository } = require('./cognition-repository');
 const { recentMessages } = require('./recent-rounds');
 const { CompanionAffect } = require('./companion-affect');
 const { factFromStatement, factFromMemory, keysForQuestion } = require('./user-facts');
 const knowledge = require('./knowledge-records');
-const { createMemoryKnowledge, replacementMarker } = require('./memory-knowledge');
-const { snapshotsOf, evidenceFor, verifySnapshots } = require('./memory-evidence');
+const { createMemoryKnowledge, replacementMarker, correctionMarker } = require('./memory-knowledge');
+const { snapshotsOf, evidenceFor, verifySnapshots, readRecords } = require('./memory-evidence');
 const { createExperienceMemory } = require('./experience-memory');
 const id = () => crypto.randomUUID();
 const SECRET = { test: containsSecret }; // Compatibility for older internal callers.
@@ -148,6 +150,8 @@ class MemoryService {
     this.knowledge = createMemoryKnowledge({ memory: this, clock });
     this.experiences = createExperienceMemory({ memory: this, clock });
     this.affect = new CompanionAffect({ clock });
+    this.cognition = new CognitionRepository({ memory: this, clock, onChange: () => { this.selfRevisionChanged?.(); void this.notifyChange(); } });
+    this.growth = new (require('./companion-growth').CompanionGrowth)({ memory: this, clock });
     this.state = { mood: '平静', energy: 0.7, warmth: 0.7, updatedAt: clock(), interactions: 0 };
   }
   async init() {
@@ -208,13 +212,17 @@ class MemoryService {
     const scope = scopes.scopeOf(record);
     return { id: record.id, kind: record.kind, ts: record.ts, updatedAt: record.updatedAt || record.ts, state: record.state || 'active', expiresAt: record.expiresAt || null,
       ...scope, ...(restoreSequence ? { ingestionSeq: record.ingestionSeq } : {}), body: vc.seal(this.key, { ...record.value, _scopeV1: scope }, record.id + ':' + record.kind),
-      tokens: vc.tokenKeys(this.key, knowledge.markersOf(record).join(' ') + ' ' +
+      tokens: vc.tokenKeys(this.key, references.tokens(record.value).join(' ') + ' ' +
+        (record.kind === 'task' && record.value.taskType === 'contact' ? 'bunny_contact_anchor ' : '') + knowledge.markersOf(record).join(' ') + ' ' +
         (record.kind === 'message' && !actors.isOwner(record.value) && !actors.isBunny(record.value) ? 'bunny_external_message ' : '') +
         (record.kind === 'state' && record.value.origin === 'message-block-v1' ? 'bunny_message_block ' : '') +
+        (record.kind === 'state' && record.value.schema === 'growth-entry/v1' ? `bunny_growth_entry ${record.value.entryId} ` : '') +
         (record.kind === 'memory' && record.value.origin === 'deepdream-merged-v1' ? 'bunny_memory_merged ' : '') +
         (record.kind === 'state' && ['context-head-v2', 'context-current-v2'].includes(record.value.origin) ? 'bunny_context_head ' : '') +
-        (record.kind === 'memory' && record.value.origin === 'user-reviewed-doubt' && Array.isArray(record.value.supersedes) ? record.value.supersedes.slice(0, 12).map(replacementMarker).join(' ') + ' ' : '') +
+        (record.kind === 'memory' && ['user-reviewed-doubt', 'user-reviewed'].includes(record.value.origin) && Array.isArray(record.value.supersedes) ? record.value.supersedes.slice(0, 12).map(replacementMarker).join(' ') + ' ' : '') +
+        (record.kind === 'memory' && record.value.origin === 'user-reviewed' ? (record.value.supersedesClaims || []).slice(0, 12).map(c => correctionMarker(c.sourceId)).join(' ') + ' ' : '') +
         (knowledge.typeOf(record) && Array.isArray(record.value.tags) ? record.value.tags.slice(0, 10).join(' ') + ' ' : '') + (record.searchText ?? textOf(record.value)) +
+        (record.kind === 'memory' && record.value.origin === 'user-reviewed' ? ' ' + (record.value.supersedesClaims || []).map(c => c.quote).join(' ') : '') +
         (record.kind === 'memory' && Array.isArray(record.value.tags) ? ' ' + record.value.tags.slice(0, 10).join(' ') : '') +
         (record.kind === 'memory' && record.value.key ? ` ${record.value.key}` : '') +
         (record.kind === 'memory' && record.value.key && record.value.status === 'confirmed' ? ` ${factMarker('confirmed_fact', record.value.key)}` : '') +
@@ -253,7 +261,7 @@ class MemoryService {
     }
     const result = await this.db.request('write', { epoch, ...(restoreSequence ? { restoreSequence: true } : {}), records: records.map(r => this.encode(r, restoreSequence)) });
     this.epoch = result.epoch;
-    if (notify && records.some(r => ['memory', 'message', 'summary', 'persona', 'task'].includes(r.kind) || knowledge.typeOf(r))) await this.notifyChange();
+    if (notify && records.some(r => ['memory', 'message', 'summary', 'persona', 'task'].includes(r.kind) || knowledge.typeOf(r) || r.value.schema === 'growth-entry/v1')) await this.notifyChange();
     return records;
   }
   markerTokens(markers = []) {
@@ -266,7 +274,7 @@ class MemoryService {
       ...(requiredMarkers ? { requiredTokens: this.markerTokens(requiredMarkers) } : {}),
       ...(excludedMarkers ? { excludedTokens: this.markerTokens(excludedMarkers) } : {}) })).rows.map(r => this.decode(r));
   }
-  async search(text, kinds = ['memory', 'summary', 'message'], limit = 30, { scene = this.scene(), domain, visibilityFloor, requiredMarkers, excludedMarkers } = {}) {
+  async search(text, kinds = ['memory', 'summary', 'message'], limit = 30, { scene = this.scene(), domain, visibilityFloor, requiredMarkers, excludedMarkers, anyTokens } = {}) {
     this.check();
     limit = Math.min(50, Math.max(0, Math.floor(Number(limit) || 0)));
     // Ignore common English function words at query time; they are frequent in
@@ -276,6 +284,7 @@ class MemoryService {
     const synonyms = querySynonyms(text);
     const synonymTokens = synonyms.length ? vc.tokenKeys(this.key, synonyms.join(' '), 128).filter(t => !exactSet.has(t)) : [];
     const scopeFilter = { scene, ...(domain !== undefined ? { domain } : {}), ...(visibilityFloor !== undefined ? { visibilityFloor } : {}),
+      ...(anyTokens?.length ? { anyTokens } : {}),
       ...(requiredMarkers ? { requiredTokens: this.markerTokens(requiredMarkers) } : {}),
       ...(excludedMarkers ? { excludedTokens: this.markerTokens(excludedMarkers) } : {}) };
     const [exact, expanded] = await Promise.all([
@@ -291,6 +300,69 @@ class MemoryService {
     return [...ranked.values()]
       .sort((a, b) => (b.exact + b.expanded * 0.5) - (a.exact + a.expanded * 0.5) || b.row.ts - a.row.ts || b.row.id.localeCompare(a.row.id))
       .slice(0, limit).map(({ row, exact: e, expanded: x }) => this.decode({ ...row, score: e + x * 0.5 }));
+  }
+  async entityAnchors(scene = this.scene()) {
+    const rows = await this.query('task', 50, { scene, requiredMarkers: ['bunny_contact_anchor'] });
+    const candidates = rows.filter(r => r.value.taskType === 'contact' && typeof r.value.recipient === 'string');
+    const aliasCounts = new Map();
+    for (const r of candidates) for (const name of new Set([r.value.recipient, ...(r.value.aliases || [])])) aliasCounts.set(name, (aliasCounts.get(name) || 0) + 1);
+    return candidates.map(r => ({ id: r.id, sourceId: r.id, type: 'person', name: r.value.recipient,
+      aliases: (r.value.aliases || []).filter(name => aliasCounts.get(name) === 1) })).filter(e => aliasCounts.get(e.name) === 1);
+  }
+  async recall(text, { scene = this.scene(), limit = 20 } = {}) {
+    const normalized = references.query(text, { at: this.clock(), entities: await this.entityAnchors(scene) });
+    const temporal = references.temporalTokens(normalized.references, true);
+    const query = normalized.text + ' ' + normalized.references.keys.join(' ') + (temporal.length ? ' bunny_dated_v2' : '');
+    const datedScope = temporal.length ? { scene, anyTokens: vc.tokenKeys(this.key, temporal.join(' '), 512), requiredMarkers: ['bunny_dated_v2'] } : { scene };
+    const resolve = async rows => {
+      const indices = rows.filter(r => r.kind === 'state' && r.value.origin === 'memory-reference-index-v1');
+      const targets = indices.length ? await readRecords(this, indices.map(r => r.value.targetId), { scene }) : [];
+      return rows.flatMap(r => {
+        if (r.kind !== 'state') return [r];
+        const target = targets.find(t => t.id === r.value.targetId && t.kind === 'memory' && t.state === 'active');
+        return r.value.origin === 'memory-reference-index-v1' && target ? [{ ...target, score: r.score, referenceIndexId: r.id,
+          normalizedContent: r.value.content, referenceView: r.value.references }] : [];
+      });
+    };
+    const kinds = ['memory', 'summary', 'message', 'state'];
+    const dated = await this.search(query, kinds, Math.min(20, limit), datedScope);
+    const legacy = temporal.length ? await this.search(normalized.text, kinds, 8, { scene, excludedMarkers: ['bunny_dated_v2'] }) : [];
+    const first = await resolve([...dated, ...legacy]);
+    const keys = [...new Set(first.slice(0, 3).flatMap(r => (r.referenceView || r.value.references)?.keys || []))]
+      .filter(k => /^bunny_ref_[a-f0-9]{32}$/u.test(k)).slice(0, 3);
+    const second = keys.length ? await resolve(await this.search(keys.join(' '), ['memory', 'state'], 20, datedScope)) : [];
+    const seen = new Set();
+    const requestedDates = normalized.references.dates;
+    const timeMatches = row => { const dates = (row.referenceView || row.value.references)?.dates || []; return !requestedDates.length || !dates.length || dates.some(d => requestedDates.some(q => d.start < q.end && q.start < d.end)); };
+    return [...first, ...second.map(r => ({ ...r, score: (r.score || 0) * .5, associated: true }))]
+      .filter(r => timeMatches(r) && !seen.has(r.id) && seen.add(r.id)).slice(0, 40);
+  }
+  async backfillReferences({ signal, canRun = () => true } = {}) {
+    const rid = 'maintenance:references-v2', state = (await readRecords(this, [rid]))[0];
+    const rows = await this.query('memory', 50, { scene: null, sort: 'ingestion', order: 'asc', afterSeq: state?.value.afterSeq || 0 });
+    const generation = this.generation;
+    if (signal?.aborted || !await canRun()) return { status: 'paused' };
+    if (!rows.length) {
+      if (!state?.value.complete) await this.serial(async () => {
+        if (signal?.aborted || generation !== this.generation) throw new Error('记忆来源已变化');
+        await this.write([{ id: rid, kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2, value: { afterSeq: state?.value.afterSeq || 0, complete: true, sources: [] } }], this.epoch, { notify: false });
+      });
+      return { status: 'done', more: false };
+    }
+    await this.serial(async () => {
+      if (signal?.aborted || generation !== this.generation) throw new Error('记忆来源已变化');
+      const writes = [];
+      for (const row of rows) {
+        if (row.value.references?.normalizer >= 2 || !row.value.evidenceSourceId) continue;
+        const source = (await readRecords(this, [row.value.evidenceSourceId]))[0]; if (!source) continue;
+        const normalized = references.normalize(row.value.content, { at: source.value.occurredAt || source.ts, timezone: source.value.timezone, timeUnknown: !!source.value.timeUnknown, keywords: row.value.tags || [], entities: await this.entityAnchors(scopes.SCENES[row.visibilityFloor]) });
+        writes.push({ id: 'reference-index:' + row.id, kind: 'state', ts: 0, domain: row.domain, visibilityFloor: row.visibilityFloor,
+          value: { origin: 'memory-reference-index-v1', targetId: row.id, content: normalized.canonical, references: normalized.references, sources: [row.id, ...normalized.references.entities.map(e => e.sourceId).filter(Boolean)] } });
+      }
+      await this.write([...writes, { id: rid, kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2,
+        value: { afterSeq: rows.at(-1).ingestionSeq, complete: rows.length < 50, sources: [] } }], this.epoch, { notify: false });
+    });
+    return { status: 'done', more: rows.length === 50 };
   }
   async migrateLegacy() {
     const file = path.join(path.dirname(this.dir), 'memory.json');
@@ -310,6 +382,7 @@ class MemoryService {
     if (!this.getSettings().enabled || !String(content || '').trim()) return Promise.resolve(null);
     content = actors.validateText(content);
     const meta = actors.identity(role, details); role = meta.role;
+    const cognitive = details.cognition && actors.isBunny(meta) ? require('./dialogue-cognition').stored(details.cognition) : null;
     const generation = this.generation;
     const scene = scopes.normalizeScene(details?.scene, this.scene());
     return this.serial(async () => {
@@ -332,8 +405,10 @@ class MemoryService {
       const record = { id: recordId, kind: 'message', ts: this.clock(), domain: details.domain ?? scene,
         ...(details.visibilityFloor !== undefined ? { visibilityFloor: details.visibilityFloor } : {}), value: {
         ...meta, content,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        ...(cognitive ? { cognition: cognitive } : {}),
         ...(turnId ? { turnId } : {}),
-        ...(role === 'assistant' && safeDetails.delivery === 'generated' ? { delivery: 'generated' } : {}),
+        ...(role === 'assistant' && ['generated', 'task-receipt'].includes(safeDetails.delivery) ? { delivery: safeDetails.delivery } : {}),
         ...(role === 'assistant' && Array.isArray(safeDetails.webSources) ? { webSources: safeDetails.webSources.slice(0, 6)
           .flatMap(item => { const url = require('./workbuddy-search').publicURL(item?.url);
             return url && typeof item.title === 'string' ? [{ url, title: item.title.slice(0, 180) }] : []; }) } : {}),
@@ -356,6 +431,7 @@ class MemoryService {
         typeof content !== 'string' || !content.trim()) return Promise.reject(new Error('幂等消息格式不合法'));
     content = actors.validateText(content);
     const meta = actors.identity(role, details); role = meta.role;
+    const cognitive = details.cognition && actors.isBunny(meta) ? require('./dialogue-cognition').stored(details.cognition) : null;
     const safeDetails = details && typeof details === 'object' && !Array.isArray(details) ? details : {};
     if (Object.hasOwn(safeDetails, 'privacyEpoch') && !Number.isSafeInteger(safeDetails.privacyEpoch)) {
       return Promise.reject(new Error('消息隐私版本不合法'));
@@ -363,6 +439,8 @@ class MemoryService {
     const generation = Object.hasOwn(safeDetails, 'privacyEpoch') ? safeDetails.privacyEpoch : this.generation;
     return this.serial(async () => {
       if (generation !== this.generation) throw new Error('消息来源的隐私版本已变更');
+      if (safeDetails.evidenceSnapshots && !(await verifySnapshots(this, safeDetails.evidenceSnapshots, { scene: safeDetails.scene ?? this.scene() })).ok)
+        throw new Error('回复的回忆依据已变化，未保存旧回答');
       const sources = [];
       if (!actors.isOwner(meta) && safeDetails.sources !== undefined) {
         if (!Array.isArray(safeDetails.sources) || safeDetails.sources.length > 200 ||
@@ -376,6 +454,9 @@ class MemoryService {
         }
       }
       const value = { ...meta, content,
+        ...(safeDetails.turnId ? { turnId: safeDetails.turnId } : {}),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        ...(cognitive ? { cognition: cognitive } : {}),
         ...(role === 'assistant' && ['generated', 'task-receipt'].includes(safeDetails.delivery) ? { delivery: safeDetails.delivery } : {}),
         ...(actors.isOwner(meta) ? { userOrdinal: this.userMessagesSeen + 1 } : {}),
         sources: actors.isOwner(meta) ? [] : sources };
@@ -384,7 +465,8 @@ class MemoryService {
         if (existing.kind !== 'message') throw new Error('幂等消息 ID 已被其他记录占用');
         const prior = this.decode(existing).value;
         const sameSources = JSON.stringify([...(prior.sources || [])].sort()) === JSON.stringify([...value.sources].sort());
-        if (actors.character(prior) !== meta.characterId || prior.role !== value.role || prior.content !== value.content || prior.delivery !== value.delivery || !sameSources) {
+        if (actors.character(prior) !== meta.characterId || prior.role !== value.role || prior.content !== value.content || prior.delivery !== value.delivery || !sameSources ||
+            JSON.stringify(prior.cognition || null) !== JSON.stringify(value.cognition || null) || (prior.turnId || null) !== (value.turnId || null)) {
           throw new Error('幂等消息 ID 已存在，但内容或来源不一致');
         }
         return { record: { ...existing, body: undefined, value: prior }, inserted: false };
@@ -426,6 +508,8 @@ class MemoryService {
     else if (/^(?:我(?:很|最|比较)?(?:喜欢|不喜欢|讨厌|习惯|不习惯)|i (?:like|love|prefer|dislike|hate)\b)/i.test(text) && text.length <= 180 && !/[?？]/.test(text)) { content = text; kind = 'preference'; }
     else if (/^我(?:今天|这几天|最近).{0,20}(?:累|忙|开心|难过|疲惫|生病)/.test(text)) { content = text; kind = 'temporary'; expiresAt = source.ts + 2 * 86400000; }
     if (!content) return;
+    const normalized = references.normalize(content, { at: source.value.occurredAt || source.ts, timezone: source.value.timezone, entities: await this.entityAnchors(scopes.SCENES[source.visibilityFloor]) });
+    content = normalized.canonical;
     const sourceScene = scopes.SCENES[source.visibilityFloor];
     const partition = { scene: sourceScene, domain: source.domain, visibilityFloor: source.visibilityFloor };
     const nearby = await this.search(content, ['memory'], 20, partition);
@@ -436,10 +520,10 @@ class MemoryService {
       (!explicit || require('./memory-tags').provenance(row.value).includes('active')))) return;
     const conflicts = stableFact ? comparable.filter(row => factFromMemory(row.value)?.canonicalValue !== stableFact.canonicalValue).slice(0, 2) : [];
     await this.write([{ id: id(), kind: 'memory', ts: source.ts, expiresAt, domain: source.domain, visibilityFloor: source.visibilityFloor,
-      value: require('./memory-tags').tagged({ content, key, memoryKind: kind, importance, ...(anniversary ? { anniversary } : {}),
+      value: require('./memory-tags').tagged({ content, references: normalized.references, key, memoryKind: kind, importance, ...(anniversary ? { anniversary } : {}),
         ...(stableFact ? { canonicalValue: stableFact.canonicalValue } : {}),
         status: conflicts.length || unparsedBirthday ? 'pending' : 'confirmed', evidence: text, evidenceSourceId: source.id,
-        sources: [source.id, ...conflicts.map(row => row.id)],
+        sources: [...new Set([source.id, ...conflicts.map(row => row.id), ...normalized.references.entities.map(e => e.sourceId).filter(Boolean)])],
         origin: conflicts.length ? 'user-key-conflict-v1' : unparsedBirthday ? 'user-unparsed-fact' : 'user-statement',
         ...(conflicts.length ? { conflictWith: conflicts.map(row => row.id) } : {}) }, [explicit ? 'active' : 'automatic']),
     }]);
@@ -575,16 +659,10 @@ class MemoryService {
     const now = this.clock(), time = timeContext(now), epoch = this.generation;
     const charBudget = Number.isFinite(budget) ? Math.max(0, Math.floor(budget)) : 8500;
     if (!this.db || !this.getSettings().enabled) {
-      const text = time.line.slice(0, charBudget), latest = recent.filter(r => scopes.canRead(scene, r)).at(-1);
-      let messages = [], remaining = charBudget - text.length;
-      if (latest && !containsSecret(latest.content) && remaining > 0) {
-        let message = { role: latest.role, content: String(latest.content || '') };
-        if (JSON.stringify(message).length > remaining && remaining > 16) {
-          message.content = message.content.slice(0, Math.max(0, remaining - String(message.role || '').length - 16));
-        }
-        if (JSON.stringify(message).length <= remaining) messages = [message];
-      }
-      return { text, messages, epoch, scene, used: text.length + messages.reduce((n, m) => n + JSON.stringify(m).length, 0), sourceIds: messages.length && latest?.id ? [latest.id] : [], references: [] };
+      const text = time.line.slice(0, charBudget);
+      const session = recent.filter(r => scopes.canRead(scene, r) && !containsSecret(r.content)).map(r => ({ value: r }));
+      const selected = recentMessages(session, { count: 20, budget: Math.max(0, charBudget - text.length) });
+      return { text, messages: selected.rows.map(actors.inputRow), epoch, scene, used: text.length + selected.used, sourceIds: [], references: [] };
     }
     await this.tail;
     const compression = !internal && this.compression ? await this.compression.snapshot(scene) : null;
@@ -595,7 +673,7 @@ class MemoryService {
     if (!internal) {
       doubts = await this.relevantConflicts(userText, { scene });
       const doubtfulKeys = new Set(doubts.map(row => row.value.key));
-      const found = (await this.search(`${userText} ${time.monthDay} ${time.holiday}`, ['memory', 'summary', 'message'], 45, { scene })).filter(safeModelRow);
+      const found = (await this.recall(`${userText} ${time.monthDay} ${time.holiday}`, { scene })).filter(safeModelRow);
       // Indexed anchors remain reachable after years of newer facts, without scanning the whole vault.
       const pinned = (await this.search('bunny_pinned_memory bunny_anniversary_memory', ['memory'], 20, { scene })).filter(safeModelRow).map(r => ({ ...r, score: 0, anchorOnly: true }));
       const anniversaryQueries = [`bunny_anniversary_solar_${time.month}_${time.day}`];
@@ -603,7 +681,8 @@ class MemoryService {
       const dated = [];
       for (const query of anniversaryQueries) dated.push(...(await this.search(query, ['memory'], 50, { scene })).filter(safeModelRow));
       const seen = new Set();
-      const effective = await this.knowledge.projectMemories([...found.filter(r => r.kind === 'memory'), ...pinned, ...dated], { scene });
+      const corrections = await this.knowledge.applyResolutions(found, { scene });
+      const effective = await this.knowledge.projectMemories([...corrections.facts, ...found.filter(r => r.kind === 'memory'), ...pinned, ...dated], { scene });
       tentative = effective.filter(r => r.kind === 'memory' && r.value.status === 'pending' &&
         ['dream-candidate-v3', 'dream-observation-v1', 'doze-candidate-v2', 'deepdream-merged-v1'].includes(r.value.origin) && (r.score || 0) > 0 &&
         !doubtfulKeys.has(r.value.key) && (!r.expiresAt || r.expiresAt > now)).slice(0, 3);
@@ -628,9 +707,7 @@ class MemoryService {
       for (const row of affectRows) { this.decode(row); verifiedAffectIds.add(row.id); }
     }
     const expression = this.affect.project(scene, now, { sourceIds: verifiedAffectIds }).prompt;
-    const styles = ['这轮先直说重点，语气自然。', '这轮留一点轻松感，但不强行开玩笑。', '这轮温和简洁，避免复用最近的开头。'].filter(s => s !== this.state.lastStyle);
-    const style = styles[Math.min(styles.length - 1, Math.floor(this.random() * styles.length))];
-    this.state.lastStyle = style;
+    const style = '表达节奏以本轮语义评估为准；不机械复用最近的开头，认真交流时可以展开。';
     const latest = visibleRecent.at(-1);
     const latestLine = latest ? (latest.value.timeUnknown ? '最近一条共同对话来自旧记录，具体时间未知。' : `最近一条共同对话在${elapsedLabel(now - latest.ts)}。`) : '这是新的对话起点，没有已知共同经历。';
     const fixedParts = [latestLine, `${expression}${style}`,
@@ -658,7 +735,7 @@ class MemoryService {
         const reviewTime = r.value.resolvedAt ?? r.value.correctedAt;
         const review = ['user-reviewed', 'user-reviewed-conflict', 'user-reviewed-doubt'].includes(r.value.origin) && r.value.status === 'confirmed'
           ? ` 用户已核对${Number.isSafeInteger(reviewTime) ? '于' + new Date(reviewTime).toISOString() : ''}，作为当前有效信息${r.value.resolvedFrom?.length ? '并替代此前不同说法' : ''}` : '';
-        const line = `[${r.id.slice(0, 8)} ${new Date(r.ts).toISOString()} ${r.value.role ? actors.character(r.value) : r.value.memoryKind || '摘要'}${r.value.evidenceCharacter ? ' 来源:' + r.value.evidenceCharacter : ''}${review}] ${JSON.stringify(clipped(textOf(r.value), r.kind === 'message' ? 350 : 600))}`;
+        const line = `[${r.id.slice(0, 8)} ${new Date(r.ts).toISOString()} ${r.value.role ? actors.character(r.value) : r.value.memoryKind || '摘要'}${r.value.evidenceCharacter ? ' 来源:' + r.value.evidenceCharacter : ''}${review}] ${JSON.stringify(clipped(r.normalizedContent || textOf(r.value), r.kind === 'message' ? 350 : 600))}`;
         const cost = line.length + (section.length ? 1 : heading.length + 2);
         if (cost > historyRemaining) break;
         historyRemaining -= cost;
@@ -667,7 +744,7 @@ class MemoryService {
       if (section.length) {
         chunks.push(heading, ...section);
         for (const r of sectionRows) {
-          includeSource(r.id);
+          includeSource(r.id); if (r.referenceIndexId) includeSource(r.referenceIndexId);
           if ((r.kind === 'memory' || r.kind === 'summary') && !referenceIds.has(r.id)) {
             referenceIds.add(r.id);
             references.push({ id: r.id, kind: r.kind, content: clipped(textOf(r.value), 600), ts: r.ts,
@@ -762,6 +839,14 @@ class MemoryService {
     } finally { this.extracting = false; if (this.extractionAbort === controller) this.extractionAbort = null; }
   }
   async saveState() { await this.write([{ id: 'companion-state', kind: 'state', ts: this.clock(), domain: 'private', visibilityFloor: 2, value: { ...this.state, affect: this.affect.serialize(), lastExtractCount: this.lastExtractCount, userMessagesSeen: this.userMessagesSeen, ...(this.moodSourceId ? { moodSourceId: this.moodSourceId } : {}), sources: [] } }]); }
+  async observeGrowthRecords(records) {
+    return this.serial(async () => {
+      const actual = await readRecords(this, records.filter(r => r.value.schema === 'growth-entry/v1').map(r => r.id));
+      let changed = false;
+      for (const row of actual) if (row.state === 'active') changed = this.affect.observeAppraisal(row) || changed;
+      if (changed) await this.saveState();
+    });
+  }
   async observeTaskReport(report) {
     if (report?.status !== 'accepted' || !report.taskId) return Promise.resolve();
     await this.serial(async () => {
@@ -836,32 +921,31 @@ class MemoryService {
       const sourceIds = [...new Set(Array.isArray(r.value.sources) ? r.value.sources : [])];
       const sourceRows = sourceIds.length ? (await this.db.request('get', { ids: sourceIds })).rows : [];
       const originalMessages = evidenceMessages(r, sourceRows);
-      const forgottenUserSources = originalMessages.filter(x => actors.isOwner(this.decode(x).value)).map(x => x.id);
-      let removed = 0; const rewindHints = [];
-      const roots = originalMessages.length ? originalMessages.map(x => x.id) : [recordId];
-      for (const rootId of roots) {
-        const result = await this.db.request('remove', { epoch: this.epoch, id: rootId });
-        this.epoch = result.epoch; removed += result.removed; rewindHints.push(...(result.rewind || []));
-      }
-      if ((await this.db.request('get', { ids: [recordId] })).rows.length) {
-        const result = await this.db.request('remove', { epoch: this.epoch, id: recordId });
-        this.epoch = result.epoch; removed += result.removed; rewindHints.push(...(result.rewind || []));
-      }
-      await this.rewindDreamFor([...originalMessages, ...rewindHints.map(item => ({ ...item, kind: 'message', value: {} }))]);
-      await this.resetMoodForForgottenSources(forgottenUserSources);
+      // Correction is an independent owner decision. Retire only the selected
+      // claim at this visibility, never erase its original multi-fact message
+      // or downstream conversation. Explicit remove() remains source erasure.
+      const scope = { domain: r.domain, visibilityFloor: Math.max(r.visibilityFloor, scopes.rank(this.scene())) };
+      const retiredIds = [...new Set([r.id, ...(r.value.origin === 'deepdream-merged-v1' ? r.value.memberIds : [])])];
+      const retired = await readRecords(this, retiredIds);
+      const claims = [...new Map(retired.flatMap(row => [...(row.value.supersedesClaims || []), ...(row.value.evidenceSourceId && row.value.evidence ? [{ sourceId: row.value.evidenceSourceId, quote: row.value.evidence }] : [])])
+        .map(c => [JSON.stringify([c.sourceId, c.quote]), c])).values()];
+      const normalized = references.normalize(corrected, { at: ts, entities: await this.entityAnchors(this.scene()) });
       const sourceId = id();
-      await this.write([{ id: sourceId, kind: 'message', ts, domain: r.domain, visibilityFloor: r.visibilityFloor, value: { role: 'user', content: corrected, source: 'user-reviewed', sources: [] } }], this.epoch, { notify: false });
-      await this.write([{ id: id(), kind: 'memory', ts, expiresAt: r.expiresAt, domain: r.domain, visibilityFloor: r.visibilityFloor, value: {
-        content: corrected, key: stableCorrection?.key || (['user.name', 'user.birthday'].includes(r.value.key) ? '' : r.value.key || ''),
-        memoryKind: stableCorrection?.memoryKind || (['anniversary', 'candidate'].includes(r.value.memoryKind) ? 'fact' : r.value.memoryKind || 'fact'),
+      await this.write([{ id: sourceId, kind: 'message', ts, ...scope, value: { role: 'user', content: corrected, source: 'user-reviewed', sources: [] } }], this.epoch, { notify: false });
+      const factId = id();
+      const superseded = retired.filter(row => row.visibilityFloor === scope.visibilityFloor).map(row => ({ ...row, state: 'superseded', updatedAt: ts, value: { ...row.value, status: 'superseded', supersededBy: factId } }));
+      const expiry = r.value.memoryKind === 'temporary' ? references.temporaryExpiry({ ts, value: { content: corrected } }) : r.expiresAt;
+      await this.write([...superseded, { id: factId, kind: 'memory', ts, expiresAt: expiry, ...scope, value: {
+        content: normalized.canonical, references: normalized.references, key: stableCorrection?.key || (['user.name', 'user.birthday'].includes(r.value.key) ? '' : r.value.key || ''),
+        memoryKind: stableCorrection?.memoryKind || (r.value.memoryKind === 'temporary' ? expiry ? 'temporary' : 'fact' : ['anniversary', 'candidate'].includes(r.value.memoryKind) ? 'fact' : r.value.memoryKind || 'fact'),
         ...(stableCorrection ? { canonicalValue: stableCorrection.canonicalValue, ...(stableCorrection.anniversary ? { anniversary: stableCorrection.anniversary } : {}) } : {}),
-        importance: r.value.importance || 0.7, status: 'confirmed', evidence: corrected,
+        importance: 1, status: 'confirmed', evidence: corrected, supersedes: retiredIds, supersedesClaims: claims,
         ...(r.value.protected ? { protected: r.value.protected } : {}), ...(r.value.pinned ? { pinned: r.value.pinned } : {}),
-        sources: [sourceId], evidenceSourceId: sourceId, ...(r.value.memoryKind === 'observation' ? { evidenceCharacter: 'owner' } : {}), origin: 'user-reviewed', correctedAt: ts,
+        sources: [sourceId, ...normalized.references.entities.map(e => e.sourceId).filter(Boolean)], evidenceSourceId: sourceId, ...(r.value.memoryKind === 'observation' ? { evidenceCharacter: 'owner' } : {}), origin: 'user-reviewed', correctedAt: ts,
       } }], this.epoch, { notify: false });
       this.recent = conversationMessages(await this.query('message', 40)).reverse();
       await this.notifyChange();
-      return { ok: true, removed, removedSources: originalMessages.length };
+      return { ok: true, removed: 0, removedSources: 0, superseded: superseded.length, factId };
     });
   }
   remove(recordId) {
@@ -873,8 +957,11 @@ class MemoryService {
       if (decoded?.value.origin === 'deepdream-merged-v1' && !(await verifySnapshots(this, decoded.value.analysisSnapshots, { scene: this.scene() })).ok) throw new Error('归并依据已变化，请刷新后再删除');
       const sourceIds = decoded?.kind === 'memory' && Array.isArray(decoded.value.sources) ? [...new Set(decoded.value.sources)] : [];
       const sourceRows = sourceIds.length ? (await this.db.request('get', { ids: sourceIds })).rows : [];
-      const originalMessages = decoded?.kind === 'memory' ? evidenceMessages(decoded, sourceRows) : decoded?.kind === 'message' ? [row] : [];
-      const forgottenUserSources = originalMessages.filter(x => actors.isOwner(this.decode(x).value)).map(x => x.id);
+      const directMessages = decoded?.kind === 'memory' ? evidenceMessages(decoded, sourceRows) : decoded?.kind === 'message' ? [row] : [];
+      const inherited = decoded?.value.origin === 'user-reviewed' ? await readRecords(this, [...new Set((decoded.value.supersedesClaims || []).map(c => c.sourceId))], { scene: this.scene() }) : [];
+      const originalMessages = [...new Map([...directMessages, ...inherited.filter(r => r.kind === 'message' && r.domain === decoded.domain && r.visibilityFloor === decoded.visibilityFloor)]
+        .map(r => [r.id, r.value ? r : this.decode(r)])).values()];
+      const forgottenUserSources = originalMessages.filter(x => actors.isOwner(x.value)).map(x => x.id);
       if (decoded?.kind === 'message' && actors.isOwner(decoded.value)) forgottenUserSources.push(decoded.id);
       const roots = decoded?.kind === 'memory' && originalMessages.length ? originalMessages.map(x => x.id) : [recordId];
       let removed = 0; const rewindHints = [];
@@ -895,7 +982,7 @@ class MemoryService {
   }
   clear() {
     this.cancelExtraction(); this.generation++; clearTimeout(this.extractTimer); this.extractTimer = null;
-    return this.serial(async () => { this.epoch = (await this.db.request('clear')).epoch; this.recent = []; this.userMessagesSeen = 0; this.lastExtractCount = 0; this.lastMaintenanceQueued = 0; this.moodSourceId = null; this.affect = new CompanionAffect({ clock: this.clock }); this.state = { mood: '平静', energy: 0.7, warmth: 0.7, updatedAt: this.clock(), interactions: 0 }; await this.notifyChange(); return { ok: true }; });
+    return this.serial(async () => { this.epoch = (await this.db.request('clear')).epoch; await this.write([{ id: require('./cognition-repository').HEAD, kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2, value: { schema: 'self-head/v1', revision: 1, locked: false, entries: [], locks: [], removed: [], pendingSettings: false, sources: [] } }]); this.recent = []; this.userMessagesSeen = 0; this.lastExtractCount = 0; this.lastMaintenanceQueued = 0; this.moodSourceId = null; this.affect = new CompanionAffect({ clock: this.clock }); this.state = { mood: '平静', energy: 0.7, warmth: 0.7, updatedAt: this.clock(), interactions: 0 }; await this.notifyChange(); return { ok: true }; });
   }
   async export(passphrase) {
     return this.serial(async () => {
@@ -920,6 +1007,12 @@ class MemoryService {
     for (const r of data.records) {
       if (!r || typeof r.id !== 'string' || !allowed.has(r.kind) || !Number.isSafeInteger(r.ts) || !r.value || !Array.isArray(r.value.sources) || r.value.sources.some(s => typeof s !== 'string' || !ids.has(s))) throw new Error('备份记录校验失败');
       Object.assign(r, scopes.scopeOf(r, 'private'));
+      require('./cognition-repository').validateRecord(r);
+      require('./companion-growth').validateRecord(r);
+      if (r.value.cognition) {
+        if (r.kind !== 'message' || !actors.isBunny(r.value)) throw new Error('认知元数据只能附于Bunny消息');
+        require('./dialogue-cognition').stored(r.value.cognition);
+      }
     }
     const suppliedSequence = data.records.some(r => r.ingestionSeq !== undefined);
     if (suppliedSequence) {

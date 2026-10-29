@@ -93,6 +93,37 @@ class Secretary {
     this.requests = new Map(); this.taskEpochs = new Map(); this.suppressed = new Set();
     this.verifying = null; this.controller = null; this.handled = new Set(); this.closed = false;
   }
+  async createArtifact({ directory, title, extension = 'md', content, sources, scene, signal, authorize, authorization }) {
+    const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
+    if (!this.ready() || signal?.aborted || !await authorize()) throw new Error('自主创作授权已停止');
+    if (!['md', 'txt', 'html', 'js', 'py'].includes(extension) || typeof content !== 'string' || !content.trim() || Buffer.byteLength(content) > 60000 || require('./conversation-input').containsSecret(content)) throw new Error('创作内容不适合保存');
+    const root = fs.realpathSync(directory);
+    if (root !== directory || !fs.lstatSync(root).isDirectory() || fs.lstatSync(root).isSymbolicLink()) throw new Error('创作目录已经变化');
+    const taskId = 'autonomy-task:' + crypto.randomUUID(), startedAt = this.clock(), privacyEpoch = this.epoch();
+    const file = path.join(root, new Date(startedAt).toISOString().slice(0, 10) + '-' + crypto.randomUUID().slice(0, 8) + '.' + extension);
+    const task = { id: taskId, startedAt, privacyEpoch, scene, domain: scene, visibilityFloor: rank(scene), target: 'local-artifact', taskType: 'autonomous-creation',
+      origin: 'autonomy', authorization, goal: String(title || 'Bunny的自主创作').slice(0, 120), note: '正在生成本地作品文件', status: 'running', sources };
+    const journal = require('./task-journal').createTaskJournal(this.memory, { clock: this.clock });
+    await journal(task);
+    let created = false;
+    try {
+      if (signal?.aborted || privacyEpoch !== this.epoch() || !await authorize()) throw new Error('自主创作已暂停');
+      if (signal?.aborted || fs.realpathSync(directory) !== root) throw new Error('创作目录已变化');
+      const fd = fs.openSync(file, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
+      created = true;
+      try { fs.writeFileSync(fd, content, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      const bytes = fs.readFileSync(file), stat = fs.statSync(file), sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (!bytes.equals(Buffer.from(content))) throw new Error('作品写入核验失败');
+      if (signal?.aborted || privacyEpoch !== this.epoch()) throw new Error('自主创作已暂停');
+      const artifactManifest = { files: [{ path: file, sha256, size: bytes.length, mtimeMs: stat.mtimeMs, checkedAt: this.clock() }] };
+      await journal({ ...task, status: 'accepted', note: '作品已保存并核验文件内容；代码文件未经运行', report: `我做了一个小作品「${task.goal}」，保存在 ${file}。`, artifactManifest, verification: { verdict: 'pass', at: this.clock(), report: '新建文件字节已核验；文件内容未经执行测试', artifactManifest }, acceptance: { verified: true, verdict: 'pass', checkedAt: this.clock(), artifactManifest } });
+      return { taskId, file, title: task.goal, artifactManifest };
+    } catch (e) {
+      if (created) try { fs.unlinkSync(file); } catch {}
+      if (privacyEpoch === this.epoch()) await journal({ ...task, status: 'paused', note: '创作中止，未交付作品' }).catch(() => {});
+      throw e;
+    }
+  }
   context() {
     return this.contextSnapshot().text;
   }

@@ -6,6 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'" />
   <title>伙伴空间 · workbunny</title>
   <link rel="stylesheet" href="./companion.css" />
+  <link rel="stylesheet" href="./form-controls.css" />
 </head>
 <body>
   <main id="memoryPage" class="page" hidden>
@@ -30,12 +31,10 @@
             </select>
           </div>
           <p id="memorySceneScope" class="inline-note" aria-live="polite">生活：可按需参考生活与工作资料</p>
-          <label class="field-label" for="sceneProfile">当前场景补充设定</label>
-          <textarea id="sceneProfile" rows="2" maxlength="2000" placeholder="写下此场景希望补充的交流方式"></textarea>
-          <p class="inline-note scene-profile-hint">这是同一个 Bunny 的场景补充，不会替换共通角色设定。场景只控制可参考资料，不改变操作授权。</p>
-          <div class="button-row scene-profile-actions"><button id="sceneProfileSave" class="button quiet">保存本场景设定</button><span id="sceneProfileNote" class="inline-note" role="status"></span></div>
+          <p class="inline-note">三个场景共用一份自我理解。</p>
+          <button id="openSelfSettings" class="button quiet">自我理解 · 查看与微调</button>
         </div>
-        <div class="setting-row"><div><strong>使用记忆</strong><p>保存聊天，并在对话中参考记忆</p></div><label class="switch"><input id="memoryEnabled" type="checkbox"><span></span></label></div>
+        <div class="setting-row"><div><strong>使用记忆</strong><p>保存聊天并参考历史记忆；关闭后只保留当前临时对话</p></div><label class="switch"><input id="memoryEnabled" type="checkbox"><span></span></label></div>
         <div class="setting-row"><div><strong>整理新记忆</strong><p>空闲时将近期对话交给 WorkBuddy 免费模型整理</p></div><label class="switch"><input id="memoryExtract" type="checkbox"><span></span></label></div>
         <div id="memoryConfigNote" class="inline-note" role="status"></div>
       </div>
@@ -44,12 +43,12 @@
 
       <section class="card context-card" aria-labelledby="contextHeading">
         <div class="section-heading"><div><h2 id="contextHeading">对话衔接</h2><p id="contextStatus" role="status">正在读取当前场景…</p></div></div>
-        <p class="inline-note">优先保留最近20条主人与Bunny交流，外部渠道另行聚合；整体输入受模型预算约束。三场景分别整理，原文始终可回查。</p>
+        <p class="inline-note" data-character-text="优先保留最近20条主人与Bunny交流，外部渠道另行聚合；整体输入受模型预算约束。三场景分别整理，原文始终可回查。">优先保留最近20条主人与她交流，外部渠道另行聚合；整体输入受模型预算约束。三场景分别整理，原文始终可回查。</p>
       </section>
 
       <section class="card maintenance-card" aria-labelledby="maintenanceHeading">
         <div class="section-heading"><div><h2 id="maintenanceHeading">整理记忆</h2><p id="maintenanceStatus" role="status">正在读取整理状态…</p></div></div>
-        <p class="inline-note maintenance-scope">Doze 压缩历史对话；Dream 累计50条各来源消息提炼记忆（04:00补齐）；Deepdream 归并与复查（05:00）。睡眠或退出后会在恢复时补做，均保留场景边界。</p>
+        <p class="inline-note maintenance-scope">Doze 压缩历史对话；Dream 提炼记忆并反思相处；设定变化和纠正可提前触发（04:00补齐）；Deepdream 归并与复查（05:00）。睡眠或退出后会在恢复时补做，均保留场景边界。</p>
         <div class="button-row"><button id="maintenanceDoze" class="button quiet">Doze 小憩</button><button id="maintenanceDream" class="button quiet">Dream 梦境</button><button id="maintenanceDeepdream" class="button quiet">Deepdream 深梦</button></div>
       </section>
 
@@ -70,6 +69,7 @@
         </select>
       </div>
       <div class="search-row"><input id="memorySearch" type="search" placeholder="搜索内容" aria-label="搜索记忆内容"><button id="memorySearchBtn" class="button quiet">搜索</button></div>
+      <p class="inline-note">编辑会保留原始聊天并更正事实；彻底遗忘会移除证据原话及其派生记录。</p>
       <div id="memoryList" class="records" aria-live="polite"></div>
       <div class="more-row"><span id="memoryListNote" class="inline-note"></span><button id="memoryMore" class="button quiet" hidden>更早内容</button></div>
 
@@ -91,7 +91,7 @@
     </header>
     <section class="main desktop-main">
       <div id="taskStateCard" class="card task-state-card">
-        <div class="section-heading"><div><h2>Bunny 当前操作</h2><p id="taskStateNote">没有进行中的代理操作</p></div></div>
+        <div class="section-heading"><div><h2 data-character-text="Bunny 当前操作">她 当前操作</h2><p id="taskStateNote">没有进行中的代理操作</p></div></div>
         <p id="taskPauseNote" class="inline-note task-pause-note" hidden></p>
         <div id="taskMeta" class="task-detail task-meta" hidden></div>
         <p id="taskSummary" class="task-summary" hidden></p>
@@ -105,6 +105,19 @@
         </details>
       </div>
 
+      <section class="card" id="autonomyCard">
+        <div class="section-heading"><div><h2>她自己的小天地</h2><p>在你授权的范围里，自主选题、尝试和分享。</p></div></div>
+        <p class="inline-note">默认关闭。每天最多两次模型尝试、两次问候或分享，间隔至少六小时，22:00—09:00安静。没有回应不会继续追问；正在交流时暂停。</p>
+        <label class="field-label">活动<select id="autonomyKind"><option value="greet">桌面问候</option><option value="create">本地创作</option></select></label>
+        <label class="field-label">可参考的资料<select id="autonomyScene"><option value="life">生活与工作</option><option value="work">仅工作</option><option value="private">包含私聊</option></select></label>
+        <label class="field-label">兴趣与范围<textarea id="autonomySubject" rows="2" maxlength="400" placeholder="例如短篇故事、小工具源码、对最近问题的新想法"></textarea></label>
+        <div class="button-row"><button id="autonomyDirectory" class="button quiet">选择专用创作目录</button><span id="autonomyPath" class="inline-note"></span></div>
+        <label class="field-label">授权期限<select id="autonomyDays"><option value="1">一天</option><option value="7" selected>七天</option><option value="30">三十天</option></select></label>
+        <p class="inline-note">只使用确认免费的模型。作品仅在专用目录内新建文件，源码不自动运行；问候只在本机送达。第三方账号、社交发送和公开发布需独立接入。</p>
+        <div class="button-row"><button id="autonomyEnable" class="button primary">授权这项活动</button><button id="autonomyRevoke" class="button danger">撤销这项授权</button><button id="autonomyRefresh" class="button quiet">刷新</button></div>
+        <div id="autonomyStatus" class="inline-note" role="status"></div><div id="autonomyGrants" class="inline-note"></div>
+        <details><summary>她正在理解和在意的事</summary><p class="inline-note">认识保留条件和反例，目标可以调整或结束。移除后不再作为当前依据；长期兴趣和愿景可在自我理解中编辑、锁定。</p><div id="growthList" class="records" aria-live="polite"></div></details>
+      </section>
       <section id="watchCard" class="card watch-card" aria-label="持续关注">
         <div class="section-heading"><div><h2>持续关注</h2><p>与当前桌面操作分开运行</p></div><button id="watchRefresh" class="button quiet">刷新</button></div>
         <div id="watchList" class="watch-list" aria-live="polite"><div class="inline-note">正在读取关注事项…</div></div>
@@ -118,7 +131,7 @@
       <details id="taskFormDetails" class="card task-card">
         <summary>手动交代（备用）</summary>
         <div class="task-form">
-        <p class="desktop-intro">你可以直接告诉 Bunny 要办什么。</p>
+        <p class="desktop-intro" data-character-text="你可以直接告诉 Bunny 要办什么。">你可以直接告诉 她 要办什么。</p>
         <label class="field-label" for="taskTarget">代理对象</label>
         <select id="taskTarget">
           <option value="workbuddy">工作代理 · WorkBuddy</option>
@@ -160,6 +173,13 @@
     <footer id="desktopActions" class="sticky-actions" hidden><div class="sticky-button-row"><button id="taskStart" class="button primary" hidden>发送给 WorkBuddy</button><button id="taskResume" class="button primary" hidden>继续处理</button><button id="taskStop" class="button danger" disabled hidden>暂停代理操作</button><button id="taskAccept" class="button quiet" disabled hidden>确认结果</button></div><span id="desktopActionNote" class="inline-note" role="status"></span></footer>
   </main>
 
+  <dialog id="selfDialog" class="self-dialog" aria-labelledby="selfDialogTitle">
+    <header class="self-dialog-head"><div><h2 id="selfDialogTitle" data-character-text="Bunny 的自我理解">她 的自我理解</h2><p class="inline-note">三个场景共用。分类只用于整理，每类都可以有多条理解。</p></div><button id="selfClose" class="button quiet" aria-label="关闭自我理解">关闭</button></header>
+    <div class="self-dialog-toolbar"><button id="selfGlobalLock" class="button">锁定自我理解</button><button id="selfAdd" class="button">增加条目</button><button id="selfRefresh" class="button quiet">刷新</button></div>
+    <div id="selfLockNote" class="inline-note self-lock-note"></div>
+    <div id="selfEntries" class="self-entries"></div>
+    <footer class="self-dialog-foot"><div id="selfStatus" class="inline-note" role="status" aria-live="polite"></div></footer>
+  </dialog>
   <footer id="pageError" class="global-note" role="status" hidden></footer>
   <script type="module" src="./companion.js"></script>
 </body>

@@ -91,10 +91,10 @@ app.whenReady().then(async () => {
       const st = await win.webContents.executeJavaScript(`({
         text: document.getElementById('activityText').textContent,
         cls: document.getElementById('activity').className,
-        dot: getComputedStyle(document.querySelector('#activity .dot')).animationName,
+        logo: getComputedStyle(document.querySelector('#activity .workbuddy-logo')).filter,
         act: window.__act ? window.__act() : null,
       })`);
-      console.log(`   [${n}] ${st.text}  · class="${st.cls}" dot=${st.dot}`);
+      console.log(`   [${n}] ${st.text}  · class="${st.cls}" logo=${st.logo}`);
       if (st.act) console.log(`        keys=${JSON.stringify(st.act.keys)} idx=${st.act.idx} seen=${JSON.stringify(st.act.seen)}`);
       const geo = await win.webContents.executeJavaScript(`(() => {
         const a = document.getElementById('activity').getBoundingClientRect();

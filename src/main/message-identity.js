@@ -27,6 +27,10 @@ function validateText(content) {
 function inputRow(row) {
   return { id: row.id, role: isBunny(row.value) ? 'assistant' : 'user', characterId: character(row.value),
     characterName: row.value.characterName || character(row.value), content: row.value.content, time: row.value.occurredAt || row.ts,
+    ...(row.value.timezone ? { timezone: row.value.timezone } : {}),
+    ...(row.value.timeUnknown ? { timeUnknown: true } : {}),
+    ...(row.value.delivery ? { delivery: row.value.delivery } : {}),
+    ...(row.value.eventType ? { eventType: row.value.eventType } : {}),
     ...(row.value.turnId ? { turnId: row.value.turnId } : {}),
     ...(row.value.taskId ? { taskId: row.value.taskId } : {}),
     ...(row.value.conversationId ? { conversationId: row.value.conversationId } : {}) };

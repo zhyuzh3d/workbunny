@@ -36,10 +36,53 @@ function validateBlock(result, rows) {
 }
 class MessageBlocks {
   constructor({ memory, summarize, clock = Date.now }) { Object.assign(this, { memory, summarize, clock }); }
-  async prepare(rows, { signal, allowModel = false, reserveModelCall = async () => ({ ok: true }) } = {}) {
+  async longMessage(row, { signal, reserveModelCall }) {
+    if (!this.summarize) throw Object.assign(new Error('长消息整理器暂不可用'), { code: 'E_INVALID_MODEL_OUTPUT' });
+    const generation = this.memory.generation, snapshots = snapshotsOf([row]), parts = [], pieces = [];
+    for (let start = 0; start < row.value.content.length;) {
+      let end = Math.min(start + 4000, row.value.content.length);
+      if (end < row.value.content.length && /[\uD800-\uDBFF]/u.test(row.value.content[end - 1])) end--;
+      parts.push({ start, end }); start = end;
+    }
+    for (const [index, part] of parts.entries()) {
+      if (signal?.aborted || generation !== this.memory.generation) return { status: 'paused' };
+      const id = 'long-message-part:v1:' + hash([snapshots, part]);
+      const existing = (await readRecords(this.memory, [id]))[0];
+      const chunk = { ...row, value: { ...row.value, content: row.value.content.slice(part.start, part.end) } };
+      let value;
+      if (existing?.value.origin === 'long-message-part-v1' && (await verifySnapshots(this.memory, existing.value.analysisSnapshots)).ok) value = existing.value;
+      else {
+        const reserved = await reserveModelCall(signal);
+        if (reserved === false || reserved?.ok === false) return { status: 'budget' };
+        value = validateBlock(await this.summarize([actors.inputRow(chunk)], { signal, segment: { index, total: parts.length } }), [chunk]);
+        if (value.content.length > 200 || value.quotes.length > 2) throw Object.assign(new Error('长消息分段索引超过预算'), { code: 'E_INVALID_MODEL_OUTPUT' });
+        value = { ...value, origin: 'long-message-part-v1', analysisSnapshots: snapshots, sources: [row.id], part };
+        const committed = await this.memory.serial(async () => {
+          if (signal?.aborted || generation !== this.memory.generation || !(await verifySnapshots(this.memory, snapshots)).ok) return false;
+          await this.memory.write([{ id, kind: 'state', ts: 0, domain: row.domain, visibilityFloor: row.visibilityFloor, value }], this.memory.epoch, { notify: false }); return true;
+        });
+        if (!committed) return { status: 'paused' };
+      }
+      pieces.push(value);
+    }
+    const quotes = pieces.flatMap(p => p.quotes);
+    const selected = quotes.length <= 8 ? quotes : Array.from({ length: 8 }, (_, i) => quotes[Math.round(i * (quotes.length - 1) / 7)]);
+    return { status: 'done', unit: { ...actors.inputRow(row), content: pieces.map((p, i) => `片段${i + 1}/${pieces.length}：${p.content}`).join('\n'),
+      block: true, segmented: true, rawCount: 1, firstMessageId: row.id, endMessageId: row.id, sourceIds: [row.id], sourceQuotes: selected } };
+  }
+  async prepare(rows, { signal, allowModel = false, allowLongModel = allowModel, reserveModelCall = async () => ({ ok: true }) } = {}) {
     const generation = this.memory.generation, units = [], blockIds = [];
     for (const group of groups(rows)) {
       if (signal?.aborted || generation !== this.memory.generation) return { status: 'paused', units: [], blockIds: [] };
+      if (allowLongModel && group.some(r => r.value.content.length > 12000)) {
+        for (const row of group) {
+          if (row.value.content.length <= 12000) { units.push(actors.inputRow(row)); continue; }
+          const prepared = await this.longMessage(row, { signal, reserveModelCall });
+          if (prepared.status !== 'done') return { ...prepared, units: [], blockIds: [] };
+          units.push(prepared.unit);
+        }
+        continue;
+      }
       if (group.length < 4) { units.push(...group.map(actors.inputRow)); continue; }
       const pieces = [];
       const known = await this.memory.query('state', 64, { scene: null, domain: group[0].domain, visibilityFloor: group[0].visibilityFloor, requiredMarkers: ['bunny_message_block'] });

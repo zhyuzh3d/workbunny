@@ -21,7 +21,8 @@ function createMemoryConsolidation({ memory, clock = Date.now }) {
       baseId: base.id, memberEvidenceIds: [...new Set(clean.map(r => r.value.evidenceSourceId))], analysisSnapshots: snapshotsOf([relation, ...clean]),
       evidence: base.value.evidence, evidenceSourceId: base.value.evidenceSourceId,
       protected: clean.some(r => provenance(r.value).includes('active')), mergedAt: clock() }, flags);
-    await memory.write([{ id, kind: 'memory', ts: clock(), domain: relation.domain, visibilityFloor: relation.visibilityFloor, value }]);
+    const expiries = clean.map(r => r.expiresAt).filter(Number.isSafeInteger);
+    await memory.write([{ id, kind: 'memory', ts: clock(), ...(expiries.length ? { expiresAt: Math.min(...expiries) } : {}), domain: relation.domain, visibilityFloor: relation.visibilityFloor, value }]);
     // Parents must already exist before a native write. A crash here only
     // leaves an immutable orphan; the next sync reuses it and repairs pointers.
     return id;
@@ -43,6 +44,7 @@ function createMemoryConsolidation({ memory, clock = Date.now }) {
         row.value.memberIds.length < 2 || row.value.memberIds.length > 6 || !Array.isArray(row.value.analysisSnapshots)) return false;
     const checked = await verifySnapshots(memory, row.value.analysisSnapshots, { scene });
     if (!checked.ok) return false;
+    if (checked.rows.some(r => r.expiresAt && r.expiresAt <= clock())) return false;
     const relation = checked.rows.find(r => r.id === row.value.relationId), base = checked.rows.find(r => r.id === row.value.baseId);
     if (!relation || relation.value.relation !== 'equivalent' || relation.value.status !== 'proposed' || !base ||
         base.value.content !== row.value.content || base.value.status !== row.value.status ||
@@ -56,6 +58,7 @@ function createMemoryConsolidation({ memory, clock = Date.now }) {
     const byId = new Map(targets.map(r => [r.id, r])), replacements = new Map(pointers.map(p => [p.value.memberId, byId.get(p.value.mergedId)]));
     const cache = new Map(), output = new Map();
     for (const row of rows) {
+      if (row.expiresAt && row.expiresAt <= clock()) continue;
       let selected = replacements.get(row.id) || row;
       if (selected.value.origin === 'deepdream-merged-v1') {
         if (!cache.has(selected.id)) cache.set(selected.id, await valid(selected, scene));

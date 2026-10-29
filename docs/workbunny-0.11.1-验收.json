@@ -1,0 +1,470 @@
+{
+  "version": "0.11.1",
+  "date": "2026-10-29",
+  "fixes": 10,
+  "regressions": [
+    {
+      "test": "test-memory-service.js",
+      "code": 0,
+      "seconds": 14.45,
+      "output": "[memory-restore-scale] records=6600 export_ms=197.4 restore_ms=1172.0 sources_ok=2\nMemoryService integration checks passed\n"
+    },
+    {
+      "test": "test-memory-lineage.js",
+      "code": 0,
+      "seconds": 0.22,
+      "output": "memory lineage SQLite integration tests passed (temporary vaults, stub extractor, fake voice clock)\n"
+    },
+    {
+      "test": "test-memory-conflicts.js",
+      "code": 0,
+      "seconds": 0.33,
+      "output": "memory conflict SQLite integration: ok\n"
+    },
+    {
+      "test": "test-memory-dialogue-repairs.js",
+      "code": 0,
+      "seconds": 0.92,
+      "output": "memory/dialogue repair acceptance: 10 groups passed, real encrypted Vault, no production data or network\n"
+    },
+    {
+      "test": "test-dialogue-foreground.js",
+      "code": 0,
+      "seconds": 0.19,
+      "output": "actual foreground think passed: persisted forecast pairing under external flood, protected feedback, memory-off isolation/session history, short acknowledgement admission\n"
+    },
+    {
+      "test": "test-cognition-evolution.js",
+      "code": 0,
+      "seconds": 0.29,
+      "output": "cognition evolution: actual encrypted Vault, role continuity, locks, provenance, ordered prediction, idempotence, and restore passed\n"
+    },
+    {
+      "test": "test-cognitive-loop.js",
+      "code": 0,
+      "seconds": 0.22,
+      "output": "cognitive loop passed: ordered reply, actual Dream learning/locks, no replay, immutable reference backfill/two hops, real artifacts, grants and contact budget\n"
+    },
+    {
+      "test": "test-memory-lifecycle.js",
+      "code": 0,
+      "seconds": 0.83,
+      "output": "Memory lifecycle integration passed: immediate, provenance, scope, stages, schedule, merge, sampling, resume\n"
+    },
+    {
+      "test": "test-memory-maintenance.js",
+      "code": 0,
+      "seconds": 0.15,
+      "output": "memory-maintenance fixtures passed (synthetic in-memory store; no production vault or model calls)\n"
+    },
+    {
+      "test": "test-memory-maintenance-integration.js",
+      "code": 0,
+      "seconds": 0.41,
+      "output": "memory-maintenance SQLite integration fixtures passed (temporary vaults, fixed test key, stub extractor)\n"
+    },
+    {
+      "test": "test-semantic-dream.js",
+      "code": 0,
+      "seconds": 0.3,
+      "output": "semantic dream checks passed (six partitions, strict evidence, restart cache, SQLite lineage)\n"
+    },
+    {
+      "test": "test-context-evolution.js",
+      "code": 0,
+      "seconds": 0.65,
+      "output": "Context evolution passed: identity, raw preservation, flood/cache, 50 all-role messages, semantic frontiers, observation trust, scene isolation, whole-request budget\n"
+    },
+    {
+      "test": "test-context-compression.js",
+      "code": 0,
+      "seconds": 0.23,
+      "output": "context compression checks passed (three scene lanes, bounded rounds, cancellation, temporary SQLite)\n"
+    },
+    {
+      "test": "test-memory-evolution.js",
+      "code": 0,
+      "seconds": 0.64,
+      "output": "memory evolution SQLite integration passed (116 records; 8 stub calls; fresh-key restore; three scope heads)\n"
+    },
+    {
+      "test": "test-memory-scenes.js",
+      "code": 0,
+      "seconds": 5.3,
+      "output": "Memory scene integration checks passed\n"
+    },
+    {
+      "test": "test-memory-knowledge.js",
+      "code": 0,
+      "seconds": 0.97,
+      "output": "memory knowledge SQLite checks passed (scope, decisions, paging, restore, context)\n"
+    },
+    {
+      "test": "test-memory-secret-boundaries.js",
+      "code": 0,
+      "seconds": 0.2,
+      "output": "memory secret-boundary SQLite integration passed (temporary vaults, no model/provider calls)\n"
+    },
+    {
+      "test": "test-memory-evidence.js",
+      "code": 0,
+      "seconds": 0.33,
+      "output": "Memory evidence validation checks passed\n"
+    },
+    {
+      "test": "test-memory-dream.js",
+      "code": 0,
+      "seconds": 0.14,
+      "output": "MemoryDream isolated and SQLite integration checks passed\n"
+    },
+    {
+      "test": "test-companion-affect.js",
+      "code": 0,
+      "seconds": 0.06,
+      "output": "companion-affect deterministic fixtures passed (no model, database, or user data)\n"
+    },
+    {
+      "test": "test-user-facts.js",
+      "code": 0,
+      "seconds": 0.05,
+      "output": "User fact parsing checks passed\n"
+    },
+    {
+      "test": "test-reply-request.js",
+      "code": 0,
+      "seconds": 0.05,
+      "output": "reply request tests passed\n"
+    },
+    {
+      "test": "test-reply-format.js",
+      "code": 0,
+      "seconds": 0.05,
+      "output": "reply format tests passed\n"
+    },
+    {
+      "test": "test-dialogue-actions.js",
+      "code": 0,
+      "seconds": 0.08,
+      "output": "dialogue action protocol checks passed\n"
+    },
+    {
+      "test": "test-recent-rounds.js",
+      "code": 0,
+      "seconds": 0.04,
+      "output": "Complete recent-round budget checks passed\n"
+    },
+    {
+      "test": "test-voice-turns.js",
+      "code": 0,
+      "seconds": 0.05,
+      "output": "13\n# Subtest: request begins at one second, final confirmation does not duplicate it, commit waits for three seconds\nok 1 - request begins at one second, final confirmation does not duplicate it, commit waits for three seconds\n  ---\n  duration_ms: 1.94725\n  ...\n# Subtest: continuation in three seconds merges segments and immediately rejects the old response\nok 2 - continuation in three seconds merges segments and immediately rejects the old response\n  ---\n  duration_ms: 0.499833\n  ...\n# Subtest: a new turn preserves an unanswered prior user turn, discards its response, and avoids double history\nok 3 - a new turn preserves an unanswered prior user turn, discards its response, and avoids double history\n  ---\n  duration_ms: 0.244042\n  ...\n# Subtest: a changed final cancels provisional words; no reply can commit without a final\nok 4 - a changed final cancels provisional words; no reply can commit without a final\n  ---\n  duration_ms: 0.101209\n  ...\n# Subtest: reset cancels active and queued callbacks\nok 5 - reset cancels active and queued callbacks\n  ---\n  duration_ms: 0.170542\n  ...\n# Subtest: missing final is bounded; recognizer exit cancels unconfirmed text but preserves confirmed responses\nok 6 - missing final is bounded; recognizer exit cancels unconfirmed text but preserves confirmed responses\n  ---\n  duration_ms: 0.146333\n  ...\n# Subtest: partial punctuation confirmation does not cancel an already issued request or restart the pause\nok 7 - partial punctuation confirmation does not cancel an already issued request or restart the pause\n  ---\n  duration_ms: 0.472375\n  ...\n1..7\n# tests 7\n# suites 0\n# pass 7\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 0.088833\n"
+    },
+    {
+      "test": "test-asr-dispatch.js",
+      "code": 0,
+      "seconds": 0.05,
+      "output": "TAP version 13\n# Subtest: real ASR handlers dispatch after one second despite ongoing microphone noise and confirm the final\nok 1 - real ASR handlers dispatch after one second despite ongoing microphone noise and confirm the final\n  ---\n  duration_ms: 3.215208\n  ...\n# Subtest: loud input without new recognized words cannot cancel a valid response; new words do cancel it\nok 2 - loud input without new recognized words cannot cancel a valid response; new words do cancel it\n  ---\n  duration_ms: 1.001666\n  ...\n# Subtest: late final from disabled continuous listening never becomes a manual chat\nok 3 - late final from disabled continuous listening never becomes a manual chat\n  ---\n  duration_ms: 1.242709\n  ...\n1..3\n# tests 3\n# suites 0\n# pass 3\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 0.063667\n"
+    },
+    {
+      "test": "test-asr-generation.js",
+      "code": 0,
+      "seconds": 0.05,
+      "output": "TAP version 13\n# Subtest: discarded ASR generation cannot leak messages, auth, errors, or close into its replacement\nok 1 - discarded ASR generation cannot leak messages, auth, errors, or close into its replacement\n  ---\n  duration_ms: 2.194291\n  ...\n# Subtest: default kill still emits exit so existing health recovery can restart ASR\nok 2 - default kill still emits exit so existing health recovery can restart ASR\n  ---\n  duration_ms: 0.34\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 0.054792\n"
+    },
+    {
+      "test": "test-knowledge-maintenance.js",
+      "code": 0,
+      "seconds": 0.4,
+      "output": "Knowledge maintenance SQLite end-to-end integration passed\n"
+    },
+    {
+      "test": "test-knowledge-scale.js",
+      "code": 0,
+      "seconds": 2.39,
+      "output": "{\n  \"fixture\": \"synthetic-only; real MemoryService + native SQLite; isolated temp directory\",\n  \"records\": {\n    \"memory\": 5000,\n    \"knowledge\": 1500,\n    \"total\": 6500\n  },\n  \"insert\": {\n    \"batches\": 6,\n    \"totalMs\": 1622.41,\n    \"perScopeKindMs\": [\n      {\n        \"scene\": \"work\",\n        \"kind\": \"memory\",\n        \"count\": 1667,\n        \"ms\": 462.38\n      },\n      {\n        \"scene\": \"work\",\n        \"kind\": \"knowledge\",\n        \"count\": 500,\n        \"ms\": 74.18\n      },\n      {\n        \"scene\": \"life\",\n        \"kind\": \"memory\",\n        \"count\": 1667,\n        \"ms\": 451.39\n      },\n      {\n        \"scene\": \"life\",\n        \"kind\": \"knowledge\",\n        \"count\": 500,\n        \"ms\": 87.83\n      },\n      {\n        \"scene\": \"private\",\n        \"kind\": \"memory\",\n        \"count\": 1666,\n        \"ms\": 469.71\n      },\n      {\n        \"scene\": \"private\",\n        \"kind\": \"knowledge\",\n        \"count\": 500,\n        \"ms\": 70.84\n      }\n    ]\n  },\n  \"search\": {\n    \"samples\": 9,\n    \"p50Ms\": 8.97,\n    \"p95Ms\": 16.11\n  },\n  \"context\": {\n    \"samples\": 9,\n    \"p50Ms\": 61.36,\n    \"p95Ms\": 92.26\n  },\n  \"contextBudgetChars\": 8500,\n  \"requiredExcludedMarkersBeforeLimit\": \"passed\",\n  \"oldRareRecordPerScene\": \"passed\",\n  \"limits\": \"Synthetic scale and local latency only; not a real-world recall or long-term reliability claim.\"\n}\n"
+    },
+    {
+      "test": "test-vault-knowledge.js",
+      "code": 0,
+      "seconds": 4.92,
+      "output": "Vault knowledge filters and lineage checks passed\n"
+    },
+    {
+      "test": "test-vault-scenes.js",
+      "code": 0,
+      "seconds": 5.1,
+      "output": "Vault scene isolation checks passed\n"
+    },
+    {
+      "test": "test-vault-db.js",
+      "code": 0,
+      "seconds": 6.01,
+      "output": "VaultDB integration checks passed\n"
+    },
+    {
+      "test": "test-compression-provenance.js",
+      "code": 0,
+      "seconds": 0.45,
+      "output": "compression provenance SQLite checks passed (immutable sources, crash recovery, frozen v1 migration, fresh-key restore)\n"
+    },
+    {
+      "test": "test-contact-directory.js",
+      "code": 0,
+      "seconds": 0.05,
+      "output": "TAP version 13\n# Subtest: invalidate clears cached aliases; a delayed prior read cannot resurrect or delete a replacement load\nok 1 - invalidate clears cached aliases; a delayed prior read cannot resurrect or delete a replacement load\n  ---\n  duration_ms: 2.512625\n  ...\n# Subtest: invalidate during remember prevents the completed old write from repopulating RAM\nok 2 - invalidate during remember prevents the completed old write from repopulating RAM\n  ---\n  duration_ms: 1.430625\n  ...\n# Subtest: invalidate during a delayed remember read stops it before persistence\nok 3 - invalidate during a delayed remember read stops it before persistence\n  ---\n  duration_ms: 0.449041\n  ...\n1..3\n# tests 3\n# suites 0\n# pass 3\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 0.088542\n"
+    },
+    {
+      "test": "test-settings-config.js",
+      "code": 0,
+      "seconds": 0.06,
+      "output": "TAP version 13\n# Subtest: role settings reach the real dialogue prompt and survive reload without losing private provider fields\nok 1 - role settings reach the real dialogue prompt and survive reload without losing private provider fields\n  ---\n  duration_ms: 4.648208\n  ...\n# Subtest: an unsuccessful atomic replacement leaves both persisted and live settings unchanged\nok 2 - an unsuccessful atomic replacement leaves both persisted and live settings unchanged\n  ---\n  duration_ms: 2.8615\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 0.055542\n[config] save failed: fixture rename failure\n"
+    },
+    {
+      "test": "test-persona-backup.js",
+      "code": 0,
+      "seconds": 1.15,
+      "output": "persona backup integration checks passed (temporary SQLite vault; no build or app launch)\n"
+    },
+    {
+      "test": "test-experience-memory.js",
+      "code": 0,
+      "seconds": 0.38,
+      "output": "experience memory SQLite integration: ok\n"
+    },
+    {
+      "test": "test-secretary.js",
+      "code": 0,
+      "seconds": 0.15,
+      "output": "Secretary lifecycle checks passed\n"
+    },
+    {
+      "test": "test-task-privacy.js",
+      "code": 0,
+      "seconds": 5.02,
+      "output": "Task journal privacy and cascade checks passed\n"
+    },
+    {
+      "test": "test-scope-routing.js",
+      "code": 0,
+      "seconds": 0.05,
+      "output": "scope routing service probes passed\n"
+    },
+    {
+      "test": "test-workbuddy-transport.js",
+      "code": 0,
+      "seconds": 0.08,
+      "output": "WorkBuddy transport response checks passed\n"
+    },
+    {
+      "test": "test-verification-transport.js",
+      "code": 0,
+      "seconds": 0.04,
+      "output": "Verification transport fallback checks passed\n"
+    },
+    {
+      "test": "test-conversation-search.js",
+      "code": 0,
+      "seconds": 0.13,
+      "output": "Conversation search protocol checks passed\n"
+    },
+    {
+      "test": "test-conversation-input.js",
+      "code": 0,
+      "seconds": 0.04,
+      "output": "Sensitive conversation admission checks passed\n"
+    },
+    {
+      "test": "test-conversation-text.js",
+      "code": 0,
+      "seconds": 0.04,
+      "output": "conversation text boundary tests passed\n"
+    },
+    {
+      "test": "test-tts-session.js",
+      "code": 0,
+      "seconds": 0.05,
+      "output": "TAP version 13\n# Subtest: actual fallback persists system default and broadcasts it; next request uses system\nok 1 - actual fallback persists system default and broadcasts it; next request uses system\n  ---\n  duration_ms: 0.938834\n  ...\n# Subtest: an old failure cannot overwrite a newly selected engine\nok 2 - an old failure cannot overwrite a newly selected engine\n  ---\n  duration_ms: 0.083708\n  ...\n# Subtest: an old failure cannot overwrite a newer voice on the same engine\nok 3 - an old failure cannot overwrite a newer voice on the same engine\n  ---\n  duration_ms: 0.069041\n  ...\n# Subtest: successful local synthesis retains selection; unrelated model check does not reset remote\nok 4 - successful local synthesis retains selection; unrelated model check does not reset remote\n  ---\n  duration_ms: 0.06425\n  ...\n1..4\n# tests 4\n# suites 0\n# pass 4\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 0.149\n"
+    },
+    {
+      "test": "test-tts-system.js",
+      "code": 0,
+      "seconds": 2.13,
+      "output": "TAP version 13\n# Subtest: say failure hides command text and removes partial WAV after callback\nok 1 - say failure hides command text and removes partial WAV after callback\n  ---\n  duration_ms: 5.626\n  ...\n# Subtest: timeout removes partial WAV and reports a fixed timeout\nok 2 - timeout removes partial WAV and reports a fixed timeout\n  ---\n  duration_ms: 2.386\n  ...\n# Subtest: abort kills the child and removes its WAV after the child callback\nok 3 - abort kills the child and removes its WAV after the child callback\n  ---\n  duration_ms: 23.562167\n  ...\n# Subtest: success returns WAV and removes its temporary directory\nok 4 - success returns WAV and removes its temporary directory\n  ---\n  duration_ms: 2.536542\n  ...\n# Subtest: stdin error and early child exit are sanitized and cleaned after child callback\nok 5 - stdin error and early child exit are sanitized and cleaned after child callback\n  ---\n  duration_ms: 23.162833\n  ...\n# Subtest: real say stdin produces a WAV without playing it\nok 6 - real say stdin produces a WAV without playing it\n  ---\n  duration_ms: 2021.49325\n  ...\n# generated_bytes=123994\n1..6\n# tests 6\n# suites 0\n# pass 6\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 0.078084\n"
+    },
+    {
+      "test": "test-pcm-player.mjs",
+      "code": 0,
+      "seconds": 0.06,
+      "output": "TAP version 13\n# Subtest: prebuffer schedules contiguous chunks and completion waits for the last playback\nok 1 - prebuffer schedules contiguous chunks and completion waits for the last playback\n  ---\n  duration_ms: 1.764792\n  ...\n# Subtest: cancel stops scheduled sound, ignores stale chunks and handles a short final buffer\nok 2 - cancel stops scheduled sound, ignores stale chunks and handles a short final buffer\n  ---\n  duration_ms: 0.564042\n  ...\n1..2\n# tests 2\n# suites 0\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 0.06075\n"
+    },
+    {
+      "test": "test-delivery-evidence.js",
+      "code": 0,
+      "seconds": 0.09,
+      "output": "delivery evidence safety checks passed\n"
+    },
+    {
+      "test": "test-delivery-acceptance.js",
+      "code": 0,
+      "seconds": 0.09,
+      "output": "Local delivery acceptance gate checks passed\n"
+    },
+    {
+      "test": "test-wechat-intents.js",
+      "code": 0,
+      "seconds": 0.04,
+      "output": "wechat intents: one-time, read/draft, persistent-watch, English names, bounds, and prompt-safety checks passed\n"
+    },
+    {
+      "test": "test-watch-service.js",
+      "code": 0,
+      "seconds": 0.06,
+      "output": "WatchService state-machine checks passed\n"
+    },
+    {
+      "test": "test-watch-journal.js",
+      "code": 0,
+      "seconds": 4.9,
+      "output": "Watch journal integration checks passed\n"
+    },
+    {
+      "test": "test-wechat-observer.js",
+      "code": 0,
+      "seconds": 5.49,
+      "output": "wechat observer: sampling, window binding, header, direction, media, and reply safety checks passed\n"
+    },
+    {
+      "test": "test-followup-uncertainty.js",
+      "code": 0,
+      "seconds": 0.09,
+      "output": "Follow-up uncertainty recovery checks passed\n"
+    }
+  ],
+  "allRegressionsPassed": true,
+  "syntax": {
+    "files": 85,
+    "passed": true
+  },
+  "isolatedElectronUI": {
+    "passed": true
+  },
+  "liveSynthetic": {
+    "passed": true,
+    "syntheticOnly": true,
+    "model": "hy3",
+    "ms": 89515,
+    "attempts": 1
+  },
+  "installation": {
+    "status": "installed",
+    "version": "0.11.1",
+    "app": "/Users/zhyuzh/Applications/workbunny.app",
+    "backup": "/Users/zhyuzh/Library/Caches/workbunny-release-backup/20261029-131404-before-0.11.1",
+    "sourceFilesIncludingPackage": 170,
+    "sourceParity": true,
+    "preservedRecords": 365,
+    "unchangedMessageAndMemoryBodies": 244,
+    "mutableMaintenanceRecordsChanged": 7,
+    "userSettingsIdentical": true,
+    "settingsRevision": [
+      635,
+      645
+    ],
+    "keyEnvelopeIdentical": true,
+    "tts": {
+      "engine": "remote",
+      "baseURL": "http://192.168.2.31:8189/chp/info",
+      "voice": "youngfemale"
+    },
+    "runtime": {
+      "pid": 37199,
+      "normalMode": true,
+      "vaultUnlocked": true,
+      "alwaysListen": false,
+      "backgroundExtract": true,
+      "postBootMaintenanceErrors": 0
+    }
+  },
+  "finalAffectedRetest": [
+    {
+      "test": "test-memory-service.js",
+      "code": 0,
+      "output": "[memory-restore-scale] records=6600 export_ms=171.1 restore_ms=1078.6 sources_ok=2\nMemoryService integration checks passed\n"
+    },
+    {
+      "test": "test-memory-dialogue-repairs.js",
+      "code": 0,
+      "output": "memory/dialogue repair acceptance: 10 groups passed, real encrypted Vault, no production data or network\n"
+    },
+    {
+      "test": "test-dialogue-foreground.js",
+      "code": 0,
+      "output": "actual foreground think passed: persisted forecast pairing under external flood, protected feedback, memory-off isolation/session history, short acknowledgement admission\n"
+    },
+    {
+      "test": "test-memory-knowledge.js",
+      "code": 0,
+      "output": "memory knowledge SQLite checks passed (scope, decisions, paging, restore, context)\n"
+    },
+    {
+      "test": "test-memory-conflicts.js",
+      "code": 0,
+      "output": "memory conflict SQLite integration: ok\n"
+    },
+    {
+      "test": "test-memory-lineage.js",
+      "code": 0,
+      "output": "memory lineage SQLite integration tests passed (temporary vaults, stub extractor, fake voice clock)\n"
+    },
+    {
+      "test": "test-context-evolution.js",
+      "code": 0,
+      "output": "Context evolution passed: identity, raw preservation, flood/cache, 50 all-role messages, semantic frontiers, observation trust, scene isolation, whole-request budget\n"
+    },
+    {
+      "test": "test-conversation-search.js",
+      "code": 0,
+      "output": "Conversation search protocol checks passed\n"
+    },
+    {
+      "test": "test-workbuddy-transport.js",
+      "code": 0,
+      "output": "WorkBuddy transport response checks passed\n"
+    }
+  ],
+  "build": {
+    "version": "0.11.1",
+    "strictSignature": true,
+    "sourceFiles": 169,
+    "sourceParity": true,
+    "keyHelperIdentityPreserved": true
+  },
+  "runtimeSchedulerRegression": {
+    "reproducedBeforeFix": true,
+    "consecutiveCycles": 3,
+    "actualPeriodicCallback": true,
+    "passed": true,
+    "affectedRetests": [
+      "test-dialogue-foreground.js",
+      "test-memory-maintenance-integration.js",
+      "test-cognitive-loop.js"
+    ]
+  },
+  "actualRuntimeUI": {
+    "version": "0.11.1",
+    "vaultReady": true,
+    "maintenanceProgressObserved": [
+      4,
+      6
+    ],
+    "actualAutoMaintenance": true,
+    "manualDreamTriggerUsed": false,
+    "userFactsEditedByTest": false
+  },
+  "invalidLearningProposalRegression": {
+    "passed": true,
+    "unknownEntrySkipped": true,
+    "validMemoryAndWatermarkCommitted": true,
+    "ownerValidationUnchanged": true
+  }
+}

@@ -21,12 +21,12 @@ function limits(options) {
   const available = Math.floor(Math.min(input, context - output) * .85) - 1024;
   return { context, output, inputBudget: Math.max(512, Math.min(64000, available) * (options.budgetScale === .5 ? .5 : 1)), mode: 'conservative-utf8-text-estimate' };
 }
-function fitRequest(options) {
+function fitRequest(options, { retainLanes = false } = {}) {
   if (!Array.isArray(options.messages) || !options.messages.length) return options;
   const cap = limits(options), messages = options.messages.map(m => ({ ...m }));
   let lastUser = -1;
   messages.forEach((m, i) => { if (m.role === 'user' && !m._contextLane) lastUser = i; });
-  const mandatory = new Set(messages.flatMap((m, i) => m.role === 'system' || m.role === 'developer' || i >= lastUser && lastUser >= 0 ? [m] : []));
+  const mandatory = new Set(messages.flatMap((m, i) => m.role === 'system' || m.role === 'developer' || m._contextLane === 'cognition' || i >= lastUser && lastUser >= 0 ? [m] : []));
   let omitted = 0;
   // Context lanes are historical data, never the persona or operation rules.
   for (const lane of ['external', 'memory', 'work']) {
@@ -58,11 +58,11 @@ function fitRequest(options) {
     const e = new Error('当前请求与必要规则超过模型输入预算，原文已保留。请分段指定要处理的部分或选择更大上下文模型。');
     e.code = 'E_CONTEXT_BUDGET'; throw e;
   }
-  return { ...options, ...(options.maxTokens === undefined ? {} : { maxTokens: cap.output }), messages: messages.map(wire), contextBudget: { ...cap, estimate, omitted } };
+  return { ...options, ...(options.maxTokens === undefined ? {} : { maxTokens: cap.output }), messages: messages.map(m => ({ ...wire(m), ...(retainLanes && m._contextLane ? { _contextLane: m._contextLane } : {}) })), contextBudget: { ...cap, estimate, omitted } };
 }
 function isContextError(status, body) {
   if (![400, 413, 422].includes(Number(status))) return false;
   const text = typeof body === 'string' ? body.slice(0, 8192) : '';
   return /context_length_exceeded|context_window_exceeded|maximum context length|exceeds.{0,30}(?:context|input token)|prompt.{0,20}too long|max_input_tokens|上下文.{0,12}(?:超|长)/iu.test(text);
 }
-module.exports = { isContextError, fitRequest, limits, cost, contentCost };
+module.exports = { isContextError, fitRequest, limits, cost, contentCost, wire };

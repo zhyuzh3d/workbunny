@@ -106,6 +106,104 @@ class MemoryMaintenance {
     return { ok: true, queued: true };
   }
 
+  requestReflection(reason = 'feedback', { manual = false } = {}) {
+    this.reflectionReason = String(reason).slice(0, 80);
+    if (reason === 'settings') this.settingsOnly = true;
+    this.forceDream = true;
+    return this.request('dream', { automatic: !manual });
+  }
+
+  async cognitiveContext(rows = [], { settings = false, deep = false, taskRows = [], growth } = {}) {
+    const self = await this.memory.cognition?.learningInput();
+    if (!self) return null;
+    return { self: { revision: self.revision, locked: self.locked, updateAllowed: !self.locked, entries: self.entries.map(e => ({ ...e, ...(deep ? { sourceId: rows.find(r => r.value.schema === 'self-entry/v1' && r.value.entryId === e.entryId)?.id } : {}) })) },
+      tasks: taskRows.map(r => ({ id: r.id, status: r.value.status, goal: String(r.value.goal || '').slice(0, 500),
+        verification: r.value.verification ? { verdict: r.value.verification.verdict, at: r.value.verification.at, report: String(r.value.verification.report || '').slice(0, 600) } : null,
+        fileOnly: r.value.target === 'local-artifact' })),
+      feedback: rows.filter(r => r.value.cognition).slice(-24).map(r => ({ id: r.id, ...r.value.cognition })),
+      ...(growth ? { growth: growth.entries } : {}),
+      ...(settings && self.pendingSettings && !self.locked ? { settings: { sourceId: self.settingsSourceId, ...self.settings, legacy: self.legacy } } : {}),
+      ...(deep && !self.locked ? { purpose: '整理重复或冲突的未锁自我条目，保持连续性；没有证据不改动' } : {}),
+      reason: this.reflectionReason || 'daily-learning' };
+  }
+
+  async taskEvidence(rows) {
+    const ids = [...new Set(rows.filter(r => r.value.taskId && r.value.sources?.includes(r.value.taskId)).map(r => r.value.taskId))].slice(-6);
+    return ids.length && this.memory.db ? (await require('./memory-evidence').readRecords(this.memory, ids)).filter(r => r.kind === 'task') : [];
+  }
+
+  selfOps(result, rows, maxOps = 3) {
+    if (!result.selfChanges) return [];
+    if (!Array.isArray(result.selfChanges) || result.selfChanges.length > maxOps) throw Object.assign(new Error('反思条目过多'), { code: 'E_INVALID_MODEL_OUTPUT' });
+    const allowed = new Set(rows.map(r => r.id));
+    return result.selfChanges.map(item => {
+      if (!item || !['add', 'replace', 'remove'].includes(item.op) || !Array.isArray(item.sourceIds) || !item.sourceIds.length || item.sourceIds.some(id => !allowed.has(id)))
+        throw Object.assign(new Error('反思缺少真实来源'), { code: 'E_INVALID_MODEL_OUTPUT' });
+      return { op: item.op, ...(item.entryId ? { entryId: item.entryId } : {}), ...(item.text ? { text: item.text } : {}),
+        ...(item.facet ? { facet: item.facet } : {}), ...(item.condition ? { condition: item.condition } : {}) };
+    });
+  }
+
+  async runPriorityReflection(signal, { deep = false, immediate = false, name } = {}) {
+    const self = await this.memory.cognition?.learningInput();
+    if (self?.locked) { this.reflectionReason = null; return 'done'; }
+    if (!self || !(self.pendingSettings || this.reflectionReason === 'owner-request' || deep)) return 'done';
+    const recent = self.pendingSettings ? [] : await this.memory.query('message', 24, { scene: null, sort: 'ingestion' });
+    const selfOnly = !recent.length && !self.pendingSettings;
+    const rows = [...self.sourceRows, ...recent.filter(r => !SECRET.test(r.value.content)), ...(deep || selfOnly ? self.entrySourceRows : [])].slice(0, 80);
+    if (!rows.length) { this.reflectionReason = null; return 'done'; }
+    const taskRows = await this.taskEvidence(rows);
+    const context = await this.cognitiveContext(rows, { settings: true, deep: deep || selfOnly, taskRows });
+    if (immediate) { context.manualUpdate = true; context.name = String(name || '伙伴').slice(0, 64); }
+    const deepWatermark = 'meditation:deep-watermark:v1', evidenceKey = digest(JSON.stringify(rows.map(r => [r.id, r.ingestionSeq])), 40);
+    if (deep && (await this.readState(deepWatermark))?.value.evidenceKey === evidenceKey) return 'done';
+    // Each latest settings version/deep consolidation is evaluated once. It is
+    // committed together with its receipt, never replayed after a restart.
+    const rid = 'meditation:' + digest(JSON.stringify([context, rows.map(r => [r.id, r.ingestionSeq])]), 40);
+    if (await this.readState(rid)) { this.reflectionReason = null; return 'done'; }
+    if (immediate ? !await this.canRun({ mode: 'self-update', manual: true, signal }) : !await this.permitted({ mode: 'dream', signal })) return 'paused';
+    if (!(await this.reserveModelCall(signal)).ok) {
+      if (immediate) throw new Error(this.budgetReason + '，请稍后再更新');
+      return 'budget';
+    }
+    const generation = this.memory.generation;
+    const input = rows.filter(validRole).map(require('./message-identity').inputRow);
+    const result = await this.extract(input, { signal, force: input.length > 0, allowedThrough: input.map(r => r.id), analysisContext: context });
+    if (signal.aborted || generation !== this.memory.generation) return 'paused';
+    const ops = this.selfOps(result, [...rows, ...taskRows], immediate ? 20 : 3);
+    try {
+      const committed = await this.memory.cognition.commitPatch({ requestId: rid, baseRevision: context.self.revision, ops,
+        completeSettings: !!context.settings, summary: result.selfSummary }, { sourceRows: [...rows, ...taskRows], signal, generation, extraRecords: [{ id: rid, kind: 'state', ts: 0,
+          domain: 'private', visibilityFloor: 2, value: { origin: 'meditation-receipt-v1', sources: [...rows, ...taskRows].map(r => r.id), proposed: ops.length, settings: !!context.settings } }, ...(deep ? [{ id: deepWatermark, kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2, value: { evidenceKey, sources: rows.map(r => r.id) } }] : [])] });
+      this.publish({ reflection: { changed: committed.changed, skipped: committed.skipped, revision: committed.revision } });
+      this.reflectionReason = null; return immediate ? committed : 'done';
+    } catch (e) { if (e.code === 'E_SELF_STALE') return 'paused'; throw e; }
+  }
+
+  updateSelfNow({ name } = {}) {
+    if (this.selfUpdatePromise) return this.selfUpdatePromise;
+    const run = async () => {
+      this.cancel();
+      await this.tickPromise?.catch(() => {});
+      if (this.closed) throw new Error('应用正在关闭');
+      const controller = this.selfController = new AbortController();
+      await this.memory.cognition.requestUnderstanding();
+      this.publish({ selfUpdate: { status: 'running' } });
+      const result = await this.runPriorityReflection(controller.signal, { immediate: true, name });
+      if (controller.signal.aborted || !result || typeof result !== 'object') throw new Error('更新已中断或资料刚有变化，请重新更新');
+      this.publish({ selfUpdate: { status: 'completed', changed: result.changed, revision: result.revision } });
+      return { ok: true, ...result };
+    };
+    this.selfUpdatePromise = run().catch(error => {
+      this.publish({ selfUpdate: { status: 'failed' } });
+      throw error;
+    }).finally(() => {
+      this.selfController = null; this.selfUpdatePromise = null; this.settingsOnly = false; this.reflectionReason = null;
+      if (!this.closed && this.queue.length) this.scheduleTick();
+    });
+    return this.selfUpdatePromise;
+  }
+
   scheduleTick(delayMs = 0) {
     if (this.closed || this.timer) return;
     this.timer = this.setTimer(() => {
@@ -152,6 +250,7 @@ class MemoryMaintenance {
   }
 
   async tick() {
+    if (this.selfUpdatePromise) return;
     if (this.tickPromise) return this.tickPromise;
     this.tickPromise = this.runQueue().finally(() => { this.tickPromise = null; });
     return this.tickPromise;
@@ -222,7 +321,8 @@ class MemoryMaintenance {
                 value: { ...(previous?.value || {}), retryAfter, retryMode: mode, sources: [] } }], this.memory.epoch, { notify: false });
             });
           } catch { /* A failed store must not hide the original failure. */ }
-          this.publish({ status: 'failed', mode, note: this.safeError(error) });
+          const errorSite = String(error?.stack || '').match(/(?:src\/main\/)([a-z0-9-]+\.js:\d+:\d+)/u)?.[1] || null;
+          this.publish({ status: 'failed', mode, note: this.safeError(error), errorSite });
         }
         break;
       } finally {
@@ -255,6 +355,7 @@ class MemoryMaintenance {
   }
 
   cancel() {
+    this.selfController?.abort();
     if (this.timer) { this.clearTimer(this.timer); this.timer = null; }
     if (this.activeMode && !this.queue.includes(this.activeMode)) this.queue.unshift(this.activeMode);
     this.controller?.abort();
@@ -267,6 +368,8 @@ class MemoryMaintenance {
     this.closed = true;
     if (this.timer) { this.clearTimer(this.timer); this.timer = null; }
     this.controller?.abort();
+    this.selfController?.abort();
+    await this.selfUpdatePromise?.catch(() => {});
     await this.tickPromise?.catch(() => {});
     this.publish({ status: 'paused', mode: this.activeMode || this.queue[0] || null, note: '应用关闭，整理进度已保存' });
   }
@@ -316,7 +419,7 @@ class MemoryMaintenance {
       if (!validRole(row)) { consumed.push(row); continue; }
       const content = row.value.content;
       if (chars + content.length > this.maxChars) {
-        if (!consumed.length) throw new Error('单条消息超过整理字符预算，原文未截断且进度未推进');
+        if (!consumed.length) { consumed.push(row); input.push(require('./message-identity').inputRow(row)); }
         break;
       }
       consumed.push(row);
@@ -342,20 +445,22 @@ class MemoryMaintenance {
       seen.add(key);
       const owner = require('./message-identity').isOwner(source.value);
       if (!owner && item.claimType !== 'observation') continue;
-      outputs.push({ source, content, evidence: item.evidence, observation: !owner, tags: normalizeTags(item.tags) });
+      outputs.push({ source, content, evidence: item.evidence, observation: !owner, tags: normalizeTags(item.keywords || item.tags), memoryKind: ['user_model', 'relationship', 'strategy'].includes(item.memoryKind) ? item.memoryKind : 'candidate' });
     }
     return outputs;
   }
 
   buildDreamRecords(candidates, batch, consumed, partition, snapshot) {
     const records = [];
-    const inputSources = [...new Set(batch.map(row => row.id))];
+    const inputSources = [...new Set([...batch.map(row => row.id), ...(snapshot.extraSources || [])])];
     for (const item of this.validCandidates(candidates, batch, partition)) {
+      const n = require('./memory-references').normalize(item.content, { at: item.source.value.occurredAt || item.source.ts, timezone: item.source.value.timezone, timeUnknown: !!item.source.value.timeUnknown, keywords: item.tags, entities: snapshot.entities || [] });
+      item.content = n.canonical;
       const id = `dream-memory:v3:${digest(`${partition.domain}:${partition.visibilityFloor}:${item.source.id}:${item.evidence}:${item.content}`, 40)}`;
-      records.push({ id, kind: 'memory', ts: item.source.ts, domain: partition.domain, visibilityFloor: partition.visibilityFloor,
+      records.push({ id, kind: 'memory', ts: item.source.ts, expiresAt: require('./memory-references').temporaryExpiry(item.source), domain: partition.domain, visibilityFloor: partition.visibilityFloor,
         searchText: `${item.content} ${item.tags.join(' ')}`.trim(),
-        value: require('./memory-tags').tagged({ content: item.content, memoryKind: item.observation ? 'observation' : 'candidate', status: 'pending', importance: 0.6,
-          evidence: item.evidence, evidenceSourceId: item.source.id, sources: [item.source.id, ...inputSources.filter(source => source !== item.source.id)], origin: item.observation ? 'dream-observation-v1' : 'dream-candidate-v3', evidenceCharacter: require('./message-identity').character(item.source.value), ...(item.observation && item.source.value.taskId ? { key: 'event:' + require('./message-identity').character(item.source.value) + ':' + item.source.value.taskId } : {}), ...(item.tags.length ? { tags: item.tags } : {}) }, ['automatic']) });
+        value: require('./memory-tags').tagged({ content: item.content, references: n.references, memoryKind: item.observation ? 'observation' : item.memoryKind, status: 'pending', importance: 0.6,
+          evidence: item.evidence, evidenceSourceId: item.source.id, sources: [...new Set([item.source.id, ...inputSources.filter(source => source !== item.source.id), ...n.references.entities.map(e => e.sourceId).filter(Boolean)])], origin: item.observation ? 'dream-observation-v1' : 'dream-candidate-v3', evidenceCharacter: require('./message-identity').character(item.source.value), ...(item.observation && item.source.value.taskId ? { key: 'event:' + require('./message-identity').character(item.source.value) + ':' + item.source.value.taskId } : {}), ...(item.tags.length ? { tags: item.tags } : {}) }, ['automatic']) });
     }
     const last = consumed.at(-1);
     if (last) records.push({ id: `${CHECKPOINT_PREFIX}${partition.domain}:${partition.visibilityFloor}`, kind: 'state', ts: 0, updatedAt: this.clock(), domain: partition.domain, visibilityFloor: partition.visibilityFloor,
@@ -398,6 +503,8 @@ class MemoryMaintenance {
 
   async runExtract(signal) {
     this.publish({ stage: 'dream' });
+    const priority = await this.runPriorityReflection(signal); if (priority !== 'done') return priority;
+    if (this.settingsOnly) { this.settingsOnly = false; this.forceDream = false; return 'done'; }
     this.currentProcessed = 0;
     let held = false;
     const force = this.requestSources.get(this.activeMode) === 'manual' || this.activeMode === 'deepdream' || this.forceDream;
@@ -420,11 +527,15 @@ class MemoryMaintenance {
         snapshot.snapshotHash = this.sourceHash(eligible);
         const batchEnd = consumed.at(-1);
         let candidates = { memories: [] }, selected = consumed;
+        const taskRows = await this.taskEvidence(eligible);
+        snapshot.extraSources = taskRows.map(r => r.id);
+        const growthView = await this.memory.growth?.view({ scene: require('./memory-scope').SCENES[partition.visibilityFloor], ...partition });
+        const analysisContext = await this.cognitiveContext(eligible, { taskRows, growth: growthView });
         if (input.length) {
           try {
             if (this.memory.blocks) {
               const planned = await require('./semantic-plan').planBatch(this.memory, { mode: 'dream', scope: partition, rows: eligible,
-                generate: this.extract, signal, force: !!force || !!(snapshot.state?.value.deferSince && this.clock() - snapshot.state.value.deferSince >= 10 * 60_000), reserveModelCall: s => this.reserveModelCall(s) });
+                generate: this.extract, analysisContext, signal, force: !!force || !!(snapshot.state?.value.deferSince && this.clock() - snapshot.state.value.deferSince >= 10 * 60_000), reserveModelCall: s => this.reserveModelCall(s) });
               if (planned.status !== 'done') return planned.status;
               candidates = planned.result;
               if (!planned.consumed.length) {
@@ -441,7 +552,7 @@ class MemoryMaintenance {
             } else {
               const reserved = await this.reserveModelCall(signal);
               if (!reserved.ok) return 'budget';
-              candidates = await this.extract(input, { signal });
+              candidates = await this.extract(input, { signal, analysisContext });
             }
           } catch (error) {
             if (signal.aborted || this.closed) return 'paused';
@@ -460,10 +571,21 @@ class MemoryMaintenance {
           if (!candidates || typeof candidates !== 'object' || Array.isArray(candidates)) throw new Error('记忆整理模型返回格式无效');
         }
         const acceptedCandidates = { ...candidates, memories: (candidates.memories || []).filter(item => selected.some(row => row.id === item.sourceId)) };
+        snapshot.entities = await this.memory.entityAnchors?.(require('./memory-scope').SCENES[partition.visibilityFloor]) || [];
         const records = this.buildDreamRecords(acceptedCandidates, eligible, selected, partition, snapshot);
         // This watermark update and all derivatives are committed in one native write.
-        const committed = await this.commitDream(records, eligible, partition, snapshot);
+        const selfRows = selected.filter(r => eligible.some(e => e.id === r.id));
+        const growth = await this.memory.growth?.prepare(acceptedCandidates.growthChanges, { rows: [...selfRows, ...taskRows], view: growthView,
+          self: analysisContext?.self, entities: snapshot.entities, ...partition });
+        let committed;
+        if (analysisContext && this.memory.cognition) {
+          try { await this.memory.cognition.commitPatch({ requestId: 'dream:' + snapshot.snapshotHash, baseRevision: analysisContext.self.revision,
+            ops: analysisContext.self.locked ? [] : this.selfOps(acceptedCandidates, [...selfRows, ...taskRows]) }, { sourceRows: [...eligible, ...taskRows],
+            signal, generation: snapshot.generation, extraRecords: [...records, ...(growth?.records || [])], validateExtra: growth?.guard }); committed = true; }
+          catch (e) { if (e.code === 'E_SELF_STALE') committed = false; else throw e; }
+        } else committed = await this.commitDream(records, eligible, partition, snapshot);
         if (!committed) return 'paused';
+        if (growth?.records.length) await this.memory.observeGrowthRecords?.(growth.records);
         this.currentProcessed += selected.length;
         this.publish({ status: 'running', mode: this.activeMode, processed: this.statusValue.processed + selected.length, note: '已保存一批有来源的记忆整理结果' });
         if (snapshot.deferred) { held = true; break; }
@@ -473,7 +595,7 @@ class MemoryMaintenance {
         if (batchEnd === snapshot.page.at(-1) && snapshot.page.length < this.maxMessages) break;
       }
     }
-    this.forceDream = false;
+    this.forceDream = false; if (!held) this.reflectionReason = null;
     return held ? 'deferred' : 'done';
   }
 
@@ -512,13 +634,16 @@ class MemoryMaintenance {
   async runDeepdream(signal) {
     const extracted = await this.runExtract(signal);
     if (extracted !== 'done') return extracted;
+    const reflection = await this.runPriorityReflection(signal, { deep: true }); if (reflection !== 'done') return reflection;
     this.publish({ stage: 'deepdream' });
     this.deepdream ||= require('./deepdream').createDeepdream({ memory: this.memory, analyze: this.analyzeRelations, clock: this.clock });
     const result = await this.deepdream.run({ signal, canRun: details => this.permitted(details),
       reserveModelCall: budgetSignal => this.reserveModelCall(budgetSignal) });
     this.publish({ scanned: (this.statusValue.scanned || 0) + (result.scanned || 0) });
     if (result.status !== 'done') return result.status;
-    let more = result.more;
+    const refs = await this.memory.backfillReferences?.({ signal, canRun: () => this.permitted({ mode: 'deepdream', signal }) });
+    if (refs && refs.status !== 'done') return refs.status;
+    let more = result.more || refs?.more;
     if (this.memory.knowledge) {
       this.publish({ stage: 'knowledge' });
       for (const method of ['sync', 'backfillExperiences']) {
@@ -557,6 +682,8 @@ class MemoryMaintenance {
       this.automaticRetryAfter = Number.isSafeInteger(schedule?.value?.retryAfter) ? schedule.value.retryAfter : 0;
       if (now < this.automaticRetryAfter) return false;
       const date = this.localDayKey(now), hour = new Date(now).getHours();
+      const self = await this.memory.cognition?.loadRoleView({ repair: false });
+      if (self?.pendingSettings && !self.locked) return this.requestReflection('settings').ok;
       const pending = await this.pendingMessages();
       let queued = false;
       if (this.automaticRetryAfter && ['blocks', 'doze', 'dream', 'deepdream'].includes(schedule?.value?.retryMode)) {

@@ -29,8 +29,11 @@ const NAMES = {
 /* 灯光系数：这几只官方样例的贴图本身就偏亮（白裙子 + 金发在 1.0 的光下会洗白），
  * 载入时按角色单独压一下主光与 Ambient，裙子才看得见褶皱而不是一片白。 */
 const LIGHT = {
-  'avatarsample_g': 0.76,
+  'avatarsample_e': 0.62,
+  'avatarsample_f': 0.64,
+  'avatarsample_g': 0.56,
 };
+const HIDDEN_MESHES = { '58': ['Bag.baked'] };
 
 const baseOf = (file) => String(file).replace(/\.vrm$/i, '').toLowerCase();
 
@@ -91,6 +94,7 @@ function scan(dir = MODELS_DIR) {
       // 原来的名字留着做 tooltip：主人想知道「这是哪只官方样例」还查得到
       title: m.title || '',
       light: LIGHT[base] || 1,
+      hiddenMeshes: HIDDEN_MESHES[base] || [],
       author: m.author || '',
       vrmVersion: m.vrmVersion || '',
       redistribute: m.redistribute || false,

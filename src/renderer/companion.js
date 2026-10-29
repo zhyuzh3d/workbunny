@@ -1,6 +1,13 @@
+import { setupAutonomy } from './autonomy-ui.js';
+import { createSelfEditor } from './self-editor.js';
+import { characterName, characterText, paintCharacterNames } from './character-name.mjs';
 const $ = (id) => document.getElementById(id);
 const page = new URLSearchParams(location.search).get('p') === 'desktop' ? 'desktop' : 'memory';
 $(page === 'desktop' ? 'desktopPage' : 'memoryPage').hidden = false;
+if (page === 'desktop') setupAutonomy(window.pet);
+let characterConfig = {};
+function setCharacterConfig(config) { if (config?.buddy) { characterConfig = config; paintCharacterNames(config); } }
+const selfEditor = page === 'memory' ? createSelfEditor(window.pet, { getConfig: () => characterConfig }) : null;
 
 function node(tag, className = '', text = '') {
   const item = document.createElement(tag);
@@ -11,7 +18,7 @@ function node(tag, className = '', text = '') {
 function setNote(id, message, bad = false) {
   const target = $(id);
   if (!target) return;
-  target.textContent = message || '';
+  target.textContent = characterText(message, characterConfig);
   target.classList.toggle('bad-text', !!bad);
 }
 function api(name, ...args) {
@@ -49,10 +56,6 @@ const SCENE_SCOPE_TEXT = {
 };
 let activeScene = 'life', savedScene = 'life', sceneRevision = 0;
 let sceneWritePending = 0, sceneWriteTail = Promise.resolve();
-let savedSceneProfiles = { private: '', life: '', work: '' };
-let sceneProfileDrafts = { private: '', life: '', work: '' };
-const sceneProfileRevisions = { private: 0, life: 0, work: 0 };
-let profileWritePending = 0, profileWriteTail = Promise.resolve();
 let memoryRefreshPending = false, memoryRefreshTimer = null, memoryRefreshBusy = false;
 let memoryViewRevision = 0, memoryStatsRevision = 0;
 let memoryListBusyRevision = 0;
@@ -122,19 +125,18 @@ async function requestMemoryMaintenance(mode) {
 }
 function memoryConfigFrom(result) {
   const root = result?.config || result || {};
+  setCharacterConfig(root);
   const value = root.memory && typeof root.memory === 'object' ? root.memory : {};
   memoryCfg = { enabled: !!value.enabled, extract: !!value.extract };
   savedMemoryCfg = { ...memoryCfg };
   activeScene = SCENES.includes(value.scene) ? value.scene : 'life';
   savedScene = activeScene;
-  const profiles = root.buddy?.sceneProfiles && typeof root.buddy.sceneProfiles === 'object' ? root.buddy.sceneProfiles : {};
-  savedSceneProfiles = Object.fromEntries(SCENES.map(scene => [scene, typeof profiles[scene] === 'string' ? profiles[scene].slice(0, 2000) : '']));
-  sceneProfileDrafts = { ...savedSceneProfiles };
   paintMemoryConfig();
   paintSceneSettings();
 }
 function applyMemoryConfigUpdate(result) {
   const root = result?.config || result || {};
+  setCharacterConfig(root);
   const remoteMemory = root.memory && typeof root.memory === 'object' ? root.memory : {};
   for (const key of ['enabled', 'extract']) {
     const dirty = memoryCfg[key] !== savedMemoryCfg[key];
@@ -146,13 +148,6 @@ function applyMemoryConfigUpdate(result) {
   const sceneDirty = activeScene !== savedScene;
   savedScene = remoteScene;
   if (!sceneDirty) activeScene = remoteScene;
-  const profiles = root.buddy?.sceneProfiles && typeof root.buddy.sceneProfiles === 'object' ? root.buddy.sceneProfiles : {};
-  for (const scene of SCENES) {
-    const dirty = (sceneProfileDrafts[scene] || '') !== (savedSceneProfiles[scene] || '');
-    const remote = typeof profiles[scene] === 'string' ? profiles[scene].slice(0, 2000) : '';
-    savedSceneProfiles[scene] = remote;
-    if (!dirty) sceneProfileDrafts[scene] = remote;
-  }
   paintMemoryConfig();
   paintSceneSettings();
 }
@@ -166,17 +161,6 @@ function configDraftLabel(draft) {
 function paintSceneSettings() {
   $('memoryScene').value = activeScene;
   $('memorySceneScope').textContent = SCENE_SCOPE_TEXT[activeScene];
-  $('sceneProfile').value = sceneProfileDrafts[activeScene] || '';
-  syncSceneProfileNote();
-}
-function hasUnsavedSceneProfiles() {
-  return SCENES.some(scene => (sceneProfileDrafts[scene] || '') !== (savedSceneProfiles[scene] || ''));
-}
-function syncSceneProfileNote() {
-  const dirty = (sceneProfileDrafts[activeScene] || '') !== (savedSceneProfiles[activeScene] || '');
-  $('sceneProfileSave').disabled = profileWritePending > 0;
-  if (!profileWritePending && dirty && !$('sceneProfileNote').classList.contains('bad-text')) setNote('sceneProfileNote', '有未保存的场景设定');
-  else if (!profileWritePending && $('sceneProfileNote').textContent === '正在保存…') setNote('sceneProfileNote', '');
 }
 function changeMemoryScene(scene) {
   if (!SCENES.includes(scene) || scene === activeScene) return;
@@ -190,7 +174,6 @@ function changeMemoryScene(scene) {
   paintCurrentRecall([]);
   paintSceneSettings();
   setNote('memorySceneScope', SCENE_SCOPE_TEXT[scene]);
-  setNote('sceneProfileNote', (sceneProfileDrafts[scene] || '') !== (savedSceneProfiles[scene] || '') ? '有未保存的场景设定' : '');
   sceneWritePending++;
   setNote('memoryConfigNote', '正在切换场景…');
   sceneWriteTail = sceneWriteTail.catch(() => {}).then(async () => {
@@ -210,39 +193,6 @@ function changeMemoryScene(scene) {
         await loadMemoryStats(); await loadMemoryList(true);
       }
     } finally { sceneWritePending--; }
-  });
-}
-function saveSceneProfile() {
-  const scene = activeScene;
-  const content = String(sceneProfileDrafts[scene] || '').slice(0, 2000);
-  const revision = sceneProfileRevisions[scene];
-  profileWritePending++;
-  $('sceneProfileSave').disabled = true;
-  setNote('sceneProfileNote', '正在保存…');
-  profileWriteTail = profileWriteTail.catch(() => {}).then(async () => {
-    try {
-      const result = await api('config', { buddy: { sceneProfiles: { [scene]: content } } });
-      if (result?.ok === false) throw new Error(result.error || '保存失败');
-      const root = result?.config || result;
-      const returnedProfiles = root?.buddy?.sceneProfiles;
-      if (returnedProfiles && typeof returnedProfiles === 'object') {
-        for (const key of SCENES) {
-          const wasDirty = (sceneProfileDrafts[key] || '') !== (savedSceneProfiles[key] || '');
-          const remote = typeof returnedProfiles[key] === 'string' ? returnedProfiles[key].slice(0, 2000) : '';
-          savedSceneProfiles[key] = remote;
-          if (!wasDirty) sceneProfileDrafts[key] = remote;
-        }
-      } else savedSceneProfiles[scene] = content;
-      if (revision === sceneProfileRevisions[scene]) sceneProfileDrafts[scene] = content;
-      if (activeScene === scene) syncSceneProfileNote();
-      if (activeScene === scene && revision === sceneProfileRevisions[scene]) setNote('sceneProfileNote', '本场景设定已保存');
-      else if (activeScene === scene) setNote('sceneProfileNote', '已保存上一版；有新的修改未保存');
-    } catch (error) {
-      if (activeScene === scene) setNote('sceneProfileNote', `保存失败，草稿仍保留。${error.message || '请重试。'}`, true);
-    } finally {
-      profileWritePending--;
-      if (activeScene === scene) syncSceneProfileNote();
-    }
   });
 }
 async function flushMemoryConfig() {
@@ -276,7 +226,7 @@ function saveMemorySetting(key, value) {
   flushMemoryConfig();
 }
 addEventListener('beforeunload', (event) => {
-  if (!memoryCfgPending && !sceneWritePending && !profileWritePending && !hasUnsavedSceneProfiles()) return;
+  if (!memoryCfgPending && !sceneWritePending) return;
   event.preventDefault(); event.returnValue = '';
 });
 function rowSourceIds(row) {
@@ -310,8 +260,10 @@ function renderRecord(row) {
   top.append(node('span', 'record-date', formatTime(row.ts)));
   if (row.role) {
     const id = row.characterId || (row.role === 'assistant' ? 'bunny' : 'owner');
-    const names = { owner: '主人', bunny: 'Bunny', workbuddy: 'WorkBuddy', system: '系统事件' };
-    top.append(node('span', 'badge', row.characterName && row.characterName !== id ? row.characterName : names[id] || id));
+    const names = { owner: '主人', bunny: characterName(characterConfig), workbuddy: 'WorkBuddy', system: '系统事件' };
+    const characterBadge = node('span', 'badge', id === 'bunny' ? names.bunny : row.characterName && row.characterName !== id ? row.characterName : names[id] || id);
+    if (id === 'bunny') characterBadge.dataset.characterText = 'Bunny';
+    top.append(characterBadge);
   }
   if (row.memoryKind === 'observation') top.append(node('span', 'badge', '来源观察'));
   if (row.evidenceCharacter && !row.role) top.append(node('span', 'badge', `来源：${row.evidenceCharacter}`));
@@ -366,7 +318,7 @@ function renderRecord(row) {
         card.append(region);
       }
     });
-    addAction(actions, '删除', async () => {
+    addAction(actions, '彻底遗忘', async () => {
       try {
         hideError();
         const result = await api('memoryRemove', row.id);
@@ -696,13 +648,7 @@ $('memorySearchBtn').addEventListener('click', () => { memoryQuery = $('memorySe
 $('memorySearch').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('memorySearchBtn').click(); } });
 $('memoryMore').addEventListener('click', () => { if (memoryHasMore) loadMemoryList(false); });
 $('memoryScene').addEventListener('change', event => changeMemoryScene(event.target.value));
-$('sceneProfile').addEventListener('input', event => {
-  sceneProfileDrafts[activeScene] = event.target.value.slice(0, 2000);
-  sceneProfileRevisions[activeScene]++;
-  $('sceneProfileNote').classList.remove('bad-text');
-  syncSceneProfileNote();
-});
-$('sceneProfileSave').addEventListener('click', saveSceneProfile);
+$('openSelfSettings').addEventListener('click', () => { void selfEditor?.open(); });
 $('memoryEnabled').addEventListener('change', (event) => saveMemorySetting('enabled', event.target.checked));
 $('memoryExtract').addEventListener('change', (event) => saveMemorySetting('extract', event.target.checked));
 $('memoryExport').addEventListener('click', async () => {
@@ -811,15 +757,17 @@ function paintDesktopStatus(status) {
     : ['accepted', 'failed'].includes(task?.status) ? task.report || ''
       : task?.note || (running ? '代理操作正在进行' : '');
   const stateText = task ? [taskLabel, stateDetail && stateDetail !== taskLabel ? stateDetail : ''].filter(Boolean).join(' · ') : '没有正在进行的代理操作';
-  $('taskStateNote').textContent = stateText;
-  $('taskStateNote').title = stateText;
+  $('taskStateNote').textContent = characterText(stateText, characterConfig);
+  $('taskStateNote').dataset.characterText = stateText;
+  $('taskStateNote').title = characterText(stateText, characterConfig);
   const pausableStates = ['starting', 'running', 'awaiting', 'monitoring', 'verifying', 'paused', 'stopped'];
   const pauseNote = task?.target === 'workbuddy' && pausableStates.includes(task.status)
     ? '暂停只停止 Bunny 的代理操作；WorkBuddy 已接收的会话可能仍在继续。'
     : task?.target === 'wechat' && pausableStates.includes(task.status)
       ? '暂停只停止 Bunny 的微信代理操作；微信中已发生的变化需要单独核对。' : '';
   const pauseNoteEl = $('taskPauseNote');
-  pauseNoteEl.textContent = pauseNote;
+  pauseNoteEl.textContent = characterText(pauseNote, characterConfig);
+  pauseNoteEl.dataset.characterText = pauseNote;
   pauseNoteEl.hidden = !pauseNote;
   const permissions = desktopStatus.permissions || {};
   const requiredPermissions = ['accessibilityTrusted', 'screenCaptureAllowed', 'postEventAllowed'];
@@ -896,7 +844,9 @@ function paintWatches(rows) {
   const active = watchRows.filter(row => !['stopped', 'expired'].includes(row?.status));
   const inactive = watchRows.filter(row => ['stopped', 'expired'].includes(row?.status));
   if (!active.length && !inactive.length) {
-    list.append(node('div', 'watch-empty', '暂时没有持续关注。可以告诉 Bunny：“帮我关注某位联系人的新消息，有消息就告诉我。”'));
+    const empty = node('div', 'watch-empty', characterText('暂时没有持续关注。可以告诉 Bunny：“帮我关注某位联系人的新消息，有消息就告诉我。”', characterConfig));
+    empty.dataset.characterText = '暂时没有持续关注。可以告诉 Bunny：“帮我关注某位联系人的新消息，有消息就告诉我。”';
+    list.append(empty);
     return;
   }
   for (const row of active) list.append(makeWatchRow(row));
@@ -1095,11 +1045,13 @@ addEventListener('beforeunload', () => {
 
 if (page === 'memory') {
   initMemory();
+  if (new URLSearchParams(location.search).get('section') === 'self') void selfEditor.open();
   let recallRevision = 0;
   if (typeof window.pet?.init === 'function') Promise.resolve(window.pet.init()).then(result => {
     if (recallRevision === 0) paintCurrentRecall(result?.currentRecall);
   }).catch(() => {});
   window.pet?.on?.(event => {
+    if (event?.type === 'self-editor-open') void selfEditor.open();
     if (event?.type === 'memory-ready') { loadMemoryStats(); loadMemoryList(true); }
     else if (event?.type === 'memory-changed') scheduleMemoryRefresh();
     else if (event?.type === 'memory-maintenance') { paintMaintenanceStatus(event); if (event.status === 'idle') void loadMemoryStats(); }
@@ -1113,11 +1065,13 @@ else {
   $('watchRefresh').addEventListener('click', refreshWatches);
   $('workbuddyMonitorCard').hidden = $('taskTarget').value !== 'workbuddy';
   if (typeof window.pet?.init === 'function') Promise.resolve(window.pet.init()).then(result => {
+    setCharacterConfig(result?.config);
     paintWorkBuddyMonitor(result?.monitor);
     if (result?.desktop) paintDesktopStatus(result.desktop);
     if (Array.isArray(result?.watches)) paintWatches(result.watches);
   }).catch(() => {});
   if (typeof window.pet?.on === 'function') window.pet.on((event) => {
+    if (event?.type === 'config' && event.config) setCharacterConfig(event.config);
     if (event?.type === 'desktop') paintDesktopStatus(event);
     else if (event?.type === 'monitor') paintWorkBuddyMonitor(event);
     else if (Array.isArray(event)) paintWatches(event);

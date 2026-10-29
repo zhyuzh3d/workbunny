@@ -13,6 +13,7 @@ const pairKey = row => hash(JSON.stringify([row.domain, row.visibilityFloor, [..
 const questionId = row => 'memory-doubt:v1:' + pairKey(row);
 const decisionId = (id, floor) => `doubt-resolution:v1:${hash(id)}:${floor}`;
 const replacementMarker = id => 'bunny_replaces_' + hash(id).slice(0, 24);
+const correctionMarker = id => 'bunny_corrects_' + hash(id).slice(0, 24);
 const STOP = /^(?:你好|您好|谢谢|好的|嗯|好|在吗|hello|hi|ok)[！!。，,.？?\s]*$/iu;
 const relationLabels = { equivalent: '同义陈述', update: '随时间变化', contextual: '不同条件', contradiction: '可能矛盾', uncertain: '需要核对' };
 
@@ -31,7 +32,7 @@ function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
     for (const id of row.value.memberIds) {
       const member = verified.rows.find(item => item.id === id);
       if (!member || member.domain !== row.domain || member.visibilityFloor !== row.visibilityFloor || member.state !== 'active' ||
-          !['pending', 'confirmed'].includes(member.value.status)) return null;
+          !['pending', 'confirmed'].includes(member.value.status) || member.expiresAt && member.expiresAt <= clock()) return null;
       const evidence = await evidenceFor(memory, member, { scene });
       if (!evidence) return null;
       members.push({ ...member, evidence });
@@ -172,9 +173,11 @@ function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
   async function applyResolutions(rows, { scene = memory.scene() } = {}) {
     if (!rows.length) return { rows, facts: [], suppressed: [] };
     const ids = new Set(rows.map(row => row.id));
-    const replacements = await memory.search([...ids].slice(0, 48).map(replacementMarker).join(' '), ['memory'], 50, { scene });
+    const evidenceIds = [...new Set(rows.flatMap(r => r.kind === 'message' ? [r.id, ...(r.value.sources || [])] : [r.value.evidenceSourceId]).filter(Boolean))];
+    const replacements = await memory.search([...ids].slice(0, 48).map(replacementMarker).concat(evidenceIds.slice(0, 48).map(correctionMarker)).join(' '), ['memory'], 50, { scene });
     const valid = replacements.filter(row => row.state === 'active' && row.value.status === 'confirmed' &&
-      row.value.origin === 'user-reviewed-doubt' && Array.isArray(row.value.supersedes) && row.value.supersedes.some(id => ids.has(id)));
+      ['user-reviewed-doubt', 'user-reviewed'].includes(row.value.origin) && Array.isArray(row.value.supersedes) &&
+      (row.value.supersedes.some(id => ids.has(id)) || row.value.supersedesClaims?.some(c => evidenceIds.includes(c.sourceId))));
     const facts = [];
     for (const row of valid) if (await evidenceFor(memory, row, { scene })) facts.push(row);
     const currentIds = new Set([...rows, ...facts].map(row => row.id));
@@ -182,6 +185,11 @@ function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
     // correction under the same ID is new evidence and must remain visible.
     const suppressed = new Set();
     for (const row of facts) {
+      if (row.value.origin === 'user-reviewed') {
+        for (const old of rows) if (old.id !== row.id && (row.value.supersedes.includes(old.id) || row.value.supersedesClaims?.some(c =>
+          c.sourceId === old.value.evidenceSourceId && typeof old.value.evidence === 'string' && (old.value.evidence.includes(c.quote) || c.quote.includes(old.value.evidence))))) suppressed.add(old.id);
+        continue;
+      }
       if (!Array.isArray(row.value.supersedesSnapshots) || !(await verifySnapshots(memory, row.value.supersedesSnapshots, { scene })).ok) continue;
       // verifySnapshots reads authoritative stored rows. Display projections may
       // intentionally add explanatory text and must not be used as fingerprints.
@@ -289,7 +297,11 @@ function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
     return { status: 'done', more: rows.length === 30, processed };
   }
 
-  return { projectMemories: consolidation.project, sync, resolve, list, context, applyResolutions, backfillExperiences, validRelation, projectQuestion };
+  async function projectMemories(rows, options) {
+    const result = await applyResolutions(await consolidation.project(rows, options), options);
+    return [...new Map([...result.facts, ...result.rows].filter(r => !result.suppressed.includes(r.id)).map(r => [r.id, r])).values()];
+  }
+  return { projectMemories, sync, resolve, list, context, applyResolutions, backfillExperiences, validRelation, projectQuestion };
 }
 
-module.exports = { createMemoryKnowledge, replacementMarker };
+module.exports = { createMemoryKnowledge, replacementMarker, correctionMarker };

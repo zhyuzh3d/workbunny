@@ -57,9 +57,12 @@ function makeSentenceSplitter(onSentence) {
  * @returns {Promise<{text:string,motions:string[],emos:string[],usage:any,ms:number}>}
  */
 function chat(opts) {
-  opts = require('./context-budget').fitRequest(opts);
-  if (opts.transport === 'workbuddy') return opts.webSearch === true
+  opts = require('./context-budget').fitRequest(opts, { retainLanes: true });
+  if (opts.transport === 'workbuddy') return opts.webSearch === true || opts.recallSession
     ? require('./conversation-search').chatWithSearch(opts) : require('./workbuddy').chat(opts);
+  if (opts.recallSession && !opts._toolRound) return require('./conversation-search').chatWithSearch(opts, {
+    chat: request => chat({ ...request, _toolRound: true, recallSession: undefined, webSearch: false }),
+  });
   const {
     baseURL, apiKey, model, messages,
     temperature = 0.8, maxTokens = 220, timeoutMs = 30000,
@@ -79,7 +82,7 @@ function chat(opts) {
     const isHttps = u.protocol === 'https:';
     const payload = JSON.stringify({
       model,
-      messages,
+      messages: messages.map(require('./context-budget').wire),
       max_tokens: maxTokens,
       stream: true,
       // 部分网关认这个；不认的会忽略
@@ -118,6 +121,7 @@ function chat(opts) {
         res.setEncoding('utf8');
         let text = '';
         let usage = null;
+        const tools = new Map();
         const splitter = makeSentenceSplitter((s) => onSentence && onSentence(s));
         let buf = '';
 
@@ -140,6 +144,13 @@ function chat(opts) {
             const ch = (d.choices && d.choices[0]) || null;
             if (!ch) continue;
             const delta = ch.delta || {};
+            for (const part of delta.tool_calls || []) {
+              const index = part.index || 0, prior = tools.get(index) || { id: '', type: 'function', function: { name: '', arguments: '' } };
+              if (part.id) prior.id = part.id;
+              if (part.function?.name) prior.function.name += part.function.name;
+              if (part.function?.arguments) prior.function.arguments += part.function.arguments;
+              tools.set(index, prior);
+            }
             // 推理模型的思考过程不进正文
             if (delta.content) {
               text += delta.content;
@@ -151,6 +162,7 @@ function chat(opts) {
 
         res.on('end', () => {
           splitter.flush();
+          if (tools.size) { resolve({ raw: '', text: '', model, usage, toolCalls: [...tools.values()] }); return; }
           const { clean, motions, emos } = extractTags(text);
           if (!clean.trim()) { reject(new Error('模型没有返回回答正文，请检查所选模型和思考设置')); return; }
           resolve({ text: clean.trim(), raw: text, motions, emos, usage, model });

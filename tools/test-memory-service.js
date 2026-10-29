@@ -75,7 +75,8 @@ async function testChangeNotifications(temp, safeStorage) {
   assert.equal(changes.length, beforeRemove + 1, 'remove emits one notification');
   await service.clear();
   assert.equal(changes.at(-1).type, 'memory-changed', 'clear invalidates the open view');
-  assert.equal((await service.db.request('stats')).counts.total, 0);
+  assert.equal((await service.db.request('stats')).counts.total, 1, 'clear keeps only an empty self head so old config cannot resurrect personality');
+  assert.equal((await service.cognition.loadRoleView()).entries.length, 0);
   await service.close();
 }
 
@@ -194,10 +195,11 @@ async function testAssistantLineageDeletionAndCorrection(temp, safeStorage) {
   const oldContext = await updateService.context('猫叫什么', { budget: 8500 });
   const oldReply = await updateService.addMessage('assistant', '猫名是旧猫名PQ。', { sources: oldContext.sourceIds });
   const revised = await updateService.updateMemory(oldMemory.id, '我的猫名字改为新猫名RS');
-  assert.equal(revised.removedSources, 1);
+  assert.equal(revised.removedSources, 0);
   const oldNameMatches = await updateService.search('旧猫名PQ', ['message', 'memory']);
-  assert(!oldNameMatches.some(row => row.value.content.includes('旧猫名PQ')));
-  assert.equal((await updateService.db.request('get', { ids: [oldSource.id, oldMemory.id, oldReply.id] })).rows.length, 0);
+  assert(oldNameMatches.some(row => row.id === oldSource.id), 'original conversation remains historical evidence');
+  assert.equal((await updateService.db.request('get', { ids: [oldSource.id, oldMemory.id, oldReply.id] })).rows.length, 3);
+  assert.equal((await updateService.query('memory', 20)).some(r => r.id === oldMemory.id), false, 'old fact is retired');
   const updatedMemory = (await updateService.list({ kind: 'memory' }))[0];
   assert.equal(updatedMemory.content, '我的猫名字改为新猫名RS');
   const reviewedSource = (await updateService.db.request('get', { ids: updatedMemory.sources })).rows[0];
@@ -215,12 +217,13 @@ async function testCorrectionInvalidatesSource(temp, safeStorage) {
   const memory = (await service.list({ kind: 'memory' }))[0];
   assert(memory && memory.content.includes('红茶'));
   const corrected = await service.updateMemory(memory.id, '我改为喜欢绿茶');
-  assert.equal(corrected.removedSources, 1);
-  assert((await service.search('红茶', ['message', 'memory'])).length === 0, 'old statement should no longer be searchable');
+  assert.equal(corrected.removedSources, 0);
+  assert((await service.search('红茶', ['message'])).some(r => r.id === original.id), 'correction preserves the historical statement');
+  assert(!(await service.query('memory', 20)).some(r => r.id === memory.id), 'old claim loses current-fact status');
   const newMemory = (await service.list({ kind: 'memory' }))[0];
   assert.equal(newMemory.content, '我改为喜欢绿茶');
   assert.notEqual(newMemory.id, memory.id);
-  assert(!service.recent.some(x => x.id === original.id));
+  assert(service.recent.some(x => x.id === original.id));
   assert(!service.recent.some(x => x.value.content === '我改为喜欢绿茶' && x.value.source === 'user-reviewed'));
   await service.close();
 }
@@ -231,7 +234,7 @@ async function testReviewedEditAndMoodForget(temp, safeStorage) {
   await service.addMessage('user', '请记住：我的小猫叫棉花Audit');
   const originalMemory = (await service.list({ kind: 'memory' }))[0];
   const updated = await service.updateMemory(originalMemory.id, '我的小猫名字更正为云朵Audit');
-  assert.equal(updated.removedSources, 1);
+  assert.equal(updated.removedSources, 0);
   let correctedMemory = (await service.list({ kind: 'memory' }))[0];
   const correctedSourceId = correctedMemory.sources[0];
   assert.equal((await service.db.request('get', { ids: [correctedSourceId] })).rows.length, 1,
@@ -241,7 +244,7 @@ async function testReviewedEditAndMoodForget(temp, safeStorage) {
   assert(!context.messages.some(row => row.role === 'user' && row.content.includes('云朵Audit')),
     'an editor correction must not be injected as a spoken user turn');
   assert.match(context.text, /云朵Audit/, 'the corrected memory itself remains in context');
-  assert.match(context.text, /新的对话起点/, 'an edit must not advance the last-conversation timestamp');
+  assert.match(context.text, /最近一条共同对话/, 'the original conversation remains; editor evidence is not a new chat turn');
   await service.close();
 
   service = await createService(correctionDir, safeStorage).init();
@@ -249,11 +252,12 @@ async function testReviewedEditAndMoodForget(temp, safeStorage) {
   assert(!service.recent.some(row => row.value.source === 'user-reviewed'), 'restart must keep editor evidence out of recent dialogue');
   context = await service.context('你好', { budget: 8500 });
   assert(!context.messages.some(row => row.role === 'user' && row.content.includes('云朵Audit')));
-  assert.match(context.text, /新的对话起点/);
+  assert.match(context.text, /最近一条共同对话/);
   await service.remove(correctedMemory.id);
   assert.equal((await service.db.request('get', { ids: [correctedMemory.sources[0]] })).rows.length, 0,
     'forgetting the corrected memory still cascades to its review evidence');
-  assert.equal((await service.search('云朵Audit', ['message', 'memory'])).length, 0);
+  assert(!(await service.search('云朵Audit', ['message', 'memory'])).some(r => r.value.content.includes('云朵Audit')),
+    'the removed correction is gone; old history may still match the shared Audit token');
   await service.close();
 
   const moodDir = path.join(temp, 'mood-forget-vault');
@@ -447,7 +451,7 @@ async function testContextBudgetAndDisabledFallback(temp, safeStorage) {
     { role: 'assistant', content: '更早的 RAM 对话', domain: 'life', visibilityFloor: 1 },
     { role: 'user', content: '当前这一轮', domain: 'life', visibilityFloor: 1 },
   ], budget: 500 });
-  assert.deepEqual(fallback.messages, [{ role: 'user', content: '当前这一轮' }]);
+  assert.deepEqual(fallback.messages.map(({ role, content }) => ({ role, content })), [{ role: 'assistant', content: '更早的 RAM 对话' }, { role: 'user', content: '当前这一轮' }]);
   const tiny = await service.context('当前这一轮', { recent: [{ role: 'user', content: '当前这一轮', domain: 'life', visibilityFloor: 1 }], budget: 100 });
   assert(tiny.text.length + tiny.messages.reduce((n, m) => n + JSON.stringify(m).length, 0) <= 100);
   await service.close();

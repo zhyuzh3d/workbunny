@@ -43,9 +43,10 @@
   <div id="recText">在听…</div>
 </div>
 
-<!-- 上方任务状态：使用整行文字宽度。 -->
+<!-- 上方任务状态：按当前内容收缩，长内容限制在 UI 列宽内。 -->
 <div id="activity" class="hidden">
-  <span class="dot"></span>
+  <!-- Official icon from the installed WorkBuddy application's resources. -->
+  <img class="workbuddy-logo" src="./assets/icons/workbuddy-logo.png" alt="WorkBuddy" draggable="false" />
   <span class="actRoll"><span id="activityText">在干活</span></span>
   <button id="actDone" title="这条我看过了" aria-label="这条我看过了">
     <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor"

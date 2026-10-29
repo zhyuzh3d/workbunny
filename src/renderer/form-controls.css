@@ -1,0 +1,47 @@
+/* Shared field appearance, including dynamically created and untyped inputs.
+ * Layout stays with each panel; checkboxes and sliders keep their own styles. */
+:where(input:not([type]), input[type="text"], input[type="search"], input[type="password"],
+       input[type="url"], input[type="email"], input[type="tel"], input[type="number"],
+       textarea, select) {
+  appearance: none;
+  min-width: 0;
+  border: 1px solid rgba(30, 24, 18, .12);
+  border-radius: 8px;
+  padding: 6px 9px;
+  background-color: #fffdfa;
+  color: var(--ink);
+  font: 12px/1.5 var(--font);
+  outline: 0;
+  transition: border-color .14s, box-shadow .14s, background-color .14s;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Native macOS select painting can ignore the field's rounded border. */
+select {
+  appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m3 4.5 3 3 3-3' fill='none' stroke='%23777f89' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 12px;
+  cursor: pointer;
+}
+
+textarea { resize: vertical; }
+input::placeholder, textarea::placeholder { color: #8a9099; opacity: 1; }
+
+:where(input:not([type]), input[type="text"], input[type="search"], input[type="password"],
+       input[type="url"], input[type="email"], input[type="tel"], input[type="number"],
+       textarea, select):focus {
+  border-color: #9c9488;
+  background-color: #fff;
+  box-shadow: 0 0 0 2px rgba(74, 80, 88, .10);
+}
+
+:where(input:not([type]), input[type="text"], input[type="search"], input[type="password"],
+       input[type="url"], input[type="email"], input[type="tel"], input[type="number"],
+       textarea, select):disabled {
+  opacity: .5;
+  cursor: default;
+}

@@ -5,38 +5,45 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>workbunny</title>
 <link rel="stylesheet" href="./panel.css" />
+<link rel="stylesheet" href="./form-controls.css" />
 </head>
 <body data-p="settings">
 
-<!-- ══ 设置：四个 tab ══
-     按"她身上哪一部分"分，不按技术模块分 —— 主人脑子里想的是"她的脸/她的耳朵/
-     她的脑子/她的嘴"，不是"llm 配置 / tts 配置"。
-     每页只显示当前选择需要的控件：选了系统语音就不会冒出一大片 API 地址吓人。 -->
+<!-- Settings are grouped by what the owner wants to change. -->
 <div id="settings" class="pane">
   <div class="tabs" id="tabs">
-    <button data-t="look">角色</button>
+    <button data-t="look">外观</button>
+    <button data-t="persona">设定</button>
+    <button data-t="scene">场景</button>
     <button data-t="ear">听力</button>
     <button data-t="brain">智力</button>
     <button data-t="mouth">语音</button>
   </div>
 
-  <!-- 外貌 -->
-  <div class="pb" data-page="look">
+  <!-- 用户给与的设定与 Bunny 自我理解分开编辑。 -->
+  <div class="pb" data-page="persona">
     <label class="row"><span>名字</span><input id="setName" type="text" /></label>
-    <label class="row"><span>设定</span><textarea id="setProfile" rows="5" maxlength="2000"></textarea></label>
     <label class="row"><span>怎么称呼你</span><input id="setOwnerName" type="text" maxlength="64" placeholder="主人" /></label>
-    <div class="scene-profile-box">
-      <div class="group">当前场景</div>
-      <label class="row"><span>对话场景</span><select id="panelScene" aria-label="对话场景">
-        <option value="private">私聊</option>
-        <option value="life">生活</option>
-        <option value="work">工作</option>
-      </select></label>
-      <div class="note" id="panelSceneScope">生活：可参考生活与工作资料。</div>
-      <label class="row scene-profile-row"><span>场景补充</span><textarea id="panelSceneProfile" rows="3" maxlength="2000" placeholder="可留空，沿用共通设定"></textarea></label>
-      <div class="note">同一个 Bunny 的场景补充，不替换上面的共通角色设定。切换场景立即生效；修改补充后点下方“保存”。</div>
-      <div class="scene-profile-status" id="panelSceneProfileStatus" role="status"></div>
+    <label class="setting-field"><span data-character-text="你给 Bunny 的设定">你给她的设定</span><textarea id="setProfile" rows="6" maxlength="2000" data-character-placeholder="你希望 Bunny 是怎样的伙伴，有怎样的性格、兴趣或愿景" placeholder="你希望她是怎样的伙伴"></textarea></label>
+    <label class="setting-field"><span>你希望她怎样与你相处</span><textarea id="setBehavior" rows="4" maxlength="2000" placeholder="例如：我倾诉时先听完，不急着给建议；可以表达自己的不同看法"></textarea></label>
+    <div class="note" data-character-text="这里保留你的原始设定。点击后，Bunny 会立即融合新设定与现有理解；也可以手工微调她当前的自我理解。">这里保留你的原始设定，可立即融合更新或手工微调。</div>
+    <div class="persona-actions"><button id="selfUnderstand" class="mini">理解并更新设定</button><button id="selfManual" class="mini">手工微调</button></div>
+    <div id="selfSettingsStatus" class="permTip" role="status"></div>
+  </div>
+
+  <div class="pb" data-page="scene">
+    <div class="group">对话场景</div>
+    <div class="segRow" id="panelScene" role="group" aria-label="对话场景">
+      <button data-scene="private" aria-pressed="false">私聊</button>
+      <button data-scene="life" aria-pressed="false">生活</button>
+      <button data-scene="work" aria-pressed="false">工作</button>
     </div>
+    <div class="note scene-scope" id="panelSceneScope">生活：可参考生活与工作资料。</div>
+    <div class="note">三个场景共用同一份自我理解，场景决定可参考的资料范围。选择后立即生效。</div>
+    <div class="scene-profile-status" id="panelSceneProfileStatus" role="status"></div>
+  </div>
+
+  <div class="pb" data-page="look">
     <div class="group">形象</div>
     <div class="avRow" id="avRow"></div>
 

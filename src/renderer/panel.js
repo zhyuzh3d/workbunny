@@ -1,3 +1,4 @@
+import { createSelfSettings } from './self-settings.js';
 /**
  * 独立窗口（设置 / 动作库）的逻辑。
  *
@@ -5,9 +6,7 @@
  * 一半，动作库摊开 92 条更是把画面挤成一条缝。它们本来就不是"表演的一部分"，
  * 该有自己的窗口：娃娃在她的窗口里照常站着，主人在这边慢慢挑。
  *
- * ── 设置分四页 ──
- * 按"她身上哪一部分"分，不按技术模块分：主人想的是"她的脸/耳朵/脑子/嘴"，
- * 不是"llm 配置 / tts 配置"。每页只显示当前选择真正需要的控件 ——
+ * 设置分为外观、设定、场景、听力、智力、语音。每页只显示需要的控件 ——
  * 选了系统语音，就不该同时冒出一大片 API 地址把人吓退。
  *
  * 这里不碰 3D。点一个动作是把 key 发给主进程，由主进程转给角色窗口去演。
@@ -26,6 +25,7 @@ let BRAIN = { providers: [], thinkingLevels: [], workbuddyModels: [] };
 let TTSI = { engines: [], systemVoices: [], qwen: {}, dl: {} };
 
 const $ = (id) => document.getElementById(id);
+const selfSettings = createSelfSettings(window.pet, { save: () => save(), getConfig: () => cfg });
 const log = (m) => { try { window.pet.log('[panel] ' + m); } catch {} };
 
 // Keep unsaved fields separate from the latest main-process snapshot. An older
@@ -85,13 +85,16 @@ function paintSceneProfile(source = cfg) {
   const configured = source?.memory?.scene;
   let scene = pendingValue('memory.scene', configured || 'life');
   if (!Object.hasOwn(SCENE_SCOPE_TEXT, scene)) scene = 'life';
-  $('panelScene').value = scene;
+  for (const button of $('panelScene').querySelectorAll('[data-scene]')) {
+    const active = button.dataset.scene === scene;
+    button.classList.toggle('on', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
   $('panelSceneScope').textContent = SCENE_SCOPE_TEXT[scene];
-  const path = `buddy.sceneProfiles.${scene}`;
-  $('panelSceneProfile').value = pendingValue(path, '');
+  const path = 'memory.scene';
   const status = $('panelSceneProfileStatus');
   status.classList.remove('bad', 'dirty');
-  if (edits.has(path)) { status.textContent = '有未保存的场景补充'; status.classList.add('dirty'); }
+  if (edits.has(path)) { status.textContent = '正在切换场景…'; status.classList.add('dirty'); }
   else status.textContent = '';
 }
 function changePanelScene(scene) {
@@ -447,7 +450,7 @@ function syncTts(c, acknowledged = []) {
     rate: pendingValue('tts.rate', 200), qwenVoice: pendingValue('tts.qwen.voice', 'serena'),
     chpVoice: pendingValue('tts.chp.voice', ''),
   };
-  for (const [id, path, fallback] of [['setName', 'buddy.name', 'baby'], ['setProfile', 'buddy.profile', ''], ['setOwnerName', 'buddy.ownerName', '主人'], ['rmUrl', 'tts.baseURL', '']])
+  for (const [id, path, fallback] of [['setName', 'buddy.name', 'baby'], ['setOwnerName', 'buddy.ownerName', '主人'], ['rmUrl', 'tts.baseURL', '']])
     if (!edits.has(path)) $(id).value = readPath(c, path) ?? fallback;
   paintSceneProfile(c);
   if (!edits.has('tts.apiKey')) $('rmKey').value = c.tts.hasApiKey ? KEY_MASK : '';
@@ -463,6 +466,7 @@ function syncTts(c, acknowledged = []) {
     initBrainDraft(); paintBrain();
   }
   paintTts();
+  selfSettings.paint();
   if (c.tts.engine === 'system' && c.tts.lastFallback?.at && c.tts.lastFallback.at !== previousFallback)
     $('sfNote').textContent = '已切换到系统默认语音：' + c.tts.lastFallback.reason;
 }
@@ -470,8 +474,9 @@ function syncTts(c, acknowledged = []) {
 function fillForm() {
   const c = cfg;
   $('setName').value = c.buddy.name || '';
-  $('setProfile').value = c.buddy.profile || '';
+  void selfSettings.load();
   $('setOwnerName').value = c.buddy.ownerName || '主人';
+  selfSettings.paint();
   $('setAlways').checked = !!(c.voice && c.voice.alwaysListen);
   $('setJudge').checked = !(c.asr && c.asr.judge === false);
   $('setTtsOn').checked = !!c.tts.enabled;
@@ -498,6 +503,7 @@ async function save() {
   btn.disabled = true;
   try {
     const { patch, paths } = draftPatch();
+    await selfSettings.saveInputs();
     await persist(patch, paths);
     $('sfNote').textContent = edits.size ? '当前设置已保存，新的编辑尚未保存。' : '设置已保存并生效。';
     btn.textContent = '已保存 ✓';
@@ -599,16 +605,11 @@ function buildMotionList() {
     });
     $('brainKeyInput').addEventListener('input', () => edit('brain', true));
     $('brainThinking').addEventListener('change', () => edit('brain', true));
-    $('panelScene').addEventListener('change', () => changePanelScene($('panelScene').value));
-    $('panelSceneProfile').addEventListener('input', () => {
-      const scene = pendingValue('memory.scene', cfg?.memory?.scene || 'life');
-      const path = `buddy.sceneProfiles.${scene}`;
-      edit(path, $('panelSceneProfile').value.slice(0, 2000));
-      $('panelSceneProfileStatus').textContent = '有未保存的场景补充';
-      $('panelSceneProfileStatus').classList.remove('bad');
-      $('panelSceneProfileStatus').classList.add('dirty');
+    $('panelScene').addEventListener('click', event => {
+      const button = event.target.closest('button[data-scene]');
+      if (button) changePanelScene(button.dataset.scene);
     });
-    for (const [id, path] of [['setName', 'buddy.name'], ['setProfile', 'buddy.profile'], ['setOwnerName', 'buddy.ownerName']])
+    for (const [id, path] of [['setName', 'buddy.name'], ['setOwnerName', 'buddy.ownerName']])
       $(id).addEventListener('input', () => edit(path, $(id).value));
     $('setAlways').addEventListener('change', () => edit('voice.alwaysListen', $('setAlways').checked));
     $('setJudge').addEventListener('change', () => edit('asr.judge', $('setJudge').checked));

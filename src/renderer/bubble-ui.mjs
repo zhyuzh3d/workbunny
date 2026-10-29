@@ -77,6 +77,15 @@ export function createBubbleController(bubble, textElement, { setTimeoutFn = set
   };
 
   return {
+    setSpeaking(on) {
+      if (on) holdHide('speech');
+      else if (holdReasons.has('speech')) {
+        holdReasons.delete('speech');
+        // A following sentence starts within this grace period and holds the
+        // same bubble again. The final sentence releases it after playback.
+        scheduleHide(1200);
+      }
+    },
     show(text, holdMs) {
       if (!text) return;
       streaming = false; streamText = '';

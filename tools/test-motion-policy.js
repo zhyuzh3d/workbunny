@@ -30,7 +30,7 @@ test('an interaction voice keeps its touch gesture while ordinary speech still r
  assert(start>=0&&end>start,'the real speaking event branch exists');
  const branch=renderer.slice(start,end);
  const idles=[];
- const context={speakingNow:false,thinkingNow:false,shownHeard:false,shownState:'',ambientTimer:0,currentMotion:'touch_greet',IDLE:'idle_loop',
+ const context={speakingNow:false,thinkingNow:false,shownHeard:false,shownState:'',ambientTimer:0,currentMotion:'touch_greet',IDLE:'idle_loop',cfg:{tts:{enabled:true},voice:{enabled:true}},bubbleController:{setSpeaking(){}},
   toIdle:fade=>idles.push(fade),paintEar(){},clearHeardLater(){}};
  vm.createContext(context);
  vm.runInContext(`function handleSpeaking(ev){switch(ev.type){${branch}default:break;}}`,context);

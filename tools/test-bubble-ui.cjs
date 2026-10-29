@@ -168,6 +168,28 @@ async function testWebSourcesStayLocalAndOpenOnlyValidatedTitles() {
   assert.equal(await evaluate("document.getElementById('bubble').classList.contains('has-web-sources')"), false);
 }
 
+async function testSpeechKeepsTheBubbleUntilPlaybackCompletes() {
+  assert.match(appJs, /bubbleController\.setSpeaking\(/u, 'production speaking events control bubble lifetime');
+  await evaluate("window.fixture.controller.hide(); window.fixture.controller.show('等合成与朗读完成。',200); window.fixture.controller.setSpeaking(true)");
+  assert.deepEqual(await evaluate('window.fixture.clock.pending()'), [], 'synthesis and playback cancel the fixed hide timer');
+  await evaluate("window.fixture.controller.appendDelta('后续文字'); window.fixture.controller.finish('完整的长回复',9000)");
+  assert.deepEqual(await evaluate('window.fixture.clock.pending()'), [], 'final text cannot re-arm the timer during speech');
+  assert.equal(await evaluate('window.fixture.clock.fire()'), false);
+  assert.equal(await evaluate("document.getElementById('bubble').classList.contains('hidden')"), false);
+  await evaluate('window.fixture.controller.setSpeaking(false)');
+  assert.deepEqual(await evaluate('window.fixture.clock.pending()'), [1200], 'playback completion starts a brief closing delay');
+  await evaluate('window.fixture.controller.setSpeaking(true)');
+  assert.deepEqual(await evaluate('window.fixture.clock.pending()'), [], 'the next spoken sentence keeps the bubble continuously visible');
+  await evaluate("document.getElementById('bubble').dispatchEvent(new MouseEvent('mouseenter')); window.fixture.controller.setSpeaking(false)");
+  assert.deepEqual(await evaluate('window.fixture.clock.pending()'), [], 'reading hover still protects the bubble after audio ends');
+  await evaluate("document.getElementById('bubble').dispatchEvent(new MouseEvent('mouseleave'))");
+  assert.deepEqual(await evaluate('window.fixture.clock.pending()'), [1200]);
+  await evaluate('window.fixture.clock.fire()');
+  assert.equal(await evaluate("document.getElementById('bubble').classList.contains('hidden')"), true);
+  await evaluate("window.fixture.controller.show('打断这句。'); window.fixture.controller.setSpeaking(true); window.fixture.controller.hide(); window.fixture.controller.setSpeaking(false)");
+  assert.deepEqual(await evaluate('window.fixture.clock.pending()'), [], 'explicit interruption clears the speech hold and timer');
+}
+
 app.whenReady().then(async () => {
   win = new BrowserWindow({ width: 560, height: 760, show: false, webPreferences: { contextIsolation: false, nodeIntegration: false, sandbox: true } });
   await win.loadFile(fixture);
@@ -178,7 +200,8 @@ app.whenReady().then(async () => {
   await testMouseAndKeyboardScrollInput();
   await testHoverAndFocusPauseAndResumeHideTimer();
   await testWebSourcesStayLocalAndOpenOnlyValidatedTitles();
-  console.log('bubble UI fixture: viewport bounds, five-line cap, references, source validation, stream preservation, mouse/keyboard scrolling, and hide timer interaction passed');
+  await testSpeechKeepsTheBubbleUntilPlaybackCompletes();
+  console.log('bubble UI fixture: playback-bound lifetime, interruption, viewport bounds, references, stream preservation, scrolling and reading holds passed');
   win.destroy();
   fs.rmSync(temp, { recursive: true, force: true });
   app.quit();

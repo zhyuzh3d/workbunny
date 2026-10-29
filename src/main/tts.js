@@ -162,6 +162,18 @@ async function qwenTTS(text, q, options) {
 }
 async function prewarm(q) { if (q?.dir && qwenDownload.qwenReady(q.dir)) await qwenRuntime.prewarm(q.dir); }
 
+/** Stable identity for persistent interaction audio, based on the active engine. */
+async function voiceIdentity(cfg) {
+  const engine = cfg.engine || 'system';
+  if (engine === 'qwen') return { engine, model: QWEN_FILES.map(f => f.sha256), voice: cfg.qwen?.voice || 'serena' };
+  if (engine === 'remote') {
+    const catalog = chp.cached(cfg) || await chp.discover(cfg).catch(() => null);
+    if (!catalog) return null; // Let ordinary synthesis handle its system fallback.
+    return { engine, service: catalog.endpoint, model: [catalog.model, catalog.file, catalog.version], voice: cfg.chp?.voice || catalog.voices[0].id };
+  }
+  return { engine: 'system', model: 'macos-system', voice: pickSystemVoice(cfg.voice), rate: cfg.rate || 200 };
+}
+
 /* ═══════════ 合成入口 ═══════════ */
 /**
  * @param {string} text
@@ -252,7 +264,7 @@ function clearSpeechCache() { cache.clear(); }
 function reset() { clearSpeechCache(); }
 
 module.exports = {
-  synthesize, probe,
+  synthesize, probe, voiceIdentity,
   systemVoices, pickSystemVoice,
   downloadQwen, downloadState, cancelDownload, qwenReady, QWEN_FILES, qwenVoices,
   findSpeechRuntime, reset, clearSpeechCache, prewarm,

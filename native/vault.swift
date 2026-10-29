@@ -593,12 +593,20 @@ final class DB {
             guard let tokens=p["tokens"] as? [String], tokens.count <= 128, let now=int(p["now"]) else { throw fail("invalid_request") }
             let requiredTokens = try tokenFilters(p, "requiredTokens")
             let excludedTokens = try tokenFilters(p, "excludedTokens")
+            let anyTokens = p["anyTokens"] as? [String] ?? []
+            guard anyTokens.count <= 512, anyTokens.allSatisfy(validHMACToken), p["anyTokens"] == nil || p["anyTokens"] is [String] else { throw fail("invalid_request") }
             if tokens.isEmpty { return ["rows": []] }
             let kinds = (p["kinds"] as? [String]) ?? (text(p["kind"]).map{[$0]} ?? [])
             let limit=min(50,max(1,Int(int(p["limit"]) ?? 20)))
             let uniqueTokens=Array(Set(tokens)); let marks=Array(repeating:"?",count:uniqueTokens.count).joined(separator:",")
-            var sql="SELECT r.id,r.kind,r.ts,r.updatedAt,r.state,r.expiresAt,r.body,r.domain,r.visibilityFloor,r.ingestionSeq,COUNT(*) score FROM records r JOIN tokens t ON t.recordId=r.id WHERE r.state='active' AND (r.expiresAt IS NULL OR r.expiresAt>?) AND t.token IN (\(marks))"
-            var vals:[(String?,Int64?)]=[(nil,now)]+uniqueTokens.map{($0,nil)}
+            let origin: String
+            if anyTokens.isEmpty { origin = "records r JOIN tokens t ON t.recordId=r.id" }
+            else {
+                let anyMarks = Array(repeating: "?", count: anyTokens.count).joined(separator: ",")
+                origin = "(SELECT DISTINCT recordId FROM tokens WHERE token IN (\(anyMarks))) candidates CROSS JOIN records r ON r.id=candidates.recordId CROSS JOIN tokens t ON t.recordId=r.id"
+            }
+            var sql="SELECT r.id,r.kind,r.ts,r.updatedAt,r.state,r.expiresAt,r.body,r.domain,r.visibilityFloor,r.ingestionSeq,COUNT(*) score FROM \(origin) WHERE r.state='active' AND (r.expiresAt IS NULL OR r.expiresAt>?) AND t.token IN (\(marks))"
+            var vals:[(String?,Int64?)]=anyTokens.map{($0,nil)}+[(nil,now)]+uniqueTokens.map{($0,nil)}
             if let floor=try requestedSceneFloor(p) { sql += " AND r.visibilityFloor<=?"; vals.append((nil,floor)) }
             if let raw=p["domain"] {
                 guard let domain=text(raw), domainFloor(domain) != nil else { throw fail("invalid_request") }

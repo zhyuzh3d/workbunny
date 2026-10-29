@@ -44,18 +44,9 @@ body[data-p="motions"]  #motions  { display: flex; }
 .pHead .sp { flex: 1 1 auto; }
 .pHead input {
   width: 108px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
   padding: 4px 8px;
-  font-family: var(--font);
   font-size: 11.5px;
-  background: #fbf8f3;
-  color: var(--ink);
-  outline: 0;
-  -webkit-user-select: text; user-select: text;
 }
-.pHead input:focus { background: #fff; }
-.pHead input::placeholder { color: #b6ae9e; }
 
 .pb { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px; font-size: 11.5px; }
 
@@ -87,15 +78,18 @@ body[data-p="motions"]  #motions  { display: flex; }
 .pb[data-page] { display: none; }
 .pb[data-page].on { display: block; }
 .row.dim { opacity: .45; }
-.scene-profile-box { margin: 12px 0 14px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,253,250,.68); }
-.scene-profile-box .group { margin-top: 0; }
-.scene-profile-box .note { margin-left: 86px; }
-.scene-profile-box .scene-profile-row { margin-top: 9px; }
-.scene-profile-box .scene-profile-status { min-height: 15px; margin: 5px 0 0 86px; color: var(--muted); font-size: 10.5px; }
-.scene-profile-box .scene-profile-status.bad { color: #a9453a; }
-.scene-profile-box .scene-profile-status.dirty { color: #775614; }
+.setting-field { display: block; margin: 16px 0 10px; }
+.setting-field > span { display: block; margin-bottom: 7px; color: var(--ink-soft); }
+.setting-field textarea { display: block; width: 100%; }
+.persona-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
+.persona-actions #selfUnderstand { flex: 2 1 190px; }
+.persona-actions #selfManual { flex: 1 1 86px; }
+.scene-scope { margin-top: 15px; color: var(--ink-soft); }
+.scene-profile-status { min-height: 15px; margin-top: 9px; color: var(--muted); font-size: 10.5px; }
+.scene-profile-status.bad { color: #a9453a; }
+.scene-profile-status.dirty { color: #775614; }
 
-/* tab：四个字一排，当前页下面一条线 */
+/* Six peer tabs fit in one row at the default window width. */
 .tabs {
   flex: 0 0 auto;
   display: flex;
@@ -106,6 +100,8 @@ body[data-p="motions"]  #motions  { display: flex; }
 }
 .tabs button {
   flex: 1 1 0;
+  min-width: 0;
+  white-space: nowrap;
   border: 0;
   background: transparent;
   color: var(--muted);
@@ -119,20 +115,8 @@ body[data-p="motions"]  #motions  { display: flex; }
 .tabs button:hover { color: var(--ink); }
 .tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
 
-/* 下拉：和输入框一个骨相，别让它看起来像另一个年代的控件 */
-select {
-  flex: 1 1 auto; min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 6px 8px;
-  font-family: var(--font);
-  font-size: 12px;
-  background: #fffdfa;
-  color: var(--ink);
-  outline: 0;
-  cursor: pointer;
-}
-select:disabled { opacity: .5; cursor: default; }
+/* Field appearance is shared with the memory and desktop panels. */
+select { flex: 1 1 auto; }
 input[type="range"] { flex: 1 1 auto; min-width: 0; accent-color: #4a5058; cursor: pointer; }
 .val { flex: 0 0 34px; text-align: right; font-size: 11px; color: var(--muted); }
 
@@ -162,18 +146,8 @@ input[type="range"] { flex: 1 1 auto; min-width: 0; accent-color: #4a5058; curso
 }
 .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .row > span { flex: 0 0 78px; color: var(--ink-soft); }
-.row > input[type="text"], .row > input[type="url"], .row > input[type="password"],
-.row > input[type="number"], .row > textarea {
+.row > input:not([type="checkbox"]):not([type="range"]), .row > textarea {
   flex: 1 1 auto; min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 6px 9px;
-  font-family: var(--font);
-  font-size: 12px;
-  background: #fffdfa;
-  color: var(--ink);
-  outline: 0;
-  -webkit-user-select: text; user-select: text;
 }
 .row > input[type="checkbox"] { width: 16px; height: 16px; }
 .modelRefresh { display:flex; align-items:center; gap:8px; margin:0 0 12px 86px; }
@@ -226,7 +200,7 @@ button.mini:disabled { opacity:.4; }
 .downloadPolicy { font-size:10.5px; }
 .voiceGroup { margin-top:20px; color:var(--ink-soft); font-size:11px; letter-spacing:0; }
 .voiceSelect { margin-top:0; }
-.voiceSelect select { width:100%; padding:9px 10px; }
+.voiceSelect select { width:100%; }
 .voiceEnabled { margin-top:18px; padding-top:13px; border-top:1px solid var(--line); }
 .voiceEnabled > span { flex:1; white-space:nowrap; }
 body:not([data-tab="mouth"]) #testBtn { display:none; }

@@ -248,7 +248,7 @@ async function testExplicitResumePreservesTaskAndPrivacy() {
   };
   const secretary = new Secretary({ desktop, epoch: () => 3, report: async item => reports.push(item),
     verify: async () => ({ verdict: 'pass', report: '已核对原结果' }) });
-  const result = await secretary.dispatch({ action: 'resume' }, { requestId: 'resume-old', userText: '继续刚才这件', sources: ['resume-user'], source: 'text' });
+  const result = await secretary.dispatch({ action: 'resume' }, { requestId: 'resume-old', requestSourceId: 'resume-user', userText: '继续刚才这件', sources: ['resume-user'], source: 'text' });
   if (secretary.verifying) await secretary.verifying;
   assert.equal(result.taskId, 'old-task');
   assert.equal(original.userRequest, '原始用户交代');

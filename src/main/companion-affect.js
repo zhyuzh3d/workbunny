@@ -19,6 +19,8 @@ const SIGNALS = Object.freeze({
   uplift: { valence: 0.18, arousal: 0.10, energy: 0.08 },
   'task-pass': { valence: 0.16, arousal: 0.07, energy: 0.05 },
   'task-fail': { valence: -0.10, arousal: 0.04, energy: -0.07 },
+  curiosity: { valence: 0.08, arousal: 0.14, energy: 0.06 },
+  anticipation: { valence: 0.12, arousal: 0.07, energy: 0.05 },
 });
 
 function finiteTime(value, fallback) {
@@ -106,6 +108,7 @@ class CompanionAffect {
     if (typeof text !== 'string' || !text.trim()) return false;
     // These cues only shape Bunny's expression. They do not classify or store
     // the user's emotional state, and no source text is retained here.
+    if (/(?:不开心|不太开心|不顺利|没成功|难过|伤心|焦虑|压力很大|烦死|疲惫|累了|受挫|不顺)/u.test(text)) return this.record('gentle', source, 0.7);
     if (/(?:谢谢|感谢|太好了|开心|顺利|成功|喜欢你|轻松多了)/u.test(text)) return this.record('uplift', source, 0.7);
     if (/(?:难过|伤心|焦虑|压力很大|烦死|疲惫|累了|受挫|不顺)/u.test(text)) return this.record('gentle', source, 0.7);
     return false;
@@ -116,6 +119,13 @@ class CompanionAffect {
     const verdict = verifiedResult.verdict;
     if (verdict !== 'pass' && verdict !== 'fail') return false;
     return this.record(verdict === 'pass' ? 'task-pass' : 'task-fail', scope, 0.65, ':verified-result');
+  }
+
+  observeAppraisal(row) {
+    if (row?.value?.schema !== 'growth-entry/v1' || !row.value.support?.length && !row.value.counter?.length) return false;
+    const signal = { curious: 'curiosity', hopeful: 'anticipation', pleased: 'uplift', disappointed: 'gentle', concerned: 'gentle' }[row.value.feeling];
+    // Time follows the real experience, not the time an old batch was Dreamed.
+    return signal ? this.record(signal, { ...row, ts: row.value.lastVerifiedAt }, 0.45) : false;
   }
 
   forget(sourceIds) {
@@ -165,11 +175,14 @@ class CompanionAffect {
 
   project(scene, now = this.clock(), { sourceIds } = {}) {
     const logicalNow = this.logicalNow(now);
-    const state = this.aggregate(this.visibleEvents(scene, logicalNow, sourceIds));
+    const visible = this.visibleEvents(scene, logicalNow, sourceIds), state = this.aggregate(visible);
     let expression = '表达平和自然，简短陪伴。';
     if (state.valence <= -0.05 || state.energy <= -0.04) expression = '语气温和克制，继续把眼前事情做好。';
     else if (state.valence >= 0.08) expression = '语气可以明快一点，保持自然。';
     else if (state.arousal >= 0.07) expression = '表达稍有活力，保持简洁。';
+    const interest = visible.filter(({ event, weight }) => ['curiosity', 'anticipation'].includes(event.kind) && weight * event.intensity >= 0.15).at(-1);
+    if (interest && state.valence > -0.05 && state.energy > -0.04) expression = interest.event.kind === 'curiosity'
+      ? '对有依据的探索有些好奇，可以自然表达想试一试的兴趣。' : '对正在推进的事情有些期待，表达自然，不催促回应。';
     return { prompt: `${this.rhythm(logicalNow)}表达状态：${expression}这些状态不改变任务优先级、授权、模型、验收标准或执行次数；不编造生活经历。` };
   }
 

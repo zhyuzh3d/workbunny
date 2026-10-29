@@ -37,22 +37,26 @@ async function rememberRequest(memory, intent, { userRecord, scene = memory.scen
     }
     const unique = [...new Map(sources.map(r => [r.id, r])).values()];
     const scope = scopes.withSources(scene, unique, scopes.rank(scene));
-    const rid = 'explicit-memory:v1:' + crypto.createHash('sha256').update(JSON.stringify([request.id, intent.action, intent.content, intent.quotes])).digest('hex');
-    if ((await readRecords(memory, [rid], { scene })).length) return { ok: true, duplicate: true, text: '这条已经记下了。', id: rid };
-    const same = (await memory.search(intent.content, ['memory'], 20, scope)).find(r => r.value.content === intent.content && r.value.sources.includes(request.id));
-    if (same && intent.action === 'remember') return { ok: true, duplicate: true, text: '已经记住了。', id: same.id };
     const evidence = unique.find(r => actors.isOwner(r.value) && intent.quotes.some(q => r.value.content.includes(q))) || request;
+    const normalized = require('./memory-references').normalize(intent.content, { at: evidence.value.occurredAt || evidence.ts, timezone: evidence.value.timezone, timeUnknown: !!evidence.value.timeUnknown, entities: await memory.entityAnchors(scene) });
+    const content = normalized.canonical;
+    const rid = 'explicit-memory:v1:' + crypto.createHash('sha256').update(JSON.stringify([request.id, intent.action, content, intent.quotes])).digest('hex');
+    if ((await readRecords(memory, [rid], { scene })).length) return { ok: true, duplicate: true, text: '这条已经记下了。', id: rid };
+    const fact = require('./user-facts').factFromStatement(intent.content);
+    const existing = await memory.query('memory', 80, { ...scope, sourceId: evidence.id });
+    const same = existing.find(r => r.value.content === content || fact && r.value.key === fact.key && r.value.canonicalValue === fact.canonicalValue);
+    if (same && intent.action === 'remember') return { ok: true, duplicate: true, text: same.value.status === 'pending' ? '新的说法已经记下，与原有记忆的差异还需要核对。' : '已经记住了。', id: same.id };
     const quote = intent.quotes.find(q => evidence.value.content.includes(q)) || request.value.content.slice(0, 500);
     const experience = intent.action === 'learn_experience';
-    const value = tagged({ content: intent.content, origin: experience ? 'user-experience-v1' : 'user-statement',
+    const value = tagged({ content, references: normalized.references, origin: experience ? 'user-experience-v1' : 'user-statement',
       status: experience ? 'unverified' : 'confirmed', memoryKind: 'fact', importance: 1,
       outcome: experience ? 'user-taught-unverified' : undefined,
-      evidence: quote, evidenceSourceId: evidence.id, sources: unique.map(r => r.id),
+      evidence: quote, evidenceSourceId: evidence.id, sources: [...new Set([...unique.map(r => r.id), ...normalized.references.entities.map(e => e.sourceId).filter(Boolean)])],
       analysisSnapshots: snapshotsOf(unique) }, ['active']);
     // JSON bodies have no undefined properties (fingerprints intentionally reject them).
     if (!experience) delete value.outcome;
     if (!current()) throw new Error('场景或轮次已变化，本次没有保存');
-    await memory.write([{ id: rid, kind: experience ? 'state' : 'memory', ts: memory.clock(), ...scope, value }]);
+    await memory.write([{ id: rid, kind: experience ? 'state' : 'memory', ts: memory.clock(), expiresAt: experience ? null : require('./memory-references').temporaryExpiry(evidence), ...scope, value }]);
     return { ok: true, id: rid, text: experience ? '已经记为你教给我的经验，实际使用时我会核对适用条件。' : '已经记住了。' };
   });
 }

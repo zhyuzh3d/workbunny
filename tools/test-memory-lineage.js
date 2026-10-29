@@ -107,18 +107,20 @@ async function testVoiceStableTurnReceiptAndCascade() {
   await service.close();
 }
 
-async function runTwoInputDoze(service, { candidateFor, excerptFor, clock }) {
-  const extract = async batch => ({
-    memories: candidateFor ? [candidateFor(batch)] : [],
-    // The test can deliberately omit a model input from excerpts. The v2
-    // summary still records all inputs as its dependency set.
-    excerpts: excerptFor ? [excerptFor(batch)] : [],
-  });
-  const worker = createWorker(service, extract, { clock });
-  const outcome = await worker.runDoze(new AbortController().signal);
-  assert.equal(outcome, 'done');
-  await worker.close();
-  return worker;
+// Frozen v2 backup fixtures: current Doze only compresses context. These
+// records deliberately test that erasure/correction still understands old
+// candidate evidence vs the larger set of model inputs.
+async function seedLegacyV2(service, { candidateFor, excerptFor, clock }) {
+  const batch = await allRows(service, 'message');
+  const inputs = batch.map(require('../src/main/message-identity').inputRow);
+  const item = candidateFor(inputs), quote = excerptFor(inputs), sources = batch.map(r => r.id);
+  await service.write([
+    { id: 'legacy-v2-candidate', kind: 'memory', ts: clock(), domain: batch[0].domain, visibilityFloor: batch[0].visibilityFloor,
+      value: { content: item.content, evidence: item.evidence, evidenceSourceId: item.sourceId, sources,
+        origin: 'doze-candidate-v2', memoryKind: 'candidate', status: 'pending' } },
+    { id: 'legacy-v2-summary', kind: 'summary', ts: clock(), domain: batch[0].domain, visibilityFloor: batch[0].visibilityFloor,
+      value: { content: quote.quote, excerpts: [quote], sources, origin: 'doze-summary-v2' } },
+  ]);
 }
 
 async function testV2EvidenceRemovalAndCorrection() {
@@ -126,7 +128,7 @@ async function testV2EvidenceRemovalAndCorrection() {
   await removeService.init();
   const fact = await addUser(removeService, '我每周三会去河边散步。');
   const unrelated = await addUser(removeService, '另一个话题是我喜欢柚子茶。');
-  await runTwoInputDoze(removeService, {
+  await seedLegacyV2(removeService, {
     clock: () => 1_800_000_000_010,
     candidateFor: batch => ({ sourceId: batch[0].id, content: '每周三去河边散步', evidence: '每周三会去河边散步' }),
     excerptFor: batch => ({ sourceId: batch[0].id, quote: batch[0].content }),
@@ -155,7 +157,7 @@ async function testV2EvidenceRemovalAndCorrection() {
   await updateService.init();
   const oldFact = await addUser(updateService, '我现在住在苏州园区。');
   const otherInput = await addUser(updateService, '我喜欢听爵士乐。');
-  await runTwoInputDoze(updateService, {
+  await seedLegacyV2(updateService, {
     clock: () => 1_800_000_100_010,
     candidateFor: batch => ({ sourceId: batch[0].id, content: '目前住在苏州园区', evidence: '现在住在苏州园区' }),
     excerptFor: batch => ({ sourceId: batch[0].id, quote: batch[0].content }),
@@ -165,14 +167,14 @@ async function testV2EvidenceRemovalAndCorrection() {
   const update = await updateService.updateMemory(oldCandidate.id, '我现在住在杭州滨江');
   assert(update.ok);
   const messages = await allRows(updateService, 'message');
-  assert(!messages.some(row => row.id === oldFact.id), 'correction removes only the evidence original');
+  assert(messages.some(row => row.id === oldFact.id), 'correction retains original history');
   assert(messages.some(row => row.id === otherInput.id), 'correction preserves unrelated input from that extraction batch');
   const memories = await allRows(updateService, 'memory');
   const reviewed = memories.find(row => row.value.origin === 'user-reviewed');
   assert.equal(reviewed?.value.content, '我现在住在杭州滨江');
-  assert(!memories.some(row => row.id === oldCandidate.id), 'old candidate does not survive correction');
-  assert.equal((await updateService.db.request('get', { ids: [oldCandidate.id] })).rows.length, 0);
-  assert.equal((await allRows(updateService, 'summary')).length, 0, 'summary depending on the corrected evidence is cascaded');
+  assert(memories.find(row => row.id === oldCandidate.id)?.state === 'superseded', 'old candidate is historical, not a current fact');
+  assert.equal((await updateService.db.request('get', { ids: [oldCandidate.id] })).rows.length, 1);
+  assert.equal((await allRows(updateService, 'summary')).length, 1, 'historical navigation is retained with the independent correction');
   await updateService.close();
 }
 
@@ -181,7 +183,7 @@ async function testUnselectedBatchInputInvalidatesAllDerivatives() {
   await service.init();
   const evidence = await addUser(service, '我计划春天去成都旅行。');
   const omittedFromExcerpts = await addUser(service, '顺便说我不吃香菜。');
-  await runTwoInputDoze(service, {
+  await seedLegacyV2(service, {
     clock: () => 1_800_000_200_010,
     candidateFor: batch => ({ sourceId: batch[0].id, content: '春天计划去成都旅行', evidence: '计划春天去成都旅行' }),
     excerptFor: batch => ({ sourceId: batch[0].id, quote: batch[0].content }),
@@ -216,7 +218,7 @@ async function testMaintenanceStatePointReadsPastLargeStateSet() {
     value: { job: 'doze', domain: 'life', visibilityFloor: 1, watermark: { ingestionSeq: 0, ts: 0, id: 'old-watermark' }, sources: [] } }]);
   const scheduledDate = '2026-10-27';
   await service.write([{ id: 'maintenance:daily-schedule', kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2,
-    value: { lastDueLocalDate: scheduledDate, lastSuccessAt: fixedNow, sources: [] } }]);
+    value: { lastDueLocalDate: scheduledDate, dreamDate: scheduledDate, deepdreamDate: scheduledDate, lastSuccessAt: fixedNow, sources: [] } }]);
   await service.write([{ id: 'maintenance:budget', kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2,
     value: { calls: [fixedNow - 1000], sources: [] } }]);
 
@@ -241,9 +243,9 @@ async function testMaintenanceStatePointReadsPastLargeStateSet() {
     calls.push(batch.map(row => row.id));
     return { memories: [], excerpts: [] };
   }, { clock: () => fixedNow });
-  const outcome = await doze.runDoze(new AbortController().signal);
+  const outcome = await doze.runExtract(new AbortController().signal);
   assert.equal(outcome, 'done');
-  assert(calls.flat().includes(lifeMessage.id), 'doze uses the persisted ingestion watermark and sees the life source');
+  assert(calls.flat().includes(lifeMessage.id), 'Dream uses the persisted ingestion watermark and sees the life source');
   const updatedCheckpoint = await doze.readPartitionState('life', 1);
   assert(updatedCheckpoint.value.watermark.ingestionSeq >= persistedMessage.ingestionSeq);
   assert.equal(updatedCheckpoint.value.watermark.id, lifeMessage.id);
