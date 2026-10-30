@@ -18,9 +18,9 @@ test('cancel, timeout and inconsistent readings preserve the previously enrolled
   const f = new SpeakerFilter(); f.load({ schema: 'local-speaker/v1', samples: [vector(0),vector(0),vector(0)] });
   const old = structuredClone(f.profile);
   let pending = f.enroll(); f.offer(feature(1)); f.cancel(); await assert.rejects(pending, /取消/); assert.deepEqual(f.profile, old);
-  pending = f.enroll({ timeoutMs: 5 }); await assert.rejects(pending, /重新朗读/); assert.deepEqual(f.profile, old);
-  pending = f.enroll(); for (let i = 0; i < 8; i++) f.offer(feature(1)); for (let i = 0; i < 8; i++) f.offer(feature(2));
-  await assert.rejects(pending, /同一个声音/); assert.deepEqual(f.profile, old);
+  pending = f.enroll({ timeoutMs: 5 }); await assert.rejects(pending, /重试/); assert.deepEqual(f.profile, old);
+  pending = f.enroll({quietMs:0}); for (let i = 0; i < 8; i++) f.offer(feature(1)); for (let i = 0; i < 8; i++) f.offer(feature(2));
+  await assert.rejects(pending, /声音变化/); assert.deepEqual(f.profile, old);
   f.device = 'first'; pending = f.enroll(); f.device = 'second'; f.offer(feature(0)); await assert.rejects(pending, /麦克风/); assert.deepEqual(f.profile, old);
 });
 test('enrollment ignores noise and finishes only after the reading becomes quiet', async () => {
@@ -35,4 +35,18 @@ test('filter uses bounded recent acoustic evidence before semantic text and has 
   let now = 0;const f = new SpeakerFilter({ clock: () => now });f.enabled = true;f.load({ schema: 'local-speaker/v1', samples: [vector(0),vector(0),vector(0)], threshold:.9 });
   assert(!f.acceptsText());f.offer(feature(0));assert(f.acceptsText());now=7000;assert(!f.acceptsText());
   f.enabled=false;assert(f.acceptsText());f.load({ schema:'local-speaker/v1', samples:[[NaN]] });assert(!f.status().ready);
+});
+
+test('a normal short reading stops automatically and emits progress, without waiting for three fixed recordings', async()=>{
+  const f=new SpeakerFilter();let updates=0;
+  const pending=f.enroll({quietMs:15,onProgress:()=>updates++});
+  f.heard('今天我想慢慢把事情做好');
+  for(let i=0;i<7;i++)f.offer({...feature(0),speech:false});
+  assert.equal(f.status().phase,'recording');assert(f.status().percent>0);assert(f.status().seconds>0);
+  await pending;assert(f.status().ready);assert.equal(f.status().phase,'complete');assert(updates>=3);
+});
+test('speech too short or an absent microphone produces a visible result and preserves the old profile',async()=>{
+ const f=new SpeakerFilter();f.load({schema:'local-speaker/v1',samples:[vector(0),vector(0),vector(0)]});const old=structuredClone(f.profile);
+ let pending=f.enroll({quietMs:5});f.heard('你好');f.offer(feature(0));await assert.rejects(pending,/没听清/);assert.equal(f.status().phase,'failed');assert.deepEqual(f.profile,old);
+ pending=f.enroll({startTimeoutMs:5});await assert.rejects(pending,/没有听到/);assert.deepEqual(f.profile,old);
 });

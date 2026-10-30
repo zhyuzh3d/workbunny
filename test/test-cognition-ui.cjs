@@ -81,35 +81,37 @@ async function run() {
   await exec(panel, "document.getElementById('setName').value='露露'; document.getElementById('setName').dispatchEvent(new Event('input'))");
   await exec(panel, "document.getElementById('selfManual').click()");
   await new Promise(r => setTimeout(r, 50)); assert.deepEqual(opened, ['self']);
-  const memory = await page('companion.html', { p: 'memory', section: 'self' });
-  await wait(memory, "document.getElementById('selfDialog').open && document.querySelectorAll('.self-entry').length > 0");
-  await wait(memory, "document.getElementById('selfDialogTitle').textContent.includes('露露')");
-  await exec(memory, "document.getElementById('selfGlobalLock').click()");
-  await wait(memory, "document.getElementById('selfGlobalLock').textContent === '解锁自我理解' && !document.getElementById('selfGlobalLock').disabled");
+  const memory = await page('companion.html', {p:'memory'});
+  const selfWindow = await page('self.html', {p:'self'});
+  await wait(selfWindow, "document.querySelectorAll('.self-entry').length > 0");
+  await wait(selfWindow, "document.getElementById('selfDialogTitle').textContent.includes('露露')");
+  await exec(selfWindow, "document.getElementById('selfGlobalLock').click()");
+  await wait(selfWindow, "document.getElementById('selfGlobalLock').textContent === '解锁自我理解' && !document.getElementById('selfGlobalLock').disabled");
   panel.webContents.send('pet:ev', { type: 'memory-changed' });
   await wait(panel, "document.getElementById('selfUnderstand').disabled");
-  assert.equal(await exec(memory, "document.querySelectorAll('#selfEntries input,#selfEntries textarea').length"), 0);
-  await exec(memory, "document.querySelector('.self-edit').click(); document.getElementById('selfEntryText').value='我愿意表达自己的看法，也会认真倾听。'; document.getElementById('selfEntrySave').click()");
-  await wait(memory, "!document.getElementById('selfEntryDialog').open && !document.getElementById('selfGlobalLock').disabled");
+  assert.equal(await exec(selfWindow, "document.querySelectorAll('#selfEntries input,#selfEntries textarea').length"), 0);
+  await exec(selfWindow, "document.querySelector('.self-edit').click(); document.getElementById('selfEntryText').value='我愿意表达自己的看法，也会认真倾听。'; document.getElementById('selfEntrySave').click()");
+  await wait(selfWindow, "!document.getElementById('selfEntryDialog').open && !document.getElementById('selfGlobalLock').disabled");
   assert((await m.cognition.loadRoleView()).text.includes('认真倾听'));
   assert((await m.cognition.loadRoleView()).locked, 'manual edits retain the global lock');
   for (const text of ['我在对方倾诉时会耐心听完。', '我在讨论方案时愿意清楚表达不同意见。']) {
-    await exec(memory, "document.getElementById('selfAdd').click()");
-    await exec(memory, `document.getElementById('selfEntryFacet').value='behavior'; document.getElementById('selfEntryText').value=${JSON.stringify(text)}; document.getElementById('selfEntryCondition').value='认真交流时'; document.getElementById('selfEntrySave').click()`);
-    await wait(memory, "!document.getElementById('selfEntryDialog').open && !document.getElementById('selfGlobalLock').disabled");
+    await exec(selfWindow, "document.getElementById('selfAdd').click()");
+    await exec(selfWindow, `document.getElementById('selfEntryFacet').value='behavior'; document.getElementById('selfEntryText').value=${JSON.stringify(text)}; document.getElementById('selfEntryCondition').value='认真交流时'; document.getElementById('selfEntrySave').click()`);
+    await wait(selfWindow, "!document.getElementById('selfEntryDialog').open && !document.getElementById('selfGlobalLock').disabled");
   }
   assert.equal((await m.cognition.loadRoleView()).entries.filter(e => e.facet === 'behavior').length, 2);
-  assert.equal(await exec(memory, "document.querySelectorAll('.self-entry[data-facet=behavior]').length"), 2);
-  await exec(memory, "document.querySelector('.self-edit').click()");
-  assert.equal(await exec(memory, "document.getElementById('selfEntryHistory').open"), false);
-  await exec(memory, "document.getElementById('selfEntryHistory').open=true");
-  await wait(memory, "document.getElementById('selfEntryHistoryList').textContent.includes('手工微调')");
-  await exec(memory, "document.getElementById('selfEntryHistory').open=false; document.getElementById('selfEntryCancel').click(); document.querySelector('.self-edit').click()");
-  assert.equal(await exec(memory, "document.getElementById('selfEntryHistory').open"), false);
-  await exec(memory, "document.getElementById('selfEntryCancel').click()");
-  await exec(memory, "document.getElementById('selfClose').click(); document.getElementById('openSelfSettings').click()");
-  await wait(memory, "document.getElementById('selfDialog').open");
-  assert.equal(await exec(memory, "[...document.querySelectorAll('#selfDialog button')].filter(b=>/锁定条目|解锁条目/.test(b.textContent)).length"), 0, 'one global lock control');
+  assert.equal(await exec(selfWindow, "document.querySelectorAll('.self-entry[data-facet=behavior]').length"), 2);
+  await exec(selfWindow, "document.querySelector('.self-edit').click()");
+  assert.equal(await exec(selfWindow, "document.getElementById('selfEntryHistory').open"), false);
+  await exec(selfWindow, "document.getElementById('selfEntryHistory').open=true");
+  await wait(selfWindow, "document.getElementById('selfEntryHistoryList').textContent.includes('手工微调')");
+  await exec(selfWindow, "document.getElementById('selfEntryHistory').open=false; document.getElementById('selfEntryCancel').click(); document.querySelector('.self-edit').click()");
+  assert.equal(await exec(selfWindow, "document.getElementById('selfEntryHistory').open"), false);
+  await exec(selfWindow, "document.getElementById('selfEntryCancel').click()");
+  await exec(memory, "document.getElementById('openSelfSettings').click()");
+  await new Promise(r=>setTimeout(r,20)); assert.deepEqual(opened,['self','self']);
+  await wait(selfWindow, "document.getElementById('selfDialog').tagName === 'MAIN'");
+  assert.equal(await exec(selfWindow, "[...document.querySelectorAll('#selfDialog button')].filter(b=>/锁定条目|解锁条目/.test(b.textContent)).length"), 0, 'one global lock control');
   await exec(panel, "document.querySelector('[data-t=scene]').click(); document.querySelector('#panelScene [data-scene=work]').click()");
   await wait(panel, "document.querySelector('#panelScene [data-scene=work]').getAttribute('aria-pressed') === 'true' && document.getElementById('panelSceneProfileStatus').textContent === ''");
   assert.deepEqual(configWrites.at(-1), { memory: { scene: 'work' } });
@@ -117,9 +119,9 @@ async function run() {
   await exec(panel, "document.querySelector('#panelScene [data-scene=private]').click()");
   await wait(panel, "document.getElementById('panelSceneProfileStatus').textContent.includes('已恢复')");
   assert.equal(await exec(panel, "document.querySelector('#panelScene [aria-pressed=true]').dataset.scene"), 'work');
-  await exec(memory, "document.getElementById('selfGlobalLock').click()");
-  await wait(memory, "document.getElementById('selfGlobalLock').textContent === '锁定自我理解' && !document.getElementById('selfGlobalLock').disabled");
-  await exec(memory, "document.getElementById('selfClose').click()");
+  await exec(selfWindow, "document.getElementById('selfGlobalLock').click()");
+  await wait(selfWindow, "document.getElementById('selfGlobalLock').textContent === '锁定自我理解' && !document.getElementById('selfGlobalLock').disabled");
+  assert.equal(await exec(selfWindow, "document.querySelectorAll('dialog#selfDialog').length"),0);
   settings.scene = 'life';
   const owner = await m.addMessage('user', '讨论方案时我希望先弄清目标。');
   const bunny = await m.addMessage('assistant', '我想试着写一个对话短篇，先写开场。');
@@ -142,7 +144,7 @@ async function run() {
   await wait(desktop, `document.getElementById('autonomyPath').textContent === ${JSON.stringify(directory)}`);
   await wait(memory, "document.getElementById('memoryStatus').textContent.includes('已就绪')");
   assert.equal(errors.length, 0, errors.join(';'));
-  console.log('real renderer/preload UI passed: seven settings tabs, explicit understanding, memory self dialog, multiple entries per category, global lock/manual edits/history, scene button persistence/rollback, growth and authorization');
+  console.log('real renderer/preload UI passed: seven settings tabs, explicit understanding, independent self window, multiple entries per category, global lock/manual edits/history, scene button persistence/rollback, growth and authorization');
 }
 run().then(() => finish(0), e => { console.error(e, errors.join('; ')); finish(1); });
-async function finish(code) { for (const w of windows) w.destroy(); await autonomy?.close(); await selfWorker?.close(); await m?.close(); fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); app.exit(code); }
+async function finish(code) { for (const w of windows) if (!w.isDestroyed()) w.destroy(); await autonomy?.close(); await selfWorker?.close(); await m?.close(); fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); app.exit(code); }

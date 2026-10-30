@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const http = require('node:http');
 const { app, BrowserWindow, ipcMain } = require('electron');
 if (!app || !BrowserWindow || !process.versions.electron) throw new Error('Run with node_modules/.bin/electron test/test-panel-scene-settings.cjs');
 
@@ -29,6 +30,18 @@ let settings = {
   motions: { disabled: [] },
 };
 const windows = [];
+const modelCatalog = require('../src/main/model-catalog').createCatalog();
+modelCatalog.setPath(path.join(tmp, 'models.json'));
+let modelBase, rejectModels = false, modelRequests = 0;
+const server = http.createServer((req, res) => {
+  modelRequests++;
+  assert.match(req.headers.authorization, /^Bearer fixture-/);
+  res.setHeader('Content-Type', 'application/json');
+  if (rejectModels) { res.writeHead(401); res.end('{"private":"do not display"}'); return; }
+  const provider = req.url.split('/')[1];
+  assert.equal(req.url, `/${provider}/v1/${provider === 'grok' ? 'language-models' : 'models'}`);
+  setTimeout(() => res.end(JSON.stringify({ [provider === 'grok' ? 'models' : 'data']: [{ id: provider + '-actual-first' }, { id: provider + '-actual-second' }] })), 70);
+});
 
 fs.writeFileSync(preload, `
   const { contextBridge, ipcRenderer } = require('electron');
@@ -36,6 +49,7 @@ fs.writeFileSync(preload, `
   contextBridge.exposeInMainWorld('pet', {
     log: () => {}, selfView: () => api('selfView'), selfSettings: value => api('selfSettings', value), portability: () => api('portability'), ttsHTTPTemplate: kind => api('ttsHTTPTemplate', kind),
     panelInit: (...a) => api('panelInit', ...a), brainInfo: (...a) => api('brainInfo', ...a), ttsInfo: (...a) => api('ttsInfo', ...a),
+    brainModels: (...a) => api('brainModels', ...a),
     config: (...a) => api('config', ...a), on: cb => ipcRenderer.on('panel-fixture:event', (_e, value) => cb(value)),
     __fixture: { emitConfig: value => ipcRenderer.invoke('panel-fixture:control', 'emitConfig', value),
       failNextConfig: () => ipcRenderer.invoke('panel-fixture:control', 'failNextConfig'), getCalls: () => ipcRenderer.invoke('panel-fixture:control', 'getCalls') }
@@ -74,8 +88,13 @@ ipcMain.handle('panel-fixture:api', async (_event, name, ...args) => {
   if (name === 'ttsHTTPTemplate') return require('../src/main/tts-http-profile').template(args[0]);
   if (name === 'panelInit') return { config: clone(settings), avatars: [{ key: 'fixture-avatar', label: '测试角色' }], avatar: 'fixture-avatar',
     motions: [], motionGroups: [], asr: { speech: 3, micSystem: 'granted' } };
-  if (name === 'brainInfo') return { providers: [{ id: 'deepseek', label: 'DeepSeek', hint: 'fixture provider' }, { id: 'grok', label: 'Grok' }],
+  if (name === 'brainInfo') return { providers: ['deepseek','openai','grok'].map(id => ({id,label:id,baseURL:modelBase+'/'+id+'/v1'})),
     workbuddyModels: [{ id: 'hy3', label: 'Hy3', thinking: [{ id: 'low', label: '低' }] }], workbuddyThinking: [{ id: 'low', label: '低' }], thinkingLevels: [] };
+  if (name === 'brainModels') {
+    const provider = args[0].provider, profile = args[0].profiles[provider];
+    try { await modelCatalog.refresh(provider, profile.apiKey, profile.baseURL); return {ok:true,catalog:modelCatalog.forConnection(provider,profile.apiKey,profile.baseURL)}; }
+    catch(error) { return {ok:false,error:error.message}; }
+  }
   if (name === 'ttsInfo') return { engines: [{ id: 'system', label: '系统语音' }, { id: 'qwen', label: 'Qwen' }, { id: 'remote', label: 'CHP' }],
     systemVoices: [{ id: 'Tingting', lang: 'zh-CN' }], qwen: { ready: false, downloaded: false, hasRuntime: true, hasFiles: false, voices: [] }, dl: {}, chp: null };
   if (name === 'config') {
@@ -98,6 +117,8 @@ async function click(win, id) { await evalIn(win, `document.getElementById(${JSO
 
 async function main() {
   await app.whenReady();
+  await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
+  modelBase = 'http://127.0.0.1:'+server.address().port;
   const win = new BrowserWindow({ width: 520, height: 720, show: false, webPreferences: { preload, contextIsolation: true, nodeIntegration: false, sandbox: true } });
   windows.push(win);
   win.webContents.on('console-message', (_e, level, message, line) => console.error(`panel fixture console[${level}] ${line}: ${message}`));
@@ -123,13 +144,41 @@ async function main() {
   assert.equal(await scene(), 'work');
   assert.equal(settings.memory.scene, 'work');
 
+  await evalIn(win, 'document.querySelector("[data-t=brain]").click()');
+  const modelIds = () => evalIn(win, '[...document.getElementById("brainModel").options].map(o=>o.value).filter(Boolean)');
+  for (const provider of ['grok','deepseek','openai']) {
+    await evalIn(win, `document.getElementById('brainSource').value=${JSON.stringify(provider)};document.getElementById('brainSource').dispatchEvent(new Event('change'))`);
+    assert.deepEqual(await modelIds(), [], 'no predefined or saved-model placeholder before fetch: '+provider);
+    await evalIn(win, `document.getElementById('brainKeyInput').value='fixture-'+${JSON.stringify(provider)};document.getElementById('brainKeyInput').dispatchEvent(new Event('input'))`);
+    await click(win,'brainModelsBtn');
+    await waitFor(() => evalIn(win, '!document.getElementById("brainModelsBtn").disabled'), 'model fetch '+provider);
+    assert.deepEqual(await modelIds(), [provider+'-actual-first',provider+'-actual-second']);
+    await evalIn(win, 'document.getElementById("brainKeyInput").value+="-changed";document.getElementById("brainKeyInput").dispatchEvent(new Event("input"))');
+    assert.deepEqual(await modelIds(), [], 'key change invalidates catalog');
+    rejectModels = true; await click(win,'brainModelsBtn');
+    await waitFor(() => evalIn(win, 'document.getElementById("brainStatus").textContent.includes("获取失败")'), 'auth failure');
+    assert.deepEqual(await modelIds(), [], 'failed fetch never repopulates fallback models');
+    for(const w of windows) w.webContents.send('panel-fixture:event', {type:'asrStatus',mode:'continuous'});
+    await delay(30);
+    assert.match(await evalIn(win, 'document.getElementById("brainStatus").textContent'), /API Key/);
+    assert(!await evalIn(win, 'document.getElementById("brainStatus").textContent.includes("do not display")'));
+    rejectModels = false; await click(win,'brainModelsBtn');
+    await waitFor(() => evalIn(win, '!document.getElementById("brainModelsBtn").disabled'), 'retry fetch');
+    await evalIn(win, 'document.getElementById("brainURL").value+="/other";document.getElementById("brainURL").dispatchEvent(new Event("input"))');
+    assert.deepEqual(await modelIds(), [], 'address change invalidates catalog');
+  }
+  assert.equal(modelRequests, 9, 'three providers used real Electron network requests and retry');
+  assert.equal(await evalIn(win,'document.getElementById("asrNetworkRow").hidden'), true);
+
   await win.close();
-  console.log('panel scene-settings fixture passed (hidden Electron window, stub APIs, isolated userData)');
+  server.close();
+  console.log('panel settings passed: scene drafts, all three real HTTP model catalogs, empty/loading/success/auth failure/retry, key/address invalidation and ASR status isolation');
   app.exit(0);
 }
 
 main().catch(error => {
   console.error(error.stack || error);
+  server.close();
   for (const win of windows) if (!win.isDestroyed()) win.destroy();
   app.exit(1);
 })

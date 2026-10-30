@@ -47,3 +47,19 @@ test('HTTP errors do not expose provider response bodies or credentials',async t
  const server=http.createServer((_q,r)=>{r.writeHead(401);r.end('private-account-data');});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>server.close());
  await assert.rejects(requestJSON(`http://127.0.0.1:${server.address().port}/models`,'fixture'),e=>!e.message.includes('private-account-data')&&/API Key/.test(e.message));
 });
+test('external catalogs start empty and belong to the exact provider, key and address across restart',async t=>{
+ const f=fixture(t,{request:async url=>url.endsWith('/language-models')?{models:[{id:'actual-grok'}]}:{data:[{id:'actual-model'}]}});
+ for(const provider of ['deepseek','openai','grok']){
+  const base='https://fixture.invalid/'+provider+'/v1';
+  assert.deepEqual(f.catalog.forConnection(provider,'secret-key',base).models,[]);
+  await f.catalog.refresh(provider,'secret-key',base);
+  assert.equal(f.catalog.forConnection(provider,'secret-key',base).models.length,1);
+  assert.deepEqual(f.catalog.forConnection(provider,'other-key',base).models,[]);
+  assert.deepEqual(f.catalog.forConnection(provider,'secret-key',base+'-other').models,[]);
+  const reload=createCatalog();reload.setPath(path.join(f.dir,'models.json'));
+  assert.equal(reload.forConnection(provider,'secret-key',base+'/').models.length,1);
+  assert.deepEqual(reload.forConnection(provider,'other-key',base).models,[]);
+  assert(!JSON.stringify(reload.forConnection(provider,'secret-key',base)).includes('connectionKey'));
+ }
+ assert(!fs.readFileSync(path.join(f.dir,'models.json'),'utf8').includes('secret-key'));
+});

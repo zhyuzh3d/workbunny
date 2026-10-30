@@ -476,22 +476,19 @@ function createWindow() {
 const panels = new Map();
 const LIBRARY_PANEL_WIDTH = 580;
 const PANEL_SIZE = {
-  settings: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'workbunny · 设置' },
-  motions: { w: LIBRARY_PANEL_WIDTH, h: 800, title: 'workbunny · 动作库' },
-  memory: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'workbunny · 记忆与关系' },
-  desktop: { w: 560, h: 760, title: 'workbunny · 工作与日常' },
+  settings: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'Workbunny-设置' },
+  motions: { w: LIBRARY_PANEL_WIDTH, h: 800, title: 'Workbunny-动作库' },
+  memory: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'Workbunny-记忆' },
+  desktop: { w: 560, h: 760, title: 'Workbunny-工作与日常' },
+  self: { w: LIBRARY_PANEL_WIDTH, h:760, title:'Workbunny-自我理解' },
 };
 
-function openPanel(kind, { section } = {}) {
+function openPanel(kind) {
   const spec = PANEL_SIZE[kind] || PANEL_SIZE.settings;
   const old = panels.get(kind);
   if (old && !old.isDestroyed()) {
     if (old.isMinimized()) old.restore();
     old.focus();
-    if (section === 'self') {
-      const notify = () => old.webContents.send('pet:ev', { type: 'self-editor-open' });
-      if (old.webContents.isLoading()) old.webContents.once('did-finish-load', notify); else notify();
-    }
     return old;
   }
   const w = new BrowserWindow({
@@ -513,6 +510,7 @@ function openPanel(kind, { section } = {}) {
     },
   });
   w.setMenuBarVisibility(false);
+  w.on('page-title-updated', event => { event.preventDefault(); w.setTitle(spec.title); });
   // 面板的报错也得进日志：新窗口一旦白屏，日志里没字就等于无从查起
   w.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     const tag = ['log', 'warn', 'error', 'debug'][level] || 'log';
@@ -522,7 +520,7 @@ function openPanel(kind, { section } = {}) {
     log(`[panel:${kind}:${tag}] ${msg}  (${String(sourceId || '').split('/').pop()}:${line})`);
   });
   w.webContents.on('did-fail-load', (_e, code, desc) => log(`[panel:${kind}] did-fail-load ${code} ${desc}`));
-  w.loadFile(path.join(__dirname, '..', 'renderer', ['memory', 'desktop'].includes(kind) ? 'companion.html' : 'panel.html'), { query: { p: kind, ...(section === 'self' ? { section } : {}) } });
+  w.loadFile(path.join(__dirname, '..', 'renderer', kind === 'self' ? 'self.html' : ['memory', 'desktop'].includes(kind) ? 'companion.html' : 'panel.html'), { query: { p: kind } });
   w.once('ready-to-show', () => w.show());
   w.on('closed', () => panels.delete(kind));
   panels.set(kind, w);
@@ -1574,7 +1572,7 @@ ipcMain.handle('pet:autonomy-directory', async e => {
   selfAccess(e);
   const name = [...String(config.load().buddy.name || '伙伴')];
   const label = name.length > 6 ? name.slice(0, 6).join('') + '…' : name.join('');
-  const selected = await dialog.showOpenDialog({ title: `选择作品存放位置，将建立${label}的专用子目录`, properties: ['openDirectory', 'createDirectory'] });
+  const selected = await dialog.showOpenDialog({ title: 'Workbunny-自主目录', message:`选择作品存放位置，将建立${label}的专用子目录`, properties: ['openDirectory', 'createDirectory'] });
   if (selected.canceled) return null;
   const directory = path.join(fs.realpathSync(selected.filePaths[0]), 'Bunny-Creations');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -1643,7 +1641,7 @@ ipcMain.handle('pet:memory-resolve-doubt', async (e, options = {}) => {
 });
 ipcMain.handle('pet:memory-remove', async (e, id) => {
   trustedCompanion(e, 'memory');
-  const r = await dialog.showMessageBox(panels.get('memory'), { type: 'warning', buttons: ['取消', '删除'], defaultId: 0, cancelId: 0,
+  const r = await dialog.showMessageBox(panels.get('memory'), { title:'Workbunny-遗忘记忆', type: 'warning', buttons: ['取消', '删除'], defaultId: 0, cancelId: 0,
     message: '删除这条记忆？', detail: '关联的原始对话和派生摘要也会移除，避免以后重新想起。已导出的备份需另行管理。' });
   if (r.response !== 1) return { removed: 0, canceled: true };
   invalidateMemoryContext();
@@ -1653,7 +1651,7 @@ ipcMain.handle('pet:memory-remove', async (e, id) => {
 });
 ipcMain.handle('pet:memory-clear', async e => {
   trustedCompanion(e, 'memory');
-  const r = await dialog.showMessageBox(panels.get('memory'), { type: 'warning', buttons: ['取消', '清空记忆'], defaultId: 0, cancelId: 0,
+  const r = await dialog.showMessageBox(panels.get('memory'), { title:'Workbunny-清空记忆', type: 'warning', buttons: ['取消', '清空记忆'], defaultId: 0, cancelId: 0,
     message: '清空全部聊天和长期记忆？', detail: '也会清除自我理解、简短身份与行为输入、锁、摘要及任务记录。模型和音色保留。请先导出加密备份。' });
   if (r.response !== 1) return { ok: false, canceled: true };
   await desktop.stop('清空本地记忆'); invalidateMemoryContext();
@@ -1662,13 +1660,13 @@ ipcMain.handle('pet:memory-clear', async e => {
 ipcMain.handle('pet:memory-export', async (e, passphrase) => {
   trustedCompanion(e, 'memory');
   const data = await memory.export(passphrase);
-  const r = await dialog.showSaveDialog(panels.get('memory'), { defaultPath: `workbunny-${new Date().toISOString().slice(0, 10)}.bunnyvault`, filters: [{ name: 'workbunny 加密备份', extensions: ['bunnyvault'] }] });
+  const r = await dialog.showSaveDialog(panels.get('memory'), { title:'Workbunny-导出备份', defaultPath: `workbunny-${new Date().toISOString().slice(0, 10)}.bunnyvault`, filters: [{ name: 'workbunny 加密备份', extensions: ['bunnyvault'] }] });
   if (r.canceled || !r.filePath) return { ok: false, canceled: true };
   require('./vault-crypto').atomicPrivate(r.filePath, data); return { ok: true };
 });
 ipcMain.handle('pet:memory-restore', async (e, passphrase) => {
   trustedCompanion(e, 'memory');
-  const r = await dialog.showOpenDialog(panels.get('memory'), { properties: ['openFile'], filters: [{ name: 'workbunny 加密备份', extensions: ['bunnyvault'] }] });
+  const r = await dialog.showOpenDialog(panels.get('memory'), { title:'Workbunny-恢复备份', properties: ['openFile'], filters: [{ name: 'workbunny 加密备份', extensions: ['bunnyvault'] }] });
   if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
   const file = r.filePaths[0]; if (fs.statSync(file).size > 256 * 1024 * 1024) throw new Error('备份过大，请使用分段迁移');
   invalidateMemoryContext();
@@ -1757,7 +1755,7 @@ ipcMain.handle('pet:scale', (_e, { scale } = {}) => {
 ipcMain.handle('pet:avatars', () => avatarList());
 ipcMain.handle('pet:avatar-import', async e => {
   trustedCompanion(e);
-  const choice = await dialog.showOpenDialog(panels.get('settings') || win, { title: '导入你有权使用的个人模型（仅保存在本机）', properties: ['openFile'], filters: [{ name: 'VRM', extensions: ['vrm'] }] });
+  const choice = await dialog.showOpenDialog(panels.get('settings') || win, { title: 'Workbunny-导入VRM', properties: ['openFile'], filters: [{ name: 'VRM', extensions: ['vrm'] }] });
   if (choice.canceled) return { cancelled: true };
   const key = require('./asset-library').importModel(choice.filePaths[0]);
   const list = avatarList(); send('avatars', { avatars: list });
@@ -1829,7 +1827,7 @@ ipcMain.handle('pet:motion-edit', async (e, change) => {
 });
 ipcMain.handle('pet:motion-import', async (e, options) => {
   trustedCompanion(e, 'motions');
-  const choice = await dialog.showOpenDialog(panels.get('motions') || win, { title: '导入个人VRMA动作', properties: ['openFile', 'multiSelections'], filters: [{ name: 'VRMA', extensions: ['vrma'] }] });
+  const choice = await dialog.showOpenDialog(panels.get('motions') || win, { title:'Workbunny-导入动作', properties: ['openFile', 'multiSelections'], filters: [{ name: 'VRMA', extensions: ['vrma'] }] });
   if (choice.canceled) return { cancelled: true };
   const imported = [], errors = [];
   for (const file of choice.filePaths.slice(0, 32)) {
@@ -2002,14 +2000,14 @@ ipcMain.handle('pet:speaker-enroll', async e => {
   stopSpeaking('user'); voiceTurns.reset(); suppressEnrollmentFinal = true;
   const wasRunning = asr?.running;
   const previousProfile = speakerFilter.profile; let captured = false;
-  const pending = speakerFilter.enroll(); publishSpeakerStatus();
+  const pending = speakerFilter.enroll({ onProgress:publishSpeakerStatus }); publishSpeakerStatus();
   if (!asr?.running) asr?.start({ ...asrOpts(asrMode === 'continuous'), askSpeech: asrMode === 'single' });
   try {
     await pending; captured = true;
     await memory.serial(() => memory.write([{ id: 'local:speaker-profile', kind: 'state', ts: Date.now(), domain: 'private', visibilityFloor: 2,
       value: { schema: 'local-speaker-profile/v1', profile: speakerFilter.profile, sources: [] } }], memory.epoch, { notify: false }));
     return { ...publishSpeakerStatus(), ok: true };
-  } catch (error) { if (captured) speakerFilter.load(previousProfile); throw error; } finally {
+  } catch (error) { if (captured) { speakerFilter.load(previousProfile); speakerFilter.reportFailure('声音保存失败，请重新朗读'); } throw error; } finally {
     voiceTurns.reset(); asr?.kill({ discard: true }); speakerFilter.latest = null; suppressEnrollmentFinal = false;
     if (wasRunning && alwaysOn) scheduleListenRestart(200);
     publishSpeakerStatus();
@@ -2038,7 +2036,7 @@ ipcMain.on('pet:vis', (_e, v) => (v ? showWindow() : hideWindow()));
 ipcMain.on('pet:quit', () => { quitting = true; app.quit(); });
 ipcMain.on('pet:open', (_e, what) => {
   if (what === 'settings') openPanel('settings');
-  else if (what === 'self') openPanel('memory', { section: 'self' });
+  else if (what === 'self') openPanel('self');
   else if (what === 'motions') openPanel('motions');
   else if (what === 'memory' || what === 'desktop') openPanel(what);
   else if (what === 'workbuddy') require('./workbuddy').openApplication().catch(e => log('[workbuddy] ' + e.message));
@@ -2083,7 +2081,7 @@ ipcMain.handle('pet:tts-http-catalog', async (e, kind) => {
 ipcMain.handle('pet:storage-migrate', async e => {
   trustedCompanion(e);
   if (screenLocked || !memory?.ready || storageBusy) return { ok: false, error: '请先解锁资料库并等待当前迁移完成' };
-  const choice = await dialog.showOpenDialog(panels.get('settings') || win, { title: '选择数据库的目的父目录（将在其中建立 vault）', properties: ['openDirectory', 'createDirectory'] });
+  const choice = await dialog.showOpenDialog(panels.get('settings') || win, { title:'Workbunny-迁移数据库', message:'选择目的父目录，将在其中建立 vault', properties: ['openDirectory', 'createDirectory'] });
   if (choice.canceled) return { ok: false, cancelled: true };
   let closed = false;
   try {
@@ -2105,7 +2103,7 @@ ipcMain.handle('pet:storage-migrate', async e => {
 ipcMain.handle('pet:storage-reconnect', async e => {
   trustedCompanion(e);
   if (screenLocked || storageBusy || memory?.ready) return { ok: false, error: '此操作仅用于原磁盘不可用时恢复连接；正常更换路径请使用迁移' };
-  const choice = await dialog.showOpenDialog({ title: '选择已有资料库 vault 文件夹', properties: ['openDirectory'] });
+  const choice = await dialog.showOpenDialog({ title:'Workbunny-连接资料库', properties: ['openDirectory'] });
   if (choice.canceled) return { ok: false, cancelled: true };
   try {
     const dir = fs.realpathSync(choice.filePaths[0]);
@@ -2119,7 +2117,7 @@ ipcMain.handle('pet:storage-reconnect', async e => {
 
 ipcMain.handle('pet:brain-info', () => ({
   providers: config.PROVIDERS, connection: connection.status(),
-  catalogs: Object.fromEntries(['workbuddy', ...config.PROVIDERS.map(p => p.id)].map(id => [id, require('./model-catalog').get(id)])),
+  catalogs: Object.fromEntries(['workbuddy', ...config.PROVIDERS.map(p => p.id)].map(id => [id, require('./model-catalog').forConnection(id, config.load().brain.profiles?.[id]?.apiKey, config.load().brain.profiles?.[id]?.baseURL)])),
   thinkingLevels: config.THINKING_LEVELS,
   workbuddyModels: config.listWorkBuddyModels(),
   workbuddyThinking: config.thinkingOptions('workbuddy', 'hy3'),
@@ -2135,9 +2133,10 @@ ipcMain.handle('pet:brain-models', async (_e, brain) => {
   let L;
   try {
     L = config.resolveLLM(config.preview({ brain: brain || {} }));
-    const catalog = await require('./model-catalog').refresh(L.provider, L.apiKey, L.baseURL);
-    return { ok: true, provider: L.provider, catalog };
-  } catch (e) { return { ok: false, provider: L.provider, error: e.message }; }
+    await require('./model-catalog').refresh(L.provider, L.apiKey, L.baseURL);
+    const catalog = require('./model-catalog').forConnection(L.provider,L.apiKey,L.baseURL);
+    return { ok:true, provider:L.provider, catalog };
+  } catch (e) { return { ok: false, provider: L?.provider, error: e.message }; }
 });
 
 ipcMain.handle('pet:brain-test', async (_e, brain) => {
@@ -2218,7 +2217,7 @@ ipcMain.handle('pet:tts-dl-state', () => tts.downloadState());
 ipcMain.on('pet:tts-cancel', () => tts.cancelDownload());
 ipcMain.handle('pet:tts-delete', async () => {
   const result = await dialog.showMessageBox(panels.get('settings') || win, {
-    type: 'warning', message: '删除本地语音模型？',
+    title:'Workbunny-删除语音模型', type: 'warning', message: '删除本地语音模型？',
     detail: '将删除约 1.33GB 的 CustomVoice 模型文件，并停止正在进行的下载。再次使用本地语音需要重新下载。原有用户文件会保留。',
     buttons: ['取消', '删除模型'], defaultId: 0, cancelId: 0, noLink: true,
   });
@@ -2770,6 +2769,7 @@ if (!lock) {
     });
     asr.on('fmt', (f) => log(`[asr] 格式 硬件=${f.hw} → 识别=${f.tgt}`));
     asr.on('partial', (t) => {
+      if (speakerFilter.enrollment) { speakerFilter.heard(t); return; }
       if (speakerFilter.enrollment || suppressEnrollmentFinal || !speakerFilter.acceptsText()) return;
       send('asrPartial', { text: t });
       // 调试用：能听到"半句"就说明识别真的在工作（限流，别刷屏）
@@ -2828,6 +2828,7 @@ if (!lock) {
     });
     asr.on('recycle', (n) => log('[asr] recycled after ' + n + ' utterances'));
     asr.on('error', (m) => {
+      if (speakerFilter.enrollment) speakerFilter.cancel('麦克风暂时中断，请重新朗读');
       applyStatus({ captureReady: false, note: 'reconnecting', error: m });
       log('[asr] error', m); send('asrError', { message: m });
     });
@@ -2905,11 +2906,6 @@ if (!lock) {
     }, 2200);
 
     try {
-      globalShortcut.register('CommandOrControl+Shift+Space', () => {
-        if (alwaysOn) { stopListen(); config.save({ voice:{ alwaysListen:false } }); }
-        else { config.save({ voice:{ alwaysListen:true } }); void requestAsrPermission().then(() => startListen('hotkey')); }
-        sendConfig(config.load());
-      });
       globalShortcut.register('CommandOrControl+Shift+B', () => (win && win.isVisible() ? hideWindow() : showWindow()));
     } catch (e) {
       console.error('[hotkey]', e.message);

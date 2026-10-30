@@ -122,10 +122,10 @@ export function createSelfEditor(pet, { getConfig = () => ({}) } = {}) {
     if (!editing?.entryId || saving || !confirm('删除这条自我理解？')) return;
     if (await patch([{ op: 'remove', entryId: editing.entryId }], true)) closeEntry();
   };
-  $('selfClose').onclick = () => dialog.close();
+  $('selfClose').onclick = () => window.close();
   $('selfGlobalLock').onclick = () => view && patch([{ op: view.locked ? 'unlock_all' : 'lock_all' }]);
   $('selfAdd').onclick = () => openEntry(); $('selfRefresh').onclick = load;
-  pet.on?.(event => { if (['memory-changed', 'memory-ready', 'self-changed'].includes(event.type) && dialog.open) void load(); });
+  pet.on?.(event => { if (['memory-changed', 'memory-ready', 'self-changed'].includes(event.type)) void load(); });
   paintControls();
-  return { load, async open() { if (!dialog.open) dialog.showModal(); await load(); } };
+  return { load };
 }

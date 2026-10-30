@@ -54,6 +54,14 @@ async function main() {
     '@panel:settings:(()=>{document.querySelector("[data-t=ear]").click();return {switches:[...document.querySelectorAll("input[type=checkbox]")].every(e=>e.getAttribute("role")==="switch"),wakeAliases:!!document.getElementById("setWakeAliases")}})()',
     '(async()=>{const original=(await window.pet.panelInit()).config.window.y;window.pet.drag({type:"start",x:0,y:0});window.pet.drag({type:"move",x:0,y:10000});window.pet.drag({type:"end"});await new Promise(r=>setTimeout(r,80));window.__belowDock=screenY+innerHeight>screen.availTop+screen.availHeight;const current=(await window.pet.panelInit()).config.window.y;window.pet.drag({type:"start",x:0,y:0});window.pet.drag({type:"move",x:0,y:original-current});window.pet.drag({type:"end"});return {dragBelowDock:window.__belowDock}})()',
     '@panel:settings:window.pet.speakerStatus().then(s=>({voiceOptIn:!s.enabled&&s.samples===0}))',
+    'window.pet.open("self")',
+    '@panel:self:({independentSelf:document.getElementById("selfDialog").tagName==="MAIN",selfTitle:document.title==="Workbunny-自我理解"})',
+    'window.pet.open("memory")',
+    '@panel:memory:({memoryTitle:document.title==="Workbunny-记忆",noNestedSelf:!document.getElementById("selfDialog")})',
+    '@panel:memory:window.close()',
+    '@panel:self:({selfSurvivesMemoryClose:!window.closed})',
+    '@panel:settings:({settingsTitle:document.title==="Workbunny-设置",noVoiceHotkeyHints:!document.body.textContent.includes("⌘⇧Space"),networkHidden:document.getElementById("asrNetworkRow").hidden})',
+
   ];
   fs.writeFileSync(path.join(root, 'selftest.json'), JSON.stringify({ shotDir: path.join(root, 'shots'), delay: 5000, every: 650, extra: 0, script }));
   const source = process.argv.includes('--source');
@@ -66,7 +74,7 @@ async function main() {
     const log = fs.readFileSync(path.join(root, 'buddy.log'), 'utf8'); assert.equal(code, 0, log.slice(-3000));
     for (const marker of ['"stock":4', '"described":true', '"overflow":true', '"categoryCreated":true', '"actualPersonalMotion":true', '"why":"manual"',
       '"fiveActual":true', '"disabledRejected":true', '"personalMotionRemoved":true', '"stockProtected":true', '"rapidAvatarConsistent":true', '"personalLoaded":true',
-      '"allGroupsOpen":true', '"readOnlyList":true', '"motionEditorPopup":true', '"stockOnly":true', '"customCards":true', '"hasGuidedReading":true', '"ownerSwitchHidden":true', '"providers":true', '"hasDoubao":true', '"noNewGenericHTTP":true', '"inactiveDescriptionSaved":true', '"dragBelowDock":true', '"customCollapsed":true', '"customBorderless":true', '"inactiveEditing":true', '"descriptionAutoSize":true', '"cleanDescriptionHint":true', '"autoGrowShrink":true', '"ui150Fixed":true', '"ui200Fixed":true', '"personalDeleted":true', '"defaultAfterDelete":true', '"descriptionRemoved":true', '"voiceOptIn":true', '"fourEfforts":true', '"simpleDoubao":true', '"switches":true', '"wakeAliases":true']) assert(log.includes(marker), marker + '\n' + log.slice(-9000));
+      '"allGroupsOpen":true', '"readOnlyList":true', '"motionEditorPopup":true', '"stockOnly":true', '"customCards":true', '"hasGuidedReading":true', '"ownerSwitchHidden":true', '"providers":true', '"hasDoubao":true', '"noNewGenericHTTP":true', '"inactiveDescriptionSaved":true', '"dragBelowDock":true', '"customCollapsed":true', '"customBorderless":true', '"inactiveEditing":true', '"descriptionAutoSize":true', '"cleanDescriptionHint":true', '"autoGrowShrink":true', '"ui150Fixed":true', '"ui200Fixed":true', '"personalDeleted":true', '"defaultAfterDelete":true', '"descriptionRemoved":true', '"voiceOptIn":true', '"fourEfforts":true', '"simpleDoubao":true', '"switches":true', '"wakeAliases":true', '"independentSelf":true', '"selfTitle":true', '"memoryTitle":true', '"noNestedSelf":true', '"selfSurvivesMemoryClose":true', '"settingsTitle":true', '"noVoiceHotkeyHints":true', '"networkHidden":true']) assert(log.includes(marker), marker + '\n' + log.slice(-9000));
     assert(!fs.existsSync(assets.personalFile('model', model) || path.join(root, 'avatars', model)));
     assert(!fs.existsSync(path.join(root, 'motions', imported.key + '.vrma')));
     assert(!log.includes('[brain] 完成'), 'UI operations do not use an LLM');

@@ -16,6 +16,7 @@ import { createSelfSettings } from './self-settings.js';
  */
 const which = new URLSearchParams(location.search).get('p') === 'motions' ? 'motions' : 'settings';
 document.body.dataset.p = which;
+document.title = which === 'motions' ? 'Workbunny-动作库' : 'Workbunny-设置';
 
 let cfg = null;
 let AVATAR_LIST = [];
@@ -163,7 +164,7 @@ function paintPerm(st) {
   const tip = $('permTip');
   if (tip) {
     tip.textContent = asrStat.mode === 'single' && ok && asrStat.onDevice === false && !cfg.asr.allowNetwork ? '当前语言需要联网识别；请明确允许联网，或继续使用文字输入。' : asrStat.mode === 'single' && ok && asrStat.available === false ? '系统识别暂不可用，请检查听写资源和网络后重试。' : asrStat.note === 'installing' ? '正在准备本机语音资源，完成后自动开始识别。' : ok
-      ? '都通了。按 ⌘⇧Space 或点她脚下那条就开始说话。'
+      ? '麦克风已就绪，开启自动聆听即可。'
       : (pending ? '系统弹窗正在等你点「允许」。点完这里会自动变绿。'
         : '第一次要允许两项：语音识别 + 麦克风。允许后如果还是灰的，把开关关掉再打开一次。');
   }
@@ -253,11 +254,15 @@ function paintSpeaker(status) {
   if (!$('speakerEnabled') || !status) return;
   speakerState = status;
   $('speakerEnabled').checked = !!status.enabled;
+  $('speakerEnabled').disabled = status.enrolling || speakerRequestBusy;
+  $('speakerProgress').hidden = !status.enrolling;
+  $('speakerProgress').setAttribute('aria-valuenow', String(status.percent || 0));
+  $('speakerProgress').querySelector('i').style.width = (status.percent || 0) + '%';
   $('speakerToggle').hidden = !status.ready;
   $('speakerEnroll').disabled = speakerRequestBusy && !status.enrolling;
   $('speakerEnroll').textContent = status.enrolling ? '取消朗读' : status.ready ? '重新朗读' : '开始朗读';
   $('speakerReset').hidden = !status.samples || status.enrolling || speakerRequestBusy;
-  $('speakerStatus').textContent = status.enrolling ? '正在听，读完后稍等片刻。' : status.latest?.status === 'device-changed'
+  $('speakerStatus').textContent = status.enrolling ? status.phase === 'waiting' ? '正在听，请开始朗读。' : `已听到你的声音 · ${status.seconds || 0} 秒 · 停下后自动完成` : status.note ? status.note : status.latest?.status === 'device-changed'
     ? '麦克风变了，请重新朗读。' : status.ready ? '已记住你的声音，可开启下方开关。' : '点击开始，再自然读完。';
 }
 
@@ -302,8 +307,9 @@ function draftProfile() {
 }
 function stashBrain() {
   const p = draftProfile();
-  p.modelId = $('brainModel').value;
+  if ($('brainModel').value) p.modelId = $('brainModel').value;
   p.thinking = $('brainThinking').value;
+  $('brainThinking').disabled = brainDraft.source !== 'workbuddy' && !brainCatalog().models.length;
   if (brainDraft.source !== 'workbuddy') {
     p.baseURL = $('brainURL').value.trim();
     const value = $('brainKeyInput').value;
@@ -313,6 +319,7 @@ function stashBrain() {
 const brainPending = new Set();
 function brainCatalog(id = brainDraft.source) {
   const cached = BRAIN.catalogs?.[id];
+  if (id !== 'workbuddy') return cached?.at && cached.current ? cached : {at:0,models:[]};
   if (cached) return cached;
   const items = id === 'workbuddy' ? BRAIN.workbuddyModels : (BRAIN.providers.find(p => p.id === id)?.models || []).map(id => ({ id, label: id }));
   return { at: 0, models: items.map(m => ({ ...m, thinking: m.thinking || (id === 'workbuddy' ? BRAIN.workbuddyThinking : BRAIN.thinkingByModel?.[m.id]) || [{ id: 'auto', label: '模型默认' }] })) };
@@ -323,13 +330,14 @@ function paintThinking() {
   const options = brainDraft.source === 'workbuddy' ? brainCatalog().models.find(m => m.id === p.modelId)?.thinking || [{ id: 'auto', label: '模型默认' }] : ['none', 'low', 'medium', 'high'].map(id => ({ id, label: id }));
   fillSelect($('brainThinking'), options, p.thinking === 'off' ? 'none' : p.thinking || (brainDraft.source === 'workbuddy' ? 'auto' : 'none'));
   p.thinking = $('brainThinking').value;
+  $('brainThinking').disabled = brainDraft.source !== 'workbuddy' && !brainCatalog().models.length;
   $('brainThinkingRow').classList.toggle('hidden', options.length < 2);
 }
 function paintModelFetch() {
   const busy = brainPending.has(brainDraft.source), list = brainCatalog();
   $('brainModelsBtn').disabled = busy;
   $('brainModelsBtn').textContent = busy ? '正在获取…' : '获取模型列表';
-  $('brainModelsMeta').textContent = list.at ? `${list.models.length} 个模型 · 上次获取 ${new Date(list.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '获取当前账号可用模型';
+  $('brainModelsMeta').textContent = list.at ? `${list.models.length} 个模型 · 上次获取 ${new Date(list.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '尚未获取模型';
 }
 function paintBrain() {
   if (!brainDraft) initBrainDraft();
@@ -343,8 +351,10 @@ function paintBrain() {
   const provider = BRAIN.providers.find(x => x.id === id);
   const models = brainCatalog().models.slice();
   if (!p.modelId) p.modelId = models[0]?.id || '';
-  if (p.modelId && !models.some(x => x.id === p.modelId)) models.push({ id: p.modelId, label: p.modelId + '（已保存）' });
-  fillSelect($('brainModel'), models, p.modelId);
+  if (wb && p.modelId && !models.some(x => x.id === p.modelId)) models.push({ id: p.modelId, label: p.modelId + '（已保存）' });
+  fillSelect($('brainModel'), models.length ? models : [{id:'',label:'请先获取模型列表'}], p.modelId);
+  $('brainModel').disabled = !models.length;
+  if (!wb && models.length) p.modelId = $('brainModel').value;
   $('brainURL').value = p.baseURL || provider?.baseURL || '';
   $('brainKeyInput').value = p.apiKey || (p.hasApiKey ? KEY_MASK : '');
   $('brainHint').textContent = wb ? '使用当前登录账号的模型。思考选项按所选模型提供；额度以 WorkBuddy 账号为准。' : provider?.hint || '';
@@ -370,7 +380,7 @@ async function refreshBrainModels() {
     if ($('brainKeyInput').value !== keyAtStart || $('brainURL').value !== urlAtStart) {
       $('brainStatus').textContent = '密钥已更改，请使用新密钥重新获取列表。'; return;
     }
-    BRAIN.catalogs ||= {}; BRAIN.catalogs[source] = r.catalog;
+    BRAIN.catalogs ||= {}; BRAIN.catalogs[source] = {...r.catalog,current:true};
     const p = draftProfile();
     if (!r.catalog.models.some(m => m.id === p.modelId)) { p.modelId = r.catalog.models[0]?.id || ''; p.thinking = 'auto'; }
     edit('brain', true); paintBrain();
@@ -615,6 +625,7 @@ async function save() {
   const btn = $('saveBtn');
   btn.disabled = true;
   try {
+    if (edits.has('brain') && brainDraft.source !== 'workbuddy' && !$('brainModel').value) throw new Error('请先获取模型列表并选择模型');
     const { patch, paths } = draftPatch();
     await selfSettings.saveInputs();
     await persist(patch, paths);
@@ -809,9 +820,10 @@ function buildMotionList() {
       const result = await window.pet.workbuddyOpen();
       $('brainStatus').textContent = result.ok ? 'WorkBuddy 已打开。登录后获取模型列表。' : result.error;
     });
-    $('brainKeyInput').addEventListener('input', () => edit('brain', true));
+    const connectionEdited = () => { stashBrain(); edit('brain', true); BRAIN.catalogs ||= {}; delete BRAIN.catalogs[brainDraft.source]; fillSelect($('brainModel'),[{id:'',label:'请先获取模型列表'}],''); $('brainModel').disabled = true; paintThinking(); paintModelFetch(); $('brainHint').textContent = '填写密钥，获取模型后选择并保存。'; $('brainStatus').textContent = '地址或密钥已更改，请重新获取模型列表。'; };
+    $('brainKeyInput').addEventListener('input', connectionEdited);
     $('brainThinking').addEventListener('change', () => { edit('brain', true); paintBrainHint(); });
-    $('brainURL').addEventListener('input', () => edit('brain', true));
+    $('brainURL').addEventListener('input', connectionEdited);
     $('panelScene').addEventListener('click', event => {
       const button = event.target.closest('button[data-scene]');
       if (button) changePanelScene(button.dataset.scene);
@@ -844,12 +856,13 @@ function buildMotionList() {
     };
     $('brainModel').addEventListener('change', () => {
       const p = draftProfile();
-      p.modelId = $('brainModel').value;
+      if ($('brainModel').value) p.modelId = $('brainModel').value;
       p.thinking = brainDraft.source === 'workbuddy' ? 'auto' : 'none'; edit('brain', true);
       paintThinking(); paintBrainHint();
       $('brainStatus').textContent = '模型已选择，可测试连接。';
     });
     $('brainTestBtn').addEventListener('click', async () => {
+      if (brainDraft.source !== 'workbuddy' && !$('brainModel').value) { $('brainStatus').textContent = '请先获取模型列表并选择模型'; return; }
       const btn = $('brainTestBtn'); btn.disabled = true;
       $('brainStatus').textContent = '正在用当前选择测试连接…';
       try {

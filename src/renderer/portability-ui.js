@@ -1,19 +1,23 @@
 export async function mountPortability(pet) {
   const $ = id => document.getElementById(id);
-  let state = await pet.portability(), config = (await pet.panelInit()).config;
+  let state = await pet.portability(), initial = await pet.panelInit(), config = initial.config;
+  state.asr = initial.asr || {};
   function paint() {
     $('storagePath').textContent = state.storage.dir || state.storage.error;
     $('storageMove').disabled = !state.storage.ok || state.storage.busy;
-    $('asrModeInfo').textContent = state.asrMode === 'continuous' ? '可以持续聆听。' : '自动分段聆听，识别间会短暂重连。';
+    const needsNetwork = state.asrMode === 'single' && state.asr.onDevice === false;
+    $('asrNetworkRow').hidden = !needsNetwork;
+    $('asrModeInfo').hidden = !needsNetwork;
+    $('asrModeInfo').textContent = needsNetwork ? '当前语音识别需要网络。' : '';
     $('setAlways').disabled = false;
-    if (config.brain.source !== 'apikey') $('brainStatus').textContent = state.connection.note;
+    if ($('brainSource').value === 'workbuddy') $('brainStatus').textContent = state.connection.note;
     if ($('openWorkBuddy')) $('openWorkBuddy').textContent = state.connection.ready ? '重新连接 WorkBuddy' : '连接 WorkBuddy';
   }
   $('installWorkBuddy').onclick = () => pet.open('workbuddy-download');
   paint();
   $('asrAllowNetwork').checked = !!config.asr.allowNetwork;
   $('asrAllowNetwork').onchange = async () => { try { await pet.config({ asr: { allowNetwork: $('asrAllowNetwork').checked } }); } catch (e) { $('permTip').textContent = e.message; } };
-  pet.on(ev => { if (ev.type === 'config' && ev.config) config = ev.config; if (ev.type === 'workbuddy-connection') { state.connection = ev; paint(); } if (ev.type === 'asrStatus' && ev.mode) { state.asrMode = ev.mode; paint(); } });
+  pet.on(ev => { if (ev.type === 'config' && ev.config) config = ev.config; if (ev.type === 'workbuddy-connection') { state.connection = ev; paint(); } if (ev.type === 'asrStatus') { state.asr = {...state.asr,...ev}; if(ev.mode) state.asrMode = ev.mode; paint(); } });
   for (const [id, operation] of [['storageMove', () => pet.storageMigrate()], ['storageReconnect', () => pet.storageReconnect()]]) $(id).onclick = async () => {
     $(id).disabled = true; $('storageStatus').textContent = '正在处理，请勿断开磁盘…';
     try { const r = await operation(); $('storageStatus').textContent = r.cancelled ? '' : r.ok ? '位置已更新，正在重启…' : r.error; }

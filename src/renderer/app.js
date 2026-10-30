@@ -1077,27 +1077,12 @@ stageEl.addEventListener('pointerdown', () => {
   toIdle(0.26);
 }, { passive: true });
 
-/* 脚下那一条：单击 = 展开/收起输入框；长按 = 开关耳朵 */
+/* 点击字幕打开输入框；聆听只通过独立开关控制。 */
 const earBar = document.getElementById('ear');
-let earHoldTimer = null;
-let earLongFired = false;
 const listenToggle = document.getElementById('listenToggle');
-listenToggle.addEventListener('pointerdown', e => { e.stopPropagation(); clearTimeout(earHoldTimer); });
-listenToggle.addEventListener('click', e => { e.stopPropagation(); clearTimeout(earHoldTimer); pet.listen('toggle'); });
-earBar.addEventListener('pointerdown', () => {
-  earLongFired = false;
-  clearTimeout(earHoldTimer);
-  earHoldTimer = setTimeout(() => { earLongFired = true; pet.listen('toggle'); }, 560);
-});
-for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) {
-  earBar.addEventListener(ev, () => clearTimeout(earHoldTimer));
-}
-earBar.addEventListener('click', () => {
-  clearTimeout(earHoldTimer);
-  if (earLongFired) { earLongFired = false; return; }
-  if (dockMode === 'open') closeDock();
-  else openDock();
-});
+listenToggle.addEventListener('pointerdown', event => event.stopPropagation());
+listenToggle.addEventListener('click', event => { event.stopPropagation(); pet.listen('toggle'); });
+earBar.addEventListener('click', () => dockMode === 'open' ? closeDock() : openDock());
 
 let hintTimer = setTimeout(() => {
   hint.classList.remove('hidden');
@@ -1187,7 +1172,7 @@ function paintPerm(st) {
   const tip = document.getElementById('permTip');
   if (tip) {
     const ok = speech === 3 && micOk;
-    if (ok) { tip.textContent = '都通了。按 ⌘⇧Space 或点她脚下那条就开始说话。'; }
+    if (ok) { tip.textContent = '麦克风已就绪，开启自动聆听即可。'; }
     else if (pending) { tip.textContent = '系统弹窗正在等你点「允许」。点完这里会自动变绿。'; }
     else { tip.textContent = '第一次要允许两项：语音识别 + 麦克风。允许后如果还是灰的，把开关关掉再打开一次。'; }
     tip.classList.toggle('hidden', false);

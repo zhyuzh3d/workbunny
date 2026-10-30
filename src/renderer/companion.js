@@ -1,13 +1,12 @@
 import { setupAutonomy } from './autonomy-ui.js';
-import { createSelfEditor } from './self-editor.js';
 import { characterName, characterText, paintCharacterNames } from './character-name.mjs';
 const $ = (id) => document.getElementById(id);
 const page = new URLSearchParams(location.search).get('p') === 'desktop' ? 'desktop' : 'memory';
+document.title = page === 'desktop' ? 'Workbunny-工作与日常' : 'Workbunny-记忆';
 $(page === 'desktop' ? 'desktopPage' : 'memoryPage').hidden = false;
 if (page === 'desktop') setupAutonomy(window.pet);
 let characterConfig = {};
 function setCharacterConfig(config) { if (config?.buddy) { characterConfig = config; paintCharacterNames(config); } }
-const selfEditor = page === 'memory' ? createSelfEditor(window.pet, { getConfig: () => characterConfig }) : null;
 
 function node(tag, className = '', text = '') {
   const item = document.createElement(tag);
@@ -648,7 +647,7 @@ $('memorySearchBtn').addEventListener('click', () => { memoryQuery = $('memorySe
 $('memorySearch').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('memorySearchBtn').click(); } });
 $('memoryMore').addEventListener('click', () => { if (memoryHasMore) loadMemoryList(false); });
 $('memoryScene').addEventListener('change', event => changeMemoryScene(event.target.value));
-$('openSelfSettings').addEventListener('click', () => { void selfEditor?.open(); });
+$('openSelfSettings').addEventListener('click', () => window.pet.open('self'));
 $('memoryEnabled').addEventListener('change', (event) => saveMemorySetting('enabled', event.target.checked));
 $('memoryExtract').addEventListener('change', (event) => saveMemorySetting('extract', event.target.checked));
 $('memoryExport').addEventListener('click', async () => {
@@ -1003,13 +1002,12 @@ $('taskAccept').addEventListener('click', async () => {
 });
 if (page === 'memory') {
   initMemory();
-  if (new URLSearchParams(location.search).get('section') === 'self') void selfEditor.open();
+  if (new URLSearchParams(location.search).get('section') === 'self') window.pet.open('self');
   let recallRevision = 0;
   if (typeof window.pet?.init === 'function') Promise.resolve(window.pet.init()).then(result => {
     if (recallRevision === 0) paintCurrentRecall(result?.currentRecall);
   }).catch(() => {});
   window.pet?.on?.(event => {
-    if (event?.type === 'self-editor-open') void selfEditor.open();
     if (event?.type === 'memory-ready') { loadMemoryStats(); loadMemoryList(true); }
     else if (event?.type === 'memory-changed') scheduleMemoryRefresh();
     else if (event?.type === 'memory-maintenance') { paintMaintenanceStatus(event); if (event.status === 'idle') void loadMemoryStats(); }

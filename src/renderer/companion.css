@@ -241,3 +241,5 @@ h2 { margin: 0; font-size: 13px; font-weight: 650; }
 .autonomy-directory summary { cursor:pointer; font-size:12px; }
 #autonomyPath,.artifact-path { overflow-wrap:anywhere; }
 #autonomyHistory:empty { color:var(--muted); }
+
+.self-window { display:flex; flex-direction:column; width:100%; height:100%; max-height:none; border:0; border-radius:0; box-shadow:none; }

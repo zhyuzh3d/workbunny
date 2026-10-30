@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>workbunny</title>
+<title>Workbunny-设置</title>
 <link rel="stylesheet" href="./panel.css" />
 <link rel="stylesheet" href="./form-controls.css" />
 </head>
@@ -91,8 +91,8 @@
       </div>
       <div id="permTip" class="permTip"></div>
     </div>
-<div id="asrModeInfo" class="note"></div>
-    <label class="row"><span>允许旧版识别联网</span><input id="asrAllowNetwork" type="checkbox" role="switch" /></label>
+<div id="asrModeInfo" class="note" hidden></div>
+    <label class="row" id="asrNetworkRow" hidden><span>允许联网识别</span><input id="asrAllowNetwork" type="checkbox" role="switch" /></label>
     <div class="group">一直听着</div>
     <label class="row"><span>常驻监听</span><input id="setAlways" type="checkbox" role="switch" /></label>
     <label class="row"><span>只回应对我说的话</span><input id="setJudge" type="checkbox" role="switch" /></label>
@@ -102,9 +102,10 @@
     <div class="group">主人声音</div>
     <div class="speakerReading"><p>请朗读下面这段文字：</p><blockquote id="speakerPassage">今天我想慢慢把手里的事情做好，遇到问题就一步一步来。忙的时候认真工作，累的时候起来走走。现在我在和你说话，希望我们可以自然地聊天，也一起发现一些有趣的新想法。</blockquote></div>
     <div class="actions"><button id="speakerEnroll" class="mini">开始朗读</button><button id="speakerReset" class="mini" hidden>清除声音</button></div>
+    <div id="speakerProgress" class="bar" role="progressbar" aria-label="声音录入进度" aria-valuemin="0" aria-valuemax="100" hidden><i></i></div>
     <div id="speakerStatus" class="note" role="status">点击开始，再自然读完。</div>
     <label class="row speakerToggle" id="speakerToggle" hidden><span>只接收主人声音</span><input id="speakerEnabled" type="checkbox" role="switch"></label>
-    <div class="note">⌘⇧Space 开关聆听；讲话或打字可打断朗读。</div>
+    <div class="note">讲话或打字可打断朗读。</div>
   </div>
 
   <!-- 大脑：选择来源后，只显示对应的密钥、模型和思考 -->

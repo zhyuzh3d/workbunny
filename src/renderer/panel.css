@@ -379,3 +379,6 @@ button.motionIcon[aria-pressed="true"] { color:#3e8a5c; }
 #motionList input.motionRatio { flex:0 0 110px; width:110px; }
 
 #avatarDescriptionStatus:empty { display:none; }
+
+#asrNetworkRow[hidden], #speakerProgress[hidden] { display:none; }
+#speakerProgress { margin-top:10px; }

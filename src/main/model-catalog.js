@@ -1,8 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
-const http = require('http');
+const crypto = require('crypto');
 
 const PROVIDERS = [
   { id: 'deepseek', label: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', models: ['deepseek-flash', 'deepseek-v4-pro'], hint: '填写官方 API Key，再获取当前账号可用的模型。' },
@@ -103,24 +102,23 @@ function apiThinking(provider, model, selection = 'none') {
   }
   return {};
 }
-function requestJSON(url, apiKey) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url), mod = u.protocol === 'https:' ? https : http;
-    const req = mod.get(u, { headers: { Authorization: 'Bearer ' + apiKey, Accept: 'application/json' } }, res => {
-      let body = '', size = 0;
-      res.setEncoding('utf8');
-      res.on('data', part => { size += Buffer.byteLength(part); if (size > 3 * 1024 * 1024) req.destroy(new Error('模型列表返回内容过大')); else body += part; });
-      res.on('end', () => {
-        if (res.statusCode !== 200) return reject(new Error(res.statusCode === 401 || res.statusCode === 403
-          ? 'API Key 无效或没有模型访问权限' : `获取模型失败（HTTP ${res.statusCode}）`));
-        try { resolve(JSON.parse(body)); } catch { reject(new Error('服务返回的模型列表不是有效 JSON')); }
-      });
-      res.on('error', reject);
-    });
-    const timer = setTimeout(() => req.destroy(new Error('获取模型列表超时，请检查网络')), 20000);
-    req.on('close', () => clearTimeout(timer));
-    req.on('error', reject);
-  });
+async function requestJSON(url, apiKey) {
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const fetcher = process.versions.electron ? require('electron').net.fetch : fetch;
+    const response = await fetcher(url, { headers:{ Authorization:'Bearer ' + apiKey, Accept:'application/json' }, redirect:'error', signal:controller.signal });
+    if (response.status !== 200) throw new Error(response.status === 401 || response.status === 403 ? 'API Key 无效或没有模型访问权限' : `获取模型失败（HTTP ${response.status}）`);
+    const parts = []; let size = 0;
+    for await (const part of response.body) { size += part.length; if (size > 3 * 1024 * 1024) throw new Error('模型列表返回内容过大'); parts.push(Buffer.from(part)); }
+    try { return JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { throw new Error('服务返回的模型列表不是有效 JSON'); }
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('获取模型列表超时，请检查网络');
+    throw new Error(/^(API Key|获取模型失败|模型列表返回|服务返回的模型列表)/.test(error.message) ? error.message : '无法获取模型列表，请检查地址、密钥与网络');
+  } finally { clearTimeout(timer); controller.abort(); }
+}
+function connectionKey(provider, apiKey, baseURL) {
+  const p = PROVIDERS.find(item => item.id === provider);
+  return crypto.createHash('sha256').update(JSON.stringify([provider, apiBase(baseURL || p?.baseURL), String(apiKey || '').trim()])).digest('hex');
 }
 function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => require('./workbuddy').request(...args) } = {}) {
   let file, cache = {};
@@ -131,7 +129,7 @@ function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => 
       // Read only our whitelisted metadata, never propagate credentials or arbitrary response fields.
       for (const id of ['workbuddy', 'deepseek', 'openai', 'grok']) {
         const row = disk[id];
-        if (Array.isArray(row?.models)) cache[id] = { at: Number(row.at) || 0, models: row.models.filter(m => clean(m.id) && Array.isArray(m.thinking)).map(m => ({
+        if (Array.isArray(row?.models)) cache[id] = { at: Number(row.at) || 0, ...(/^[a-f0-9]{64}$/.test(row.connectionKey || '') ? {connectionKey:row.connectionKey} : {}), models: row.models.filter(m => clean(m.id) && Array.isArray(m.thinking)).map(m => ({
           id: clean(m.id), label: clean(m.label), thinking: m.thinking.filter(t => ['auto', 'off', 'on', ...EFFORTS].includes(t.id)).map(t => ({ id: t.id, label: clean(t.label) })),
           ...(Number.isSafeInteger(m.maxOutputTokens) && m.maxOutputTokens > 0 ? { maxOutputTokens: m.maxOutputTokens } : {}),
         })) };
@@ -150,6 +148,13 @@ function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => 
     if (stored?.models.length) return JSON.parse(JSON.stringify(stored));
     const ids = provider === 'workbuddy' ? ['hy3'] : PROVIDERS.find(p => p.id === provider)?.models || [];
     return { at: 0, models: ids.map(id => ({ id, label: id === 'hy3' ? '混元三 · Hy3' : id, thinking: fallbackThinking(provider, id) })) };
+  }
+  function forConnection(provider, apiKey, baseURL) {
+    if (provider === 'workbuddy') return get(provider);
+    let current = false;
+    try { current = !!apiKey && cache[provider]?.connectionKey === connectionKey(provider,apiKey,baseURL); } catch {}
+    const value = current ? get(provider) : { at:0, models:[] };
+    delete value.connectionKey; return { ...value, current };
   }
   function thinking(provider, id) { return get(provider).models.find(m => m.id === id)?.thinking || fallbackThinking(provider, id); }
   function body(provider, id, selection) {
@@ -180,11 +185,11 @@ function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => 
       models = normalize(provider, provider === 'grok' ? data.models : data.data);
     }
     const previous = cache[provider];
-    cache[provider] = { at: Date.now(), models };
+    cache[provider] = { at:Date.now(), models, ...(provider === 'workbuddy' ? {} : {connectionKey:connectionKey(provider,apiKey,baseURL)}) };
     try { save(); } catch { cache[provider] = previous; throw new Error('模型列表已获取，但本地保存失败'); }
     return get(provider);
   }
   function invalidate(provider) { delete cache[provider]; save(); }
-  return { setPath, get, thinking, body, refresh, invalidate };
+  return { setPath, get, forConnection, thinking, body, refresh, invalidate };
 }
 module.exports = { ...createCatalog(), createCatalog, PROVIDERS, normalize, fallbackThinking, requestJSON, apiBase, apiThinking };
