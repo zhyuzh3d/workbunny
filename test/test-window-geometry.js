@@ -27,3 +27,14 @@ test('screen edges keep at least 160 pixels recoverable and support a monitor ab
   const area={x:-1440,y:-900,width:1440,height:900};
   for(const y of [-99999,99999]) {const r=layoutWindow({x:-1000,y,width:832,height:1200},area);assert(r.bounds.height>=160);assert(r.bounds.y>=area.y);assert(r.bounds.y+r.bounds.height<=0);}
 });
+test('Dock height does not constrain the pet canvas, while the menu bar remains excluded',()=>{
+ const {canvasArea}=require('../src/main/window-geometry');
+ const display={bounds:{x:0,y:0,width:1440,height:900},workArea:{x:0,y:32,width:1440,height:790}};
+ const area=canvasArea(display);assert.deepEqual(area,{x:0,y:32,width:1440,height:868});
+ const dragged=layoutWindow({x:100,y:500,width:832,height:800},area);
+ assert.equal(dragged.logical.y,500);assert.equal(dragged.bounds.y+dragged.bounds.height,900);
+ assert(dragged.bounds.y+dragged.bounds.height>display.workArea.y+display.workArea.height);
+ assert.equal(layoutWindow({x:100,y:-300,width:832,height:800},area).bounds.y,32);
+ const upper={bounds:{x:-1440,y:-900,width:1440,height:900},workArea:{x:-1380,y:-868,width:1380,height:800}};
+ assert.deepEqual(canvasArea(upper),{x:-1440,y:-868,width:1440,height:868});
+});

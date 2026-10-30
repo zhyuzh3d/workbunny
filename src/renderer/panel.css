@@ -234,7 +234,7 @@ body[data-tab="mouth"] #testBtn { background:#a94b32; color:white; border-color:
 .avRow button.on:hover { background:#3a3e44; border-color:#3a3e44; color:#fff; filter:none; }
 .avRow button:disabled { opacity: .55; }
 
-/* Appearance: built-ins first; personal models each own their active editor. */
+/* Appearance: borderless custom-model rows expand into a shared editor. */
 .pb[data-page="look"] { padding:16px; }
 .lookSection + .lookSection { margin-top:18px; padding-top:16px; border-top:1px solid var(--line); }
 .lookTitle { margin:0 0 10px; font-size:12px; font-weight:600; color:var(--ink-soft); }
@@ -244,21 +244,26 @@ body[data-tab="mouth"] #testBtn { background:#a94b32; color:white; border-color:
 .avRow button { flex:1 1 0; min-width:0; }
 .stockDescription { margin-top:10px; color:var(--muted); }
 .stockDescription > summary { cursor:pointer; padding:3px 0; font-size:11px; }
-.personalAvatars { display:grid; gap:8px; }
-.avatarCard { overflow:hidden; border:1px solid var(--line); border-radius:11px; background:#fffdfa; }
-.avatarCard.active { border-color:#b8afa0; }
-.avatarPick { display:flex; align-items:center; gap:12px; width:100%; padding:11px 12px; border:0; background:transparent; text-align:left; font:12px var(--font); color:var(--ink-soft); }
-.avatarPick:hover { background:#f3efe8; }
+.personalAvatars { display:grid; gap:4px; }
+.avatarCard { border:0; background:transparent; }
+.avatarCard > summary { display:flex; align-items:center; gap:12px; list-style:none; cursor:pointer; border-radius:7px; }
+.avatarCard > summary::-webkit-details-marker { display:none; }
+.avatarCard > summary:hover { background:#f1ede6; }
+.avatarFold { flex:none; font-size:10px; color:var(--muted); padding-right:6px; }
+.avatarFold::after { content:' ▸'; }
+.avatarCard[open] .avatarFold::after { content:' ▾'; }
+.avatarPick { display:flex; align-items:center; gap:12px; width:100%; min-width:0; padding:8px 0; border:0; background:transparent; text-align:left; font:12px var(--font); color:var(--ink-soft); }
+.avatarPick:hover { background:transparent; }
 .avatarPick.on { color:var(--ink); }
 .avatarName { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .avatarUse { flex:none; font-size:10px; color:var(--muted); }
 .avatarPick.on .avatarUse { color:#4c7253; }
 .avatarEmpty { padding:16px 12px; border:1px dashed #d7d0c4; border-radius:10px; color:var(--muted); line-height:1.6; }
-.avatarEditor { padding:10px 12px 12px; }
-.avatarCard .avatarEditor { border-top:1px solid var(--line); }
+.avatarEditor { padding:8px 0 12px; }
+.avatarCard .avatarEditor { border:0; }
 .stockDescription .avatarEditor { padding:8px 0 0; }
 .avatarEditor > label { display:block; margin-bottom:6px; color:var(--ink-soft); font-size:11px; }
-.avatarEditor #avatarDescription { display:block; min-height:64px; width:100%; resize:vertical; }
+.avatarEditor #avatarDescription { display:block; width:100%; resize:none; overflow:hidden; }
 .avatarActions { display:flex; gap:8px; margin-top:8px; }
 .avatarActions button.mini { flex:0 0 auto; }
 #stockAppearanceDetails[hidden], #deleteAvatar[hidden] { display:none; }
@@ -335,7 +340,7 @@ button.wide.primary:hover:not(:disabled) { background:#3a3e44; border-color:#3a3
 ::-webkit-scrollbar-track { background: transparent; }
 .hidden { display: none !important; }
 
-.motionTools{padding:10px 16px;border-bottom:1px solid #ddd8cf}.motionTools .actions{display:flex;gap:8px;margin:6px 0;flex-wrap:wrap}.motionTools input,.motionTools select{flex:1;min-width:120px}.motionEditor{margin:4px 0 12px 24px;padding:8px 10px;background:rgba(255,255,255,.5);border-radius:10px;font-size:12px}.motionEditor>summary{cursor:pointer;color:#666}.motionField{display:flex;gap:10px;align-items:center;margin:8px 0}.motionField>span{min-width:90px}.motionField input:not([type=checkbox]),.motionField textarea{flex:1;min-width:0}.motionField textarea{min-height:56px}.motionWeight{flex:0 0 58px;width:58px;height:30px;min-width:0;padding:4px;text-align:center;cursor:text}.motionChance{min-width:36px;color:#777;font-size:11px}.motionRow .mItem{min-width:0}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}#avatarDescription{box-sizing:border-box;width:100%;resize:vertical;min-height:70px}#deleteAvatar:disabled{opacity:.4}
+.motionTools{padding:10px 16px;border-bottom:1px solid #ddd8cf}.motionTools .actions{display:flex;gap:8px;margin:6px 0;flex-wrap:wrap}.motionTools input,.motionTools select{flex:1;min-width:120px}.motionEditor{margin:4px 0 12px 24px;padding:8px 10px;background:rgba(255,255,255,.5);border-radius:10px;font-size:12px}.motionEditor>summary{cursor:pointer;color:#666}.motionField{display:flex;gap:10px;align-items:center;margin:8px 0}.motionField>span{min-width:90px}.motionField input:not([type=checkbox]),.motionField textarea{flex:1;min-width:0}.motionField textarea{min-height:56px}.motionWeight{flex:0 0 58px;width:58px;height:30px;min-width:0;padding:4px;text-align:center;cursor:text}.motionChance{min-width:36px;color:#777;font-size:11px}.motionRow .mItem{min-width:0}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}#avatarDescription{box-sizing:border-box;width:100%;resize:none;overflow:hidden}#deleteAvatar:disabled{opacity:.4}
 
 .motionField:has(input[type="checkbox"]) { justify-content:space-between; }
 .motionField:has(input[type="checkbox"]) > span { white-space:nowrap; }
@@ -372,3 +377,5 @@ button.motionIcon[aria-pressed="true"] { color:#3e8a5c; }
 #motionDialogBody select { flex:1; min-width:0; }
 #motionDialogStatus { flex:1; font-size:11px; color:var(--muted); }
 #motionList input.motionRatio { flex:0 0 110px; width:110px; }
+
+#avatarDescriptionStatus:empty { display:none; }

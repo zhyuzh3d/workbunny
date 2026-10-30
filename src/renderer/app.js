@@ -569,7 +569,7 @@ function playPCM(event) {
 }
 
 function markReplyStarted() {
-  if (shownHeard && shownState !== 'skip') { shownState = 'reply'; paintEar(); }
+  if (shownHeard && !['skip', 'not-addressed'].includes(shownState)) { shownState = 'reply'; paintEar(); }
 }
 
 /* ═══════════ 加载 ═══════════ */
@@ -658,6 +658,7 @@ function loadAvatar(key) {
     const ld = document.getElementById('hint');
     if (ld) ld.classList.add('hidden');
     setLoading(false);
+    flushAvatarDescription();
     resolve(true);
     nextAvatar();
   }, undefined, (e) => {
@@ -667,6 +668,14 @@ function loadAvatar(key) {
     resolve(false);
     nextAvatar();
   }));
+}
+
+let pendingAvatarDescriptionKey = '';
+function flushAvatarDescription() {
+  if (!pendingAvatarDescriptionKey || pendingAvatarDescriptionKey !== avatarKey || loading) return;
+  const key = pendingAvatarDescriptionKey, png = avatarPreviewPNG();
+  pendingAvatarDescriptionKey = '';
+  if (png) void pet.avatarDescribe?.({ key, png });
 }
 
 function avatarPreviewPNG() {
@@ -887,7 +896,7 @@ const activity = document.getElementById('activity');
 let dockMode = 'mini';        // mini | open
 let listening = false;        // 耳朵开着（常驻聆听）
 let shownHeard = '';          // 「你说 · …」
-let shownState = '';          // pending | ready | reply | done | skip
+let shownState = '';          // pending | ready | reply | done | skip | not-addressed
 let liveText = '';            // 正说到一半的字（实时字幕）
 let aecOn = false;            // 系统回声消除可用 → 她说话时也能听
 let pendingHeard = '';        // 刚听到、还没被主人用过的一句 —— 留着填进输入框
@@ -905,7 +914,7 @@ function earLabel() {
   if (listening && asrStat.captureReady === false) return asrStat.note === 'installing' ? '准备语音资源…' : asrStat.note === 'starting' ? '正在连接麦克风…' : '正在重连麦克风…';
   if (liveText) return liveText;
   if (shownHeard) {
-    const status = { pending: '正在回应', ready: '正在准备声音', reply: '正在说话', skip: '略过' }[shownState];
+    const status = { pending: '正在回应', ready: '正在准备声音', reply: '正在说话', skip: '略过', 'not-addressed': '没叫我，飘过～' }[shownState];
     return `你说 · ${shownHeard}${status ? ' · ' + status : ''}`;
   }
   return listening ? '在听' : '耳朵关着';
@@ -941,7 +950,7 @@ function paintEar() {
   ear.classList.toggle('on', listening && !warn);
   ear.classList.toggle('off', !listening || warn);
   ear.classList.toggle('warn', warn);
-  ear.classList.toggle('skip', shownState === 'skip');
+  ear.classList.toggle('skip', ['skip', 'not-addressed'].includes(shownState));
   ear.classList.toggle('expand', !!(shownHeard || liveText));
   const toggle = document.getElementById('listenToggle');
   if (toggle) {
@@ -1124,15 +1133,15 @@ function paintListen() {
 }
 
 /** 听到一句话：脚下那条撑开显示「你说 · …」，主人一眼能确认有没有被听清 */
-function paintHeard(text, replied) {
+function paintHeard(text, replied, reason) {
   if (!text) return;
   // 完成通知可能属于已被新一句打断的旧请求，不覆盖当前字幕。
-  if (replied !== undefined && shownHeard !== String(text).slice(0, 180)) return;
+  if (reason !== 'not-addressed' && replied !== undefined && shownHeard !== String(text).slice(0, 180)) return;
   liveText = '';
   shownHeard = String(text).slice(0, 180);
-  shownState = replied === false ? 'skip' : replied === true
+  shownState = reason === 'not-addressed' ? 'not-addressed' : replied === false ? 'skip' : replied === true
     ? (speakingNow ? (shownState === 'reply' ? 'reply' : 'ready') : 'done') : 'pending';
-  pendingHeard = shownHeard;      // 留着，主人点开输入框时能填进去改
+  pendingHeard = reason === 'not-addressed' ? '' : shownHeard;      // 留着，主人点开输入框时能填进去改
   pendingAt = Date.now();
   paintEar();
   clearTimeout(heardTimer);
@@ -1414,7 +1423,7 @@ function wire() {
         break;
       case 'heard':
         // 听到了什么：只做轻提示，不抢气泡
-        paintHeard(ev.text, ev.replied);
+        paintHeard(ev.text, ev.replied, ev.reason);
         break;
       case 'asrLive':
         paintLive(ev.text);
@@ -1441,7 +1450,7 @@ function wire() {
         break;
       case 'avatar-description-request': {
         const key = ev.key;
-        if (key === avatarKey && !loading) { const png = avatarPreviewPNG(); if (png) void pet.avatarDescribe?.({ key, png }); }
+        pendingAvatarDescriptionKey = key; flushAvatarDescription();
         break;
       }
       case 'viewport': viewportManaged = true; stageViewport = { width: ev.width, height: ev.height, offsetY: ev.offsetY || 0 }; onResize(); break;
@@ -1487,11 +1496,11 @@ function wire() {
         speakingNow = !!ev.on;
         bubbleController.setSpeaking(!!ev.on && cfg?.tts?.enabled !== false && cfg?.voice?.enabled !== false);
         if (ev.on) {
-          if (shownHeard && shownState !== 'skip') shownState = 'ready';
+          if (shownHeard && !['skip', 'not-addressed'].includes(shownState)) shownState = 'ready';
           ambientTimer = 30;
           // 说话时身体回中性站姿：不要在"抱臂思考"这种姿势里讲话
           if (currentMotion !== IDLE && !ev.interaction && performance.now() >= expressiveUntil) toIdle(0.45);
-        } else if (!thinkingNow && shownHeard && shownState !== 'skip') {
+        } else if (!thinkingNow && shownHeard && !['skip', 'not-addressed'].includes(shownState)) {
           shownState = 'done'; clearHeardLater();
         }
         paintEar();
@@ -1929,7 +1938,7 @@ window.__dock = (m) => {
   else if (m === 'close') closeDock();
   return { mode: dockMode, listening, text: shownHeard };
 };
-window.__heard = (text, replied) => { paintHeard(text, replied); return shownHeard; };
+window.__heard = (text, replied, reason) => { paintHeard(text, replied, reason); return shownHeard; };
 window.__listen = (on) => { listening = !!on; paintEar(); return listening; };
 window.__level = (v) => {
   const ear = document.getElementById('ear');

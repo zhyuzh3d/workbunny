@@ -1,5 +1,6 @@
 import '../shared/motion-core.js';
 import { mountPortability } from './portability-ui.js';
+import { autoGrow } from './auto-grow.js';
 import { createSelfSettings } from './self-settings.js';
 /**
  * 独立窗口（设置 / 动作库）的逻辑。
@@ -126,6 +127,7 @@ function showTab(t) {
   for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('on', b.dataset.t === t);
   for (const p of document.querySelectorAll('.pb[data-page]')) p.classList.toggle('on', p.dataset.page === t);
   if (t === 'persona') selfSettings.resize();
+  if (t === 'look') autoGrow($('avatarDescription'), 2);
 }
 document.getElementById('tabs').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-t]');
@@ -168,7 +170,8 @@ function paintPerm(st) {
 }
 
 /* ═══════════ 外貌 ═══════════ */
-let avatarEditorKey = '';
+let avatarEditorKey = '', expandedAvatarKey = '';
+const avatarDescriptionDrafts = new Map();
 function avatarButton(info, personal = false) {
   const button = document.createElement('button');
   button.dataset.key = info.key; button.type = 'button';
@@ -181,22 +184,35 @@ function avatarButton(info, personal = false) {
     button.append(name, state);
   } else button.textContent = info.label || info.key;
   button.classList.toggle('on', info.key === avatarKey);
-  button.onclick = () => pickAvatar(info.key).catch(error => { $('avatarImportStatus').textContent = error.message; });
+  button.onclick = event => { event.preventDefault(); event.stopPropagation(); pickAvatar(info.key).catch(error => { $('avatarImportStatus').textContent = error.message; }); };
   return button;
 }
 function paintAvatars() {
   const row = $('avRow'), personal = $('personalAvatars'), editor = $('avatarEditor');
   if (!row || !personal || !editor) return;
-  // Keep one editor and its event handlers; move it into the selected model.
+  // A single editor follows the expanded model; using a model remains a separate action.
   $('stockAvatarEditor').append(editor);
   row.replaceChildren(); personal.replaceChildren();
   for (const info of AVATAR_LIST.filter(a => !a.personal)) row.append(avatarButton(info));
   const custom = AVATAR_LIST.filter(a => a.personal);
+  if (!custom.some(a => a.key === expandedAvatarKey)) expandedAvatarKey = '';
   for (const info of custom) {
-    const card = document.createElement('article'); card.className = 'avatarCard'; card.dataset.key = info.key;
+    const card = document.createElement('details'); card.className = 'avatarCard'; card.dataset.key = info.key;
     card.classList.toggle('active', info.key === avatarKey);
-    card.append(avatarButton(info, true));
-    if (info.key === avatarKey) card.append(editor);
+    const summary = document.createElement('summary'), fold = document.createElement('span');
+    fold.className = 'avatarFold'; fold.textContent = '编辑'; summary.append(avatarButton(info, true), fold); card.append(summary);
+    card.open = expandedAvatarKey === info.key;
+    if (card.open) card.append(editor);
+    card.ontoggle = () => {
+      if (!card.isConnected) return;
+      if (card.open) {
+        expandedAvatarKey = info.key;
+        for (const other of personal.querySelectorAll('.avatarCard')) if (other !== card) other.open = false;
+        $('stockAppearanceDetails').open = false; card.append(editor); paintAvatarDetails();
+      } else if (expandedAvatarKey === info.key) {
+        expandedAvatarKey = ''; $('stockAvatarEditor').append(editor); paintAvatarDetails();
+      }
+    };
     personal.append(card);
   }
   if (!custom.length) {
@@ -207,14 +223,15 @@ function paintAvatars() {
 }
 
 function paintAvatarDetails() {
-  const item = AVATAR_LIST.find(a => a.key === avatarKey), field = $('avatarDescription');
-  if (field && document.activeElement !== field) field.value = cfg.avatarDescriptions?.[avatarKey] ?? item?.description ?? '';
+  const key = expandedAvatarKey || avatarKey, item = AVATAR_LIST.find(a => a.key === key), field = $('avatarDescription');
+  if (field && (avatarEditorKey !== key || document.activeElement !== field)) field.value = avatarDescriptionDrafts.get(key) ?? cfg.avatarDescriptions?.[key] ?? item?.description ?? '';
+  if (field) { field.dataset.key = key; autoGrow(field, 2); }
   const personal = !!item?.personal;
   if ($('deleteAvatar')) { $('deleteAvatar').disabled = !personal; $('deleteAvatar').hidden = !personal; }
-  if ($('stockAppearanceDetails')) $('stockAppearanceDetails').hidden = personal;
-  if (avatarEditorKey !== avatarKey) {
-    avatarEditorKey = avatarKey;
-    $('avatarDescriptionStatus').textContent = '仅识别角色预览；描述可以直接修改。';
+  if ($('stockAppearanceDetails')) $('stockAppearanceDetails').hidden = !!AVATAR_LIST.find(a => a.key === avatarKey)?.personal;
+  if (avatarEditorKey !== key) {
+    avatarEditorKey = key;
+    $('avatarDescriptionStatus').textContent = '';
   }
 }
 
@@ -735,20 +752,29 @@ function buildMotionList() {
       try { const r = await window.pet.avatarImport(); if (r.cancelled) return; AVATAR_LIST = r.avatars; paintAvatars(); await pickAvatar(r.key); $('avatarImportStatus').textContent = '已导入个人模型，仅本机使用。'; }
       catch (e) { $('avatarImportStatus').textContent = e.message; }
     };
+    $('stockAppearanceDetails').ontoggle = () => {
+      if (!$('stockAppearanceDetails').open) return;
+      expandedAvatarKey = '';
+      for (const card of $('personalAvatars').querySelectorAll('.avatarCard')) card.open = false;
+      $('stockAvatarEditor').append($('avatarEditor')); paintAvatarDetails();
+    };
+    $('avatarDescription').addEventListener('input', () => { const field = $('avatarDescription'); avatarDescriptionDrafts.set(field.dataset.key, field.value); autoGrow(field, 2); });
+    addEventListener('resize', () => autoGrow($('avatarDescription'), 2));
     $('avatarDescription').addEventListener('change', async () => {
-      const key = avatarKey, description = $('avatarDescription').value;
-      try { const saved = await window.pet.config({ avatarDescriptions: { [key]: description } }); cfg = saved; $('avatarDescriptionStatus').textContent = '形象说明已保存，不改变自我理解。'; }
-      catch (error) { $('avatarDescriptionStatus').textContent = error.message; }
+      const key = $('avatarDescription').dataset.key, description = $('avatarDescription').value;
+      avatarDescriptionDrafts.set(key, description);
+      try { const saved = await window.pet.config({ avatarDescriptions: { [key]: description } }); if ((saved.settingsRevision || 0) >= (cfg.settingsRevision || 0)) cfg = saved; if (avatarDescriptionDrafts.get(key) === description) avatarDescriptionDrafts.delete(key); if (avatarEditorKey === key) $('avatarDescriptionStatus').textContent = '已保存'; }
+      catch (error) { if (avatarEditorKey === key) $('avatarDescriptionStatus').textContent = error.message; }
     });
     $('describeAvatar').onclick = async () => {
       $('avatarDescriptionStatus').textContent = '正在识别角色外观…';
-      try { const r = await window.pet.avatarDescribeRequest(avatarKey); if (!r.ok) $('avatarDescriptionStatus').textContent = r.error; }
+      try { const key = avatarEditorKey; if (key !== avatarKey) await pickAvatar(key); const r = await window.pet.avatarDescribeRequest(key); if (!r.ok) $('avatarDescriptionStatus').textContent = r.error; }
       catch (error) { $('avatarDescriptionStatus').textContent = error.message; }
     };
     $('deleteAvatar').onclick = async () => {
-      const item = AVATAR_LIST.find(a => a.key === avatarKey);
+      const key = avatarEditorKey, item = AVATAR_LIST.find(a => a.key === key);
       if (!item?.personal || !confirm('删除这个个人模型？文件会移到废纸篓，内置模型不会受影响。')) return;
-      try { const r = await window.pet.avatarDelete(avatarKey); AVATAR_LIST = r.avatars; avatarKey = r.avatar; paintAvatars(); $('avatarImportStatus').textContent = '个人模型已移到废纸篓。'; }
+      try { const r = await window.pet.avatarDelete(key); AVATAR_LIST = r.avatars; avatarKey = r.avatar; paintAvatars(); $('avatarImportStatus').textContent = '个人模型已移到废纸篓。'; }
       catch (error) { $('avatarImportStatus').textContent = error.message; }
     };
     BRAIN = await window.pet.brainInfo();
@@ -759,9 +785,9 @@ function buildMotionList() {
       if (ev.type === 'config' && ev.config && (Number(ev.config.settingsRevision) || 0) >= (Number(cfg.settingsRevision) || 0)) { syncTts(ev.config); paintAvatarDetails(); }
       if (ev.type === 'avatars' && Array.isArray(ev.avatars)) { AVATAR_LIST = ev.avatars; paintAvatars(); }
       if (ev.type === 'speaker-status') paintSpeaker(ev);
-      if (ev.type === 'avatar-description' && ev.key === avatarKey) {
+      if (ev.type === 'avatar-description' && ev.key === avatarEditorKey) {
         if (ev.ok) { cfg.avatarDescriptions ||= {}; cfg.avatarDescriptions[ev.key] = ev.description; paintAvatarDetails(); }
-        $('avatarDescriptionStatus').textContent = ev.ok ? '外观已识别并保存，可直接修改。' : '自动识别未完成：' + ev.error + '，也可以手工填写。';
+        $('avatarDescriptionStatus').textContent = ev.ok ? '已识别并保存' : '自动识别未完成：' + ev.error + '，也可以手工填写。';
       }
     });
     paintPerm(init.asr || null);

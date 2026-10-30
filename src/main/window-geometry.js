@@ -10,4 +10,9 @@ function layoutWindow(rect, area) {
   return { logical: { x, y: logicalY, width, height }, bounds: { x, y, width, height: Math.max(160, bottom - y) },
     viewport: { width, height, offsetY: logicalY - y } };
 }
-module.exports = { layoutWindow };
+// The Dock is part of the desktop canvas; only the menu bar stays excluded.
+function canvasArea(display) {
+  const bounds = display.bounds, top = Math.max(bounds.y, display.workArea.y);
+  return { x:bounds.x, y:top, width:bounds.width, height:bounds.y + bounds.height - top };
+}
+module.exports = { layoutWindow, canvasArea };
