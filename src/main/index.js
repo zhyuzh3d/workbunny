@@ -210,6 +210,7 @@ let sessionGate = null, screenLocked = true, vaultKeyAbort = null;
 let unlockMemory = async () => {};
 let history = [];
 const speakerFilter = new (require('./speaker-filter').SpeakerFilter)();
+speakerFilter.enabled = config.load().asr.ownerOnly === true;
 let suppressEnrollmentFinal = false, lastSpeakerStatusAt = 0;
 function publishSpeakerStatus() {
   const status = speakerFilter.status();
