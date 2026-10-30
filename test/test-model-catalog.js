@@ -63,3 +63,16 @@ test('external catalogs start empty and belong to the exact provider, key and ad
  }
  assert(!fs.readFileSync(path.join(f.dir,'models.json'),'utf8').includes('secret-key'));
 });
+test('all discovered context/input/output limits survive a disk-cache reload',async t=>{
+ const f=fixture(t,{request:async()=>({data:[{id:'model-capacity',context_window:500000,max_input_tokens:480000,max_output_tokens:32000}]})});
+ await f.catalog.refresh('deepseek','fixture');
+ const restored=createCatalog();restored.setPath(path.join(f.dir,'models.json'));
+ const model=restored.get('deepseek').models[0];
+ assert.equal(model.contextWindow,500000);assert.equal(model.maxInputTokens,480000);assert.equal(model.maxOutputTokens,32000);
+});
+test('documented Grok limits are fallback metadata and cannot overwrite explicit API limits',()=>{
+ assert.equal(normalize('grok',[{id:'grok-4.7'}])[0].contextWindow,500000);
+ assert.equal(normalize('grok',[{id:'grok-4.20-0309-reasoning'}])[0].contextWindow,1000000);
+ assert.equal(normalize('grok',[{id:'grok-4.7',context_window:120000}])[0].contextWindow,120000);
+ assert.equal(normalize('grok',[{id:'unknown-grok'}])[0].contextWindow,undefined);
+});

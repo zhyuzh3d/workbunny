@@ -1047,6 +1047,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
   } catch (error) {
     if (!current()) return null;
     log('[brain] 请求未完成：' + (error.code || error.name || 'error'));
+    if (error.code === 'E_CONTEXT_BUDGET' && error.budget) log('[brain] 输入预算', error.budget);
     send('chat', { role: 'assistant', text: error.code === 'E_REPLY_PROTOCOL' ? '这次没能正常生成回复，请再试一次。' : '暂时没能回复：' + error.message });
     return null;
   } finally {

@@ -57,13 +57,14 @@ function makeSentenceSplitter(onSentence) {
  * @returns {Promise<{text:string,motions:string[],emos:string[],usage:any,ms:number}>}
  */
 function chat(opts) {
-  opts = require('./context-budget').fitRequest(opts, { retainLanes: true });
   if (opts.transport === 'workbuddy') return opts.webSearch === true || opts.recallSession
     ? require('./conversation-search').chatWithSearch(opts) : require('./workbuddy').chat(opts);
   if (opts.recallSession && !opts._toolRound) return require('./conversation-search').chatWithSearch(opts, {
     chat: request => chat({ ...request, _toolRound: true, recallSession: undefined, webSearch: false }),
   });
   if (opts.transport === 'apikey' && !String(opts.apiKey || '').trim()) return Promise.reject(new Error('请先在智力设置中填写 API Key'));
+  // Fit once the recall/search layer has attached its rules and tool schemas.
+  opts = require('./context-budget').fitRequest(opts, { retainLanes: true });
   const {
     baseURL, apiKey, model, messages,
     temperature = 0.8, maxTokens = 220, timeoutMs = 30000,

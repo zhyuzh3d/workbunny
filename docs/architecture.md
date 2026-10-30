@@ -12,7 +12,7 @@
 
 `memory-service.js` 管理加密写入和读取，`vault-db.js` 通过独立 Swift `native/vault.swift` 访问 SQLite。正文使用本机钥匙加密，搜索词以 HMAC 索引。`keychain-key-provider.js`、独立签名钥匙程序及 `vault-key-broker.js` 负责首次创建、读取与旧钥匙迁移；系统授权在辅助进程中等待。
 
-`message-identity.js`、`message-blocks.js`、`recent-rounds.js` 与 `context-budget.js` 管理身份、连续原文块和完整请求预算。`memory-evidence.js`、`memory-references.js` 和知识记录模块维护来源、作用域、修订与删除链。`memory-maintenance.js` 统一调度 Doze、Dream 和 Deepdream。
+`message-identity.js`、`message-blocks.js`、`recent-rounds.js` 与 `context-budget.js` 管理身份、连续原文块和完整请求预算。模型预算使用保守的多语言 token 估算，格式协议与工具定义计入最终请求；容量元数据在缓存重载后保留。每轮估算缓存只在该请求内使用，不留存已遗忘原文。`memory-evidence.js`、`memory-references.js` 和知识记录模块维护来源、作用域、修订与删除链。`memory-maintenance.js` 统一调度 Doze、Dream 和 Deepdream。
 
 `cognition-repository.js` 保存唯一自我理解、条目/整体锁和修订来源；`user-facts.js`、`companion-growth.js`、`companion-affect.js` 与 `companion-autonomy.js` 处理有条件的用户理解、兴趣目标、情绪和受授权的主动行为。抽象角色理解共享，原始私聊资料保留场景边界。
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成托盘模板图标（黑形+透明底），macOS 菜单栏会自动反色。"""
+"""生成应用图标。菜单栏长耳兔使用 trayTemplate.svg，由 make-tray-icon.cjs 生成。"""
 import struct
 import zlib
 import math
@@ -73,6 +73,6 @@ def shape(size):
 
 if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
-    for name, size in (("trayTemplate.png", 22), ("trayTemplate@2x.png", 44), ("icon.png", 256)):
+    for name, size in (("icon.png", 256),):
         n = png(os.path.join(OUT, name), size, shape(size))
         print(f"{name:24s} {size}x{size}  {n} bytes")

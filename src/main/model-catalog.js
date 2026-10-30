@@ -14,6 +14,18 @@ const AUTO = { id: 'auto', label: '模型默认' };
 const OFF = { id: 'off', label: '关闭思考' };
 const ON = { id: 'on', label: '开启思考' };
 const clean = (s, limit = 200) => typeof s === 'string' ? s.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, limit) : '';
+// xAI's model-list response omits context limits. Only documented exact IDs
+// get a fallback; real API metadata always takes precedence.
+// Verified 2026-10-30: https://docs.x.ai/developers/models/<exact-model-id>
+const GROK_CONTEXT_WINDOWS = Object.freeze({
+  'grok-4.20-0309-non-reasoning':1000000,
+  'grok-4.20-0309-reasoning':1000000,
+  'grok-4.20-multi-agent-0309':1000000,
+  'grok-4.3':1000000, 'grok-4.5':500000, 'grok-4.6':500000, 'grok-4.7':500000,
+});
+function documentedLimits(provider, id) {
+  return provider === 'grok' && Object.hasOwn(GROK_CONTEXT_WINDOWS,id) ? {contextWindow:GROK_CONTEXT_WINDOWS[id]} : {};
+}
 const levels = (xs) => [...new Set(Array.isArray(xs) ? xs.filter(x => EFFORTS.includes(x) || x === 'none') : [])];
 function options(provider, efforts = [], canDisable = false, canEnable = false) {
   const result = [{ ...AUTO }];
@@ -70,7 +82,7 @@ function normalize(provider, items) {
     const label = name === id ? id : `${name} · ${id}`;
     const maxOutputTokens = Number(item.max_output_tokens || item.maxOutputTokens);
     const maxInputTokens = Number(item.max_input_tokens || item.maxInputTokens);
-    const contextWindow = Number(item.context_window || item.contextWindow || item.context_length || item.contextLength || maxInputTokens);
+    const contextWindow = Number(item.context_window || item.contextWindow || item.context_length || item.contextLength || maxInputTokens || documentedLimits(provider,id).contextWindow);
     models.push({ id, label, thinking, ...(Number.isSafeInteger(contextWindow) && contextWindow > 0 ? { contextWindow } : {}), ...(Number.isSafeInteger(maxInputTokens) && maxInputTokens > 0 ? { maxInputTokens } : {}), ...(Number.isSafeInteger(maxOutputTokens) && maxOutputTokens > 0 ? { maxOutputTokens } : {}) });
     seen.add(id);
   }
@@ -133,6 +145,8 @@ function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => 
         const row = disk[id];
         if (Array.isArray(row?.models)) cache[id] = { at: Number(row.at) || 0, ...(/^[a-f0-9]{64}$/.test(row.connectionKey || '') ? {connectionKey:row.connectionKey} : {}), models: row.models.filter(m => clean(m.id) && Array.isArray(m.thinking)).map(m => ({
           id: clean(m.id), label: clean(m.label), thinking: m.thinking.filter(t => ['auto', 'off', 'on', ...EFFORTS].includes(t.id)).map(t => ({ id: t.id, label: clean(t.label) })),
+          ...(Number.isSafeInteger(m.contextWindow) && m.contextWindow > 0 ? { contextWindow:m.contextWindow } : {}),
+          ...(Number.isSafeInteger(m.maxInputTokens) && m.maxInputTokens > 0 ? { maxInputTokens:m.maxInputTokens } : {}),
           ...(Number.isSafeInteger(m.maxOutputTokens) && m.maxOutputTokens > 0 ? { maxOutputTokens: m.maxOutputTokens } : {}),
         })) };
       }
@@ -147,7 +161,11 @@ function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => 
   }
   function get(provider) {
     const stored = cache[provider];
-    if (stored?.models.length) return JSON.parse(JSON.stringify(stored));
+    if (stored?.models.length) {
+      const result = JSON.parse(JSON.stringify(stored));
+      result.models = result.models.map(m => ({...documentedLimits(provider,m.id),...m}));
+      return result;
+    }
     const ids = provider === 'workbuddy' ? ['hy3'] : PROVIDERS.find(p => p.id === provider)?.models || [];
     return { at: 0, models: ids.map(id => ({ id, label: id === 'hy3' ? '混元三 · Hy3' : id, thinking: fallbackThinking(provider, id) })) };
   }
