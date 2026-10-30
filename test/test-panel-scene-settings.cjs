@@ -149,6 +149,7 @@ async function main() {
   for (const provider of ['grok','deepseek','openai']) {
     await evalIn(win, `document.getElementById('brainSource').value=${JSON.stringify(provider)};document.getElementById('brainSource').dispatchEvent(new Event('change'))`);
     assert.deepEqual(await modelIds(), [], 'no predefined or saved-model placeholder before fetch: '+provider);
+    assert.match(await evalIn(win, 'document.getElementById("brainHint").textContent'), /填写密钥/, 'no capability hint from a model that has not been fetched');
     await evalIn(win, `document.getElementById('brainKeyInput').value='fixture-'+${JSON.stringify(provider)};document.getElementById('brainKeyInput').dispatchEvent(new Event('input'))`);
     await click(win,'brainModelsBtn');
     await waitFor(() => evalIn(win, '!document.getElementById("brainModelsBtn").disabled'), 'model fetch '+provider);

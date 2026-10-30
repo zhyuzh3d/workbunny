@@ -361,11 +361,11 @@ function paintBrain() {
   paintThinking(); paintModelFetch(); paintBrainHint();
 }
 function paintBrainHint() {
-  const p = draftProfile(), id = brainDraft.source;
+  const model = $('brainModel').value, id = brainDraft.source;
   let text = id === 'workbuddy' ? '使用已登录的 WorkBuddy。' : '填写密钥，获取模型后选择并保存。';
-  if (id === 'grok' && /^grok-4\.(?:[567]|20)(?:$|-)/.test(p.modelId) && $('brainThinking').value === 'none') text = '此模型不能关闭思考，none 使用最低的 low。';
+  if (id === 'grok' && /^grok-4\.(?:[567]|20)(?:$|-)/.test(model) && $('brainThinking').value === 'none') text = '此模型不能关闭思考，none 使用最低的 low。';
   if (id === 'deepseek' && $('brainThinking').value === 'medium') text = '此模型的 medium 按官方规则使用 high。';
-  if (id === 'openai' && /^(?:gpt-5(?:-|$)|o[134](?:[.-]|$))/.test(p.modelId) && $('brainThinking').value === 'none') text = '此模型不能关闭思考，none 使用最低的 low。';
+  if (id === 'openai' && /^(?:gpt-5(?:-|$)|o[134](?:[.-]|$))/.test(model) && $('brainThinking').value === 'none') text = '此模型不能关闭思考，none 使用最低的 low。';
   $('brainHint').textContent = text;
 }
 async function refreshBrainModels() {
