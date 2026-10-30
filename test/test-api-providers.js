@@ -58,3 +58,20 @@ test('real HTTP model discovery, SSE conversation and Doubao JSON audio adapter 
   voice.doubao.url=baseURL+'/error';await assert.rejects(tts.synthesize('测试',voice,{strict:true}),e=>/401/.test(e.message)&&!e.message.includes('never-echo'));
   const controller=new AbortController();controller.abort();await assert.rejects(doubao.synthesize('取消',voice,{signal:controller.signal}),{name:'AbortError'});
 });
+test('fixed Grok variants never send reasoning effort; missing keys fail locally and parameter errors are safe', async t=>{
+  let requests=0;const server=http.createServer((q,r)=>{requests++;let body='';q.on('data',p=>body+=p);q.on('end',()=>{
+    const data=JSON.parse(body);
+    if(q.url.startsWith('/unsupported') || 'reasoning_effort' in data){r.writeHead(400);r.end(JSON.stringify({error:'Model does not support parameter reasoningEffort. private-credential-echo'}));return;}
+    r.setHeader('Content-Type','text/event-stream');r.end('data: '+JSON.stringify({choices:[{delta:{content:'OK'}}]})+'\n\ndata: [DONE]\n\n');
+  });});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections();server.close();});
+  const baseURL='http://127.0.0.1:'+server.address().port;
+  for(const model of ['grok-4.20-0309-non-reasoning','grok-4.20-0309-reasoning']){
+    for(const effort of ['none','low','medium','high']) assert.deepEqual(catalog.apiThinking('grok',model,effort),{});
+    const L=config.resolveLLM({brain:{source:'apikey',provider:'grok',profiles:{grok:{apiKey:'fixture-key',baseURL,modelId:model,thinking:'none'}}}});
+    assert.equal((await llm.chat({...L,messages:[{role:'user',content:'hi'}]})).text,'OK');
+  }
+  assert.deepEqual(catalog.apiThinking('grok','grok-4.7','none'),{reasoning_effort:'low'});
+  assert.deepEqual(catalog.apiThinking('grok','grok-4.20-multi-agent-0309','high'),{reasoning_effort:'high'});
+  const prior=requests;await assert.rejects(llm.chat({transport:'apikey',baseURL,apiKey:'',model:'fixture',messages:[]}),/填写 API Key/);assert.equal(requests,prior);
+  await assert.rejects(llm.chat({baseURL:baseURL+'/unsupported',apiKey:'fixture-key',model:'fixture',messages:[]}),e=>e.code==='E_MODEL_PARAMETER'&&/思考参数/.test(e.message)&&!e.message.includes('private-credential-echo'));
+});

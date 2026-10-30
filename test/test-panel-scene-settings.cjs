@@ -43,7 +43,7 @@ const server = http.createServer((req, res) => {
   if (rejectModels) { res.writeHead(401); res.end('{"private":"do not display"}'); return; }
   const provider = req.url.split('/')[1];
   assert.equal(req.url, `/${provider}/v1/${provider === 'grok' ? 'language-models' : 'models'}`);
-  setTimeout(() => res.end(JSON.stringify({ [provider === 'grok' ? 'models' : 'data']: [{ id: provider + '-actual-first' }, { id: provider + '-actual-second' }] })), 70);
+  setTimeout(() => res.end(JSON.stringify({ [provider === 'grok' ? 'models' : 'data']: [{ id: provider === 'grok' ? 'grok-4.20-0309-non-reasoning' : provider + '-actual-first' }, { id: provider + '-actual-second' }] })), 70);
 });
 
 fs.writeFileSync(preload, `
@@ -122,7 +122,7 @@ async function main() {
   await app.whenReady();
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
   modelBase = 'http://127.0.0.1:'+server.address().port;
-  const win = new BrowserWindow({ width: 520, height: 720, show: false, webPreferences: { preload, contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  const win = new BrowserWindow({ width: 520, height: 720, show: false, webPreferences: { preload, contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false } });
   windows.push(win);
   win.webContents.on('console-message', (_e, level, message, line) => console.error(`panel fixture console[${level}] ${line}: ${message}`));
   await win.loadFile(panelHtml, { query: { p: 'settings' } });
@@ -157,6 +157,12 @@ async function main() {
   await evalIn(win, 'document.getElementById("doubaoKey").value="fixture-doubao-secret-last";document.getElementById("doubaoKey").dispatchEvent(new Event("input"));document.getElementById("saveBtn").click()');
   await waitFor(() => Promise.resolve(settings.tts.doubao?.apiKey==='fixture-doubao-secret-last'),'raw Doubao key saved');
   await waitFor(() => evalIn(win,'document.getElementById("doubaoKey").parentElement.querySelector(".credential-preview").textContent==="fixt••••••••last"'),'saved Doubao preview');
+  for(const [id,cleared] of [['rmKey',()=>settings.tts.apiKey===''],['doubaoKey',()=>settings.tts.doubao.apiKey==='']]) {
+    await evalIn(win, `document.getElementById(${JSON.stringify(id)}).parentElement.querySelector('.credential-clear').click()`);
+    if(id==='doubaoKey') await click(win,'saveBtn');
+    await waitFor(()=>Promise.resolve(cleared()),'saved credential cleared: '+id);
+    assert.equal(await evalIn(win, `document.getElementById(${JSON.stringify(id)}).parentElement.querySelector('.credential-clear').hidden`),true);
+  }
 
   assert.equal(await evalIn(win, '!!document.querySelector("#httpSecrets [data-secret=password]").closest(".credential-field")'), false,'password remains a native fully masked field');
 
@@ -168,10 +174,14 @@ async function main() {
     assert.match(await evalIn(win, 'document.getElementById("brainHint").textContent'), /填写密钥/, 'no capability hint from a model that has not been fetched');
     await evalIn(win, `document.getElementById('brainKeyInput').value='fixture-'+${JSON.stringify(provider)};document.getElementById('brainKeyInput').dispatchEvent(new Event('input'))`);
     assert.match(await evalIn(win,'document.getElementById("brainKeyInput").parentElement.querySelector(".credential-preview").textContent'), /^fixt•+/, 'pasted key immediately shows a partial preview');
-    if (provider === 'grok') fs.writeFileSync(path.resolve('.cache/test-credential-preview.png'), (await win.webContents.capturePage()).toPNG());
+    if (provider === 'grok') { await evalIn(win, 'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); fs.writeFileSync(path.resolve('.cache/test-credential-preview.png'), (await win.webContents.capturePage()).toPNG()); }
     await click(win,'brainModelsBtn');
     await waitFor(() => evalIn(win, '!document.getElementById("brainModelsBtn").disabled'), 'model fetch '+provider);
-    assert.deepEqual(await modelIds(), [provider+'-actual-first',provider+'-actual-second']);
+    assert.deepEqual(await modelIds(), [provider==='grok'?'grok-4.20-0309-non-reasoning':provider+'-actual-first',provider+'-actual-second']);
+    if(provider==='grok') {
+      assert.equal(await evalIn(win,'document.getElementById("brainThinking").disabled'),true);
+      assert.match(await evalIn(win,'document.getElementById("brainHint").textContent'),/不使用思考/);
+    }
     await evalIn(win, 'document.getElementById("brainKeyInput").value+="-changed";document.getElementById("brainKeyInput").dispatchEvent(new Event("input"))');
     assert.deepEqual(await modelIds(), [], 'key change invalidates catalog');
     rejectModels = true; await click(win,'brainModelsBtn');
@@ -185,6 +195,9 @@ async function main() {
     await waitFor(() => evalIn(win, '!document.getElementById("brainModelsBtn").disabled'), 'retry fetch');
     await evalIn(win, 'document.getElementById("brainURL").value+="/other";document.getElementById("brainURL").dispatchEvent(new Event("input"))');
     assert.deepEqual(await modelIds(), [], 'address change invalidates catalog');
+    await evalIn(win,'document.getElementById("brainKeyInput").parentElement.querySelector(".credential-clear").click();document.getElementById("saveBtn").click()');
+    await waitFor(()=>Promise.resolve(settings.brain.profiles[provider]?.apiKey===''),'saved brain key cleared: '+provider);
+    assert.equal(await evalIn(win,'document.getElementById("brainKeyInput").value'),'');
   }
   assert.equal(modelRequests, 9, 'three providers used real Electron network requests and retry');
   assert.equal(await evalIn(win,'document.getElementById("asrNetworkRow").hidden'), true);
@@ -194,6 +207,10 @@ async function main() {
   assert.equal(settings.tts.http.secrets.password,'private-password');
   assert(!Object.hasOwn(calls.at(-1).tts.http,'secretPreviews'));
   assert.equal(await evalIn(win,'document.querySelector("#httpSecrets [data-secret=authorization]").parentElement.querySelector(".credential-preview").textContent'),'fixt••••••••last');
+  await evalIn(win,'document.querySelector("#httpSecrets [data-secret=authorization]").parentElement.querySelector(".credential-clear").click();document.getElementById("httpProfile").dispatchEvent(new Event("change"));document.getElementById("httpSave").click()');
+  await waitFor(()=>Promise.resolve(settings.tts.http.secrets.authorization===''),'stored HTTP key cleared after rerender');
+  assert.equal(settings.tts.http.secrets.password,'private-password','clearing a key cannot affect the password');
+  assert.equal(await evalIn(win,'document.querySelector("#httpSecrets [data-secret=authorization]").parentElement.querySelector(".credential-preview").textContent'),'');
 
   await win.close();
   server.close();

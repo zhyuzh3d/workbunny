@@ -90,7 +90,9 @@ function apiThinking(provider, model, selection = 'none') {
     return { thinking: { type: choice === 'none' ? 'disabled' : 'enabled' }, reasoning_effort: choice };
   }
   if (provider === 'grok') {
-    if (/^grok-4\.(?:[567]|20)(?:$|-)/.test(model)) return { reasoning_effort: choice === 'none' ? 'low' : choice };
+    // Fixed non-reasoning and older reasoning variants reject reasoning_effort.
+    if (/(?:^|-)non-reasoning(?:$|-)/.test(model)) return {};
+    if (/^grok-4\.[567](?:$|-)/.test(model) || /^grok-4\.20-multi-agent(?:$|-)/.test(model)) return { reasoning_effort: choice === 'none' ? 'low' : choice };
     if (/^grok-3-mini(?:$|-)/.test(model)) return { reasoning_effort: choice === 'high' ? 'high' : 'low' };
     if (/^grok-4\.3(?:$|-)/.test(model)) return { reasoning_effort: choice };
     return {}; // Older Grok models reject this parameter.

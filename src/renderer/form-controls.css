@@ -65,11 +65,18 @@ input[type="checkbox"]:disabled { opacity:.4; cursor:default; }
 .row > .credential-field, .credential-field {
   position:relative; display:block; flex:1 1 auto; min-width:0; color:var(--ink);
 }
-.credential-field > input { width:100%; box-sizing:border-box; color:transparent; caret-color:var(--ink); }
+.credential-field > input { width:100%; box-sizing:border-box; padding-right:32px; color:transparent; caret-color:var(--ink); }
 .credential-field.has-preview > input::placeholder { color:transparent; }
 .credential-field > .credential-preview {
-  position:absolute; left:10px; right:10px; top:50%; transform:translateY(-50%);
+  position:absolute; left:10px; right:32px; top:50%; transform:translateY(-50%);
   overflow:hidden; white-space:nowrap; text-overflow:ellipsis; pointer-events:none;
   color:var(--ink); font:12px/1.5 var(--font);
 }
 .credential-field > input:disabled + .credential-preview { opacity:.5; }
+.credential-field > .credential-clear {
+  position:absolute; right:5px; top:50%; transform:translateY(-50%); display:grid; place-items:center;
+  width:22px; height:22px; min-width:0; padding:0; border:0; border-radius:50%; box-shadow:none;
+  background:transparent; color:var(--ink-soft); font:18px/1 var(--font); cursor:pointer;
+}
+.credential-field > .credential-clear:hover { background:rgba(30,24,18,.07); }
+.credential-field > .credential-clear[hidden] { display:none; }

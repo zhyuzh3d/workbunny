@@ -1,4 +1,4 @@
-import { paintCredential } from './credential-input.js';
+import { paintCredential, credentialCleared } from './credential-input.js';
 export async function mountPortability(pet) {
   const $ = id => document.getElementById(id);
   let state = await pet.portability(), initial = await pet.panelInit(), config = initial.config;
@@ -28,7 +28,7 @@ export async function mountPortability(pet) {
   let profile = config.tts.http?.profile || await pet.ttsHTTPTemplate('jsonl');
   let stored = config.tts.http || {};
   function renderProfile(keepSecrets = false) {
-    const draftSecrets = keepSecrets ? new Map([...$('httpSecrets').querySelectorAll('input')].map(x => [x.dataset.secret, x.value])) : new Map();
+    const draftSecrets = keepSecrets ? new Map([...$('httpSecrets').querySelectorAll('input')].map(x => [x.dataset.secret, {value:x.value,cleared:credentialCleared(x)}])) : new Map();
     $('httpProfile').value = JSON.stringify(profile, null, 2); $('httpURL').value = profile.url || '';
     for (const [id, key] of [['httpModel', 'model'], ['httpVoice', 'voice'], ['httpResource', 'resourceId']]) $(id).value = stored.params?.[key] || '';
     const names = new Set();
@@ -37,10 +37,10 @@ export async function mountPortability(pet) {
     for (const name of names) {
       const row = document.createElement('label'); row.className = 'row'; const label = document.createElement('span');
       label.textContent = name === 'authorization' ? '鉴权值' : name; const input = document.createElement('input');
-      input.type = 'password'; input.autocomplete = 'off'; input.dataset.secret = name; input.value = draftSecrets.get(name) || '';
+      input.type = 'password'; input.autocomplete = 'off'; input.dataset.secret = name; input.value = draftSecrets.get(name)?.value || '';
       input.placeholder = stored.hasSecrets?.[name] ? '已保存，留空保持' : name === 'authorization' ? '例如 Bearer 加密钥' : '请输入凭据';
       row.append(label, input); $('httpSecrets').append(row);
-      if (!globalThis.BunnyCredential.isPassword(name)) paintCredential(input, input.value, {preview:stored.secretPreviews?.[name], preserveEmpty:true});
+      if (!globalThis.BunnyCredential.isPassword(name)) paintCredential(input, input.value, {preview:stored.secretPreviews?.[name], preserveEmpty:true,cleared:draftSecrets.get(name)?.cleared});
     }
   }
   renderProfile();
@@ -54,7 +54,7 @@ export async function mountPortability(pet) {
   };
   async function save(activate = true) {
     profile = JSON.parse($('httpProfile').value); profile.url = $('httpURL').value.trim();
-    const secrets = Object.fromEntries([...$('httpSecrets').querySelectorAll('input')].filter(x => x.value).map(x => [x.dataset.secret, x.value]));
+    const secrets = Object.fromEntries([...$('httpSecrets').querySelectorAll('input')].filter(x => x.value || credentialCleared(x)).map(x => [x.dataset.secret, x.value]));
     const result = await pet.config({ tts: { ...(activate ? { engine: 'http' } : {}), http: { profile, secrets, params: {
       model: $('httpModel').value.trim(), voice: $('httpVoice').value.trim(), resourceId: $('httpResource').value.trim() } } } });
     stored = result.config?.tts?.http || result.tts?.http || {}; renderProfile();

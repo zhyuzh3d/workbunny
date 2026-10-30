@@ -310,7 +310,6 @@ function stashBrain() {
   const p = draftProfile();
   if ($('brainModel').value) p.modelId = $('brainModel').value;
   p.thinking = $('brainThinking').value;
-  $('brainThinking').disabled = brainDraft.source !== 'workbuddy' && !brainCatalog().models.length;
   if (brainDraft.source !== 'workbuddy') {
     p.baseURL = $('brainURL').value.trim();
     const value = $('brainKeyInput').value;
@@ -327,11 +326,13 @@ function brainCatalog(id = brainDraft.source) {
 }
 function paintThinking() {
   const p = draftProfile();
+  const selectedModel = brainCatalog().models.find(m => m.id === p.modelId);
+  const fixedGrok = brainDraft.source === 'grok' && !!selectedModel && !selectedModel.thinking?.some(t => ['low','medium','high'].includes(t.id));
   $('brainThinkingRow').querySelector('span').textContent = brainDraft.source === 'grok' && /^grok-4\.20-multi-agent(?:$|-)/.test(p.modelId) ? '协作规模' : '思考';
   const options = brainDraft.source === 'workbuddy' ? brainCatalog().models.find(m => m.id === p.modelId)?.thinking || [{ id: 'auto', label: '模型默认' }] : ['none', 'low', 'medium', 'high'].map(id => ({ id, label: id }));
-  fillSelect($('brainThinking'), options, p.thinking === 'off' ? 'none' : p.thinking || (brainDraft.source === 'workbuddy' ? 'auto' : 'none'));
+  fillSelect($('brainThinking'), options, fixedGrok ? 'none' : p.thinking === 'off' ? 'none' : p.thinking || (brainDraft.source === 'workbuddy' ? 'auto' : 'none'));
   p.thinking = $('brainThinking').value;
-  $('brainThinking').disabled = brainDraft.source !== 'workbuddy' && !brainCatalog().models.length;
+  $('brainThinking').disabled = fixedGrok || brainDraft.source !== 'workbuddy' && !brainCatalog().models.length;
   $('brainThinkingRow').classList.toggle('hidden', options.length < 2);
 }
 function paintModelFetch() {
@@ -364,7 +365,8 @@ function paintBrain() {
 function paintBrainHint() {
   const model = $('brainModel').value, id = brainDraft.source;
   let text = id === 'workbuddy' ? '使用已登录的 WorkBuddy。' : '填写密钥，获取模型后选择并保存。';
-  if (id === 'grok' && /^grok-4\.(?:[567]|20)(?:$|-)/.test(model) && $('brainThinking').value === 'none') text = '此模型不能关闭思考，none 使用最低的 low。';
+  if (id === 'grok' && model && $('brainThinking').disabled) text = /(?:^|-)non-reasoning(?:$|-)/.test(model) ? '此模型不使用思考。' : '此模型使用默认思考方式，无需调整强度。';
+  else if (id === 'grok' && (/^grok-4\.[567](?:$|-)/.test(model) || /^grok-4\.20-multi-agent(?:$|-)/.test(model)) && $('brainThinking').value === 'none') text = '此模型不能关闭思考，none 使用最低的 low。';
   if (id === 'deepseek' && $('brainThinking').value === 'medium') text = '此模型的 medium 按官方规则使用 high。';
   if (id === 'openai' && /^(?:gpt-5(?:-|$)|o[134](?:[.-]|$))/.test(model) && $('brainThinking').value === 'none') text = '此模型不能关闭思考，none 使用最低的 low。';
   $('brainHint').textContent = text;
@@ -626,7 +628,7 @@ async function save() {
   const btn = $('saveBtn');
   btn.disabled = true;
   try {
-    if (edits.has('brain') && brainDraft.source !== 'workbuddy' && !$('brainModel').value) throw new Error('请先获取模型列表并选择模型');
+    if (edits.has('brain') && brainDraft.source !== 'workbuddy' && draftProfile().apiKey !== '' && !$('brainModel').value) throw new Error('请先获取模型列表并选择模型');
     const { patch, paths } = draftPatch();
     await selfSettings.saveInputs();
     await persist(patch, paths);

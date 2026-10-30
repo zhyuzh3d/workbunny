@@ -63,6 +63,7 @@ function chat(opts) {
   if (opts.recallSession && !opts._toolRound) return require('./conversation-search').chatWithSearch(opts, {
     chat: request => chat({ ...request, _toolRound: true, recallSession: undefined, webSearch: false }),
   });
+  if (opts.transport === 'apikey' && !String(opts.apiKey || '').trim()) return Promise.reject(new Error('请先在智力设置中填写 API Key'));
   const {
     baseURL, apiKey, model, messages,
     temperature = 0.8, maxTokens = 220, timeoutMs = 30000,
@@ -112,6 +113,9 @@ function chat(opts) {
           res.on('data', part => { if (errorBody.length < 8192) errorBody += String(part).slice(0, 8192 - errorBody.length); });
           res.on('end', () => {
             const error = new Error(`模型接口返回 HTTP ${res.statusCode}，请检查密钥、所选模型、额度或请求频率`);
+            if (res.statusCode === 400 && /does not support parameter reasoningEffort|unsupported.{0,80}reasoning[_ ]?effort|reasoning[_ ]?effort.{0,80}(?:not supported|unsupported)/i.test(errorBody)) {
+              error.message = '所选模型不支持当前思考参数，请更新模型配置或应用'; error.code = 'E_MODEL_PARAMETER';
+            }
             if (require('./context-budget').isContextError(res.statusCode, errorBody)) error.code = 'E_CONTEXT_WINDOW';
             reject(error);
           });
