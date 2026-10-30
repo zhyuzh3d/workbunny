@@ -377,6 +377,19 @@ class MemoryService {
     fs.unlinkSync(file);
     this.recent = conversationMessages(await this.query('message', 40)).reverse();
   }
+  markInterrupted(id, { by = 'user', at = this.clock() } = {}) {
+    if (!this.ready || !this.getSettings().enabled) return Promise.resolve(false);
+    return this.serial(async () => {
+      const row = (await this.db.request('get', { ids: [id] })).rows[0];
+      if (!row || row.kind !== 'message') return false;
+      const record = this.decode(row);
+      if (!actors.isBunny(record.value) || record.value.interrupted) return false;
+      record.value = { ...record.value, interrupted: { at, by: ['voice', 'typing', 'text', 'click', 'user'].includes(by) ? by : 'user' } };
+      await this.write([record], this.epoch, { notify: false });
+      const index = this.recent.findIndex(r => r.id === id); if (index >= 0) this.recent[index] = record;
+      return true;
+    });
+  }
   addMessage(role, content, details = {}) {
     if (containsSecret(content)) return Promise.reject(new Error('普通对话不能保存密码或密钥'));
     if (!this.getSettings().enabled || !String(content || '').trim()) return Promise.resolve(null);

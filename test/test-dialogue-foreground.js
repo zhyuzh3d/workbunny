@@ -18,6 +18,8 @@ const ctx = { storageBusy: false, storageError: '', connection: { status: () => 
   config: { load: () => ({ memory: settings }), resolveLLM: () => ({ transport: 'workbuddy', provider: 'synthetic', model: 'test' }), buildSystemPrompt: () => '合成角色与操作规则' },
   memory: m, currentScene: () => settings.scene, contextEpoch: 0, screenLocked: false, activeThought: null, busy: false,
   desktop: null, monitor: null, secretary: null, history: [], presentedReplies: new Set(), lastDialogueAt: 0,
+  embodiment: { context: () => ({ appearance: { name: '可可', description: '短发' }, recentActions: [] }), perform: async () => ({ ok: true }) },
+  motionLibrary: { prompt: () => [] }, taskSupervision: { context: () => '' }, lastInterruption: null,
   dialogueActions: localRequire('./dialogue-actions'), SELF_RULE: localRequire('./dialogue-cognition').SELF_RULE, JUDGE_RULE: '',
   dialogueHistory: localRequire('./reply-format').dialogueHistory, requestReply: localRequire('./reply-request').requestReply,
   llm: { ...localRequire('./llm'), chat: async options => { calls.push(options.messages); return { raw: reply() }; } },
@@ -64,6 +66,15 @@ async function run() {
   assert.equal(JSON.parse(calls.at(-1).find(r => r._contextLane === 'cognition').content).previous, null);
   assert(ctx.worthJudging('嗯')); ctx.lastDialogueAt = 0; assert(!ctx.worthJudging('嗯'));
   assert(shown.some(e => e.name === 'chat' && e.value.final));
+  settings.enabled = true;
+  const interrupted = (await m.query('message', 1, { sort: 'ingestion' }))[0];
+  assert(await m.markInterrupted(interrupted.id, { by: 'voice', at: 123456 }));
+  assert.equal(await m.markInterrupted(interrupted.id, { by: 'typing', at: 654321 }), false);
+  assert.equal(await m.markInterrupted(first.id, { by: 'typing' }), false, 'owner messages are never marked as interrupted Bunny speech');
+  const changed = m.decode((await m.db.request('get', { ids: [interrupted.id] })).rows[0]);
+  assert.equal(changed.value.content, interrupted.value.content);assert.deepEqual(changed.value.interrupted, { at: 123456, by: 'voice' });
+  assert.equal(localRequire('./dialogue-cognition').context([changed], { dialogueId: 'owner:life' }).data.previous, null);
+  assert(JSON.parse(calls[0].find(r => r._contextLane === 'body').content).appearance.description);
   // The actual periodic callback must not create an idle-activity promise
   // while maintenance is entering its own asynchronous permission checks.
   const { MemoryMaintenance } = localRequire('./memory-maintenance');

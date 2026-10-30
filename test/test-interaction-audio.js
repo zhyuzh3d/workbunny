@@ -84,7 +84,7 @@ test('touch feedback selects a concrete enabled, loaded action while retaining t
   const motions = [{ key: 'greet_wave', slot: 'greet' }, { key: 'greet_hello', slot: 'greet' }];
   const first = touch.pick('head', { motions }); assert.equal(first.motion, 'greet_wave'); assert(first.sound);
   now += 100; assert.equal(touch.pick('head', { motions }), null);
-  now += 7000; const second = touch.pick('head', { motions }); assert.equal(second.motion, 'greet_hello');
+  now += 7000; const second = touch.pick('head', { motions }); assert.equal(second.motion, 'greet_wave', 'weighted selection uses the same cumulative distribution on every tap');
   const single = [{ key: 'greet_hello', slot: 'greet' }];
   now += 9000; const head = touch.pick('head', { motions: single });
   now += 9000; const upper = touch.pick('upper', { motions: single });

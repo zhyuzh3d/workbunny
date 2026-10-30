@@ -182,6 +182,13 @@ function paintAvatars() {
     }
   }
   for (const b of row.children) b.classList.toggle('on', b.dataset.key === avatarKey);
+  paintAvatarDetails();
+}
+
+function paintAvatarDetails() {
+  const item = AVATAR_LIST.find(a => a.key === avatarKey), field = $('avatarDescription');
+  if (field && document.activeElement !== field) field.value = cfg.avatarDescriptions?.[avatarKey] || item?.description || '';
+  if ($('deleteAvatar')) $('deleteAvatar').disabled = !item?.personal;
 }
 
 async function pickAvatar(k) {
@@ -191,6 +198,15 @@ async function pickAvatar(k) {
   edit('avatar', k);
   await persist({ avatar: k });
   log('换形象 ' + k);
+}
+
+function paintSpeaker(status) {
+  if (!$('speakerEnabled') || !status) return;
+  $('speakerEnabled').checked = !!status.enabled;
+  $('speakerEnabled').disabled = !status.ready && !status.enabled;
+  $('speakerEnroll').disabled = !!status.enrolling;
+  const verdicts = { owner: '像主人', other: '其他声音', uncertain: '暂不能确定', 'device-changed': '麦克风已变化，请重新录入', 'needs-enrollment': '请完成三段录入' };
+  $('speakerStatus').textContent = status.enrolling ? '正在采集清楚的人声，请自然说至少三秒…' : `已录入${status.samples || 0}段${status.ready ? '，可以启用' : '，至少需要3段'}。${verdicts[status.latest?.status] || ''}`;
 }
 
 function paintScale() {
@@ -531,43 +547,75 @@ async function setDisabledMotions(disabled) {
   } catch (e) { $('mStatus').textContent = e.message; }
   finally { motionSaving = false; buildMotionList(); }
 }
+function motionButton(label, action) {
+  const button = document.createElement('button'); button.className = 'mini'; button.textContent = label;
+  button.disabled = motionSaving; button.onclick = action; return button;
+}
+function motionField(parent, label, value, type = 'text') {
+  const row = document.createElement('label'); row.className = 'motionField';
+  const caption = document.createElement('span'); caption.textContent = label;
+  const input = document.createElement(type === 'textarea' ? 'textarea' : 'input');
+  if (type !== 'textarea') input.type = type;
+  if (type === 'checkbox') input.checked = !!value; else input.value = value ?? '';
+  input.setAttribute('aria-label', label); row.append(caption, input); parent.append(row); return input;
+}
+function applyMotionView(view) {
+  MOTIONS = view.motions || MOTIONS; MOTION_GROUPS = view.categories || MOTION_GROUPS;
+  const select = $('mImportGroup'), previous = select.value; select.replaceChildren();
+  for (const group of MOTION_GROUPS) { const option = document.createElement('option'); option.value = group.id; option.textContent = group.label; select.append(option); }
+  if (MOTION_GROUPS.some(g => g.id === previous)) select.value = previous;
+}
+async function motionOperation(change) {
+  if (motionSaving) return;
+  motionSaving = true; $('mStatus').textContent = '正在保存…';
+  try { applyMotionView(await window.pet.motionEdit(change)); $('mStatus').textContent = '动作库已保存'; }
+  catch (error) { $('mStatus').textContent = error.message; }
+  finally { motionSaving = false; buildMotionList(); }
+}
 function buildMotionList() {
-  const box = $('motionList');
-  if (!box) return;
+  const box = $('motionList'); if (!box) return; box.replaceChildren();
   const disabled = new Set(cfg.motions?.disabled || []);
-  const idleCount = MOTIONS.filter(m => m.slot === 'idle' && !disabled.has(m.key)).length;
-  box.innerHTML = '';
-  const groups = MOTION_GROUPS.length ? MOTION_GROUPS : [{ id: '', label: '' }];
-  for (const g of groups) {
-    const items = MOTIONS.filter(m => (m.slot || '') === g.id);
-    if (!items.length) continue;
-    const group = document.createElement('details'); group.className = 'motionGroup'; group.dataset.slot = g.id;
-    group.open = motionExpanded.has(g.id);
-    group.addEventListener('toggle', () => { if (group.open) motionExpanded.add(g.id); else motionExpanded.delete(g.id); });
-    const title = document.createElement('summary');
-    const enabledCount = items.filter(m => !disabled.has(m.key)).length;
-    title.textContent = `${g.label}　${enabledCount}/${items.length}`;
-    group.appendChild(title);
-    for (const m of items) {
-      const enabled = !disabled.has(m.key), row = document.createElement('div'); row.className = 'motionRow';
-      const check = document.createElement('input'); check.type = 'checkbox'; check.checked = enabled;
-      check.dataset.key = m.key; check.setAttribute('aria-label', '启用' + m.label);
-      check.disabled = motionSaving || (m.slot === 'idle' && enabled && idleCount === 1);
-      if (m.slot === 'idle' && enabled && idleCount === 1) check.title = '至少保留一个空闲动作';
-      check.addEventListener('change', () => { const next = new Set(cfg.motions?.disabled || []); if (check.checked) next.delete(m.key); else next.add(m.key); setDisabledMotions([...next]); });
-      row.appendChild(check);
-      const b = document.createElement('button'); b.className = 'mItem' + (m.key === curMotion ? ' on' : ''); b.dataset.key = m.key;
-      b.disabled = !enabled || motionSaving; b.title = enabled ? '预览' + m.label : '勾选后可使用';
-      const name = document.createElement('span'); name.className = 'nm'; name.textContent = m.label || m.key;
-      if (m.use) { const use = document.createElement('span'); use.className = 'us'; use.textContent = m.use; name.appendChild(use); }
-      b.appendChild(name);
-      const preview = document.createElement('span'); preview.className = 'lp'; preview.textContent = '▷'; preview.setAttribute('aria-hidden', 'true'); b.appendChild(preview);
-      b.addEventListener('click', () => { curMotion = m.key; for (const item of box.querySelectorAll('button.mItem')) item.classList.toggle('on', item.dataset.key === m.key); window.pet.panelMotion(m.key); });
-      row.appendChild(b); group.appendChild(row);
+  const idleCount = MOTIONS.filter(m => (m.idle ?? (m.slot === 'idle')) && !disabled.has(m.key) && m.weight !== 0).length;
+  for (const group of MOTION_GROUPS) {
+    const items = MOTIONS.filter(m => m.slot === group.id), details = document.createElement('details');
+    details.className = 'motionGroup'; details.dataset.slot = group.id; details.open = motionExpanded.has(group.id);
+    details.ontoggle = () => details.open ? motionExpanded.add(group.id) : motionExpanded.delete(group.id);
+    const title = document.createElement('summary'); title.textContent = `${group.label}　${items.filter(m => !disabled.has(m.key)).length}/${items.length}`; details.append(title);
+    const settings = document.createElement('details'); settings.className = 'motionEditor';
+    const caption = document.createElement('summary'); caption.textContent = '分类设置'; settings.append(caption);
+    const label = motionField(settings, '分类名称', group.label), meaning = motionField(settings, '这类动作的意思', group.description || '', 'textarea');
+    settings.append(motionButton('保存分类', () => motionOperation({ type: 'category-update', id: group.id, label: label.value, description: meaning.value })));
+    settings.append(motionButton('删除分类', () => { if (confirm('删除分类？其中的动作会移到其他分类，不会删除文件。')) motionOperation({ type: 'category-delete', id: group.id }); }));
+    details.append(settings);
+    const totalWeight = items.filter(m => !disabled.has(m.key)).reduce((n, m) => n + Number(m.weight ?? 1), 0);
+    for (const motion of items) {
+      const enabled = !disabled.has(motion.key), row = document.createElement('div'); row.className = 'motionRow';
+      const check = document.createElement('input'); check.type = 'checkbox'; check.checked = enabled; check.dataset.key = motion.key; check.setAttribute('aria-label', '启用' + motion.label);
+      check.disabled = motionSaving || ((motion.idle ?? (motion.slot === 'idle')) && enabled && idleCount === 1 && motion.weight !== 0);
+      check.onchange = () => { const next = new Set(cfg.motions?.disabled || []); check.checked ? next.delete(motion.key) : next.add(motion.key); setDisabledMotions([...next]); };
+      const preview = document.createElement('button'); preview.className = 'mItem' + (motion.key === curMotion ? ' on' : ''); preview.dataset.key = motion.key; preview.disabled = !enabled;
+      const name = document.createElement('span'); name.className = 'nm'; name.textContent = motion.label;
+      const hint = document.createElement('span'); hint.className = 'us'; hint.textContent = motion.use || ''; name.append(hint); preview.append(name);
+      preview.onclick = () => { curMotion = motion.key; window.pet.panelMotion(motion.key); buildMotionList(); };
+      const probability = document.createElement('span'); probability.className = 'motionChance'; probability.textContent = `${enabled && totalWeight ? Math.round(Number(motion.weight ?? 1) / totalWeight * 100) : 0}%`;
+      const weight = document.createElement('input'); weight.type = 'number'; weight.min = '0'; weight.max = '100'; weight.step = '0.1'; weight.value = motion.weight ?? 1; weight.className = 'motionWeight'; weight.setAttribute('aria-label', motion.label + '随机权重');
+      weight.onchange = () => motionOperation({ type: 'motion-update', key: motion.key, weight: Number(weight.value) });
+      row.append(check, preview, weight, probability); details.append(row);
+      const editor = document.createElement('details'); editor.className = 'motionEditor';
+      const heading = document.createElement('summary'); heading.textContent = '编辑“' + motion.label + '”'; editor.append(heading);
+      const motionName = motionField(editor, '动作名称', motion.label), use = motionField(editor, '动作含义', motion.use || '', 'textarea');
+      const select = document.createElement('select'); select.setAttribute('aria-label', motion.label + '所属分类');
+      for (const g of MOTION_GROUPS) { const option = document.createElement('option'); option.value = g.id; option.textContent = g.label; select.append(option); } select.value = motion.slot; editor.append(select);
+      const loop = motionField(editor, '循环播放', motion.loop, 'checkbox');
+      const idle = motionField(editor, '可作空闲待机', motion.idle, 'checkbox');
+      editor.append(motionButton('保存动作', () => motionOperation({ type: 'motion-update', key: motion.key, label: motionName.value, use: use.value, slot: select.value, loop: loop.checked, idle: idle.checked })));
+      editor.append(motionButton(motion.personal ? '删除个人动作' : '移除此动作', () => { if (confirm(motion.personal ? '删除个人动作？文件移到废纸篓。' : '从动作库移除？可通过“恢复内置动作”找回。')) motionOperation({ type: 'motion-delete', key: motion.key }); }));
+      details.append(editor);
     }
-    box.appendChild(group);
+    if (!items.length) { const empty = document.createElement('p'); empty.className = 'note'; empty.textContent = '选择这个分类后导入VRMA，或把现有动作移入。'; details.append(empty); }
+    box.append(details);
   }
-  $('mCount').textContent = `启用 ${MOTIONS.length - disabled.size}/${MOTIONS.length}`;
+  $('mCount').textContent = `启用 ${MOTIONS.filter(m => !disabled.has(m.key)).length}/${MOTIONS.length}`;
   $('mAll').disabled = motionSaving || disabled.size === 0;
 }
 
@@ -587,12 +635,33 @@ function buildMotionList() {
       try { const r = await window.pet.avatarImport(); if (r.cancelled) return; AVATAR_LIST = r.avatars; $('avRow').replaceChildren(); paintAvatars(); await pickAvatar(r.key); $('avatarImportStatus').textContent = '已导入个人模型，仅本机使用。'; }
       catch (e) { $('avatarImportStatus').textContent = e.message; }
     };
+    $('avatarDescription').addEventListener('change', async () => {
+      const key = avatarKey, description = $('avatarDescription').value;
+      try { const saved = await window.pet.config({ avatarDescriptions: { [key]: description } }); cfg = saved; $('avatarDescriptionStatus').textContent = '形象说明已保存，不改变自我理解。'; }
+      catch (error) { $('avatarDescriptionStatus').textContent = error.message; }
+    });
+    $('describeAvatar').onclick = async () => {
+      $('avatarDescriptionStatus').textContent = '正在识别角色外观…';
+      try { const r = await window.pet.avatarDescribeRequest(avatarKey); if (!r.ok) $('avatarDescriptionStatus').textContent = r.error; }
+      catch (error) { $('avatarDescriptionStatus').textContent = error.message; }
+    };
+    $('deleteAvatar').onclick = async () => {
+      const item = AVATAR_LIST.find(a => a.key === avatarKey);
+      if (!item?.personal || !confirm('删除这个个人模型？文件会移到废纸篓，内置模型不会受影响。')) return;
+      try { const r = await window.pet.avatarDelete(avatarKey); AVATAR_LIST = r.avatars; avatarKey = r.avatar; $('avRow').replaceChildren(); paintAvatars(); $('avatarImportStatus').textContent = '个人模型已移到废纸篓。'; }
+      catch (error) { $('avatarImportStatus').textContent = error.message; }
+    };
     BRAIN = await window.pet.brainInfo();
     TTSI = await window.pet.ttsInfo();
     if (TTSI.config) cfg = TTSI.config;
     fillForm();
     window.pet.on((ev) => {
-      if (ev.type === 'config' && ev.config) syncTts(ev.config);
+      if (ev.type === 'config' && ev.config) { syncTts(ev.config); cfg.avatarDescriptions = ev.config.avatarDescriptions || {}; if(ev.config.avatar && avatarKey !== ev.config.avatar) { avatarKey = ev.config.avatar; paintAvatars(); } paintAvatarDetails(); }
+      if (ev.type === 'speaker-status') paintSpeaker(ev);
+      if (ev.type === 'avatar-description' && ev.key === avatarKey) {
+        if (ev.ok) { cfg.avatarDescriptions ||= {}; cfg.avatarDescriptions[ev.key] = ev.description; paintAvatarDetails(); }
+        $('avatarDescriptionStatus').textContent = ev.ok ? '外观已识别并保存，可直接修改。' : '自动识别未完成：' + ev.error + '，也可以手工填写。';
+      }
     });
     paintPerm(init.asr || null);
     showTab(init.storage?.ok === false ? 'data' : init.connection?.ready === false ? 'brain' : 'look');
@@ -625,6 +694,21 @@ function buildMotionList() {
       $(id).addEventListener('input', () => edit(path, $(id).value));
     $('setAlways').addEventListener('change', () => edit('voice.alwaysListen', $('setAlways').checked));
     $('setJudge').addEventListener('change', () => edit('asr.judge', $('setJudge').checked));
+    if (window.pet.speakerStatus) paintSpeaker(await window.pet.speakerStatus());
+    $('speakerEnabled').onchange = async () => {
+      try { await persist({ asr: { ownerOnly: $('speakerEnabled').checked } }); paintSpeaker(await window.pet.speakerStatus()); }
+      catch (error) { $('speakerStatus').textContent = error.message; }
+    };
+    $('speakerEnroll').onclick = async () => {
+      $('speakerEnroll').disabled = true; $('speakerStatus').textContent = '请靠近麦克风，自然说至少三秒，内容与之前不同。';
+      try { paintSpeaker(await window.pet.speakerEnroll()); }
+      catch (error) { $('speakerStatus').textContent = error.message; }
+      finally { $('speakerEnroll').disabled = false; }
+    };
+    $('speakerReset').onclick = async () => {
+      if (!confirm('清除本机加密保存的声音样本并关闭声音筛选？')) return;
+      try { paintSpeaker(await window.pet.speakerReset()); } catch (error) { $('speakerStatus').textContent = error.message; }
+    };
     $('brainModel').addEventListener('change', () => {
       const p = draftProfile();
       p.modelId = $('brainModel').value;
@@ -726,14 +810,26 @@ function buildMotionList() {
       finally { button.disabled = false; button.textContent = '试听一句'; }
     });
   } else {
-    buildMotionList();
-    window.pet.on(ev => { if (ev.type === 'config' && ev.config) { cfg = ev.config; buildMotionList(); } });
+    applyMotionView({ motions: MOTIONS, categories: MOTION_GROUPS }); buildMotionList();
+    window.pet.on(ev => {
+      if (ev.type === 'config' && ev.config) { cfg = ev.config; buildMotionList(); }
+      if (ev.type === 'motion-library') { applyMotionView(ev); buildMotionList(); }
+      if (ev.type === 'motion-error') $('mStatus').textContent = ev.error;
+    });
+    $('mAddCategory').onclick = async () => { await motionOperation({ type: 'category-add', label: $('mNewCategory').value }); $('mNewCategory').value = ''; };
+    $('mImport').onclick = async () => {
+      if (motionSaving) return; motionSaving = true; $('mStatus').textContent = '请选择个人动作文件…';
+      try { const r = await window.pet.motionImport({ slot: $('mImportGroup').value }); if (!r.cancelled) { applyMotionView(r); $('mStatus').textContent = r.errors?.length ? r.errors.join('；') : `已导入${r.imported.length}个动作`; } }
+      catch (error) { $('mStatus').textContent = error.message; }
+      finally { motionSaving = false; buildMotionList(); }
+    };
+    $('mRestore').onclick = () => { if (confirm('恢复内置动作和默认分类？个人动作文件会保留。')) motionOperation({ type: 'restore-defaults' }); };
     $('mAll').addEventListener('click', () => setDisabledMotions([]));
     $('mIdle').addEventListener('click', () => { curMotion = ''; window.pet.panelMotion('__idle__'); buildMotionList(); });
   }
   addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.activeElement) document.activeElement.blur(); });
 })().catch((e) => {
-  document.body.innerHTML = '<div class="empty">面板没起来：' + String((e && e.message) || e) + '</div>';
+  document.body.textContent = '面板没起来：' + String((e && e.message) || e);
 });
 
 window.__panel = () => ({ which, motions: MOTIONS.length, groups: MOTION_GROUPS.length, avatar: avatarKey, scale: viewScale });

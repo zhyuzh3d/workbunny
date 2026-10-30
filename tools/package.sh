@@ -15,14 +15,14 @@ APP="$DIST/$APPNAME.app"
 node "$ROOT/tools/copy-release-resources.js" "$APP/Contents/Resources/app" "${1:-}" --check-only
 
 # Ship the matching local TTS engine so downloading weights is sufficient.
-if [ ! -x "$ROOT/bin/asr" ] || [ "$ROOT/native/asr.swift" -nt "$ROOT/bin/asr" ]; then
+if [ ! -x "$ROOT/bin/asr" ] || [ "$ROOT/native/asr.swift" -nt "$ROOT/bin/asr" ] || [ "$ROOT/native/speaker-features.swift" -nt "$ROOT/bin/asr" ]; then
   zsh "$ROOT/tools/build-asr.sh"
 fi
 if [ ! -x "$ROOT/bin/speech/speech" ]; then
   zsh "$ROOT/tools/build-tts-runtime.sh"
 fi
 for helper in vault desktop asr-legacy; do
-  if [ ! -x "$ROOT/bin/$helper" ] || [ "$ROOT/native/$helper.swift" -nt "$ROOT/bin/$helper" ]; then
+  if [ ! -x "$ROOT/bin/$helper" ] || [ "$ROOT/native/$helper.swift" -nt "$ROOT/bin/$helper" ] || { [ "$helper" = asr-legacy ] && [ "$ROOT/native/speaker-features.swift" -nt "$ROOT/bin/$helper" ]; }; then
     zsh "$ROOT/tools/build-$helper.sh"
   fi
 done

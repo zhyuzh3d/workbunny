@@ -49,6 +49,7 @@ class Asr extends EventEmitter {
     }
     if (opts.allowNetwork) args.push('--allow-network');
     if (opts.askSpeech) args.push('--ask-speech');
+    args.push('--aec'); // Native audio tries voice processing once, then falls back automatically.
     if (opts.device) args.push('--mic', String(opts.device));
     if (opts.noMicAsk) args.push('--no-mic-ask');
     this.always = !!opts.always;
@@ -171,6 +172,9 @@ class Asr extends EventEmitter {
         this.partial = m.v || '';
         this.emit('partial', this.partial);
         break;
+      case 'voiceFeatures':
+        this.emit('voiceFeatures', m);
+        break;
       case 'utterance':
         this.partial = '';
         this.emit('utterance', m.v || '');
@@ -189,7 +193,7 @@ class Asr extends EventEmitter {
       case 'mic':
         this.micName = m.name || '';
         this.micBound = !!m.on;
-        this.emit('micDevice', { on: !!m.on, name: m.name || '', note: m.v || '' });
+        this.emit('micDevice', { on: !!m.on, name: m.name || '', note: m.v || '', identity: m.identity || '' });
         break;
       case 'audio':
         // 最终采用的音频方案（AEC+指定麦 / 指定麦 / 系统默认 …）

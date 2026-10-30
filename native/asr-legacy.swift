@@ -6,6 +6,7 @@ let args = CommandLine.arguments
 func value(_ name: String, _ fallback: String) -> String { if let i = args.firstIndex(of:name), i+1 < args.count { return args[i+1] }; return fallback }
 let outputLock = NSLock()
 func emit(_ d:[String:Any]) { outputLock.lock(); defer { outputLock.unlock() }; if let d=try? JSONSerialization.data(withJSONObject:d), let s=String(data:d,encoding:.utf8) { print(s); fflush(stdout) } }
+let speakerFeatures = SpeakerFeatures(output: emit)
 let engine=AVAudioEngine()
 let recognizer=SFSpeechRecognizer(locale:Locale(identifier:value("--lang",Locale.current.identifier)))
 let lock=NSLock()
@@ -37,9 +38,11 @@ func run() {
         else if error != nil {emit(["t":"error","v":"系统识别暂不可用，请检查听写和网络后重试","code":6]);finish(false)}
     }
     let node=engine.inputNode,format=node.outputFormat(forBus:0)
+    emit(["t":"mic", "on":false, "identity":SpeakerFeatures.inputIdentity(node)])
     guard format.sampleRate>0,format.channelCount>0 else {finish(false);return}
     node.installTap(onBus:0,bufferSize:4096,format:format) {buffer,_ in
         lock.lock();let skip=muted;count+=1;let n=count;lock.unlock()
+        speakerFeatures.process(buffer)
         if !skip { req.append(buffer) }
         if n == 1 {emit(["t":"ready","captureHeartbeat":true]);emit(["t":"aec","on":false])}
         if n % 10 == 0 {emit(["t":"capture","buffers":n])}
@@ -48,6 +51,9 @@ func run() {
     do {engine.prepare();try engine.start()}catch {emit(["t":"error","v":"无法连接麦克风","code":6]);finish(false)}
     DispatchQueue.main.asyncAfter(deadline:.now()+45) {finish(true)}
 }
+@main struct ASRMain {
+static func main() {
+    if CommandLine.arguments.contains("--voice-feature-test") { SpeakerFeatures.selfTest(emit); return }
 if args.contains("--ask-speech") {
     SFSpeechRecognizer.requestAuthorization {_ in DispatchQueue.main.async { run() }}
 } else {DispatchQueue.main.async {run()}}
@@ -61,3 +67,6 @@ if !args.contains("--status") { DispatchQueue.global().async {
 let parent=getppid()
 Timer.scheduledTimer(withTimeInterval:2,repeats:true) {_ in if getppid() != parent || parent == 1 {finish(false)}}
 RunLoop.main.run()
+
+}
+}

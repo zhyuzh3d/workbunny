@@ -48,6 +48,10 @@
     <div class="group">形象</div>
     <div class="avRow" id="avRow"></div>
     <button id="importAvatar" class="mini">导入个人模型</button><div class="note" id="avatarImportStatus">个人模型仅保存在这台电脑，更新应用不会移除。</div>
+    <label class="row" for="avatarDescription">当前形象描述</label>
+    <textarea id="avatarDescription" rows="3" maxlength="600" placeholder="描述发型、服装与配饰；不改变她的自我理解"></textarea>
+    <div class="actions"><button id="describeAvatar" class="mini">识别形象</button><button id="deleteAvatar" class="mini">删除个人模型</button></div>
+    <div class="note" id="avatarDescriptionStatus">识别只把角色预览发送给WorkBuddy，不截图桌面。内置四个模型不能删除。</div>
 
     <div class="group">大小</div>
     <div class="segRow" id="sizeRow">
@@ -76,7 +80,12 @@
     <div class="group">一直听着</div>
     <label class="row"><span>常驻监听</span><input id="setAlways" type="checkbox" /></label>
     <label class="row"><span>只回应对我说的话</span><input id="setJudge" type="checkbox" /></label>
-    <div class="note">常驻监听可随时关闭；⌘⇧Space 开关耳朵。她说话时会临时闭麦，说完再继续听。</div>
+    <div class="group">主人声音（本地近似筛选）</div>
+    <div class="note">录入三段不同的自然说话后启用；先筛说话人，再判断是否对Bunny说话。录音不保存、不上传，声学特征只在本机加密保存。嘈杂、设备变化或相似声音可能误判，不用于身份认证。</div>
+    <label class="row"><span>只接收主人声音</span><input id="speakerEnabled" type="checkbox"></label>
+    <div class="actions"><button id="speakerEnroll" class="mini">录入一段声音</button><button id="speakerReset" class="mini">清除声音样本</button></div>
+    <div id="speakerStatus" class="note" role="status">尚未录入；每段请清楚地说至少三秒，三段内容尽量不同。</div>
+    <div class="note">常驻监听可随时关闭；⌘⇧Space 开关耳朵。开着时可以用讲话打断朗读，回声消除不可用时会过滤自己的话。</div>
   </div>
 
   <!-- 大脑：选择来源后，只显示对应的密钥、模型和思考 -->
@@ -191,6 +200,11 @@
     <span class="cnt" id="mCount"></span>
     <span class="sp"></span>
     <button id="mAll" class="mini">全部启用</button>
+  </div>
+  <div class="motionTools">
+    <div class="actions"><input id="mNewCategory" maxlength="40" placeholder="新分类名称" aria-label="新分类名称"><button id="mAddCategory" class="mini">添加分类</button></div>
+    <div class="actions"><select id="mImportGroup" aria-label="导入到分类"></select><button id="mImport" class="mini">导入VRMA</button><button id="mRestore" class="mini">恢复内置动作</button></div>
+    <div class="note">按语义选择分类，再按权重随机；指定动作精确播放。权重0只允许手动或指定触发。</div>
   </div>
   <div class="pb" id="motionList"></div>
   <div class="pFoot">

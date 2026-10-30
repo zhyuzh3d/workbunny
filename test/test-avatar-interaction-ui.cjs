@@ -4,6 +4,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), vm = require('node:vm'), assert = require('node:assert/strict');
 const config = require('../src/main/config'), avatars = require('../src/main/avatars');
+const { Embodiment } = require('../src/main/embodiment');
 const { Interactions } = require('../src/main/interaction');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bunny-avatar-ui-'));
 app.setPath('userData', path.join(root, 'electron')); config.setPath(path.join(root, 'config.json'));
@@ -38,10 +39,13 @@ async function main() {
     preload: path.resolve('src/preload.js'), contextIsolation: true, sandbox: false, backgroundThrottling: false,
   } });
   win.webContents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message); });
+  const embodiment = new Embodiment({ catalog: { select: key => motions.find(m => m.key === key), catalog: () => ({ motions: motions.map(m => ({ ...m, enabled: true })) }) },
+    avatar: () => ({ key: config.load().avatar }), send: event => win.webContents.send('pet:ev', { type: 'motion', ...event }) });
+  ipcMain.on('pet:motion-started', (_event, value) => embodiment.report(value));
   const mainSource = fs.readFileSync(path.resolve('src/main/index.js'), 'utf8');
   const handler = mainSource.slice(mainSource.indexOf("ipcMain.handle('pet:interact'"), mainSource.indexOf("ipcMain.handle('pet:init'"));
   vm.runInNewContext(handler, { ipcMain: { handle(name, fn) { ipcMain.handle(name, (event, request) => { requests.push(request); return fn(event, request); }); } },
-    win, config, Date, Set, desktop: null, busy: false, speaking: false, lastSpokeAt: -Infinity, quietUntil: 0,
+    win, config, embodiment, speakerFilter: { enrollment: null }, Date, Set, desktop: null, busy: false, speaking: false, lastSpokeAt: -Infinity, quietUntil: 0,
     interactions: new Interactions({ clock: () => now += 8000, random: () => 0 }), presentedReplies: new Map(), publishWebSources() {},
     send: (type, payload) => win.webContents.send('pet:ev', { type, ...payload }), speechQueue: queue, pumpSpeech() {},
   });

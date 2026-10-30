@@ -47,6 +47,19 @@ const MAX_SESSIONS = 6;              // 同时跟几个会话（再多也没意�
 const ATTACH_WINDOW_MS = 6 * 3600e3; // 只接 6 小时内动过的会话文件
 const KEEP_DONE_MS = 40 * 60e3;      // 已完成且静了这么久就让它退场，别无限涨
 
+function toolFailed(event) {
+  if (['error', 'failed', 'timeout'].includes(event.status) || event.is_error === true || event.isError === true) return true;
+  if (String(event.name || '').toLowerCase() !== 'bash') return false;
+  const parts = Array.isArray(event.output) ? event.output : [event.output];
+  for (const part of parts) {
+    // WorkBuddy reports a completed transport even when Bash exits unsuccessfully.
+    // Read its bounded execution footer, never infer failure from quoted prose.
+    const footer = String(part?.text || '').slice(-500).match(/(?:^|\n)Exit code:\s*(-?\d+)\s*\nSignal:\s*(?:\(none\)|[A-Z0-9]+)(?:\s|$)/);
+    if (footer && Number(footer[1]) !== 0) return true;
+  }
+  return false;
+}
+
 /** 只有正文开头明确由助手自述本次任务未完成才算失败；正文里的报错、引用和分析只是内容。 */
 const SELF_FAILURE_OPENING = /^(?:(?:很)?抱歉|对不起)[，,:：\s]*(?:(?:我|我们)(?:这次|本次|目前|仍然)?(?:没能|未能|无法|不能|没法|做不到)(?:完成|办成|交付|解决|处理|执行)|(?:这次|本次|这个|该)(?:任务|工作)(?:我|我们)(?:没能|未能|无法|不能|没法|做不到)(?:完成|办成|交付|解决|处理|执行))|^(?:(?:我|我们)(?:这次|本次|目前|仍然)?(?:没能|未能|无法|不能|没法|做不到)(?:完成|办成|交付|解决|处理|执行)|(?:这次|本次|这个|该)(?:任务|工作)(?:我|我们)(?:没能|未能|无法|不能|没法|做不到)(?:完成|办成|交付|解决|处理|执行))|^I\s+(?:couldn't|could\s+not|was\s+unable\s+to)\s+(?:complete|finish|fulfill)\b/i;
 
@@ -169,6 +182,8 @@ class Monitor extends EventEmitter {
       durationMs: 0,
       steps: 0,             // 工具调用次数（只用来衡量"推进程度"，不对外讲细节）
       failures: 0,          // 工具失败次数（只进隐藏字段，绝不主动提）
+      consecutiveFailures: 0,
+      waitingForUser: false,
       status: 'running',    // running | ok | failed | abandoned
       summary: '',
       candidateAt: 0,       // 候选最终答复出现的时刻
@@ -361,6 +376,7 @@ class Monitor extends EventEmitter {
     // 只要又出现思考或工具调用，就说明刚才那段文字只是中间汇报
     if (t === 'reasoning') {
       if (s.task && s.task.status === 'running') {
+        s.task.waitingForUser = false;
         s.task.candidateAt = 0;
         const model = o.providerData?.model || o.model;
         if (typeof model === 'string') s.task.model = model;
@@ -370,6 +386,8 @@ class Monitor extends EventEmitter {
 
     if (t === 'function_call') {
       if (s.task && s.task.status === 'running') {
+        const tool = String(o.name || o.function?.name || o.toolName || '');
+        s.task.waitingForUser = /ask_?user_?question|request_user_input/i.test(tool);
         s.task.candidateAt = 0;
         s.task.steps += 1;
         s.phase = 'running';
@@ -380,7 +398,12 @@ class Monitor extends EventEmitter {
 
     if (t === 'function_call_result') {
       const st = o.status || 'completed';
-      if (st !== 'completed' && s.task && s.task.status === 'running') s.task.failures += 1;
+      if (s.task?.status === 'running') {
+        const failed = toolFailed(o);
+        if (failed) { s.task.failures += 1; s.task.consecutiveFailures = (s.task.consecutiveFailures || 0) + 1; }
+        else if (st === 'completed') s.task.consecutiveFailures = 0;
+        if (st === 'completed' && /ask_?user_?question|request_user_input/i.test(String(o.name || ''))) s.task.waitingForUser = false;
+      }
       return;
     }
   }

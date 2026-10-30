@@ -14,6 +14,14 @@ test('replaced or truncated session files do not leave an old offset permanently
 function addMessage(m,e,role,content,timestamp=Date.now()){
  m.handleEvent({type:'message',role,content,timestamp},e);
 }
+test('actual WorkBuddy Bash footers distinguish completed transport from command failure; answered questions clear waiting', t => {
+ const {m,e}=fixture(t);addMessage(m,e,'user','请检查项目',1000);
+ for(let i=0;i<3;i++)m.handleEvent({type:'function_call_result',name:'Bash',status:'completed',output:{type:'text',text:'synthetic output\nExit code: 1\nSignal: (none)'},timestamp:1100+i},e);
+ assert.equal(e.snap.task.consecutiveFailures,3);assert.equal(e.snap.task.status,'running');
+ m.handleEvent({type:'function_call_result',name:'Read',status:'completed',output:{type:'text',text:'正文引述 Exit code: 1'},timestamp:1200},e);assert.equal(e.snap.task.consecutiveFailures,0);
+ m.handleEvent({type:'function_call',name:'AskUserQuestion',timestamp:1300},e);assert.equal(e.snap.task.waitingForUser,true);
+ m.handleEvent({type:'function_call_result',name:'AskUserQuestion',status:'completed',timestamp:1400},e);assert.equal(e.snap.task.waitingForUser,false);
+});
 test('review prose with quoted failures, negative wording, or code references is not classified as task failure',t=>{
  const {m,e}=fixture(t);const done=[];m.on('taskDone',snap=>done.push(snap.task.status));
  addMessage(m,e,'user','审查这次交付的错误处理。',1000);

@@ -102,6 +102,6 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
   return { partial, final, reset,
     recognizerStopped: () => unconfirmed('语音识别中断，这句话尚未确认，请再说一次。'),
     snapshot: () => current ? { text: textOf(current), id: current.id,
-    requested: !!current.request, silenceMs: now() - current.lastActivity } : null };
+    requested: !!current.request, finalized: current.finalized, silenceMs: now() - current.lastActivity } : null };
 }
 module.exports = { createVoiceTurns, meaningful };

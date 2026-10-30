@@ -35,7 +35,7 @@ function context(rows, { dialogueId, excludeId } = {}) {
   const last = visible.at(-1), recent = visible.filter(r => actors.isBunny(r.value) && r.value.cognition?.dialogueId === dialogueId);
   // A task receipt or an assistant interruption invalidates the old forecast.
   let previous = last && actors.isOwner(last.value) ? visible.at(-2) : last;
-  if (!previous || !actors.isBunny(previous.value) || previous.value.cognition?.dialogueId !== dialogueId || !previous.value.cognition.prediction) previous = null;
+  if (!previous || previous.value.interrupted || !actors.isBunny(previous.value) || previous.value.cognition?.dialogueId !== dialogueId || !previous.value.cognition.prediction) previous = null;
   const graded = recent.filter(r => r.value.cognition.review.grade !== 'unassessed').slice(-24);
   const count = list => Object.fromEntries(GRADES.filter(g => g !== 'unassessed').map(g => [g, list.filter(r => r.value.cognition.review.grade === g).length]));
   let misses = 0;

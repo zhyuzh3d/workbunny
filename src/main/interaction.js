@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { atomicPrivate } = require('./vault-crypto');
 const { validateWav } = require('./chp-tts');
+const motionCore = require('../shared/motion-core');
 const REACTIONS = {
   head: [{ text: '嗯？我在呢。', slot: 'greet', emo: 'happy' }, { text: '呵呵，好痒呀。', slot: 'shy', emo: 'happy' }, { text: '诶，摸摸就好啦。', slot: 'tease', emo: 'relaxed' }],
   upper: [{ text: '你好呀。', slot: 'greet', emo: 'happy' }, { text: '嗯呢，陪着你。', slot: 'thanks', emo: 'relaxed' }, { text: '哈哈，别闹啦。', slot: 'shy', emo: 'happy' }],
@@ -25,9 +26,8 @@ class Interactions {
     const sound = !quiet; this.last = now; this.lastText = selected.text;
     let slotMotions = (motions || []).filter(m => m.slot === selected.slot);
     if (!slotMotions.length) slotMotions = (motions || []).filter(m => m.slot === 'idle');
-    const alternatives = slotMotions.filter(m => m.key !== this.lastMotion);
-    const available = alternatives.length ? alternatives : slotMotions;
-    const motion = available.length ? available[Math.floor(this.random() * available.length)].key : selected.slot;
+    const available = slotMotions;
+    const motion = motionCore.choose(available, this.random)?.key || selected.slot;
     this.lastMotion = motion;
     // A concrete action has a stable phrase across body regions and restarts.
     // Replaying the same action/model/voice therefore never needs a new phrase.

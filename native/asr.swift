@@ -193,6 +193,8 @@ func isFinished() -> Bool {
     return finished
 }
 
+let speakerFeatures = SpeakerFeatures(output: emit)
+var speechDetectorTask: Task<Void, Never>?
 var engine = AVAudioEngine()
 var tapInstalled = false
 var inputCont: AsyncStream<AnalyzerInput>.Continuation?
@@ -284,6 +286,7 @@ func startAudio(aec: Bool, bind: (AudioDeviceID, String)?, target: AVAudioFormat
         stateLock.unlock()
         if count == 1 { emit(["t": "tap", "frames": Int(buffer.frameLength), "ch": Int(buffer.format.channelCount)]) }
         if report { emit(["t": "capture", "buffers": count, "muted": m]) }
+        speakerFeatures.process(buffer)
         // 有回声消除时不用闭麦：自己说话也能继续听主人
         if m && !aecEnabled { return }
 
@@ -388,7 +391,14 @@ func startSession() async {
         attributeOptions: []
     )
     let (stream, cont) = AsyncStream<AnalyzerInput>.makeStream()
-    let an = SpeechAnalyzer(modules: [transcriber])
+    let detector = SpeechDetector(detectionOptions: .init(sensitivityLevel: .medium), reportResults: true)
+    speakerFeatures.requireSpeechConfirmation()
+    let an = SpeechAnalyzer(modules: [transcriber, detector])
+    speechDetectorTask?.cancel()
+    speechDetectorTask = Task {
+        do { for try await result in detector.results { speakerFeatures.speechDetected(result.speechDetected) } }
+        catch { }
+    }
 
     stateLock.lock()
     inputCont = cont
@@ -583,9 +593,8 @@ func run() async {
     // 从"效果最好"到"最保底"依次试，第一个起得来的就用。宁可少回声消除，
     // 也绝不能哑。
     //
-    // 系统回声消除默认**不开**：实测这台机器的 VoiceProcessingIO 在 USB 摄像头
-    // 和内置麦上都一开就 -10875（FailedInitialization），每次启动还白撞两次墙、
-    // 多花一两秒。真要用再挂 --aec 打开（会自己降级，不会哑）。
+    // 主程序统一请求回声消除；不支持的设备在启动时自动退回普通输入，
+    // 不要求用户配置，也不根据某一台开发机的结果关闭所有 Mac 的能力。
     var plans: [(String, Bool, Bool)] = []   // (名字, 开AEC, 钉设备)
     if hasFlag("--aec") {
         if picked != nil { plans.append(("AEC+指定麦", true, true)) }
@@ -611,9 +620,9 @@ func run() async {
                 userInfo: [NSLocalizedDescriptionKey: "输入设备没有音频数据"]) }
             audioOK = true
             if plan.2, let p = picked {
-                emit(["t": "mic", "on": true, "name": p.1, "id": Int(p.0)])
+                emit(["t": "mic", "on": true, "name": p.1, "id": Int(p.0), "identity": SpeakerFeatures.inputIdentity(engine.inputNode)])
             } else {
-                emit(["t": "mic", "on": false, "name": "", "id": 0, "v": "使用系统默认输入设备"])
+                emit(["t": "mic", "on": false, "name": "", "id": 0, "v": "使用系统默认输入设备", "identity": SpeakerFeatures.inputIdentity(engine.inputNode)])
             }
             emit(["t": "audio", "ok": true, "plan": plan.0])
             break
@@ -672,6 +681,9 @@ func run() async {
 
 // ---------------------------------------------------------------- 入口
 
+@main struct ASRMain {
+static func main() {
+    if CommandLine.arguments.contains("--voice-feature-test") { SpeakerFeatures.selfTest(emit); return }
 // 只枚举设备：不采集、不弹窗，可以随便从命令行跑
 if listMics {
     let devs = listInputDevices()
@@ -743,3 +755,6 @@ if statusOnly {
 }
 
 RunLoop.main.run()
+
+}
+}

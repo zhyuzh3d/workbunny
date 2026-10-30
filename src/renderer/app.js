@@ -5,6 +5,7 @@ import { VRMAnimationLoaderPlugin, createVRMAnimationClip, VRMLookAtQuaternionPr
 import { makeRig, groundClip, soleHeight } from './ground.js';
 import { cutClip, MOTION_WINDOWS } from './motion-cut.js';
 import { processMotionClip, crossFadeMotionAction } from './motion-quality.mjs';
+import { createBodyAvoidance } from './body-avoidance.mjs';
 import { createPCMPlayer } from './pcm-player.mjs';
 import { createBubbleController } from './bubble-ui.mjs';
 import { characterText } from './character-name.mjs';
@@ -118,6 +119,10 @@ const IDLE_POOL = ['idle_loop', 'idle_breath', 'idle_stand', 'idle_stand2', 'idl
  * 不抽 pose / motion / dance 那种大动作 —— 无缘无故转圈显得神经。 */
 const AMBIENT_SLOTS = ['idle', 'idle', 'idle', 'tired', 'tease', 'praise', 'sign', 'shy', 'think', 'cheer'];
 const FADE = 0.26;
+let expressiveUntil = 0;
+let viewportManaged = false;
+let stageViewport = { width: innerWidth, height: innerHeight, offsetY: 0 };
+const motionCore = globalThis.BunnyMotion;
 
 /* 动作表（中文名 / 槽位 / 什么场合用）由主进程在 pet:init 时一起送过来 ——
  * 唯一的真相源是 src/main/config.js 的 MOTIONS，渲染层不另存一份。
@@ -129,6 +134,7 @@ let MOTION_GROUPS = [];
 let cfg = null;
 let vrm = null;
 let mixer = null;
+let bodyAvoidance = null;
 let currentAction = null;
 const motionActions = new Set();
 let currentMotion = null;
@@ -253,8 +259,8 @@ const _pb = new THREE.Vector3();
 function pxPerWorldY() {
   _pa.set(0, 0, 0).project(camera);
   _pb.set(0, 1, 0).project(camera);
-  const d = Math.abs(_pb.y - _pa.y) * 0.5 * innerHeight;
-  return d > 1e-4 ? d : innerHeight / Math.max(0.1, fitInfo.visibleH);
+  const d = Math.abs(_pb.y - _pa.y) * 0.5 * stageViewport.height;
+  return d > 1e-4 ? d : stageViewport.height / Math.max(0.1, fitInfo.visibleH);
 }
 
 function fitCamera(obj) {
@@ -281,10 +287,13 @@ function fitCamera(obj) {
     aimY = box.max.y + (1 - fill - 0.02) * visibleH - visibleH / 2;
   }
 
+  const previousVisible = visibleH;
+  const expansion = Math.max(1, stageViewport.height / (620 * Math.max(1, viewScale)));
+  visibleH *= expansion; aimY += (visibleH - previousVisible) / 2;
   const dist = visibleH / 2 / Math.tan(fovR / 2);
   camera.position.set(0, aimY, dist);
   camera.lookAt(0, aimY, 0);
-  camera.aspect = innerWidth / innerHeight;
+  camera.aspect = stageViewport.width / stageViewport.height;
   camera.updateProjectionMatrix();
   fitInfo = { dist, centerY: aimY, visibleH, modelH: size.y, bust };
   // 半身的时候脚在画面外，影子留在窗口下沿会像个浮空的黑块 —— 直接收掉
@@ -292,12 +301,14 @@ function fitCamera(obj) {
 }
 
 function onResize() {
-  const w = innerWidth;
-  const h = innerHeight;
-  renderer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  if (vrm) fitCamera(vrm.scene);
+  if (!viewportManaged) stageViewport = { width: innerWidth, height: innerHeight, offsetY: 0 };
+  const w = stageViewport.width, h = stageViewport.height;
+  const old = renderer.getSize(new THREE.Vector2());
+  if (old.x !== w || old.y !== h) {
+    renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+    if (vrm) fitCamera(vrm.scene);
+  }
+  Object.assign(renderer.domElement.style, { position: 'absolute', top: stageViewport.offsetY + 'px', width: w + 'px', height: h + 'px' });
 }
 addEventListener('resize', onResize);
 
@@ -354,11 +365,16 @@ function groundAllClips() {
   pet.log('ground ' + lines.join(' | '));
 }
 
-function playMotion(key, { loop = false, fade = FADE } = {}) {
+function playMotion(key, { loop = false, fade = FADE, requestId, reason = 'idle' } = {}) {
+  const requestedKey = key;
+  const report = ok => pet.motionStarted?.({ key: ok ? key : requestedKey, avatar: avatarKey, requestId, reason, ok });
+  if (loading && requestId) { report(false); return; }
   if (!key || !motionEnabled(key) || !clips.has(key)) { key = randomIdle(); loop = true; }
   const clip = clips.get(key);
-  if (!clip || !mixer) return;
+  if (!clip || !mixer) { report(false); return; }
+  if (requestId && key !== requestedKey) { report(false); return; }
   const next = mixer.clipAction(clip);
+  if (requestId) expressiveUntil = performance.now() + Math.max(1200, Math.min(12000, clip.duration * 1000));
   next.enabled = true;
   next.setEffectiveTimeScale(1);
   next.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1);
@@ -367,7 +383,7 @@ function playMotion(key, { loop = false, fade = FADE } = {}) {
   if (next === currentAction) {
     if (!loop) next.reset().play();
     currentMotion = key;
-    paintMotionActive();
+    paintMotionActive(); report(true);
     return;
   }
   if (currentAction) {
@@ -378,7 +394,7 @@ function playMotion(key, { loop = false, fade = FADE } = {}) {
   motionActions.add(next);
   currentAction = next;
   currentMotion = key;
-  paintMotionActive();
+  paintMotionActive(); report(true);
 }
 
 /* ═══════════ 槽位 → 具体动作 ═══════════
@@ -387,21 +403,13 @@ function playMotion(key, { loop = false, fade = FADE } = {}) {
  *   1. 避开这一槽上一次挑中的那条 —— 连着夸她两次，不能两次都是同一个鼓掌；
  *   2. 只挑真正载入成功的（clips.has），某条 .vrma 坏了也不至于演空。
  * 传进来的若已经是具体动作 key（含下划线），直接照播。 */
-const slotLast = new Map();
-function motionEnabled(key) { return !(cfg?.motions?.disabled || []).includes(key); }
-function randomIdle(except = currentMotion) {
-  const pool = MOTIONS.filter(m => m.slot === 'idle' && motionEnabled(m.key) && clips.has(m.key)).map(m => m.key);
-  const fresh = pool.length > 1 ? pool.filter(k => k !== except) : pool;
-  return fresh[Math.floor(Math.random() * fresh.length)] || null;
+function motionEnabled(key) { return MOTIONS.some(m => m.key === key && m.enabled !== false) && !(cfg?.motions?.disabled || []).includes(key); }
+function randomIdle() {
+  return motionCore?.choose(MOTIONS.filter(m => (m.idle ?? (m.slot === 'idle')) && motionEnabled(m.key) && clips.has(m.key)))?.key || null;
 }
 function pickSlotKey(slot) {
-  const pool = MOTIONS.filter((m) => m.slot === slot && motionEnabled(m.key) && clips.has(m.key));
-  if (!pool.length) return randomIdle();
-  const last = slotLast.get(slot);
-  const fresh = pool.length > 1 ? pool.filter((m) => m.key !== last) : pool;
-  const m = fresh[Math.floor(Math.random() * fresh.length)];
-  slotLast.set(slot, m.key);
-  return m.key;
+  const pool = MOTIONS.filter(m => m.slot === slot && motionEnabled(m.key) && clips.has(m.key));
+  return motionCore?.choose(pool)?.key || randomIdle();
 }
 /** 槽位名或具体 key 都吃：有 key 就播 key，否则当槽位随机。 */
 function resolveMotion(name) {
@@ -416,8 +424,8 @@ function playSlot(slot, fade = 0.22) {
   return k;
 }
 
-function playOneShot(key, fade = 0.2) {
-  playMotion(key, { loop: MOTIONS.some(m => m.key === key && m.slot === 'idle'), fade });
+function playOneShot(key, fade = 0.2, metadata = {}) {
+  playMotion(key, { loop: !!MOTIONS.find(m => m.key === key)?.loop, fade, ...metadata });
 }
 
 const AWAY_MS = 30 * 60e3;
@@ -435,7 +443,8 @@ function noteMaster() {
  * 只用一条待机的话，两种场景要共用一张脸，怎么都不对。 */
 let idleKey = IDLE;
 function currentIdle() {
-  return clips.has(idleKey) && motionEnabled(idleKey) ? idleKey : randomIdle();
+  const item = MOTIONS.find(m => m.key === idleKey);
+  return item && (item.idle ?? (item.slot === 'idle')) && item.weight !== 0 && clips.has(idleKey) && motionEnabled(idleKey) ? idleKey : randomIdle();
 }
 function toIdle(fade = 0.32) {
   playMotion(currentIdle(), { loop: true, fade });
@@ -444,9 +453,9 @@ function toIdle(fade = 0.32) {
  * 主人在干活时不换 —— 那时她该是待命站姿，不是在那儿换重心玩。 */
 function rotateIdle() {
   if (phase === 'work') return;
-  const pool = MOTIONS.filter(m => m.slot === 'idle' && motionEnabled(m.key) && clips.has(m.key) && m.key !== idleKey).map(m => m.key);
-  if (!pool.length) return;
-  idleKey = pool[Math.floor(Math.random() * pool.length)];
+  const next = randomIdle();
+  if (!next || next === idleKey) return;
+  idleKey = next;
   toIdle(0.7);
   pet.log(`[idle] 换站姿 ${idleKey}`);
 }
@@ -564,14 +573,20 @@ function loadMotions() {
   // 以主进程送来的表为准（那张表带中文名和槽位）；还没拿到就退回本地常量
   const keys = MOTIONS.length ? MOTIONS.map((m) => m.key) : MOTION_FILES;
   return Promise.all(keys.map((k) => new Promise((res) => {
+    if (rawAnims.has(k)) { res(); return; }
     animLoader.load(MOTIONS.find(m => m.key === k)?.url || `./assets/motions/${k}.vrma`, (g) => {
       const a = g.userData.vrmAnimations && g.userData.vrmAnimations[0];
-      if (a) rawAnims.set(k, a);
+      if (a && MOTIONS.some(m => m.key === k)) rawAnims.set(k, a);
       res();
     }, undefined, () => res());
   })));
 }
 
+let queuedAvatar = null;
+function nextAvatar() {
+  const next = queuedAvatar; queuedAvatar = null;
+  if (next && next !== avatarKey) queueMicrotask(() => void switchAvatar(next, { persist: false }));
+}
 function loadAvatar(key) {
   if (loading) return Promise.resolve(false);
   loading = true;
@@ -596,7 +611,10 @@ function loadAvatar(key) {
       });
     }
     vrm = gltf.userData.vrm;
-    if (!vrm) { loading = false; setLoading(false); resolve(false); return; }
+    if (!vrm) { loading = false; setLoading(false); resolve(false); nextAvatar(); return; }
+    // This particular experimental character has a wider torso than the
+    // source motions. Other built-in and personal avatars remain untouched.
+    bodyAvoidance = vrm.meta?.name === 'Bunny Face Hybrid' ? createBodyAvoidance(vrm) : null;
     softenCutoutEdges(vrm.scene);
     hiddenAvatarMeshes = [];
     vrm.scene.traverse(object => {
@@ -624,24 +642,44 @@ function loadAvatar(key) {
     mixer = new THREE.AnimationMixer(vrm.scene);
     mixer.addEventListener('finished', event => {
       if (event.action !== currentAction) return;
-      toIdle(0.35);
+      expressiveUntil = 0; toIdle(0.35);
       paintMotionActive();
     });
 
     rebuildClips();
     toIdle(0.001);
     loading = false;
-    pet.config({ avatar: key });
+    pet.bodyReady?.({ avatar: key, expressions: Object.keys(vrm?.expressionManager?.expressionMap || {}) });
+    pet.motionStarted?.({ key: currentMotion, avatar: key, reason: 'idle', ok: true });
     const ld = document.getElementById('hint');
     if (ld) ld.classList.add('hidden');
     setLoading(false);
     resolve(true);
+    nextAvatar();
   }, undefined, (e) => {
     console.error('模型加载失败', e);
     loading = false;
     setLoading(false);
     resolve(false);
+    nextAvatar();
   }));
+}
+
+function avatarPreviewPNG() {
+  if (!vrm || loading) return null;
+  const width = 320, height = 512, target = new THREE.WebGLRenderTarget(width, height);
+  const box = new THREE.Box3().setFromObject(vrm.scene), center = box.getCenter(new THREE.Vector3());
+  const modelHeight = Math.max(0.1, box.max.y - box.min.y), previewCamera = camera.clone();
+  previewCamera.aspect = width / height;
+  previewCamera.position.set(center.x, center.y, center.z + modelHeight / (2 * Math.tan(previewCamera.fov * Math.PI / 360)) * 1.15);
+  previewCamera.lookAt(center); previewCamera.updateProjectionMatrix();
+  const previous = renderer.getRenderTarget(), pixels = new Uint8Array(width * height * 4);
+  try { renderer.setRenderTarget(target); renderer.render(scene, previewCamera); renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels); }
+  finally { renderer.setRenderTarget(previous); target.dispose(); }
+  const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+  const context = canvas.getContext('2d'), image = context.createImageData(width, height);
+  for (let y = 0; y < height; y++) image.data.set(pixels.subarray((height - y - 1) * width * 4, (height - y) * width * 4), y * width * 4);
+  context.putImageData(image, 0, 0); return canvas.toDataURL('image/png');
 }
 
 /* 换角色要 2~4 秒。这段时间绝不能让画面空掉一半 ——
@@ -671,7 +709,7 @@ function characterRect() {
     point.project(camera);
     if (!isFinite(point.x) || !isFinite(point.y)) return;
     const x = (point.x * 0.5 + 0.5) * innerWidth;
-    const y = (-point.y * 0.5 + 0.5) * innerHeight;
+    const y = (-point.y * 0.5 + 0.5) * stageViewport.height + stageViewport.offsetY;
     minX = Math.min(minX, x); maxX = Math.max(maxX, x);
     minY = Math.min(minY, y); maxY = Math.max(maxY, y);
     n++;
@@ -734,8 +772,8 @@ addEventListener('mousemove', (e) => {
     }
   }
   // 眼球跟随
-  pointer.x = (e.clientX / innerWidth) * 2 - 1;
-  pointer.y = -((e.clientY / innerHeight) * 2 - 1);
+  pointer.x = (e.clientX / stageViewport.width) * 2 - 1;
+  pointer.y = -(((e.clientY - stageViewport.offsetY) / stageViewport.height) * 2 - 1);
   updateHit(e);
 });
 addEventListener('mouseup', (e) => {
@@ -822,6 +860,8 @@ document.getElementById('memoryBasis')?.addEventListener('click', () => pet.open
 /* ═══════════ 交互区 ═══════════ */
 const dock = document.getElementById('dock');
 const input = document.getElementById('input');
+input.addEventListener('input', () => pet.composing?.(!!input.value.trim()));
+input.addEventListener('blur', () => pet.composing?.(false));
 const hint = document.getElementById('hint');
 const fab = document.getElementById('fab');
 const recEl = document.getElementById('rec');
@@ -934,6 +974,7 @@ function openDock() {
 }
 
 function closeDock() {
+  pet.composing?.(false);
   if (document.activeElement === input) input.blur();
   dockMode = 'mini';
   dock.classList.add('hidden');
@@ -954,7 +995,7 @@ function bodyRegionAt(x, y) {
     n.getWorldPosition(_v);
     _v.project(camera);
     if (!isFinite(_v.y)) return null;
-    return (-_v.y * 0.5 + 0.5) * innerHeight;
+    return (-_v.y * 0.5 + 0.5) * stageViewport.height + stageViewport.offsetY;
   };
   const head = yOf('head');
   const hips = yOf('hips');
@@ -988,7 +1029,7 @@ async function sendText() {
   if (!v) return;
   clearWebSources();
   noteMaster();
-  input.value = '';
+  input.value = ''; pet.composing?.(false);
   pendingHeard = '';
   shownHeard = '';
   paintEar();
@@ -1212,8 +1253,11 @@ document.getElementById('sizeRow')?.addEventListener('click', (e) => {
   setScale(Number(b.dataset.k));
 });
 
-async function switchAvatar(k) {
-  if (k === avatarKey || loading) return;
+async function switchAvatar(k, { persist = true } = {}) {
+  if (!AVATARS[k]) return;
+  if (persist) void pet.config({ avatar: k }).catch(error => showBubble(error.message, 2200));
+  if (loading) { queuedAvatar = k === avatarKey ? null : k; return; }
+  if (k === avatarKey) return;
   const row = document.getElementById('avRow');
   const btns = row ? [...row.children] : [];
   // 按钮置灰但面板留着 —— 换角色的时候其他 UI 一律照常显示
@@ -1221,6 +1265,7 @@ async function switchAvatar(k) {
   const label = (AVATARS[k] || {}).label || k;
   const ok = await loadAvatar(k);
   for (const b of btns) b.disabled = false;
+  if (avatarKey !== k || loading) return;
   if (!ok) { showBubble('这个形象没加载起来。', 2200); paintAvatars(); return; }
   paintAvatars();
   showBubble(`${label} 来了。`, 1600);
@@ -1252,6 +1297,7 @@ function frame() {
   const t = performance.now() / 1000;
 
   if (vrm) {
+    bodyAvoidance?.restore();
     if (mixer) mixer.update(dt);
 
     // 面板打开 → 角色连影子一起往左让位；面板一关再滑回正中。
@@ -1305,6 +1351,7 @@ function frame() {
     const ly = 1.32 + pointerSmooth.y * 0.5 + (speakingNow ? -0.05 : 0);
     lookTarget.position.set(lx, ly, 1.05);
 
+    bodyAvoidance?.apply();
     vrm.update(dt);
 
     // 命中框（每帧算，随动作变化）
@@ -1316,7 +1363,7 @@ function frame() {
       head.getWorldPosition(_v);
       _v.y += fitInfo.modelH * 0.115;      // 头顶（含发梢）在 head 骨骼上方约 11.5% 身高处
       _v.project(camera);
-      const topY = (-_v.y * 0.5 + 0.5) * innerHeight;
+      const topY = (-_v.y * 0.5 + 0.5) * stageViewport.height + stageViewport.offsetY;
       const bubble = document.getElementById('bubble');
       if (!bubble.classList.contains('hidden')) {
         bubbleController.place(topY, innerHeight);
@@ -1394,14 +1441,32 @@ function wire() {
       case 'webSources':
         paintWebSources(ev);
         break;
+      case 'avatar-description-request': {
+        const key = ev.key;
+        if (key === avatarKey && !loading) { const png = avatarPreviewPNG(); if (png) void pet.avatarDescribe?.({ key, png }); }
+        break;
+      }
+      case 'viewport': viewportManaged = true; stageViewport = { width: ev.width, height: ev.height, offsetY: ev.offsetY || 0 }; onResize(); break;
+      case 'motion-library': {
+        const oldLoops = new Map(MOTIONS.map(m => [m.key, m.loop]));
+        const oldKeys = new Set(MOTIONS.map(m => m.key));
+        MOTIONS = ev.motions || []; MOTION_GROUPS = ev.categories || [];
+        const keys = new Set(MOTIONS.map(m => m.key));
+        let changed = MOTIONS.some(m => !rawAnims.has(m.key) || oldLoops.get(m.key) !== m.loop);
+        for (const key of oldKeys) if (!keys.has(key)) { rawAnims.delete(key); clips.delete(key); changed = true; }
+        if (changed) { await loadMotions(); if (vrm) rebuildClips(); }
+        if (!motionEnabled(currentMotion)) toIdle();
+        break;
+      }
       case 'motion': {
         // 模型给的是槽位名（cheer），也可能是具体 key（手动列表复用这条路）
-        const k = resolveMotion(ev.key);
-        if (k) playOneShot(k, 0.18);
+        const k = ev.requestId ? ev.key : resolveMotion(ev.key);
+        if (k) playOneShot(k, 0.18, ev);
+        else pet.motionStarted?.({ key: ev.key, avatar: avatarKey, requestId: ev.requestId, ok: false });
         break;
       }
       case 'emo':
-        if (ev.key) applyEmo(ev.key, 1, 2800);
+        if (ev.key) applyEmo(ev.key, 1, ev.holdMs || 3500);
         break;
       case 'think':
         thinkingNow = !!ev.on;
@@ -1411,11 +1476,11 @@ function wire() {
           if (!speakingNow) {
             // think 槽 5 条轮换；一条都没载入就退回张望
             const k = resolveMotion('think');
-            if (k) playOneShot(k, 0.3);
+            if (k) playOneShot(k, 0.3, { reason: 'thinking' });
             else if (clips.has('idle_look')) playOneShot('idle_look', 0.3);
           }
         } else if (!speakingNow) {
-          toIdle(0.42);
+          if (performance.now() >= expressiveUntil) toIdle(0.42);
           if (shownState === 'pending') { shownState = 'done'; clearHeardLater(); }
         }
         paintEar();
@@ -1427,7 +1492,7 @@ function wire() {
           if (shownHeard && shownState !== 'skip') shownState = 'ready';
           ambientTimer = 30;
           // 说话时身体回中性站姿：不要在"抱臂思考"这种姿势里讲话
-          if (currentMotion !== IDLE && !ev.interaction) toIdle(0.45);
+          if (currentMotion !== IDLE && !ev.interaction && performance.now() >= expressiveUntil) toIdle(0.45);
         } else if (!thinkingNow && shownHeard && shownState !== 'skip') {
           shownState = 'done'; clearHeardLater();
         }
@@ -1449,18 +1514,19 @@ function wire() {
         if (want !== idleKey && clips.has(want)) {
           idleKey = want;
           // 只有正停在待机上才当场换；正在说话/播别的动作就别打断，等它自然回到待机
-          if (!speakingNow && !thinkingNow && (currentMotion === IDLE || currentMotion === IDLE_QUIET)) {
+          if (!speakingNow && !thinkingNow && performance.now() >= expressiveUntil && (currentMotion === IDLE || currentMotion === IDLE_QUIET)) {
             toIdle(0.8);
           }
         }
-        if (phase === 'idle' && !speakingNow) {
+        if (performance.now() < expressiveUntil || speakingNow || thinkingNow) break;
+        if (phase === 'idle') {
           toIdle(0.6);
         } else if (phase === 'done' && prev !== 'done' && !speakingNow) {
           // 一件活收尾了，且刚才是别的状态 —— 庆祝一次；同一条消息重复上报不会反复庆祝
           const now = performance.now();
           if (now - lastDonePoseAt > 20000) {
             lastDonePoseAt = now;
-            playOneShot(clips.has('spin') ? 'spin' : 'Clapping', 0.3);
+            playSlot('cheer', 0.3);
           }
         }
         break;
@@ -1475,7 +1541,7 @@ function wire() {
         paintActivityText(ev.text);
         break;
       case 'avatar':
-        if (ev.key && ev.key !== avatarKey) switchAvatar(ev.key);
+        if (ev.key) void switchAvatar(ev.key, { persist: false });
         break;
       case 'scale':
         // 从顶部菜单改的大小：窗口已经是新的了，这里只需要重新取景
@@ -1789,6 +1855,7 @@ setInterval(() => {
     if (init?.desktop) paintDesktopActivity(init.desktop);
     paintRecallButton(init?.currentRecall);
     cfg = init.config;
+    if (init.viewport) { viewportManaged = true; stageViewport = init.viewport; onResize(); }
     const ver = document.getElementById('ver');
     if (ver) ver.textContent = 'v' + ((init.versions && init.versions.app) || '');
     const settingsButton = document.getElementById('gearBtn');
@@ -1822,7 +1889,7 @@ setInterval(() => {
 })();
 
 window.__pet = () => ({
-  vrm: !!vrm, mixer: !!mixer, clips: clips.size, currentMotion, phase, speakingNow,
+  vrm: !!vrm, loading, mixer: !!mixer, clips: clips.size, currentMotion, phase, speakingNow,
   talkLevel: +talkLevel.toFixed(3), recording, avatarKey,
   audio: !!currentSource, emo: emoTimer > 0,
   hit: lastHit, dockOpen: dockMode === 'open',
@@ -1850,7 +1917,7 @@ window.__frame = () => {
   if (!vrm || !vrm.humanoid) return null;
   const toScreen = (v) => {
     const p = v.clone().project(camera);
-    return { x: Math.round((p.x * 0.5 + 0.5) * innerWidth), y: Math.round((-p.y * 0.5 + 0.5) * innerHeight) };
+    return { x: Math.round((p.x * 0.5 + 0.5) * innerWidth), y: Math.round((-p.y * 0.5 + 0.5) * stageViewport.height + stageViewport.offsetY) };
   };
   const bone = (n) => {
     const node = vrm.humanoid.getRawBoneNode(n) || vrm.humanoid.getNormalizedBoneNode(n);
@@ -1863,7 +1930,7 @@ window.__frame = () => {
   return {
     scale: viewScale,
     bust: !!fitInfo.bust,
-    w: innerWidth, h: innerHeight,
+    w: innerWidth, h: innerHeight, viewport: stageViewport,
     top: toScreen(box.max).y,
     bottom: toScreen(box.min).y,
     head: bone('head'),

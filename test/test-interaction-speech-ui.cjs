@@ -5,6 +5,7 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), vm = require('node:vm'), http = require('node:http'), assert = require('node:assert/strict');
 const config = require('../src/main/config'), avatars = require('../src/main/avatars'), tts = require('../src/main/tts');
 const { createTTSSession } = require('../src/main/tts-session');
+const { Embodiment } = require('../src/main/embodiment');
 const { Interactions, InteractionAudio } = require('../src/main/interaction');
 const { presentConversation } = require('../src/main/conversation-text');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bunny-interaction-speech-'));
@@ -85,16 +86,22 @@ async function main() {
     Date: class extends Date { static now() { return now; } }, Map, Set,
     activeAudioId: null, playbackTest: null,
     voiceFor: (_emotion, base) => base, MODELS_DIR: '', sendConfig() {}, log() {}, asr: null, muteAsr() {}, unmuteAsr() {},
-    memory: { scheduleExtraction() {} }, presentedReplies: new Map(), busy: false, desktop: null, quietUntil: 0,
-    interactions: new Interactions({ clock: () => now, random: () => 0 }), publishWebSources() {}, ipcMain,
+    memory: { scheduleExtraction() {} }, composing:false,lastInterruption:null,activeThought:null,voiceTurns:{reset(){}},autonomy:null,lastHeardAt:0, presentedReplies: new Map(), busy: false, desktop: null, quietUntil: 0,
+    interactions: new Interactions({ clock: () => now, random: () => 0 }), speakerFilter: { enrollment: null }, publishWebSources() {}, ipcMain,
     interactionAudio: { async audio(...args) { const result = await audio.audio(...args); if (result.cached) cacheHits++; return result; } },
     send(type, data) { events.push({ type, ...data }); win.webContents.send('pet:ev', { type, ...data }); },
   });
+  const embodiment = new Embodiment({ catalog: { select: key => motions.find(m => m.key === key), catalog: () => ({ motions: motions.map(m => ({ ...m, enabled: true })) }) },
+    avatar: () => ({ key: config.load().avatar }), send: event => win.webContents.send('pet:ev', { type: 'motion', ...event }) });
+  ipcMain.on('pet:motion-started', (_event, value) => embodiment.report(value));
   const mainSource = fs.readFileSync(path.resolve('src/main/index.js'), 'utf8');
   const state = mainSource.slice(mainSource.indexOf('const speechQueue = []'), mainSource.indexOf('/** 这句识别结果是不是'));
   const pipeline = mainSource.slice(mainSource.indexOf('const synthCache = new Map()'), mainSource.indexOf('\nfunction speak('));
   const handler = mainSource.slice(mainSource.indexOf("ipcMain.handle('pet:interact'"), mainSource.indexOf("ipcMain.handle('pet:init'"));
-  vm.runInContext(state + pipeline + handler, context);
+  context.embodiment = embodiment;
+  const stop = mainSource.slice(mainSource.indexOf('function stopSpeaking('), mainSource.indexOf('/* ── 闭麦/开麦'));
+  const composing = mainSource.slice(mainSource.indexOf("ipcMain.on('pet:composing'"), mainSource.indexOf("ipcMain.handle('pet:say'"));
+  vm.runInContext(state + pipeline + stop + handler + composing, context);
   ipcMain.on('pet:audio-started', () => { started++; });
   ipcMain.on('pet:audio-done', (_event, value) => { if (!value.success) errors.push('WAV playback failed'); finished++; context.finishSpeech(value.success); });
   await win.loadFile(path.resolve('src/renderer/index.html'));
@@ -110,9 +117,17 @@ async function main() {
   }
   assert.equal(syntheses, 1, 'later accepted clicks play the saved audio without another TTS request');
   assert.equal(cacheHits, 3); assert.equal(config.load().tts.engine, 'remote', 'there was no fallback masking a failure');
+  now += 2000;
+  await evaluate(`window.pet.interact({region:'head',motions:${JSON.stringify(motions.map(m => m.key))}})`);
+  await until(() => started === 5, 'fifth playback starts before typing');
+  const before = Date.now();
+  await evaluate("(()=>{const el=document.getElementById('input');el.value='请等一下';el.dispatchEvent(new Event('input'));})()");
+  await until(async () => !vm.runInContext('speaking', context) && !(await evaluate('window.__pet().audio')), 'typing stops real playback');
+  assert(Date.now() - before < 500, 'typing interrupts the main process and WebAudio promptly');
+  assert(events.some(event => event.type === 'audio' && event.stop));
   await checkStatusWidth();
   assert.equal(errors.length, 0, errors.join('; '));
-  console.log('Actual speech pipeline passed: 4 accepted clicks within 4.5s -> 4 bubbles, 4 WebAudio starts/completions, 1 synthesis + 3 disk-cache hits. Status width adapts at 340/420/630px; logo is gray when idle and colored when busy.');
+  console.log('Actual speech pipeline passed: 4 accepted clicks within 4.5s -> 4 bubbles, 4 WebAudio starts/completions, 1 synthesis + 3 disk-cache hits. Typing interrupts real playback within 500ms. Status width adapts at 340/420/630px; logo is gray when idle and colored when busy.');
 }
 main().then(() => finish(0), error => { console.error(error); finish(1); });
 function finish(code) {

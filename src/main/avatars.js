@@ -7,6 +7,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { DESCRIPTIONS } = require('./avatar-descriptions');
 
 const MODELS_DIR = path.join(__dirname, '..', 'renderer', 'assets', 'models');
 
@@ -83,7 +84,7 @@ function scan(dir = MODELS_DIR) {
   }
   const sources = new Map(names.map(n => [n, path.join(dir, n)]));
   if (dir === MODELS_DIR && library.directory('model')) {
-    try { for (const name of fs.readdirSync(library.directory('model'))) if (/\.vrm$/i.test(name) && !name.startsWith('.')) { const file = library.personalFile('model', name); if (file) sources.set(name, file); } } catch {}
+    try { for (const name of fs.readdirSync(library.directory('model'))) if (/\.vrm$/i.test(name) && !name.startsWith('.')) { const file = library.personalFile('model', name); if (file) sources.set(sources.has(name) ? '个人-' + name : name, file); } } catch {}
   }
   names = [...sources.keys()];
   // 官方样例排在后面，自己的角色排前面：列表第一项就是默认形象
@@ -95,6 +96,8 @@ function scan(dir = MODELS_DIR) {
     const base = baseOf(file), nickname = Object.hasOwn(NAMES, base) ? NAMES[base] : "";
     return {
       key: file,
+      description: DESCRIPTIONS[file] || '',
+      personalFile: personal ? path.basename(source) : undefined,
       file,
       ...(personal ? { url: library.url(source), personal: true } : {}),
       label: nickname || (personal ? file.replace(/\.vrm$/i, '') : m.title || file.replace(/\.vrm$/i, '')),

@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
 const { pathToFileURL } = require('url');
+const STOCK_MODELS = new Set(['AvatarSample_D.vrm', 'AvatarSample_E.vrm', 'AvatarSample_F.vrm', 'AvatarSample_G.vrm']);
 let root;
 function setRoot(value) { root = value; }
 function directory(kind) { return root && path.join(root, kind === 'model' ? 'avatars' : 'motions'); }
@@ -28,6 +29,7 @@ function importModel(file) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (fs.lstatSync(dir).isSymbolicLink()) throw new Error('个人资源目录不能是符号链接');
   let name = original;
+  if (STOCK_MODELS.has(name)) name = '个人-' + path.basename(original, path.extname(original)) + '-' + digest.slice(0, 8) + '.vrm';
   const existing = path.join(dir, name);
   if (fs.existsSync(existing)) {
     const current = personalFile('model', name);
@@ -47,4 +49,4 @@ function importModel(file) {
   } finally { if (fd !== undefined) fs.closeSync(fd); try { fs.unlinkSync(temporary); } catch {} }
 
 }
-module.exports = { setRoot, directory, personalFile, url, validateModel, importModel };
+module.exports = { setRoot, directory, personalFile, url, validateModel, importModel, STOCK_MODELS };
