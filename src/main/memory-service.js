@@ -1060,6 +1060,6 @@ class MemoryService {
       return { ok: true, records: data.records.length, legacyPrivateRecords, ...(restoredPersona ? { persona: restoredPersona } : {}) };
     });
   }
-  async close() { clearTimeout(this.extractTimer); this.cancelExtraction(); await this.maintenance?.close(); this.generation++; this.ready = false; await this.tail; this.closed = true; await this.db?.close(); this.key?.fill(0); }
+  async close(options) { clearTimeout(this.extractTimer); this.cancelExtraction(); await this.maintenance?.close(); this.generation++; this.ready = false; await this.tail; this.closed = true; await this.db?.close(options); this.key?.fill(0); }
 }
 module.exports = { MemoryService, SECRET };

@@ -10,14 +10,14 @@
 
 ## 本地 broker：已读到的协议
 
-workbunny 客户端在 [workbuddy.js](/Users/zhyuzh/BaiduTongbu/2026.10.24workbunny/workbunny/src/main/workbuddy.js:16) 从当前用户目录发现 broker endpoint；源码明确要求端点文件只由当前用户拥有且不是符号链接，并且只在内存中使用其中 ticket。本文没有读取文件本身或其字段值。认证按协议 1 的 `session_hello` → `session_challenge` → `session_prove` → `session_hello_ack` 进行；连接只在 broker 宣告 `wb.request` 后取 pipe，再调用它公布的 `http.fetch` 方法。客户端的确切请求结构见 [workbuddy.js](/Users/zhyuzh/BaiduTongbu/2026.10.24workbunny/workbunny/src/main/workbuddy.js:61)：
+workbunny 客户端在 [workbuddy.js](src/main/workbuddy.js:16) 从当前用户目录发现 broker endpoint；源码明确要求端点文件只由当前用户拥有且不是符号链接，并且只在内存中使用其中 ticket。本文没有读取文件本身或其字段值。认证按协议 1 的 `session_hello` → `session_challenge` → `session_prove` → `session_hello_ack` 进行；连接只在 broker 宣告 `wb.request` 后取 pipe，再调用它公布的 `http.fetch` 方法。客户端的确切请求结构见 [workbuddy.js](src/main/workbuddy.js:61)：
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"broker/GetPipe","params":{"pipe":"wb.request"}}
 {"jsonrpc":"2.0","id":2,"method":"c:wb.request/http.fetch","mode":"call","params":{"method":"POST","path":"/v2/chat/completions","headers":{"content-type":"application/json","accept":"text/event-stream"},"body_b64":"<标准 base64 请求体>"}}
 ```
 
-这里的 `c:wb.request` 是 `GetPipe` 响应返回的 channel 名称，不应硬编码成通用 broker channel。`http.fetch` 走 WorkBuddy 当前登录账号的服务端点，接收 HTTP 方法 `GET/HEAD/POST/PUT/PATCH/DELETE`、以 `/` 开头的相对 path、独立 query 对象和受限请求头；源码拒绝协议相对 URL、`..` path 段、query/hash 混入 path，以及非白名单请求头。GET/HEAD 不允许 body；body 使用标准 base64。服务端对请求设置约 50 秒超时，内联响应上限为 655,360 字节。workbunny 当前聊天实际使用 `POST /v2/chat/completions`，将 JSON body 编为 base64；SSE 返回时优先读取响应事件的 `model` 字段作为实际返回模型 ID，字段缺失才回退到请求的 model，见 [workbuddy.js](/Users/zhyuzh/BaiduTongbu/2026.10.24workbunny/workbunny/src/main/workbuddy.js:109) 和 [workbuddy.js](/Users/zhyuzh/BaiduTongbu/2026.10.24workbunny/workbunny/src/main/workbuddy.js:122)。
+这里的 `c:wb.request` 是 `GetPipe` 响应返回的 channel 名称，不应硬编码成通用 broker channel。`http.fetch` 走 WorkBuddy 当前登录账号的服务端点，接收 HTTP 方法 `GET/HEAD/POST/PUT/PATCH/DELETE`、以 `/` 开头的相对 path、独立 query 对象和受限请求头；源码拒绝协议相对 URL、`..` path 段、query/hash 混入 path，以及非白名单请求头。GET/HEAD 不允许 body；body 使用标准 base64。服务端对请求设置约 50 秒超时，内联响应上限为 655,360 字节。workbunny 当前聊天实际使用 `POST /v2/chat/completions`，将 JSON body 编为 base64；SSE 返回时优先读取响应事件的 `model` 字段作为实际返回模型 ID，字段缺失才回退到请求的 model，见 [workbuddy.js](src/main/workbuddy.js:109) 和 [workbuddy.js](src/main/workbuddy.js:122)。
 
 安装包源码证据位于 `/Applications/WorkBuddy.app/Contents/Resources/app.asar` 的 `main/server.js`（生产打包、单行压缩模块）：
 

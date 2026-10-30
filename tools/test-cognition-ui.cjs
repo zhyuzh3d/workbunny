@@ -35,6 +35,8 @@ async function run() {
   } });
   autonomy = new CompanionAutonomy({ memory: m, getScene: () => settings.scene, canRun: () => false, propose: async () => ({ kind: 'none' }) });
   handle('panel-init', () => ({ config: config.publicConfig(), avatars: [], motions: [], asr: {} }));
+  handle('portability', () => ({ connection: { ready: true, note: '已连接' }, storage: { ok: true, dir: '/fixture/vault' }, asrMode: 'continuous', capabilities: {} }));
+  handle('tts-http-template', kind => require('../src/main/tts-http-profile').template(kind));
   handle('brain-info', () => ({ providers: config.PROVIDERS, thinkingLevels: config.THINKING_LEVELS, workbuddyModels: [] }));
   handle('tts-info', () => ({ engines: config.TTS_ENGINES, systemVoices: [], qwen: {}, dl: {} }));
   handle('self-view', () => m.cognition.loadRoleView());
@@ -59,7 +61,7 @@ async function run() {
   handle('memory-maintenance-status', () => ({ status: 'idle' }));
   const panel = await page('panel.html', { p: 'settings' });
   await wait(panel, "document.getElementById('setProfile').value.length > 0");
-  assert.deepEqual(await panel.webContents.executeJavaScript("[...document.querySelectorAll('#tabs button')].map(b=>b.textContent)"), ['外观', '设定', '场景', '听力', '智力', '语音']);
+  assert.deepEqual(await panel.webContents.executeJavaScript("[...document.querySelectorAll('#tabs button')].map(b=>b.textContent)"), ['外观', '设定', '场景', '听力', '智力', '语音', '数据']);
   assert.equal(await panel.webContents.executeJavaScript("document.querySelectorAll('.self-entry').length"), 0, 'settings only show owner inputs');
   await panel.webContents.executeJavaScript(`document.querySelector('[data-t=persona]').click(); document.getElementById('setName').value='露露'; document.getElementById('setName').dispatchEvent(new Event('input')); document.getElementById('setProfile').value='我好奇、有主见'; document.getElementById('setProfile').dispatchEvent(new Event('input')); document.getElementById('setBehavior').value='先听完，再问是否需要建议'; document.getElementById('setBehavior').dispatchEvent(new Event('input')); document.getElementById('saveBtn').click();`);
   await wait(panel, "document.getElementById('sfNote').textContent.includes('已保存')");
@@ -137,7 +139,7 @@ async function run() {
   await wait(desktop, "document.getElementById('autonomyGrants').textContent.includes('未启用')");
   await wait(memory, "document.getElementById('memoryStatus').textContent.includes('已就绪')");
   assert.equal(errors.length, 0, errors.join(';'));
-  console.log('real renderer/preload UI passed: six settings tabs, explicit understanding, memory self dialog, multiple entries per category, global lock/manual edits/history, scene button persistence/rollback, growth and authorization');
+  console.log('real renderer/preload UI passed: seven settings tabs, explicit understanding, memory self dialog, multiple entries per category, global lock/manual edits/history, scene button persistence/rollback, growth and authorization');
 }
 run().then(() => finish(0), e => { console.error(e, errors.join('; ')); finish(1); });
-async function finish(code) { for (const w of windows) w.destroy(); await autonomy?.close(); await selfWorker?.close(); await m?.close(); fs.rmSync(root, { recursive: true, force: true }); app.exit(code); }
+async function finish(code) { for (const w of windows) w.destroy(); await autonomy?.close(); await selfWorker?.close(); await m?.close(); fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); app.exit(code); }

@@ -157,6 +157,7 @@ function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => 
     try { save(); } catch { cache[provider] = previous; throw new Error('模型列表已获取，但本地保存失败'); }
     return get(provider);
   }
-  return { setPath, get, thinking, body, refresh };
+  function invalidate(provider) { delete cache[provider]; save(); }
+  return { setPath, get, thinking, body, refresh, invalidate };
 }
 module.exports = { ...createCatalog(), createCatalog, PROVIDERS, normalize, fallbackThinking, requestJSON };

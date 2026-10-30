@@ -6,6 +6,7 @@ import CoreGraphics
 import Darwin
 import Foundation
 import ScreenCaptureKit
+import CoreImage
 import Vision
 
 struct DesktopError: LocalizedError { let message: String; var errorDescription: String? { message } }
@@ -630,6 +631,42 @@ func writePrivatePNG(_ data: Data) throws -> String {
     }
     return dir.appendingPathComponent("capture.png").path
 }
+final class LegacyScreenshot: NSObject, SCStreamOutput, SCStreamDelegate {
+    let lock = NSLock()
+    var continuation: CheckedContinuation<CGImage, Error>?
+    var stream: SCStream?
+    func finish(_ result: Result<CGImage, Error>) {
+        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+        guard let c else { return }; c.resume(with: result)
+        if let stream { Task { try? await stream.stopCapture() } }
+    }
+    func stream(_ stream: SCStream, didStopWithError error: Error) { finish(.failure(error)) }
+    func stream(_ stream: SCStream, didOutputSampleBuffer buffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, buffer.isValid,
+              let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+              let status = attachments.first?[.status] as? Int, SCFrameStatus(rawValue: status) == .complete,
+              let pixel = buffer.imageBuffer else { return }
+        let image = CIImage(cvPixelBuffer: pixel)
+        guard let cg = CIContext().createCGImage(image, from: image.extent) else { return }
+        finish(.success(cg))
+    }
+    func capture(filter: SCContentFilter, config: SCStreamConfiguration) async throws -> CGImage {
+        try await withCheckedThrowingContinuation { c in
+            continuation = c
+            let capture = SCStream(filter: filter, configuration: config, delegate: self); stream = capture
+            do {
+                try capture.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "workbunny.capture"))
+                Task { do { try await capture.startCapture() } catch { self.finish(.failure(error)) } }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 8) { self.finish(.failure(DesktopError(message: "截图超时"))) }
+            } catch { finish(.failure(error)) }
+        }
+    }
+}
+func legacyPixelScale(_ rect: CGRect) -> CGFloat {
+    var display = CGMainDisplayID(), count: UInt32 = 0
+    _ = CGGetDisplaysWithRect(rect, 1, &display, &count)
+    return CGFloat(CGDisplayPixelsWide(display)) / max(1, CGDisplayBounds(display).width)
+}
 func captureImage(_ windowId: UInt32?) async throws -> (CGImage, CGRect) {
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
     let filter: SCContentFilter
@@ -645,7 +682,7 @@ func captureImage(_ windowId: UInt32?) async throws -> (CGImage, CGRect) {
         // Use the same CGRect source exposed by frontmost.windows so callers can
         // map desktop points to the captured image without a second origin system.
         rect = cgRect
-        guard let size = capturePixelSize(rect: rect, pointPixelScale: CGFloat(filter.pointPixelScale)) else {
+        guard let size = capturePixelSize(rect: rect, pointPixelScale: ( { if #available(macOS 14.0, *) { return CGFloat(filter.pointPixelScale) }; return legacyPixelScale(rect) }() )) else {
             throw DesktopError(message: "目标窗口截图尺寸无效")
         }
         width = size.width; height = size.height
@@ -659,7 +696,9 @@ func captureImage(_ windowId: UInt32?) async throws -> (CGImage, CGRect) {
         width = display.width; height = display.height
     }
     let config = makeCaptureConfiguration(width: width, height: height, fitWindow: fitsWindow)
-    let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+    let image: CGImage
+    if #available(macOS 14.0, *) { image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) }
+    else { image = try await LegacyScreenshot().capture(filter: filter, config: config) }
     return (image, rect)
 }
 
@@ -674,8 +713,8 @@ func capturePixelSize(rect: CGRect, pointPixelScale: CGFloat) -> (width: Int, he
 func makeCaptureConfiguration(width: Int, height: Int, fitWindow: Bool) -> SCStreamConfiguration {
     let config = SCStreamConfiguration()
     config.width = width; config.height = height; config.capturesAudio = false; config.showsCursor = false
-    config.ignoreShadowsSingleWindow = true; config.ignoreShadowsDisplay = true
-    if fitWindow {
+    if #available(macOS 14.0, *) { config.ignoreShadowsSingleWindow = true; config.ignoreShadowsDisplay = true }
+    if #available(macOS 14.0, *), fitWindow {
         config.scalesToFit = true
         config.preservesAspectRatio = true
     }
@@ -1431,9 +1470,11 @@ func runNativeSelfTest() -> Never {
             throw DesktopError(message: "WorkBuddy UTF-16 文本上限回归失败")
         }
         let windowConfig = makeCaptureConfiguration(width: captureSize.width, height: captureSize.height, fitWindow: true)
+        if #available(macOS 14.0, *) {
         guard windowConfig.scalesToFit, windowConfig.preservesAspectRatio,
               windowConfig.ignoreShadowsSingleWindow, windowConfig.ignoreShadowsDisplay, !windowConfig.showsCursor else {
             throw DesktopError(message: "窗口截图配置未启用适配、等比缩放及无阴影/光标")
+        }
         }
 
         let multiline = try makeInputPlan("A\r\nB\nC", lineBreak: "shiftEnter")

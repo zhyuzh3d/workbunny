@@ -10,7 +10,7 @@ const SRC = '../vrma-library';
 
 /* [ 源目录, 原文件名, 新 key ] */
 const MAP = [
-  // ── VRoid Project Motion Pack（pixiv Inc. 免费配布，发布须署名）──────────
+  // ── VRoid 既有来源记录（部分禁止裸文件再分发；只作个人库线索，不作为公开收录许可）──────────
   ['ready/vroid-project', 'VRMA_07.vrma', 'shy_face'],
   ['ready/vroid-project', 'greeting.vrma', 'greet_yeah'],
   ['ready/vroid-project', 'greeting2.vrma', 'greet_wave'],

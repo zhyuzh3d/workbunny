@@ -1,7 +1,7 @@
 {
   "name": "workbunny",
   "productName": "workbunny",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "workbunny · 有长期记忆的桌面情感伙伴与工作小秘书",
   "main": "src/main/entry.js",
   "private": true,
@@ -10,11 +10,11 @@
     "dev": "electron . --dev"
   },
   "devDependencies": {
-    "electron": "^33.4.11"
+    "electron": "44.10.0"
   },
   "dependencies": {
-    "three": "0.170.0",
     "@pixiv/three-vrm": "3.5.5",
-    "@pixiv/three-vrm-animation": "3.5.5"
+    "@pixiv/three-vrm-animation": "3.5.5",
+    "three": "0.170.0"
   }
 }

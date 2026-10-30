@@ -45,6 +45,10 @@ const SLOT_ORDER = ['idle', 'work', 'greet', 'bye', 'cheer', 'praise', 'sign', '
 const MOTION_GROUPS = SLOT_ORDER.map((id) => ({ id, label: SLOT_LABEL[id] }));
 
 const MOTIONS = [
+  // CC0 Sachi poses: independently licensed motions for public distribution.
+  {"key": "greet_sachi", "slot": "greet", "label": "轻轻挥手", "loop": false, "tag": "llm", "use": "打招呼、欢迎回来", "src": "LongbowXXX__ai-tuber / wave_pose.vrma"},
+  {"key": "praise_sachi", "slot": "praise", "label": "点头赞同", "loop": false, "tag": "llm", "use": "认同、称赞", "src": "LongbowXXX__ai-tuber / agree_pose.vrma"},
+  {"key": "sign_sachi", "slot": "sign", "label": "胜利手势", "loop": false, "tag": "llm", "use": "完成任务、小小庆祝", "src": "LongbowXXX__ai-tuber / victory_pose.vrma"},
   // ── idle · 待机 ──
   { key: 'idle_look', slot: 'idle', label: '四处张望', loop: true, tag: 'llm', use: '好奇、找东西、等回应', src: 'vrm-viewer / LookAround.vrma' },
   { key: 'idle_breath', slot: 'idle', label: '呼吸待机', loop: true, tag: 'llm', use: '什么事都没有时的默认站姿', src: 'chuckynuttys__timeline / reika_KA_Idle01_breathing.vrma' },
@@ -177,6 +181,14 @@ const MOTIONS = [
   // ── talk · 说话 ──
   { key: 'talk_talk', slot: 'talk', label: '说话带手势', loop: false, tag: 'off', use: '站着说话，带手势', src: 'yv-was-taken__desktop-waifu / talking.vrma' },];
 
+function availableMotions() {
+  const library = require('./asset-library');
+  return MOTIONS.flatMap(m => {
+    const personal = library.personalFile('motion', m.key + '.vrma');
+    if (personal) return [{ ...m, url: library.url(personal), personal: true }];
+    return fs.existsSync(path.join(__dirname, '../renderer/assets/motions', m.key + '.vrma')) ? [m] : [];
+  });
+}
 /* 交给模型的槽位：只列槽位名 + 中文意思。具体动作由代码在槽内随机挑。 */
 const MOTION_SLOTS = [...new Set(MOTIONS.filter((m) => m.tag === 'llm').map((m) => m.slot))];
 const MOTION_HINT = MOTION_SLOTS.map((s) => s + '（' + (SLOT_LABEL[s] || s) + '）').join(' / ');
@@ -266,13 +278,14 @@ function thinkingOptions(provider, model) { return modelCatalog.thinking(provide
 function thinkingFields(provider, model, thinking) { return modelCatalog.body(provider, model, thinking); }
 
 /* ── 发声：默认就是系统语音 ──
- * 以前默认是局域网里那台 A1X 上的 Qwen3-TTS。机器一关机，娃娃就先卡两秒再降级，
+ * 以前默认是局域网里那台 CHP 上的 Qwen3-TTS。机器一关机，娃娃就先卡两秒再降级，
  * 对话节奏明显发木。默认改成 macOS 自带语音：
  *   /usr/bin/say 从 OS X 10.7 起就在，最近十几年的 macOS 全都有，不依赖任何网络和设备。
  * 想要更像"她"的声音，主人自己去「语音」那一页下载大模型 —— 那是加分项，不是开机条件。 */
 const TTS_ENGINES = [
   { id: 'system', label: '系统语音', hint: 'macOS 自带，离线、立刻出声。' },
   { id: 'qwen', label: 'Qwen 本地', hint: 'CustomVoice 离线合成，内置九种音色。' },
+  { id: 'http', label: '自定义 HTTP', hint: '通用接口配置，支持 JSON 音频分片与 SSE。' },
   { id: 'remote', label: '局域网 CHP', hint: '连接 CHP 服务，获取已加载的模型与可用音色。' },
 ];
 
@@ -295,7 +308,7 @@ const DEFAULTS = {
   tts: {
     enabled: true,
     engine: 'system',      // system | qwen | remote
-    voice: 'Tingting',     // 系统音色；本机没有就自动退到系统默认
+    voice: '',     // 系统音色；本机没有就自动退到系统默认
     rate: 200,             // say 的语速（字/分钟）
     qwen: {
       dir: '',             // gguf 落在哪（下载完自动填）
@@ -318,7 +331,7 @@ const DEFAULTS = {
     format: 'wav',
     timeoutMs: 12000,
     // 兜底嗓子：远程失败时的最后一道。空 = 系统默认音色。
-    fallbackVoice: 'Tingting',
+    fallbackVoice: '',
   },
   asr: {
     enabled: true,
@@ -344,7 +357,7 @@ const DEFAULTS = {
   },
   /* w/h 永远是「100% 大小」时的基准窗口；角色放大时窗口按倍数临时放大，
    * 基准不跟着变 —— 否则 150% 存过一次，退回 100% 就回不到原尺寸了。 */
-  window: { w: 400, h: 620, x: null, y: null, alwaysOnTop: true, clickThrough: true, scale: 1, canvasWidthVersion: 1 },
+  window: { w: 400, h: 620, x: null, y: null, alwaysOnTop: true, clickThrough: true, scale: 0.5, canvasWidthVersion: 1 },
 };
 
 let cfgPath = null;
@@ -352,6 +365,7 @@ let cache = null;
 
 function setPath(p) {
   cfgPath = p;
+  require('./asset-library').setRoot(path.dirname(p));
   modelCatalog.setPath(path.join(path.dirname(p), 'model-catalog.json'));
   cache = null;
 }
@@ -360,6 +374,7 @@ function deepMerge(base, over) {
   if (!over || typeof over !== 'object') return base;
   const out = Array.isArray(base) ? base.slice() : { ...base };
   for (const [k, v] of Object.entries(over)) {
+    if (['__proto__', 'prototype', 'constructor'].includes(k)) throw new Error('配置包含不允许的字段');
     if (v && typeof v === 'object' && !Array.isArray(v) && base && typeof base[k] === 'object') {
       out[k] = deepMerge(base[k], v);
     } else {
@@ -375,19 +390,11 @@ function readWorkBuddyLLM() {
 }
 function listWorkBuddyModels() { return modelCatalog.get('workbuddy').models; }
 function resolveLLM(c) {
-  const b = (c || load()).brain || {};
-  const wb = b.source !== 'apikey' || !PROVIDERS.some(p => p.id === b.provider);
-  const provider = wb ? 'workbuddy' : b.provider;
-  const p = PROVIDERS.find(p => p.id === provider);
-  const profile = wb ? b : b.profiles?.[provider] || {};
-  const model = String(wb ? b.model || 'hy3' : profile.modelId || p.models[0]);
-  const selection = profile.thinking || (wb && model === 'hy3' ? 'low' : 'auto');
-  const thinking = thinkingOptions(provider, model).some(t => t.id === selection) ? selection : 'auto';
-  const metadata = modelCatalog.get(provider).models.find(m => m.id === model);
-  return { ...(wb ? { transport: 'workbuddy' } : { baseURL: p.baseURL }),
-    provider, model, apiKey: wb ? '' : String(profile.apiKey || '').trim(), thinking,
-    extraBody: thinkingFields(provider, model, thinking),
-    maxTokens: Math.min(4096, metadata?.maxOutputTokens || 4096), timeoutMs: 55000 };
+  const b = (c || load()).brain || {}, catalog = modelCatalog.get('workbuddy');
+  const model = b.model || catalog.models[0]?.id || 'hy3';
+  const thinking = thinkingOptions('workbuddy', model).some(t => t.id === b.thinking) ? b.thinking : 'auto';
+  return { transport: 'workbuddy', provider: 'workbuddy', model, apiKey: '', thinking,
+    extraBody: thinkingFields('workbuddy', model, thinking), maxTokens: 4096, timeoutMs: 55000 };
 }
 function migrateBrain(c) {
   const b = c.brain;
@@ -413,6 +420,7 @@ function publicConfig(c = load()) {
   for (const section of [out.brain, out.llm, out.tts, ...Object.values(out.brain?.profiles || {})]) {
     if (section && Object.hasOwn(section, 'apiKey')) { section.hasApiKey = !!section.apiKey; delete section.apiKey; }
   }
+  if (out.tts?.http) out.tts.http = require('./tts-http-profile').publicHTTP(c.tts.http);
   return out;
 }
 
@@ -429,9 +437,10 @@ function load() {
   if (disk.tts?.qwen && !disk.tts.qwen.modelKind) merged.tts.qwen.modelKind = 'legacy-base';
   if (disk.window && disk.window.canvasWidthVersion !== 1) merged.window.canvasWidthVersion = 0;
   cache = migrateBrain(merged);
+  cache.brain.source = 'workbuddy';
   const known = new Set(MOTIONS.map(m => m.key));
   cache.motions.disabled = [...new Set((Array.isArray(cache.motions.disabled) ? cache.motions.disabled : []).filter(k => known.has(k)))];
-  if (MOTIONS.filter(m => m.slot === 'idle').every(m => cache.motions.disabled.includes(m.key)))
+  if (availableMotions().filter(m => m.slot === 'idle').every(m => cache.motions.disabled.includes(m.key)))
     cache.motions.disabled = cache.motions.disabled.filter(k => k !== 'idle_loop');
   cache.tts.qwen = qwenVoices.normalize(cache.tts.qwen);
   cache.memory.scene = normalizeScene(cache.memory.scene);
@@ -441,6 +450,10 @@ function load() {
 
 function save(patch) {
   const next = deepMerge(load(), patch || {});
+  next.brain.source = 'workbuddy';
+  if (patch?.tts?.http) next.tts.http = require('./tts-http-profile').normalize(next.tts.http, load().tts.http);
+  if (next.tts?.engine === 'http') require('./tts-http-profile').validate(next.tts.http?.profile);
+  if (patch?.tts?.engine === 'qwen') require('./runtime-capabilities').requireQwen();
   next.settingsRevision = (Number(load().settingsRevision) || 0) + 1;
   if (patch?.buddy) {
     next.buddy.name = String(next.buddy.name || 'baby').trim().slice(0, 64) || 'baby';
@@ -454,7 +467,7 @@ function save(patch) {
     if (!Array.isArray(next.motions.disabled)) throw new Error('动作配置格式不正确');
     const known = new Set(MOTIONS.map(m => m.key));
     next.motions.disabled = [...new Set(next.motions.disabled.filter(k => known.has(k)))];
-    if (!MOTIONS.some(m => m.slot === 'idle' && !next.motions.disabled.includes(m.key)))
+    if (!availableMotions().some(m => m.slot === 'idle' && !next.motions.disabled.includes(m.key)))
       throw new Error('至少保留一个空闲动作');
   }
   try {
@@ -475,7 +488,7 @@ function save(patch) {
 function buildSystemPrompt(extraContext, { scene = load().memory.scene, roleView } = {}) {
   const c = load();
   const ctx = extraContext || '主人现在没有在跑任务，可能只是在发呆或者看别的东西。';
-  const activeSlots = [...new Set(MOTIONS.filter(m => m.tag === 'llm' && !c.motions.disabled.includes(m.key)).map(m => m.slot))];
+  const activeSlots = [...new Set(availableMotions().filter(m => m.tag === 'llm' && !c.motions.disabled.includes(m.key)).map(m => m.slot))];
   const motionHint = activeSlots.map(s => s + '（' + SLOT_LABEL[s] + '）').join(' / ');
   const ownerName = String(c.buddy.ownerName || '主人').trim() || '主人';
   const profile = String(c.buddy.profile ?? DEFAULTS.buddy.profile).trim();
@@ -496,7 +509,12 @@ function buildSystemPrompt(extraContext, { scene = load().memory.scene, roleView
 
 module.exports = {
   load, save, setPath, buildSystemPrompt, preview, publicConfig, thinkingOptions, thinkingFields,
-  MOTIONS, MOTION_GROUPS, MOTION_KEYS, MOTION_SLOTS, MOTION_HINT, SLOT_LABEL,
+  ALL_MOTIONS: MOTIONS,
+  get MOTIONS() { return availableMotions(); },
+  get MOTION_GROUPS() { const slots = new Set(availableMotions().map(m => m.slot)); return MOTION_GROUPS.filter(g => slots.has(g.id)); },
+  get MOTION_KEYS() { return availableMotions().filter(m => m.tag === 'llm').map(m => m.key); },
+  get MOTION_SLOTS() { return [...new Set(availableMotions().filter(m => m.tag === 'llm').map(m => m.slot))]; },
+  MOTION_HINT, SLOT_LABEL,
   readWorkBuddyLLM, listWorkBuddyModels, resolveLLM, DEFAULTS,
   PROVIDERS, THINKING_LEVELS, TTS_ENGINES,
 };

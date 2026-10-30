@@ -11,6 +11,7 @@ function atomicPrivate(file, data) {
     fd = fs.openSync(tmp, 'wx', 0o600);
     fs.writeFileSync(fd, data); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
     fs.renameSync(tmp, file); fs.chmodSync(file, 0o600);
+    const parent = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(parent); } finally { fs.closeSync(parent); }
   } finally { if (fd !== undefined) fs.closeSync(fd); try { fs.unlinkSync(tmp); } catch {} }
 }
 

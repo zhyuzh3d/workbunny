@@ -1,3 +1,4 @@
+import { mountPortability } from './portability-ui.js';
 import { createSelfSettings } from './self-settings.js';
 /**
  * 独立窗口（设置 / 动作库）的逻辑。
@@ -143,7 +144,7 @@ function paintPerm(st) {
     if (speech === 3) { sEl.textContent = '已授权'; sEl.className = 'pill ok'; }
     else if (speech === -1) { sEl.textContent = '不可用'; sEl.className = 'pill bad'; }
     else if (pending || speech === 0) { sEl.textContent = '待授权'; sEl.className = 'pill wait'; }
-    else { sEl.textContent = SPEECH_ZH[speech] || '未知'; sEl.className = 'pill bad'; }
+    else { sEl.textContent = (asrStat.mode === 'single' ? ['待授权', '被拒绝', '受限制', '可用'][speech] : SPEECH_ZH[speech]) || '未知'; sEl.className = 'pill bad'; }
     if (asrStat.note === 'installing') { sEl.textContent = '准备中'; sEl.className = 'pill wait'; }
   }
   if (mEl) {
@@ -157,7 +158,7 @@ function paintPerm(st) {
   const ok = speech === 3 && micOk;
   const tip = $('permTip');
   if (tip) {
-    tip.textContent = asrStat.note === 'installing' ? '正在准备本机语音资源，完成后自动开始识别。' : ok
+    tip.textContent = asrStat.mode === 'single' && ok && asrStat.onDevice === false && !cfg.asr.allowNetwork ? '当前语言需要联网识别；请明确允许联网，或继续使用文字输入。' : asrStat.mode === 'single' && ok && asrStat.available === false ? '系统识别暂不可用，请检查听写资源和网络后重试。' : asrStat.note === 'installing' ? '正在准备本机语音资源，完成后自动开始识别。' : ok
       ? '都通了。按 ⌘⇧Space 或点她脚下那条就开始说话。'
       : (pending ? '系统弹窗正在等你点「允许」。点完这里会自动变绿。'
         : '第一次要允许两项：语音识别 + 麦克风。允许后如果还是灰的，把开关关掉再打开一次。');
@@ -212,7 +213,7 @@ function fillSelect(el, items, cur) {
     o.disabled = !!it.disabled;
     el.appendChild(o);
   }
-  if (cur) el.value = cur;
+  if (cur !== undefined && cur !== null) el.value = cur;
   if (el.selectedIndex < 0) el.selectedIndex = 0;
 }
 
@@ -319,6 +320,7 @@ function collectBrain() {
 const ENGINE_HINT = {
   system: 'macOS 自带，离线可用。',
   qwen: '本地运行，支持中英文。',
+  http: '使用已保存的通用接口配置；可先获取目录，再试听。',
   remote: '使用同一局域网的 CHP 服务；不可用时回退系统语音。',
 };
 function paintTts() {
@@ -332,6 +334,7 @@ function paintTts() {
       b.textContent = e.label;
       b.addEventListener('click', async () => {
         edit('tts.engine', e.id); ttsDraft.engine = e.id; paintTts();
+        if (e.id === 'http' && !cfg.tts.http?.profile?.url) { $('sfNote').textContent = '请先填写接口，点击“保存并使用”后生效。'; return; }
         try { await persist({ tts: { engine: e.id } }); }
         catch (err) { $('sfNote').textContent = '切换失败：' + err.message; }
       });
@@ -339,13 +342,15 @@ function paintTts() {
     }
   }
   for (const b of row.children) b.classList.toggle('on', b.dataset.e === ttsDraft.engine);
+  for (const b of row.children) if (b.dataset.e === 'qwen') { b.disabled = TTSI.qwen?.available === false; b.title = TTSI.qwen?.reason || ''; }
   $('ttsHint').textContent = ENGINE_HINT[ttsDraft.engine] || '';
-  $('ttsCurrent').textContent = cfg.tts.enabled ? ({ system: '系统语音', qwen: 'Qwen 本地', remote: '局域网 CHP' }[ttsDraft.engine] || '系统语音') : '语音已关闭';
+  $('ttsCurrent').textContent = cfg.tts.enabled ? ({ system: '系统语音', qwen: 'Qwen 本地', remote: 'CHP', http: '自定义 HTTP' }[ttsDraft.engine] || '系统语音') : '语音已关闭';
   $('ttsSystem').classList.toggle('on', ttsDraft.engine === 'system');
   $('ttsQwen').classList.toggle('on', ttsDraft.engine === 'qwen');
   $('ttsRemote').classList.toggle('on', ttsDraft.engine === 'remote');
+  $('ttsHTTP').classList.toggle('on', ttsDraft.engine === 'http');
 
-  fillSelect($('sysVoice'), (TTSI.systemVoices || []).map((v) => ({ id: v.id, label: v.id + '　' + v.lang })), ttsDraft.voice);
+  fillSelect($('sysVoice'), (TTSI.systemVoices || []).map((v) => ({ id: v.id, label: v.label || v.id + '　' + v.lang })), ttsDraft.voice);
   $('sysRate').value = ttsDraft.rate;
   $('sysRateVal').textContent = ttsDraft.rate;
 
@@ -408,6 +413,8 @@ function paintQwen() {
 }
 let dlTimer = null;
 function paintDl(st) {
+  if (TTSI.qwen?.available === false) { $('qwenGo').disabled = true; $('qwenTip').textContent = TTSI.qwen.reason; $('qwenVoice').disabled = true; return; }
+
   clearTimeout(dlTimer);
   TTSI.dl = st;
   const total = st.total || 1329512960;
@@ -440,13 +447,13 @@ async function refreshVoices(announce = false) {
 
 /* ═══════════ 保存 ═══════════ */
 /* 语音设置即时生效，主进程的实际配置是唯一来源。 */
-let ttsDraft = { engine: 'system', voice: 'Tingting', rate: 200, qwenVoice: 'serena' };
+let ttsDraft = { engine: 'system', voice: '', rate: 200, qwenVoice: 'serena' };
 function syncTts(c, acknowledged = []) {
   if ((Number(c.settingsRevision) || 0) < (Number(cfg?.settingsRevision) || 0)) return;
   const previous = cfg, previousFallback = cfg?.tts?.lastFallback?.at;
   cfg = c;
   ttsDraft = {
-    engine: pendingValue('tts.engine', 'system'), voice: pendingValue('tts.voice', 'Tingting'),
+    engine: pendingValue('tts.engine', 'system'), voice: pendingValue('tts.voice', ''),
     rate: pendingValue('tts.rate', 200), qwenVoice: pendingValue('tts.qwen.voice', 'serena'),
     chpVoice: pendingValue('tts.chp.voice', ''),
   };
@@ -483,7 +490,7 @@ function fillForm() {
   const t = c.tts || {};
   ttsDraft = {
     engine: t.engine || 'system',
-    voice: t.voice || 'Tingting',
+    voice: t.voice || '',
     rate: t.rate || 200,
     qwenVoice: (t.qwen && t.qwen.voice) || 'serena',
     chpVoice: t.chp?.voice || '',
@@ -572,9 +579,14 @@ function buildMotionList() {
   MOTIONS = init.motions || [];
   MOTION_GROUPS = init.motionGroups || [];
   avatarKey = init.avatar || (AVATAR_LIST[0] && AVATAR_LIST[0].key) || '';
-  viewScale = (cfg.window && cfg.window.scale) || 1;
+  viewScale = (cfg.window && cfg.window.scale) || 0.5;
 
   if (which === 'settings') {
+    await mountPortability(window.pet);
+    $('importAvatar').onclick = async () => {
+      try { const r = await window.pet.avatarImport(); if (r.cancelled) return; AVATAR_LIST = r.avatars; $('avRow').replaceChildren(); paintAvatars(); await pickAvatar(r.key); $('avatarImportStatus').textContent = '已导入个人模型，仅本机使用。'; }
+      catch (e) { $('avatarImportStatus').textContent = e.message; }
+    };
     BRAIN = await window.pet.brainInfo();
     TTSI = await window.pet.ttsInfo();
     if (TTSI.config) cfg = TTSI.config;
@@ -583,7 +595,7 @@ function buildMotionList() {
       if (ev.type === 'config' && ev.config) syncTts(ev.config);
     });
     paintPerm(init.asr || null);
-    showTab('look');
+    showTab(init.storage?.ok === false ? 'data' : init.connection?.ready === false ? 'brain' : 'look');
 
     $('sizeRow').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-k]');
@@ -708,7 +720,7 @@ function buildMotionList() {
         await writeTail;
         const r = await window.pet.ttsTest();
         $('sfNote').textContent = r.ok
-          ? (r.degraded ? `所选语音不可用，已切换系统语音：${r.reason}` : `用的是 ${r.engine === 'system' ? '系统语音' : r.engine === 'qwen' ? '本地 Qwen 语音' : '局域网 CHP'}${r.voice ? ' · ' + r.voice : ''}（${(r.ms / 1000).toFixed(1)} 秒）`)
+          ? (r.degraded ? `所选语音不可用，已切换系统语音：${r.reason}` : `用的是 ${r.engine === 'system' ? '系统语音' : r.engine === 'qwen' ? '本地 Qwen 语音' : r.engine === 'http' ? '自定义 HTTP' : '局域网 CHP'}${r.voice ? ' · ' + r.voice : ''}（${(r.ms / 1000).toFixed(1)} 秒）`)
           : ('试听失败：' + r.error);
       } catch (e) { $('sfNote').textContent = '试听失败：' + e.message; }
       finally { button.disabled = false; button.textContent = '试听一句'; }

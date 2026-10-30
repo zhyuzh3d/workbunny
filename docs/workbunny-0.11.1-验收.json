@@ -358,8 +358,8 @@
   "installation": {
     "status": "installed",
     "version": "0.11.1",
-    "app": "/Users/zhyuzh/Applications/workbunny.app",
-    "backup": "/Users/zhyuzh/Library/Caches/workbunny-release-backup/20261029-131404-before-0.11.1",
+    "app": "~/Applications/workbunny.app",
+    "backup": "~/Library/Caches/workbunny-release-backup/20261029-131404-before-0.11.1",
     "sourceFilesIncludingPackage": 170,
     "sourceParity": true,
     "preservedRecords": 365,
@@ -373,7 +373,7 @@
     "keyEnvelopeIdentical": true,
     "tts": {
       "engine": "remote",
-      "baseURL": "http://192.168.2.31:8189/chp/info",
+      "baseURL": "http://chp.example.invalid:8189/chp/info",
       "voice": "youngfemale"
     },
     "runtime": {

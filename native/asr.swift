@@ -643,7 +643,7 @@ func run() async {
         }
         // 兜底：闭麦超过 25 秒还没被打开，就当上层漏了 unmute，自己开。
         // 宁可把自己的一句话当成主人说的，也不能让麦克风永久哑掉。
-        if let at = mutedAt, Date().timeIntervalSince(at) > 25 {
+        if let at = mutedAt, Date().timeIntervalSince(at) > 125 {
             muted = false
             mutedAt = nil
             stateLock.unlock()

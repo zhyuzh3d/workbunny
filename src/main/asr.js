@@ -47,6 +47,8 @@ class Asr extends EventEmitter {
     if (opts.always) {
       args.push('--always', '--utterances', String(opts.maxUtterances || 30));
     }
+    if (opts.allowNetwork) args.push('--allow-network');
+    if (opts.askSpeech) args.push('--ask-speech');
     if (opts.device) args.push('--mic', String(opts.device));
     if (opts.noMicAsk) args.push('--no-mic-ask');
     this.always = !!opts.always;
@@ -269,7 +271,7 @@ class Asr extends EventEmitter {
  * 返回 { speech, mic, installed, locale, engine, error }
  * speech: 3 可用 / 1 缺语言包 / 0 待定 / -1 出错
  */
-function probeAccess(binPath, { timeoutMs = 5000, requestMic = false } = {}) {
+function probeAccess(binPath, { timeoutMs = 5000, requestMic = false, lang = 'zh-CN' } = {}) {
   return new Promise((resolve) => {
     let done = false, timer;
     const finish = (r) => {
@@ -281,7 +283,8 @@ function probeAccess(binPath, { timeoutMs = 5000, requestMic = false } = {}) {
     };
     let p;
     try {
-      const args = ['--status'];
+      const args = ['--status', '--lang', lang];
+      if (requestMic) args.push('--ask-speech');
       if (requestMic) args.push('--request-mic');
       p = spawn(binPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
@@ -303,7 +306,7 @@ function probeAccess(binPath, { timeoutMs = 5000, requestMic = false } = {}) {
               mic: m.mic,
               installed: m.installed !== false,
               locale: m.locale || '',
-              engine: m.engine || '',
+              engine: m.engine || '', mode: m.mode, available: m.available, onDevice: m.onDevice,
               error: m.error || '',
             });
           }

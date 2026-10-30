@@ -74,7 +74,7 @@ function testPublicURLPolicy() {
   assert.equal(publicURL('https://example.com/path'), 'https://example.com/path');
   for (const url of [
     'http://127.0.0.1/private',
-    'http://192.168.1.2/',
+    'http://chp.example.invalid/',
     'https://10.0.0.8/',
     'http://[::1]/',
     'https://user:pass@example.com/private',

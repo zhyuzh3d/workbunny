@@ -1,5 +1,6 @@
 #!/bin/zsh
-# 首次开发配置：把 A1X TTS 密钥与本机模型写进 dev 配置（不进仓库，只写 userData）
-cd "$(dirname "$0")/.." || exit 1
+set -euo pipefail
+cd "$(dirname "$0")/.."
 mkdir -p .data/dev
-echo "请把密钥写进 .data/dev/config.json（见 README）"
+chmod 700 .data/dev
+echo '开发数据独立保存在 .data/dev。启动后连接 WorkBuddy；语音默认使用系统音色。'

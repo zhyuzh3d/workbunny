@@ -7,6 +7,8 @@ const path = require('path');
 const net = require('net');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+let readiness = () => true, disconnected = () => {};
+function configureConnection({ ready, onDisconnect }) { readiness = ready; disconnected = onDisconnect; }
 
 function openApplication() {
   return new Promise((resolve, reject) => execFile('/usr/bin/open', ['-b', 'com.tencent.workbuddy.mac'], { timeout: 10000 }, error =>
@@ -37,6 +39,7 @@ function proof(ticket, side, endpoint, clientNonce, serverNonce) {
 }
 
 function request(params, { signal, timeoutMs = 55000 } = {}) {
+  if (!readiness() && !(params.method === 'GET' && params.path === '/v2/enterprises/personal/models')) return Promise.reject(new Error('请先连接 WorkBuddy 并登录账号'));
   return new Promise((resolve, reject) => {
     let d;
     try { d = discovery(); } catch (e) { reject(e); return; }
@@ -50,6 +53,7 @@ function request(params, { signal, timeoutMs = 55000 } = {}) {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
       socket.destroy();
+      if (error && /登录|连接不到|连接已断开|身份验证|尚未就绪/.test(error.message)) disconnected();
       error ? reject(error) : resolve(value);
     };
     const abort = () => finish(new Error('aborted'));
@@ -278,4 +282,4 @@ async function chatWithTransport(opts, transport) {
 
 async function chat(opts) { return chatWithTransport(opts, request); }
 
-module.exports = { chat, request, discovery, chatPayload, parseChatBody, openApplication, sanitizeUsage, chatWithTransport };
+module.exports = { configureConnection, chat, request, discovery, chatPayload, parseChatBody, openApplication, sanitizeUsage, chatWithTransport };

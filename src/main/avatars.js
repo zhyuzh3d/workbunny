@@ -17,9 +17,8 @@ const MODELS_DIR = path.join(__dirname, '..', 'renderer', 'assets', 'models');
  *
  * 键是文件名去掉 .vrm 再小写；丢一个新文件进来、没配名字就退回 meta 里的原名。
  *
- * 名字是主人定的，顺序按设置列表里出现的先后（58 → D → E → F → G）。 */
+ * 名字是主人定的，顺序按设置列表里出现的先后（D → E → F → G）。 */
 const NAMES = {
-  '58': '婷婷',
   'avatarsample_d': '可可',
   'avatarsample_e': '阿雅',
   'avatarsample_f': '琪琪',
@@ -33,7 +32,7 @@ const LIGHT = {
   'avatarsample_f': 0.64,
   'avatarsample_g': 0.56,
 };
-const HIDDEN_MESHES = { '58': ['Bag.baked'] };
+const HIDDEN_MESHES = {};
 
 const baseOf = (file) => String(file).replace(/\.vrm$/i, '').toLowerCase();
 
@@ -75,27 +74,35 @@ function readMeta(file) {
 }
 
 function scan(dir = MODELS_DIR) {
+  const library = require('./asset-library');
   let names = [];
   try {
     names = fs.readdirSync(dir).filter((n) => /\.vrm$/i.test(n) && !n.startsWith('.'));
   } catch (e) {
-    return [];
+    names = [];
   }
+  const sources = new Map(names.map(n => [n, path.join(dir, n)]));
+  if (dir === MODELS_DIR && library.directory('model')) {
+    try { for (const name of fs.readdirSync(library.directory('model'))) if (/\.vrm$/i.test(name) && !name.startsWith('.')) { const file = library.personalFile('model', name); if (file) sources.set(name, file); } } catch {}
+  }
+  names = [...sources.keys()];
   // 官方样例排在后面，自己的角色排前面：列表第一项就是默认形象
   const rank = (n) => (/^AvatarSample_/i.test(n) ? 1 : 0);
   names.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
   return names.map((file) => {
-    const m = readMeta(path.join(dir, file));
-    const base = baseOf(file);
+    const source = sources.get(file), m = readMeta(source);
+    const personal = source !== path.join(dir, file);
+    const base = baseOf(file), nickname = Object.hasOwn(NAMES, base) ? NAMES[base] : "";
     return {
       key: file,
       file,
-      label: NAMES[base] || m.title || file.replace(/\.vrm$/i, ''),
+      ...(personal ? { url: library.url(source), personal: true } : {}),
+      label: nickname || (personal ? file.replace(/\.vrm$/i, '') : m.title || file.replace(/\.vrm$/i, '')),
       // 原来的名字留着做 tooltip：主人想知道「这是哪只官方样例」还查得到
-      title: m.title || '',
-      light: LIGHT[base] || 1,
-      hiddenMeshes: HIDDEN_MESHES[base] || [],
-      author: m.author || '',
+      title: nickname || file.replace(/\.vrm$/i, ''),
+      light: Object.hasOwn(LIGHT, base) ? LIGHT[base] : 1,
+      hiddenMeshes: Object.hasOwn(HIDDEN_MESHES, base) ? HIDDEN_MESHES[base] : [],
+      author: nickname ? 'VRoid 项目组（pixiv）' : m.author || '',
       vrmVersion: m.vrmVersion || '',
       redistribute: m.redistribute || false,
     };

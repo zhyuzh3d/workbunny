@@ -2,6 +2,7 @@
 node_modules/
 dist/
 bin/asr
+bin/asr-legacy
 bin/vault
 bin/desktop
 bin/workbunny-keychain.app/

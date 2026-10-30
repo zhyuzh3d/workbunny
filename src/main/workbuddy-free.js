@@ -124,5 +124,5 @@ async function proposeActivity(context, { signal } = {}) {
       { role: 'user', content: JSON.stringify(context) },
     ] })).text);
 }
-module.exports = { proposeActivity, freeModel, parseObject, extractMemories, memoryExtractionOptions, summarizeContext, contextCompressionOptions,
+module.exports = { invalidateCatalog: () => { cached = null; }, proposeActivity, freeModel, parseObject, extractMemories, memoryExtractionOptions, summarizeContext, contextCompressionOptions,
   analyzeRelations, relationAnalysisOptions, excerptFallback, summarizeBlock };

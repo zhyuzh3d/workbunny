@@ -13,7 +13,7 @@ const reply = () => JSON.stringify({ protocol: 'dialogue-v2', stages: [
   { stage: 'review', grade: 'opposite', note: '先听完用户原话。', grasp: 'adjust', pace: 'listen' },
   { stage: 'reply', reply: { kind: 'chat', text: '我听着，你继续说。' } }, { stage: 'prediction', expect: '用户继续倾诉。' },
 ] });
-const ctx = { require: localRequire, AbortController, Date, Set, JSON, randomUUID: require('node:crypto').randomUUID,
+const ctx = { storageBusy: false, storageError: '', connection: { status: () => ({ ready: true }) }, require: localRequire, AbortController, Date, Set, JSON, randomUUID: require('node:crypto').randomUUID,
   inputAdmission: localRequire('./conversation-input'), scopePolicy: localRequire('./memory-scope'),
   config: { load: () => ({ memory: settings }), resolveLLM: () => ({ transport: 'workbuddy', provider: 'synthetic', model: 'test' }), buildSystemPrompt: () => '合成角色与操作规则' },
   memory: m, currentScene: () => settings.scene, contextEpoch: 0, screenLocked: false, activeThought: null, busy: false,

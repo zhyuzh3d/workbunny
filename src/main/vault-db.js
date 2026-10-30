@@ -61,6 +61,11 @@ class VaultDB {
       let response;
       try { response = JSON.parse(line.toString('utf8')); }
       catch { this._fail(new Error('Invalid response from vault process')); this.child?.kill(); return; }
+      if (response.type === 'fatal') {
+        const messages = { database_in_use: '资料库正被另一个 Bunny 进程使用，请先退出该进程', database_moved_snapshot: '此目录是迁移前的快照，请连接当前资料库', database_version_newer: '资料库来自更新版本，请使用更新版本打开' };
+        const error = new Error(messages[response.error] || '资料库无法打开，请检查位置、权限或备份');
+        error.code = response.error; this._fail(error); continue;
+      }
       const pending = this.pending.get(response.id);
       if (!pending) continue;
       this.pending.delete(response.id);
@@ -117,17 +122,17 @@ class VaultDB {
     });
   }
 
-  close() {
+  close({ strict = false } = {}) {
     if (this._closePromise) return this._closePromise;
     this.closed = true;
     this._closePromise = (async () => {
       if (!this.child) return;
       this._fail(new Error('VaultDB closed'));
       const child = this.child;
-      await new Promise((resolve) => {
+      await new Promise((resolve, reject) => {
         if (child.exitCode !== null || child.signalCode !== null) return resolve();
-        const timer = setTimeout(() => { child.kill(); resolve(); }, 2000);
-        child.once('close', () => { clearTimeout(timer); resolve(); });
+        const timer = setTimeout(() => { child.kill(); strict ? reject(new Error('资料库未能安全关闭')) : resolve(); }, 5000);
+        child.once('close', code => { clearTimeout(timer); if (strict && code !== 0) reject(new Error('资料库退出异常')); else resolve(); });
         child.stdin.end();
       });
     })();

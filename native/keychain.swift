@@ -45,10 +45,11 @@ func helperIdentity() -> HelperIdentity? {
     let expectedSuffix = ["Contents", "Resources", "bin", "workbunny-keychain.app", "Contents", "MacOS", helperExecutableName]
     guard components.count > expectedSuffix.count,
           Array(components.suffix(expectedSuffix.count)) == expectedSuffix,
-          let outerIndex = components.lastIndex(of: "workbunny.app"),
+          let outerIndex = components.dropLast(expectedSuffix.count).indices.last,
           outerIndex + 1 + expectedSuffix.count == components.count,
           Array(components[(outerIndex + 1)...]) == expectedSuffix else { return nil }
     let outerApp = NSString.path(withComponents: Array(components[...outerIndex]))
+    guard let outer = Bundle(path: outerApp), outer.bundleIdentifier == "cn.haminn.workbunny" else { return nil }
     var helperURL = URL(fileURLWithPath: executable)
     for _ in 0..<3 { helperURL.deleteLastPathComponent() }
     let helperBundle = helperURL.path

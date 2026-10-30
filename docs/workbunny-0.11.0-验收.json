@@ -362,11 +362,11 @@
   },
   "install": {
     "version": "0.11.0",
-    "installed": "/Users/zhyuzh/Applications/workbunny.app",
+    "installed": "~/Applications/workbunny.app",
     "sourceFilesMatched": 170,
     "strictSignature": true,
     "keychainIdentityUnchanged": true,
-    "backup": "/Users/zhyuzh/Library/Caches/workbunny-release-backup/20261029-005414-0.11.0",
+    "backup": "~/Library/Caches/workbunny-release-backup/20261029-005414-0.11.0",
     "recordCounts": {
       "memory": 26,
       "message": 177,

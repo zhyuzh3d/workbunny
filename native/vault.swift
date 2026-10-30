@@ -117,14 +117,29 @@ if CommandLine.arguments.dropFirst().first == "--verify-key-parent" {
     exit(0)
 }
 
+if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--inspect-copy" {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(URL(fileURLWithPath: CommandLine.arguments[2]).absoluteString + "?immutable=1", &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let db else { exit(3) }
+    defer { sqlite3_close(db) }
+    func scalar(_ sql: String) -> String? {
+        var stmt: OpaquePointer?; guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return nil }; defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW, let p = sqlite3_column_text(stmt, 0) else { return nil }; return String(cString: p)
+    }
+    guard scalar("PRAGMA quick_check") == "ok", let count = scalar("SELECT COUNT(*) FROM records"), let version = scalar("PRAGMA user_version") else { exit(4) }
+    send(["count": Int(count) ?? 0, "version": Int(version) ?? 0, "integrity": "ok"]); exit(0)
+}
 final class DB {
     var db: OpaquePointer?
     var restoring = false
+    var lockFD: Int32 = -1
     init(path: String) throws {
         let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard !FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent(".migration-snapshot.json").path) else { throw fail("database_moved_snapshot") }
         let dir = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        lockFD = open(dir.appendingPathComponent(".vault-lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+        guard lockFD >= 0, flock(lockFD, LOCK_EX | LOCK_NB) == 0 else { if lockFD >= 0 { close(lockFD); lockFD = -1 }; throw fail("database_in_use") }
         let rc = sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil)
         guard rc == SQLITE_OK, let db else { throw fail("database_open_failed") }
         _ = sqlite3_busy_timeout(db, 5000)
@@ -201,7 +216,7 @@ final class DB {
             try exec("CREATE INDEX IF NOT EXISTS records_kind_state_ts_id_idx ON records(kind,state,ts DESC,id DESC); CREATE INDEX IF NOT EXISTS records_state_ts_id_idx ON records(state,ts DESC,id DESC); CREATE INDEX IF NOT EXISTS records_ts_id_idx ON records(ts DESC,id DESC); CREATE INDEX IF NOT EXISTS records_floor_kind_state_ts_id_idx ON records(visibilityFloor,kind,state,ts DESC,id DESC); CREATE INDEX IF NOT EXISTS records_domain_floor_ts_id_idx ON records(domain,visibilityFloor,ts,id); CREATE INDEX IF NOT EXISTS tokens_token_idx ON tokens(token); CREATE INDEX IF NOT EXISTS links_derived_idx ON links(derivedId);")
         }
     }
-    deinit { if let db { sqlite3_close_v2(db) } }
+    deinit { if let db { sqlite3_close_v2(db) }; if lockFD >= 0 { flock(lockFD, LOCK_UN); close(lockFD) } }
     func exec(_ sql: String) throws {
         var error: UnsafeMutablePointer<Int8>?
         let rc = sqlite3_exec(db, sql, nil, nil, &error)
@@ -391,6 +406,10 @@ final class DB {
     }
     func request(_ op: String, _ p: [String: Any]) throws -> [String: Any] {
         switch op {
+        case "checkpoint":
+            var log: Int32 = 0, frames: Int32 = 0
+            guard sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_TRUNCATE, &log, &frames) == SQLITE_OK else { throw fail("checkpoint_busy") }
+            return ["checkpointed": true]
         case "begin_restore":
             guard !restoring, try scalarInt("SELECT COUNT(*) FROM records") == 0 else { throw fail("restore_requires_empty_database") }
             restoring = true
@@ -667,7 +686,9 @@ final class DB {
 
 guard CommandLine.arguments.count == 2 else { exit(2) }
 let store: DB
-do { store = try DB(path: CommandLine.arguments[1]) } catch { exit(3) }
+do { store = try DB(path: CommandLine.arguments[1]) }
+catch let e as VaultError { send(["type":"fatal", "error":e.code]); exit(3) }
+catch { send(["type":"fatal", "error":"database_open_failed"]); exit(3) }
 var input = Data()
 
 // Drain Foundation autoreleased JSON/bridge objects after each complete

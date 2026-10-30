@@ -7,11 +7,11 @@ export function createPCMPlayer({ context, destination, onStart = () => {}, onDo
     stream = null;
   }
   function begin(id) { stop(); stream = { id, queue: [], samples: 0, sources: new Set(), started: false, ended: false, nextTime: 0 }; }
-  function finish(s) { if (stream === s && s.ended && !s.sources.size && !s.queue.length) { stream = null; onDone(); } }
+  function finish(s) { if (stream === s && s.ended && !s.sources.size && !s.queue.length) { stream = null; onDone(s.id); } }
   function flush(s) {
     if (!s.started) {
       if (!s.ended && s.samples / 24000 < prebufferSeconds) return;
-      s.started = true; s.nextTime = context.currentTime + .04; onStart();
+      s.started = true; s.nextTime = context.currentTime + .04; onStart(s.id);
     }
     for (const samples of s.queue.splice(0)) {
       if (s.nextTime < context.currentTime + .005) { onUnderrun(); s.nextTime = context.currentTime + .04; }

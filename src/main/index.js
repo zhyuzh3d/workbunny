@@ -3,7 +3,7 @@
  * workbunny 主进程
  * ─ 透明置顶浮窗（可穿透、可拖拽、跨桌面空间）
  * ─ 大脑：OpenAI 兼容流式 LLM（默认复用 WorkBuddy 自己的模型额度）
- * ─ 嗓子：A1X 掌机 Qwen3-TTS
+ * ─ 嗓子：系统语音、本地 Qwen 或用户配置的标准接口
  * ─ 耳朵：原生 SFSpeechRecognizer 子进程
  * ─ 眼睛：直接 tail WorkBuddy 会话日志
  */
@@ -14,13 +14,6 @@ const {
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-
-// 最早的一行探针：写到 /tmp，用来看「进程到底有没有跑到 JS」
-try {
-  fs.appendFileSync('/tmp/buddy-boot.log',
-    `${new Date().toISOString()} pid=${process.pid} argv=${JSON.stringify(process.argv.slice(1))}
-`);
-} catch {}
 
 const config = require('./config');
 const llm = require('./llm');
@@ -57,7 +50,8 @@ const { Interactions, InteractionAudio } = require('./interaction');
 const { SessionGate } = require('./session-gate');
 
 /* ── 数据目录（开发时可被 BUDDY_PET_HOME 指到工作区） ── */
-app.setName('workbunny');
+app.setName(app.isPackaged ? 'workbunny' : 'workbunny-dev');
+if (!app.isPackaged && !process.env.BUDDY_PET_HOME) app.setPath('userData', path.join(__dirname, '../../.data/dev'));
 if (process.env.BUDDY_PET_NO_SANDBOX === '1') {
   // 某些沙箱环境里 Chromium 自己的 sandbox 起不来，开了才能渲染
   app.commandLine.appendSwitch('no-sandbox');
@@ -73,9 +67,20 @@ config.setPath(path.join(USER_DIR, 'config.json'));
 
 const IS_DEV = !app.isPackaged;
 const BOOT_AT = Date.now();          // 启动时刻：此前的历史事件不触发主动说话
-const ASR_BIN = app.isPackaged
+const runtimeCaps = require('./runtime-capabilities').capabilities();
+let asrMode = runtimeCaps.asrMode;
+let ASR_BIN = app.isPackaged
   ? path.join(process.resourcesPath, 'bin', 'asr')
   : path.join(__dirname, '..', '..', 'bin', 'asr');
+
+const LEGACY_ASR_BIN = app.isPackaged ? path.join(process.resourcesPath, 'bin/asr-legacy') : path.join(__dirname, '../../bin/asr-legacy');
+if (asrMode !== 'continuous') ASR_BIN = LEGACY_ASR_BIN;
+const vaultBinary = app.isPackaged ? path.join(process.resourcesPath, 'bin/vault') : path.join(__dirname, '../../bin/vault');
+const storage = new (require('./data-location').DataLocation)(USER_DIR, vaultBinary);
+let storageBusy = false, storageError = '';
+let vaultDir; try { vaultDir = storage.resolve(); } catch (e) { vaultDir = path.join(USER_DIR, 'vault'); storageError = e.message; }
+const connection = new (require('./workbuddy-connection').WorkBuddyConnection)({ getModel: () => config.load().brain.model, saveModel: model => config.save({ brain: { model } }),
+  tasks: () => require('./workbuddy-connection').taskStatus(config.load().monitor.root) });
 
 let win = null;
 let tray = null;
@@ -571,7 +576,10 @@ function echoLike(text) {
   return n > 0 && hit / n > 0.72;
 }
 
+let activeAudioId = null, playbackTest = null;
 function stopSpeaking() {
+  if (playbackTest) { playbackTest.resolve(false); playbackTest = null; }
+  activeAudioId = null;
   if (activeSpeechReplyId) presentedReplies.delete(activeSpeechReplyId);
   for (const item of speechQueue) if (item.messageId) presentedReplies.delete(item.messageId);
   activeSpeechReplyId = null;
@@ -591,7 +599,7 @@ function stopSpeaking() {
  * 踩过的坑：自己说一句话之后，开麦那一步只要有一条路径没走到，麦克风就永久
  * 闭着 —— 表现是"电平日志不走了、主人怎么说话都没反应"，而且没有任何报错。
  * 所以这里强制加一道死线：闭麦超过 MUTE_MAX_MS 一律自动打开。 */
-const MUTE_MAX_MS = 20000;
+const MUTE_MAX_MS = 120000;
 let muteWatchdog = null;
 let mutedSince = 0;
 
@@ -602,7 +610,7 @@ function muteAsr(reason) {
   if (muteWatchdog) clearTimeout(muteWatchdog);
   muteWatchdog = setTimeout(() => {
     log('[asr] 闭麦超时（' + Math.round(MUTE_MAX_MS / 1000) + 's），强制开麦 —— 上次是：' + (reason || ''));
-    unmuteAsr('watchdog');
+    if (speaking) stopSpeaking(); else unmuteAsr('watchdog');
   }, MUTE_MAX_MS);
 }
 
@@ -646,7 +654,7 @@ const ttsSession = createTTSSession({
   },
 });
 function syncQwenRuntime(c = config.load()) {
-  if (c.tts.enabled && c.tts.engine === 'qwen') {
+  if (c.tts.enabled && c.tts.engine === 'qwen' && runtimeCaps.qwen.available) {
     const q = { ...c.tts.qwen, dir: c.tts.qwen.dir || MODELS_DIR };
     const alreadyReady = tts.runtimeStatus().ready;
     tts.prewarm(q).then(() => {
@@ -660,7 +668,7 @@ function ttsChanged(c = config.load()) {
 }
 
 let fallbackLogged = '';
-const cfgEngineName = (t) => (t && t.engine === 'qwen' ? '本地大模型' : (t && t.engine === 'remote' ? '局域网 CHP' : '系统语音'));
+const cfgEngineName = (t) => (t?.engine === 'http' ? '自定义 HTTP' : t && t.engine === 'qwen' ? '本地大模型' : (t && t.engine === 'remote' ? 'CHP' : '系统语音'));
 
 function synthBuffer(text, emo, options, c = config.load()) {
   const key = JSON.stringify([emo || '', text, c.tts]);
@@ -687,9 +695,11 @@ function synthBuffer(text, emo, options, c = config.load()) {
 let streamSequence = 0;
 function streamingPlayback(c, gen, text) {
   const id = `${gen}:${++streamSequence}`;
+  activeAudioId = id;
   let started = false, stopped = false;
   const enabled = c.tts.engine === 'qwen' && c.tts.qwen?.streaming;
   return {
+    id,
     options: !enabled ? undefined : {
       onChunk: (pcm) => {
         if (gen !== speechGen || stopped) return;
@@ -741,7 +751,7 @@ async function pumpSpeech() {
         log('[tts] 合成超时，放弃这句');
         finishSpeech(false);
       }
-    }, c.tts.engine === 'qwen' ? 145000 : c.tts.engine === 'remote' ? 90000 : 30000);
+    }, c.tts.engine === 'qwen' ? 145000 : ['remote', 'http'].includes(c.tts.engine) ? 95000 : 30000);
     try {
       const playback = streamingPlayback(c, gen, item.text);
       const bufP = item.interaction
@@ -754,7 +764,7 @@ async function pumpSpeech() {
       if (!playback.finish(result)) {
         noteSpoken(item.text);
         if (asr && !asr.aec) muteAsr('开始播放');
-        send('audio', { buffer, text: item.text });
+        send('audio', { id: playback.id, buffer, text: item.text });
       }
       // 看门狗：万一渲染层没回 audio-done（窗口崩了/解码失败），别让队列永远卡住
       if (speakWatchdog) clearTimeout(speakWatchdog);
@@ -787,6 +797,8 @@ async function pumpSpeech() {
 }
 
 function finishSpeech(confirmed = true) {
+  if (playbackTest) { playbackTest.resolve(confirmed); playbackTest = null; }
+  activeAudioId = null;
   if (!confirmed && activeSpeechReplyId) presentedReplies.delete(activeSpeechReplyId);
   activeSpeechReplyId = null;
   speaking = false;
@@ -849,6 +861,7 @@ const JUDGE_RULE = replyPolicy.RULE;
 const HISTORY_TURNS = 6;   // 只带最近 3 轮对话，够接话又不撑爆上下文
 
 async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn, userMessage }) {
+  if (storageBusy || storageError || !connection.status().ready) { voiceTurn?.skip(); send('toast', { text: storageError || connection.status().note }); return null; }
   if (!internal && inputAdmission.containsSecret(userText)) { voiceTurn?.skip(); send('toast', { text: inputAdmission.NOTICE }); return null; }
   const c = config.load(), scene = currentScene();
   let requestEpoch = contextEpoch;
@@ -1089,6 +1102,7 @@ async function scopedWork(input) {
   return scopedMonitorContext(view, { scene, taskScopes, bootAt: BOOT_AT, ready: epoch === contextEpoch });
 }
 function startMonitor() {
+  if (!connection.status().ready || storageBusy) return;
   const c = config.load();
   if (monitor) monitor.stop();
   monitor = new Monitor();
@@ -1338,7 +1352,7 @@ function toggleRecord() {
     stopSpeaking();
     const c = config.load();
     log('[asr] start requested, bin=' + ASR_BIN + ' exists=' + fs.existsSync(ASR_BIN));
-    asr.start({ lang: c.asr.lang, silenceMs: c.asr.silenceMs, maxSeconds: c.asr.maxSeconds });
+    asr.start({ lang: c.asr.lang, silenceMs: c.asr.silenceMs, maxSeconds: c.asr.maxSeconds, askSpeech: asrMode === 'single', allowNetwork: c.asr.allowNetwork === true });
     send('record', { state: 'starting' });
   }
 }
@@ -1370,12 +1384,13 @@ function asrOpts(always) {
     maxUtterances: c.asr.recycleUtterances || 30,
     device: c.asr.device || '',
     // 授权只由应用自己问一次，子进程绝不再问 —— 否则 TCC 会被两个身份来回问
-    noMicAsk: true,
+    noMicAsk: true, allowNetwork: config.load().asr.allowNetwork === true,
   };
 }
 
 function startListen(reason) {
-  if (!asr) return;
+  if (!asr || storageBusy || asrMode !== 'continuous') return;
+  if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') return;
   const c = config.load();
   if (screenLocked || (c.memory.enabled && !memory?.ready)) return;
   if (!c.voice.alwaysListen) return;
@@ -1501,6 +1516,7 @@ async function requestAsrPermission() {
 
 /* ── IPC ── */
 function trustedCompanion(event, kind) {
+  if (storageBusy) throw new Error('数据库正在迁移，请等待重启');
   const allowed = kind ? panels.get(kind) : null;
   if (kind && allowed?.webContents === event.sender) return;
   if (!kind && (win?.webContents === event.sender || [...panels.values()].some(p => !p.isDestroyed() && p.webContents === event.sender))) return;
@@ -1703,7 +1719,7 @@ ipcMain.handle('pet:init', async () => {
     currentRecall,
     asrAvailable: hasAsr,
     versions: { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome },
-    paths: { userData: USER_DIR },
+    paths: { userData: USER_DIR, vault: vaultDir }, capabilities: runtimeCaps, connection: connection.status(),
   };
 });
 
@@ -1720,6 +1736,14 @@ ipcMain.handle('pet:scale', (_e, { scale } = {}) => {
 
 /* 重扫形象目录：主人往 assets/models/ 丢一个 .vrm，打开设置就能看见，不用重启 */
 ipcMain.handle('pet:avatars', () => avatars.scan());
+ipcMain.handle('pet:avatar-import', async e => {
+  trustedCompanion(e);
+  const choice = await dialog.showOpenDialog(panels.get('settings') || win, { title: '导入你有权使用的个人模型（仅保存在本机）', properties: ['openFile'], filters: [{ name: 'VRM', extensions: ['vrm'] }] });
+  if (choice.canceled) return { cancelled: true };
+  const key = require('./asset-library').importModel(choice.filePaths[0]);
+  const list = avatars.scan(); send('avatars', { avatars: list });
+  return { key, avatars: list };
+});
 
 ipcMain.on('pet:stop-speak', () => {
   // 点她一下 = 打断。没有回声消除时，主人"开口"她听不见（说着话是闭麦的），
@@ -1734,6 +1758,8 @@ ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
   const t = String(text || '').trim();
   if (inputAdmission.containsSecret(t)) return { ok: false, error: inputAdmission.NOTICE };
   if (!t) return { ok: false };
+  if (storageBusy || storageError) return { ok: false, error: storageError || '数据库正在迁移' };
+  if (!connection.status().ready) return { ok: false, error: connection.status().note };
   if (screenLocked || (config.load().memory.enabled && !memory?.ready)) return { ok: false, error: '记忆尚未解锁，请在“记忆与关系”中解锁后继续。' };
   try { require('./message-identity').validateText(t); } catch (e) { return { ok: false, error: e.message }; }
   voiceTurns.reset();
@@ -1838,13 +1864,18 @@ ipcMain.handle('pet:probe', async () => {
 
 ipcMain.on('pet:hit', (_e, v) => setInteractive(!!v));
 ipcMain.on('pet:log', (_e, m) => log('[ui] ' + String(m).slice(0, 2400)));
-ipcMain.on('pet:audio-done', (_e, success = true) => finishSpeech(success === true));
+ipcMain.on('pet:audio-done', (e, value) => {
+  if (e.sender !== win?.webContents || !value || value.id !== activeAudioId || !speaking) return;
+  finishSpeech(value.success === true);
+});
 ipcMain.on('pet:audio-started', () => {
   if (turnT0 && speaking) { log(`[turn] 停顿→开始播放 ${Date.now() - turnT0}ms`); turnT0 = 0; }
 });
-ipcMain.on('pet:record', () => toggleRecord());
+ipcMain.on('pet:record', async () => { if (storageBusy) return; if (!asr?.running && systemPreferences.getMediaAccessStatus('microphone') !== 'granted') await systemPreferences.askForMediaAccess('microphone'); toggleRecord(); });
 ipcMain.on('pet:listen', (_e, v) => {
   const want = v === 'toggle' ? !alwaysOn : !!v;
+  if (want && asrMode !== 'continuous') { send('toast', { text: '当前使用按次识别，请点麦克风说话，每次最多45秒' }); return; }
+  if (want && systemPreferences.getMediaAccessStatus('microphone') !== 'granted') { void requestAsrPermission().then(() => startListen('permission')); return; }
   if (want) { config.save({ voice: { alwaysListen: true } }); startListen('user'); }
   else { stopListen(); config.save({ voice: { alwaysListen: false } }); }
   send('listen', { on: alwaysOn });
@@ -1869,6 +1900,7 @@ ipcMain.on('pet:open', (_e, what) => {
   else if (what === 'motions') openPanel('motions');
   else if (what === 'memory' || what === 'desktop') openPanel(what);
   else if (what === 'workbuddy') require('./workbuddy').openApplication().catch(e => log('[workbuddy] ' + e.message));
+  else if (what === 'workbuddy-download') shell.openExternal('https://cloud.tencent.com/act/pro/workbuddy');
   else if (what === 'userData') shell.openPath(USER_DIR);
 });
 
@@ -1883,7 +1915,7 @@ ipcMain.handle('pet:panel-init', async () => {
     motions: config.MOTIONS,
     motionGroups: config.MOTION_GROUPS,
     avatar: avatars.resolve(c.avatar, list),
-    asr: asrStatus,
+    asr: { ...asrStatus, mode: asrMode }, capabilities: runtimeCaps, connection: connection.status(), storage: storage.status(),
   };
 });
 
@@ -1897,8 +1929,53 @@ ipcMain.on('pet:panel-motion', (_e, key) => {
 /* ═══════════ 大脑 / 嘴巴：给设置面板的补充接口 ═══════════ */
 const MODELS_DIR = path.join(USER_DIR, 'models', 'qwen-customvoice');
 
+ipcMain.handle('pet:portability', e => { trustedCompanion(e); return { connection: connection.status(), capabilities: runtimeCaps, asrMode, storage: storage.status() }; });
+ipcMain.handle('pet:workbuddy-connect', async e => { trustedCompanion(e); return connection.connect({ launch: true }); });
+ipcMain.handle('pet:tts-http-template', (e, kind) => { trustedCompanion(e); return require('./tts-http-profile').template(kind === 'binary' ? 'binary' : 'jsonl'); });
+ipcMain.handle('pet:tts-http-catalog', async (e, kind) => {
+  trustedCompanion(e);
+  try { return { ok: true, ...await require('./tts-http').catalog(config.load().tts, kind === 'models' ? 'models' : 'voices') }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+ipcMain.handle('pet:storage-migrate', async e => {
+  trustedCompanion(e);
+  if (screenLocked || !memory?.ready || storageBusy) return { ok: false, error: '请先解锁资料库并等待当前迁移完成' };
+  const choice = await dialog.showOpenDialog(panels.get('settings') || win, { title: '选择数据库的目的父目录（将在其中建立 vault）', properties: ['openDirectory', 'createDirectory'] });
+  if (choice.canceled) return { ok: false, cancelled: true };
+  let closed = false;
+  try {
+    const result = await storage.migrate(choice.filePaths[0], { quiesce: async () => {
+      storageBusy = true; contextEpoch++; activeThought?.abort(); voiceTurns.reset(); stopListen(); stopSpeaking();
+      autonomy?.pause(); maintenance?.cancel(); monitor?.stop(); delegationMonitor?.stop(); watches?.invalidate();
+      await desktop?.stop('迁移资料库，代办已暂停且不会重发');
+      await watchDesktop?.stop('迁移资料库');
+      await memory.tail; await memory.db.request('checkpoint');
+      await memory.close({ strict: true }); closed = true;
+    } });
+    setTimeout(() => { app.relaunch(); app.quit(); }, 400); return { ...result, restarting: true };
+  } catch (err) {
+    storageBusy = false;
+    if (closed || memory?.closed || !memory?.ready) setTimeout(() => { app.relaunch(); app.quit(); }, 800);
+    return { ok: false, error: err.message };
+  }
+});
+ipcMain.handle('pet:storage-reconnect', async e => {
+  trustedCompanion(e);
+  if (screenLocked || storageBusy || memory?.ready) return { ok: false, error: '此操作仅用于原磁盘不可用时恢复连接；正常更换路径请使用迁移' };
+  const choice = await dialog.showOpenDialog({ title: '选择已有资料库 vault 文件夹', properties: ['openDirectory'] });
+  if (choice.canceled) return { ok: false, cancelled: true };
+  try {
+    const dir = fs.realpathSync(choice.filePaths[0]);
+    if (path.basename(dir) !== 'vault' || fs.existsSync(path.join(dir, '.migration-snapshot.json'))) throw new Error('请选择当前资料库 vault，不能使用迁移前的快照');
+    require('./data-location').inspect(vaultBinary, path.join(dir, 'companion.db'));
+    if (!fs.existsSync(path.join(dir, 'key-provider.json')) && !fs.existsSync(path.join(dir, 'key-envelope'))) throw new Error('资料库的钥匙文件缺失，请使用加密备份恢复');
+    require('./vault-crypto').atomicPrivate(storage.pointer, JSON.stringify({ format: 'workbunny-location/v1', dir }));
+    storageBusy = true; setTimeout(() => { app.relaunch(); app.quit(); }, 400); return { ok: true, restarting: true };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+
 ipcMain.handle('pet:brain-info', () => ({
-  providers: config.PROVIDERS,
+  providers: [], connection: connection.status(),
   catalogs: Object.fromEntries(['workbuddy', ...config.PROVIDERS.map(p => p.id)].map(id => [id, require('./model-catalog').get(id)])),
   thinkingLevels: config.THINKING_LEVELS,
   workbuddyModels: config.listWorkBuddyModels(),
@@ -1907,7 +1984,7 @@ ipcMain.handle('pet:brain-info', () => ({
 }));
 
 ipcMain.handle('pet:workbuddy-open', async () => {
-  try { await require('./workbuddy').openApplication(); return { ok: true }; }
+  try { const status = await connection.connect({ launch: true }); return { ok: status.ready, ...status, error: status.ready ? '' : status.note }; }
   catch (e) { return { ok: false, error: e.message }; }
 });
 
@@ -1951,11 +2028,11 @@ ipcMain.handle('pet:tts-info', () => {
   return {
     config: config.publicConfig(c),
     engines: config.TTS_ENGINES,
-    systemVoices: tts.systemVoices(),
+    systemVoices: [{ id: '', lang: '', label: '系统默认音色' }, ...tts.systemVoices()],
     chp: require('./chp-tts').cached(c.tts),
     qwen: {
       dir,
-      ready: downloaded && hasRuntime,
+      ready: downloaded && hasRuntime && runtimeCaps.qwen.available, ...runtimeCaps.qwen,
       downloaded,
       hasRuntime,
       files: tts.QWEN_FILES.map((f) => f.name),
@@ -2037,23 +2114,25 @@ ipcMain.handle('pet:tts-test', async () => {
   const gen = speechGen;
   speaking = true;
   send('speaking', { on: true, text: '' });
-  speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(); }, c.tts.engine === 'qwen' ? 145000 : c.tts.engine === 'remote' ? 90000 : 30000);
+  speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(false); }, c.tts.engine === 'qwen' ? 145000 : ['remote', 'http'].includes(c.tts.engine) ? 95000 : 30000);
   try {
     const text = '让我试试这个声音，你觉得顺耳吗？';
     const playback = streamingPlayback(c, gen, text);
-    const r = await ttsSession.synthesize(text, c.tts, playback.options);
+    const r = await tts.synthesize(text, c.tts, { ...playback.options, strict: true });
     if (gen !== speechGen) return { ok: false, error: '试听已停止' };
     clearTimeout(speakWatchdog);
+    const completed = new Promise(resolve => { playbackTest = { id: playback.id, resolve }; });
     if (!playback.finish(r)) {
       noteSpoken(text);
       if (asr && !asr.aec) muteAsr('开始试听');
-      send('audio', { buffer: r.buffer, text: '' });
+      send('audio', { id: playback.id, buffer: r.buffer, text: '' });
     }
-    speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(); }, Math.max(1500, ((r.buffer.length - 44) / 48000) * 1000) + 2500);
-    return { ok: true, engine: r.engine, voice: r.voice, ms: r.ms, bytes: r.buffer.length,
+    speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(false); }, Math.max(1500, ((r.buffer.length - 44) / 48000) * 1000) + 2500);
+    if (!await completed) return { ok: false, error: '试听未完成或已停止，请检查音频输出' };
+    return { ok: true, played: true, engine: r.engine, voice: r.voice, ms: r.ms, bytes: r.buffer.length,
       degraded: r.degraded, reason: r.reason };
   } catch (e) {
-    if (gen === speechGen) finishSpeech();
+    if (gen === speechGen) finishSpeech(false);
     return { ok: false, error: e.message };
   }
 });
@@ -2203,6 +2282,28 @@ function runMicProbeAll(sec) {
 }
 
 /* ── 启动 ── */
+require('./workbuddy').configureConnection({ ready: () => {
+  if (storageBusy || !connection.status().ready) return false;
+  try { if (connection.identity() !== connection.identityValue) { connection.invalidate('WorkBuddy 登录状态已变化，请重新连接'); return false; } }
+  catch { connection.invalidate(); return false; }
+  return true;
+},
+  onDisconnect: () => connection.invalidate() });
+let connectionWasReady = false;
+connection.on('change', status => {
+  send('workbuddy-connection', status);
+  for (const p of panels.values()) if (!p.isDestroyed()) p.webContents.send('pet:ev', { type: 'workbuddy-connection', ...status });
+  if (connectionWasReady && !status.ready) {
+    require('./workbuddy-free').invalidateCatalog();
+    try { require('./model-catalog').invalidate('workbuddy'); } catch { log('[workbuddy] 旧目录缓存清理失败，连接保持暂停'); }
+    contextEpoch++; activeThought?.abort(); memory?.cancelExtraction(); maintenance?.cancel(); autonomy?.pause();
+    monitor?.stop(); delegationMonitor?.stop(); monitorScoped = scopedMonitorContext(null, { scene: currentScene() });
+    void desktop?.stop('WorkBuddy 连接变化，已暂停，未重发任务').catch(() => {});
+    watches?.invalidate(); send('monitor', snapshotForUi(monitorScoped.view));
+  }
+  if (!connectionWasReady && status.ready && win) startMonitor();
+  connectionWasReady = status.ready;
+});
 const lock = app.requestSingleInstanceLock();
 if (!lock) {
   log('[boot] single-instance lock 未拿到，退出（已有实例在跑）');
@@ -2211,12 +2312,13 @@ if (!lock) {
   app.on('second-instance', () => showWindow());
 
   app.whenReady().then(async () => {
-    memory = new MemoryService({ dir: path.join(USER_DIR, 'vault'),
+    connection.start();
+    memory = new MemoryService({ dir: vaultDir,
       bin: app.isPackaged ? path.join(process.resourcesPath, 'bin', 'vault') : path.join(__dirname, '../../bin/vault'), safeStorage,
       openKey: IS_DEV ? undefined : () => {
         const controller = new AbortController(); vaultKeyAbort = controller;
         memory.error = '正在解锁本地钥匙；首次迁移时请留意 macOS 授权';
-        const dir = path.join(USER_DIR, 'vault');
+        const dir = vaultDir;
         // Ordinary app updates preserve this helper's signed bytes and Keychain identity.
         return require('./keychain-key-provider').openKey({ dir,
           binary: path.join(process.resourcesPath, 'bin/workbunny-keychain.app/Contents/MacOS/workbunny-keychain'),
@@ -2250,7 +2352,7 @@ if (!lock) {
       }
       return observeWorkBuddy(source, task);
     }, persist: createTaskJournal(memory) });
-    const readyForTasks = () => !quitting && !screenLocked && !!memory?.ready;
+    const readyForTasks = () => !quitting && !storageBusy && connection.status().ready && connection.status().tasks?.status !== 'unavailable' && !screenLocked && !!memory?.ready;
     contacts = new ContactDirectory({ read: ({ scene }) => memory.serial(async () => {
       const entries = [], legacyEntries = []; let cursor = {};
       for (;;) {
@@ -2365,6 +2467,7 @@ if (!lock) {
     };
     let vaultOpening = null;
     unlockMemory = () => {
+      if (storageError || storageBusy) { memory.error = storageError || '数据库正在迁移'; return Promise.resolve(); }
       if (memory.ready) return Promise.resolve();
       if (vaultOpening) return vaultOpening;
       memory.waitingForUnlock = false;
@@ -2427,22 +2530,11 @@ if (!lock) {
     // 打包变化的身份上 —— 表现就是每次启动都重新弹框。
     // 应用自己 askForMediaAccess 一次，授权就牢牢记在 cn.haminn.workbunny 上；
     // 再配合固定证书签名（tools/make-signing-cert.sh），重打包多少次都不会再问。
-    (async () => {
-      try {
-        const before = systemPreferences.getMediaAccessStatus('microphone');
-        log('[mic] 系统授权状态=' + before);
-        if (before !== 'granted') {
-          const ok = await systemPreferences.askForMediaAccess('microphone');
-          log('[mic] 申请结果=' + ok + '，之后状态=' + systemPreferences.getMediaAccessStatus('microphone'));
-        }
-      } catch (e) {
-        log('[mic] 申请授权出错：' + e.message);
-      }
-    })();
-
+    if (storageError) memory.error = storageError;
     asr = new Asr(ASR_BIN, log);
     const SPEECH_ZH = ['待授权', '缺语言包', '不可用', '可用'];
     function applyStatus(st) {
+      st = { ...st, mode: asrMode };
       asrStatus = { ...asrStatus, ...st, checkedAt: Date.now() };
       if (screenLocked) asrStatus = { ...asrStatus, captureReady: false, note: 'locked' };
       else if (config.load().memory.enabled && !memory.ready) asrStatus = { ...asrStatus, captureReady: false, note: 'memory-locked' };
@@ -2460,7 +2552,8 @@ if (!lock) {
       }
       let mic = null;
       try { mic = systemPreferences.getMediaAccessStatus('microphone'); } catch {}
-      const r = await probeAccess(ASR_BIN, { timeoutMs, requestMic });
+      const r = await probeAccess(ASR_BIN, { timeoutMs, requestMic, lang: config.load().asr.lang });
+      if (asrMode === 'continuous' && (r.speech === -1 || r.error?.includes('不支持所选')) && fs.existsSync(LEGACY_ASR_BIN)) { asrMode = 'single'; ASR_BIN = LEGACY_ASR_BIN; asr.bin = ASR_BIN; return refreshAsrStatus({ timeoutMs, requestMic }); }
       if (r.timedOut) {
         return applyStatus({ speech: 0, mic, note: 'pending', micSystem: mic });
       }
@@ -2474,7 +2567,7 @@ if (!lock) {
         locale: r.locale || '',
         engine: r.engine || '',
         note: ok ? 'ok' : (r.mic ? (SPEECH_ZH[r.speech] || '未知') : '待授权'),
-        error: r.error || '',
+        error: r.error || '', available: r.available, onDevice: r.onDevice,
       });
     }
     global.__refreshAsrStatus = refreshAsrStatus;
@@ -2593,7 +2686,7 @@ if (!lock) {
       }
     });
 
-    startMonitor();
+    if (connection.status().ready) startMonitor();
 
     /* ── 心跳自愈：每 20 秒检查自己有没有坏掉 ─────────────────────────
      * 桌宠没人看着。坏了就自己修，别等主人发现"它又不理我了"。
@@ -2621,7 +2714,7 @@ if (!lock) {
           return;
         }
         // 4) 闭麦卡住：说了半分钟还没开麦 → 强制开
-        if (mutedSince && now - mutedSince > 30000) unmuteAsr('心跳超时');
+        if (mutedSince && !speaking && now - mutedSince > 30000) unmuteAsr('心跳超时');
 
         // 5) 看门狗自己掉队了 → 补一个。它和我们是互相兜底的关系：
         //    它看着我崩了就拉我，我看着它没了就重布防。
@@ -2636,17 +2729,9 @@ if (!lock) {
      * launchd 用不了（bootstrap 报 EIO），所以自己带一个脱离进程组的影子。
      * 它靠"父进程活着吗"来判断，主进程被 -9 / 段错误都拦不住它。 */
     startWatchdog();
+    setTimeout(() => { if (!connection.status().ready || storageError) openPanel('settings'); }, 1800);
 
     setTimeout(() => {
-      // 一次性麦克风体检：把每个能收音的设备各开几秒，看谁的峰值高
-      const c0 = config.load();
-      if (c0.asr && c0.asr.probeAll) {
-        config.save({ asr: { probeAll: false } });
-        runMicProbeAll(Number(c0.asr.probeSec) || 3).then(() => {
-          refreshAsrStatus({ timeoutMs: 4000 }).then((st) => { if (st && st.speech === 3) startListen('after-probe'); });
-        });
-        return;
-      }
       refreshAsrStatus({ timeoutMs: 4000 })
         .then((st) => {
           if (st && st.speech === 3) startListen('boot');
@@ -2656,7 +2741,8 @@ if (!lock) {
 
     try {
       globalShortcut.register('CommandOrControl+Shift+Space', () => {
-        if (alwaysOn) stopListen();
+        if (asrMode === 'single') { void requestAsrPermission().then(() => toggleRecord()); } else if (alwaysOn) stopListen();
+        else if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') void requestAsrPermission().then(() => startListen('hotkey'));
         else startListen('hotkey');
       });
       globalShortcut.register('CommandOrControl+Shift+B', () => (win && win.isVisible() ? hideWindow() : showWindow()));
@@ -2670,6 +2756,7 @@ if (!lock) {
 
 let shutdownStarted = false, shutdownFlushed = false;
 app.on('before-quit', event => {
+  connection.close();
   clearInterval(maintenanceTimer);
   quitting = true;
   autonomy?.pause(); secretary?.close(); clearTimeout(taskReportTimer); delegationMonitor?.stop();

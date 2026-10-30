@@ -12,7 +12,9 @@ app.setPath('userData', path.join(root, 'electron')); config.setPath(path.join(r
 let win, server, context, now = 100000, syntheses = 0, cacheHits = 0, started = 0, finished = 0;
 const events = [], errors = [];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function evaluate(script) { return win.webContents.executeJavaScript(script, true); }
+async function evaluate(script) {
+  let timer; try { return await Promise.race([win.webContents.executeJavaScript(script, true), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Renderer request timed out: ' + script.slice(0, 120))), 6000); })]); } finally { clearTimeout(timer); }
+}
 async function until(check, label) {
   for (let i = 0; i < 200; i++) { if (await check()) return; if (errors.length) throw new Error(errors.join('; ')); await delay(25); }
   throw new Error(`Timeout: ${label}; bubbles=${events.filter(e => e.type === 'say').length}, started=${started}, finished=${finished}`);
@@ -68,10 +70,10 @@ async function main() {
         abilities: [{ name: 'fixture-tts', ready: true, files: { engine: 'fixture.gguf' }, voices: [{ id: 'test-voice' }], audio: { sample_rate: 24000, channels: 1, formats: ['wav'] } }] } }));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  config.save({ avatar: '58.vrm', tts: { enabled: true, engine: 'remote', baseURL: `http://127.0.0.1:${server.address().port}`, chp: { voice: 'test-voice' } }, voice: { enabled: true, alwaysListen: false }, memory: { enabled: false } });
+  config.save({ avatar: 'AvatarSample_D.vrm', tts: { enabled: true, engine: 'remote', baseURL: `http://127.0.0.1:${server.address().port}`, chp: { voice: 'test-voice' } }, voice: { enabled: true, alwaysListen: false }, memory: { enabled: false } });
   const idle = config.MOTIONS.find(m => m.key === 'idle_loop'), greet = config.MOTIONS.find(m => m.slot === 'greet');
   const motions = [idle, greet];
-  ipcMain.handle('pet:init', () => ({ config: config.publicConfig(), avatars: avatars.scan(), avatar: '58.vrm', motions, motionGroups: config.MOTION_GROUPS, versions: {} }));
+  ipcMain.handle('pet:init', () => ({ config: config.publicConfig(), avatars: avatars.scan(), avatar: 'AvatarSample_D.vrm', motions, motionGroups: config.MOTION_GROUPS, versions: {} }));
   ipcMain.handle('pet:config', (_event, patch) => config.publicConfig(config.save(patch)));
   ipcMain.handle('pet:scale', (_event, { scale }) => ({ scale }));
   ipcMain.handle('pet:asr-status', () => ({ speech: 0, mic: false }));
@@ -81,6 +83,7 @@ async function main() {
   const audio = new InteractionAudio(path.join(root, 'audio'));
   context = vm.createContext({ config, tts, createTTSSession, presentConversation, win, setTimeout, clearTimeout, setImmediate, console,
     Date: class extends Date { static now() { return now; } }, Map, Set,
+    activeAudioId: null, playbackTest: null,
     voiceFor: (_emotion, base) => base, MODELS_DIR: '', sendConfig() {}, log() {}, asr: null, muteAsr() {}, unmuteAsr() {},
     memory: { scheduleExtraction() {} }, presentedReplies: new Map(), busy: false, desktop: null, quietUntil: 0,
     interactions: new Interactions({ clock: () => now, random: () => 0 }), publishWebSources() {}, ipcMain,
@@ -93,7 +96,7 @@ async function main() {
   const handler = mainSource.slice(mainSource.indexOf("ipcMain.handle('pet:interact'"), mainSource.indexOf("ipcMain.handle('pet:init'"));
   vm.runInContext(state + pipeline + handler, context);
   ipcMain.on('pet:audio-started', () => { started++; });
-  ipcMain.on('pet:audio-done', (_event, success) => { if (!success) errors.push('WAV playback failed'); finished++; context.finishSpeech(success); });
+  ipcMain.on('pet:audio-done', (_event, value) => { if (!value.success) errors.push('WAV playback failed'); finished++; context.finishSpeech(value.success); });
   await win.loadFile(path.resolve('src/renderer/index.html'));
   await until(() => evaluate('window.__pet?.().vrm && window.__pet().clips > 0'), 'renderer loaded');
   for (let n = 1; n <= 4; n++) {

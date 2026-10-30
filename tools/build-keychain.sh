@@ -28,7 +28,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 PLIST
 
 if [[ ! -x "$EXECUTABLE" || native/keychain.swift -nt "$EXECUTABLE" ]]; then
-  xcrun swiftc -O -target arm64-apple-macos26.0 native/keychain.swift -o "$EXECUTABLE" -framework Security
+  xcrun swiftc -O -target arm64-apple-macos13.0 native/keychain.swift -o "$EXECUTABLE" -framework Security
   chmod 755 "$EXECUTABLE"
 fi
 chmod 755 "$BUNDLE" "$CONTENTS" "$CONTENTS/MacOS"

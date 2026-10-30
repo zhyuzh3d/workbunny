@@ -1,24 +1,27 @@
 #!/bin/zsh
 # 手工打包成 .app（不引 electron-builder，保持依赖极轻）
 # 产物：dist/workbunny.app
-set -e
+set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 [[ "$(uname -m)" == arm64 ]] || { echo '当前安装包面向 Apple Silicon Mac'; exit 1; }
 APPNAME="workbunny"
 BUNDLE_ID="cn.haminn.workbunny"
 VER=$(/usr/bin/python3 -c "import json;print(json.load(open('package.json'))['version'])")
+IDENTITY="${WORKBUNNY_SIGN_IDENTITY:-workbunny Dev}"
+security find-identity -p codesigning | grep -F "\"$IDENTITY\"" >/dev/null || { echo "缺少稳定签名身份：$IDENTITY。先运行 tools/make-signing-cert.sh；不会退回临时签名。"; exit 1; }
 DIST="$ROOT/dist"
 APP="$DIST/$APPNAME.app"
+node "$ROOT/tools/copy-release-resources.js" "$APP/Contents/Resources/app" "${1:-}" --check-only
 
 # Ship the matching local TTS engine so downloading weights is sufficient.
 if [ ! -x "$ROOT/bin/asr" ] || [ "$ROOT/native/asr.swift" -nt "$ROOT/bin/asr" ]; then
   zsh "$ROOT/tools/build-asr.sh"
 fi
 if [ ! -x "$ROOT/bin/speech/speech" ]; then
-  zsh "$ROOT/tools/fetch-tts-runtime.sh"
+  zsh "$ROOT/tools/build-tts-runtime.sh"
 fi
-for helper in vault desktop; do
+for helper in vault desktop asr-legacy; do
   if [ ! -x "$ROOT/bin/$helper" ] || [ "$ROOT/native/$helper.swift" -nt "$ROOT/bin/$helper" ]; then
     zsh "$ROOT/tools/build-$helper.sh"
   fi
@@ -34,6 +37,8 @@ cp -R "$ROOT/node_modules/electron/dist/Electron.app/Contents/MacOS" "$APP/Conte
 cp -R "$ROOT/node_modules/electron/dist/Electron.app/Contents/Frameworks" "$APP/Contents/" 2>/dev/null || true
 cp -R "$ROOT/node_modules/electron/dist/Electron.app/Contents/Resources/"* "$APP/Contents/Resources/" 2>/dev/null || true
 rm -rf "$APP/Contents/Resources/default_app.asar"
+cp "$ROOT/node_modules/electron/dist/LICENSE" "$APP/Contents/Resources/LICENSE.electron.txt"
+cp "$ROOT/node_modules/electron/dist/LICENSES.chromium.html" "$APP/Contents/Resources/LICENSES.chromium.html"
 
 echo "▸ 二进制改名"
 mv "$APP/Contents/MacOS/Electron" "$APP/Contents/MacOS/$APPNAME"
@@ -43,12 +48,12 @@ python3 "$ROOT/tools/set-app-uuid.py" "$APP/Contents/MacOS/$APPNAME" "$BUNDLE_ID
 echo "▸ 放入应用代码（运行时不需要 node_modules）"
 mkdir -p "$APP/Contents/Resources/app"
 cp "$ROOT/package.json" "$APP/Contents/Resources/app/"
-cp -R "$ROOT/src" "$APP/Contents/Resources/app/"
-cp -R "$ROOT/res" "$APP/Contents/Resources/app/" 2>/dev/null || true
+node "$ROOT/tools/copy-release-resources.js" "$APP/Contents/Resources/app" "${1:-}"
 
 echo "▸ 放入原生语音识别"
 mkdir -p "$APP/Contents/Resources/bin"
 cp "$ROOT/bin/asr" "$APP/Contents/Resources/bin/asr"
+cp "$ROOT/bin/asr-legacy" "$APP/Contents/Resources/bin/asr-legacy"
 cp "$ROOT/bin/vault" "$APP/Contents/Resources/bin/vault"
 cp "$ROOT/bin/desktop" "$APP/Contents/Resources/bin/desktop"
 cp -R "$ROOT/bin/workbunny-keychain.app" "$APP/Contents/Resources/bin/"
@@ -70,7 +75,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleSignature</key><string>????</string>
   <key>CFBundleIconFile</key><string>icon</string>
-  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>
@@ -94,25 +99,18 @@ fi
 # ad-hoc 的指定要求是 cdhash，重打包一次就变，TCC 把它当全新应用 ⇒ 每次启动重弹授权。
 # 用固定证书签，指定要求变成 identifier + 证书指纹，重打包多少次都认。
 echo "▸ 签名"
-IDENTITY="workbunny Dev"
-HAVE_ID=0
-if security find-certificate -c "$IDENTITY" "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1; then
-  HAVE_ID=1
-fi
-
-# 内层可执行文件先签，再签外壳（顺序不能反）
-if [ "$HAVE_ID" = "1" ]; then
-  codesign --force --sign "$IDENTITY" "$APP/Contents/Resources/bin/speech/speech"
-  codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.vault" "$APP/Contents/Resources/bin/vault"
-  codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.desktop" "$APP/Contents/Resources/bin/desktop"
-  codesign --force --sign "$IDENTITY" "$APP/Contents/Resources/bin/workbunny-keychain.app"
-  codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.asr" "$APP/Contents/Resources/bin/asr" 2>&1 | grep -v "replacing existing signature" || true
-  codesign --force --deep --sign "$IDENTITY" "$APP" 2>&1 | grep -v "replacing existing signature" || true
-else
-  codesign --force --deep --sign - "$APP" 2>&1 | grep -v "replacing existing signature" || true
-  echo "  ⚠ 没找到「$IDENTITY」证书，退回 ad-hoc —— 这样每次重打包都会重新弹麦克风授权。"
-  echo "    跑一次 ./tools/make-signing-cert.sh 就能修好。"
-fi
+# Sign nested Mach-O components first. Any failure stops the build.
+find "$APP/Contents/Frameworks" -type f -perm +111 -print0 | while IFS= read -r -d '' file; do
+  if /usr/bin/file -b "$file" | grep -q 'Mach-O'; then codesign --force --sign "$IDENTITY" "$file"; fi
+done
+find "$APP/Contents/Frameworks" -depth \( -name '*.framework' -o -name '*.app' \) -print0 | while IFS= read -r -d '' bundle; do
+  codesign --force --sign "$IDENTITY" "$bundle"
+done
+for helper in speech/speech vault desktop asr asr-legacy; do
+  codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.${helper:t}" "$APP/Contents/Resources/bin/$helper"
+done
+codesign --force --sign "$IDENTITY" "$APP/Contents/Resources/bin/workbunny-keychain.app"
+codesign --force --sign "$IDENTITY" "$APP"
 
 # 本地构建不该带隔离标记，否则 Gatekeeper 会拦自签名应用
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true

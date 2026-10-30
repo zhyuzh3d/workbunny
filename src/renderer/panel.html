@@ -18,6 +18,7 @@
     <button data-t="ear">听力</button>
     <button data-t="brain">智力</button>
     <button data-t="mouth">语音</button>
+    <button data-t="data">数据</button>
   </div>
 
   <!-- 用户给与的设定与 Bunny 自我理解分开编辑。 -->
@@ -46,6 +47,7 @@
   <div class="pb" data-page="look">
     <div class="group">形象</div>
     <div class="avRow" id="avRow"></div>
+    <button id="importAvatar" class="mini">导入个人模型</button><div class="note" id="avatarImportStatus">个人模型仅保存在这台电脑，更新应用不会移除。</div>
 
     <div class="group">大小</div>
     <div class="segRow" id="sizeRow">
@@ -69,6 +71,8 @@
       </div>
       <div id="permTip" class="permTip"></div>
     </div>
+<div id="asrModeInfo" class="note"></div>
+    <label class="row"><span>允许旧版识别联网</span><input id="asrAllowNetwork" type="checkbox" /></label>
     <div class="group">一直听着</div>
     <label class="row"><span>常驻监听</span><input id="setAlways" type="checkbox" /></label>
     <label class="row"><span>只回应对我说的话</span><input id="setJudge" type="checkbox" /></label>
@@ -80,13 +84,12 @@
     <div class="group">对话来源</div>
     <label class="row"><span>服务</span><select id="brainSource">
       <option value="workbuddy">WorkBuddy（默认）</option>
-      <option value="deepseek">DeepSeek 官方</option>
-      <option value="grok">Grok 官方</option>
+
     </select></label>
     <div id="brainWb" class="sub">
       <div class="note">使用当前登录的 WorkBuddy 账号和额度。请保持 WorkBuddy 已打开并登录。</div>
       <div class="note">对话默认按需联网搜索，参考来源显示在气泡下方。聊天与记忆整理不会每次都搜索。</div>
-      <div class="permBtns"><button id="openWorkBuddy" class="mini">打开 WorkBuddy</button></div>
+      <div class="permBtns"><button id="openWorkBuddy" class="mini">连接 WorkBuddy</button><button id="installWorkBuddy" class="mini">下载安装</button></div>
     </div>
     <div id="brainKey" class="sub">
       <label class="row"><span>API Key</span><input id="brainKeyInput" type="password" autocomplete="off" placeholder="填写这个服务商的密钥" /></label>
@@ -105,6 +108,12 @@
     <div id="brainStatus" class="permTip" role="status">选择后可先测试，点保存后用于对话。</div>
   </div>
 
+  <div class="pb" data-page="data">
+    <div class="group">数据库位置</div><p class="note" id="storagePath"></p>
+    <div class="note">包含聊天、记忆、人格和任务记录。迁移保留旧快照并重启，模型和作品目录不移动。</div>
+    <div class="permBtns"><button class="mini" id="storageMove">迁移并重启</button><button class="mini" id="storageReconnect">连接已有数据库</button></div>
+    <div class="permTip" id="storageStatus" role="status"></div>
+  </div>
   <!-- 语音 -->
   <div class="pb" data-page="mouth">
     <div class="voiceHeading"><div><div class="group">语音引擎</div><p>选择后立即生效</p></div><span id="ttsCurrent" class="pill">—</span></div>
@@ -150,6 +159,19 @@
       <div class="note">配置方法见 <a id="chpHelp" class="projectLink" href="https://github.com/zhyuzh3d/haminn-chp"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .3a12 12 0 0 0-3.79 23.38c.6.11.82-.26.82-.58v-2.23c-3.34.73-4.04-1.42-4.04-1.42-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.23 1.84 1.23 1.07 1.83 2.81 1.3 3.49.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.93 0-1.31.47-2.38 1.23-3.22-.12-.3-.53-1.52.12-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.3-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.6-2.8 5.63-5.48 5.93.43.37.81 1.1.81 2.22v3.3c0 .32.22.7.83.58A12 12 0 0 0 12 .3Z"/></svg>haminn-chp 项目</a>。</div>
     </div>
 
+    <div id="ttsHTTP" class="sub">
+      <label class="row"><span>起始模板</span><select id="httpTemplate"><option value="jsonl">HTTP JSON 音频分片</option><option value="binary">HTTP 直接音频</option></select></label>
+      <div class="permBtns"><button class="mini" id="httpApplyTemplate">使用模板</button><button class="mini" id="httpImport">导入配置</button><button class="mini" id="httpExport">导出无密钥配置</button></div>
+      <input type="file" id="httpFile" accept="application/json,.json" hidden />
+      <label class="row"><span>合成地址</span><input id="httpURL" type="url" placeholder="https://服务地址/合成接口" /></label>
+      <label class="row"><span>模型 ID</span><input id="httpModel" list="httpModels" /></label><datalist id="httpModels"></datalist>
+      <label class="row"><span>资源 ID</span><input id="httpResource" /></label>
+      <label class="row"><span>音色 ID</span><input id="httpVoice" list="httpVoices" /></label><datalist id="httpVoices"></datalist>
+      <div id="httpSecrets"></div>
+      <details><summary>接口配置</summary><textarea id="httpProfile" rows="9" spellcheck="false" aria-label="接口配置 JSON"></textarea></details>
+      <div class="permBtns"><button class="mini" id="httpSave">保存并使用</button><button class="mini" id="httpCatalog">获取模型与音色</button></div>
+      <div id="httpStatus" class="permTip" role="status">填写后保存，再点击底部试听。未提供目录接口时可填写 ID。</div>
+    </div>
     <label class="row voiceEnabled"><span>启用语音播放</span><input id="setTtsOn" type="checkbox" /></label>
   </div>
 

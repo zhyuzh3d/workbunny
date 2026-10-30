@@ -21,7 +21,7 @@
 
 语音中的远程入口改为“局域网 CHP”，使用信息文档发现 TTS 能力、输出格式、模型和音色。地址或密钥改变后清空旧菜单，重新获取；选择音色立即生效。失败沿用既有系统语音回退，并同步引擎选中状态。
 
-本机连接为 `http://192.168.124.31:8189`。实际返回 CHP 3.2.0、Qwen3-TTS 0.6B CustomVoice、12 个音色。当前 CHP 协议只播报服务端已加载的模型，不支持请求中切换模型，因此模型栏展示真实服务模型，不提供无效切换。访问密钥由主进程保存，信息请求用 Bearer，合成请求放在 `chp_params.password`，不写入 URL 或日志。
+本机连接为 `http://chp.example.invalid:8189`。实际返回 CHP 3.2.0、Qwen3-TTS 0.6B CustomVoice、12 个音色。当前 CHP 协议只播报服务端已加载的模型，不支持请求中切换模型，因此模型栏展示真实服务模型，不提供无效切换。访问密钥由主进程保存，信息请求用 Bearer，合成请求放在 `chp_params.password`，不写入 URL 或日志。
 
 协议依据：[haminn-chp 102364862d2ba0be8b10ac8a89504c4aaefa6975](https://github.com/zhyuzh3d/haminn-chp/tree/102364862d2ba0be8b10ac8a89504c4aaefa6975)。只匹配 `txt-2-sph/v1`，当前接收 24 kHz、单声道、16 位 PCM WAV。CHP 本次采用整句 WAV；本地 Qwen 的既有流式播放继续保留。
 

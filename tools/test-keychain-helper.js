@@ -13,9 +13,10 @@ function main() {
   execFileSync(path.join(__dirname, 'build-keychain.sh'), { cwd: root, stdio: 'inherit' });
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'workbunny-keychain-protocol-'));
   try {
-    const outerApp = path.join(temp, 'workbunny.app');
+    const outerApp = path.join(temp, 'Bunny Renamed.app');
     const helperBundle = path.join(outerApp, 'Contents/Resources/bin/workbunny-keychain.app');
     fs.mkdirSync(path.join(outerApp, 'Contents/MacOS'), { recursive: true });
+    fs.writeFileSync(path.join(outerApp, 'Contents/Info.plist'), '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>cn.haminn.workbunny</string></dict></plist>');
     fs.copyFileSync('/dev/null', path.join(outerApp, 'Contents/MacOS/workbunny'));
     fs.cpSync(built, helperBundle, { recursive: true });
     const executable = path.join(helperBundle, 'Contents/MacOS/workbunny-keychain');
@@ -39,7 +40,7 @@ function main() {
     assert.equal(withArgs.stdout, '');
 
     const testExecutable = path.join(helperBundle, 'Contents/MacOS/workbunny-keychain');
-    execFileSync('xcrun', ['swiftc', '-O', '-D', 'WORKBUNNY_KEYCHAIN_PARENT_GATE_TESTING', '-target', 'arm64-apple-macos26.0', path.join(root, 'native/keychain.swift'), '-o', testExecutable, '-framework', 'Security'], { cwd: root, stdio: 'inherit' });
+    execFileSync('xcrun', ['swiftc', '-O', '-D', 'WORKBUNNY_KEYCHAIN_PARENT_GATE_TESTING', '-target', 'arm64-apple-macos13.0', path.join(root, 'native/keychain.swift'), '-o', testExecutable, '-framework', 'Security'], { cwd: root, stdio: 'inherit' });
     fs.writeFileSync(path.join(temp, 'fake-parent.c'), `#include <spawn.h>\n#include <unistd.h>\n#include <sys/wait.h>\n#include <stdlib.h>\n#include <string.h>\nextern char **environ;\nint main(int argc,char **argv){if(argc!=2)return 2;int in[2],out[2];if(pipe(in)||pipe(out))return 3;posix_spawn_file_actions_t a;posix_spawn_file_actions_init(&a);posix_spawn_file_actions_adddup2(&a,in[0],0);posix_spawn_file_actions_adddup2(&a,out[1],1);posix_spawn_file_actions_addclose(&a,in[1]);posix_spawn_file_actions_addclose(&a,out[0]);char *args[]={argv[1],NULL};pid_t p=0;int rc=posix_spawn(&p,argv[1],&a,NULL,args,environ);posix_spawn_file_actions_destroy(&a);close(in[0]);close(out[1]);if(rc)return 4;const char *q="{\\\"op\\\":\\\"read\\\",\\\"account\\\":\\\"vault-123e4567-e89b-12d3-a456-426614174000\\\"}\\n";write(in[1],q,strlen(q));close(in[1]);char b[512];ssize_t n;while((n=read(out[0],b,sizeof(b)))>0)write(1,b,(size_t)n);close(out[0]);int status=0;waitpid(p,&status,0);return WIFEXITED(status)?WEXITSTATUS(status):5;}\n`);
     execFileSync('xcrun', ['clang', '-O', path.join(temp, 'fake-parent.c'), '-o', path.join(outerApp, 'Contents/MacOS/workbunny')], { stdio: 'inherit' });
     const fakeMain = spawnSync(path.join(outerApp, 'Contents/MacOS/workbunny'), [testExecutable], { encoding: 'utf8', timeout: 10000, maxBuffer: 4096 });

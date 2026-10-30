@@ -21,7 +21,7 @@ const CASES = [
 ];
 
 const CTX = `当前任务：把 VRM 桌宠的语音链路接进 Electron
-主人最后说的话：帮我看下 A1X 的 TTS 为什么没声音
+主人最后说的话：帮我看下 标准 CHP 服务 的 TTS 为什么没声音
 助手刚答完：端口 8020 的 Bearer key 取错了容器，换成 qwen3-tts 那个就通了`;
 
 (async () => {

@@ -1,0 +1,50 @@
+{
+  "format": "workbunny-tts-http/v1",
+  "url": "",
+  "headers": {
+    "X-Api-Key": {
+      "$secret": "apiKey"
+    },
+    "X-Api-Resource-Id": {
+      "$param": "resourceId"
+    },
+    "X-Api-Request-Id": {
+      "$param": "requestId"
+    }
+  },
+  "body": {
+    "req_params": {
+      "text": {
+        "$param": "text"
+      },
+      "speaker": {
+        "$param": "voice"
+      },
+      "audio_params": {
+        "format": "pcm",
+        "sample_rate": 24000
+      }
+    }
+  },
+  "response": {
+    "framing": "jsonl",
+    "audioPath": [
+      "data"
+    ],
+    "statusPath": [
+      "code"
+    ],
+    "chunkCodes": [
+      0
+    ],
+    "doneCodes": [
+      20000000
+    ],
+    "audio": {
+      "encoding": "base64",
+      "format": "pcm16le",
+      "sampleRate": 24000,
+      "channels": 1
+    }
+  }
+}

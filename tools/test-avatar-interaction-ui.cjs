@@ -52,10 +52,6 @@ async function main() {
     await wait(`window.__pet().avatarKey === ${JSON.stringify(info.key)} && document.getElementById('hint').classList.contains('hidden')`);
     await delay(350);
     assert.equal((await evaluate('window.__light()')).factor, info.light);
-    if (info.key === '58.vrm') {
-      assert((await evaluate('window.__pet()')).hiddenMeshes.includes('Bag.baked'), 'the separate backpack and shoulder-strap mesh is hidden');
-      await evaluate('window.__freeze(true)'); await snapshot('婷婷-no-bag'); await evaluate('window.__freeze(false)');
-    }
     if (['阿雅', '琪琪', '美莉'].includes(info.label)) {
       await evaluate('window.__freeze(true)');
       await snapshot(info.label + '-after');

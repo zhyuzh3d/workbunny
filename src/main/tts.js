@@ -24,6 +24,7 @@ const qwenDownload = require('./qwen-download');
 const voiceFiles = require('./qwen-voices');
 const { createRuntime } = require('./qwen-runtime');
 const chp = require('./chp-tts');
+const custom = require('./tts-http');
 
 const cache = new Map(); // hash -> Buffer
 const CACHE_MAX = 40;
@@ -121,7 +122,7 @@ function systemVoices() {
   }
   const zh = all.filter((v) => /^zh/i.test(v.lang));
   // 主人要的是中文嗓子，英文音色列出来只会让人挑错
-  zhVoices = zh.length ? zh : all;
+  zhVoices = all;
   zhVoices.sort((a, b) => {
     const ia = ZH_PREFERRED.indexOf(a.id), ib = ZH_PREFERRED.indexOf(b.id);
     return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
@@ -130,6 +131,7 @@ function systemVoices() {
 }
 /** 挑一个本机真有的音色：指定了却没有，就顺位往下，绝不让 say 因为音色名报错 */
 function pickSystemVoice(want) {
+  if (!want || want === 'system-default') return '';
   const list = systemVoices();
   if (!list.length) return '';
   if (want && list.some((v) => v.id.toLowerCase() === String(want).toLowerCase())) {
@@ -160,17 +162,19 @@ async function qwenTTS(text, q, options) {
   if (!q?.dir || !qwenDownload.qwenReady(q.dir)) throw new Error('本地模型还没下载或校验完成');
   return qwenRuntime.synthesize(text, q, options);
 }
-async function prewarm(q) { if (q?.dir && qwenDownload.qwenReady(q.dir)) await qwenRuntime.prewarm(q.dir); }
+async function prewarm(q) { require('./runtime-capabilities').requireQwen(); if (q?.dir && qwenDownload.qwenReady(q.dir)) await qwenRuntime.prewarm(q.dir); }
 
 /** Stable identity for persistent interaction audio, based on the active engine. */
 async function voiceIdentity(cfg) {
   const engine = cfg.engine || 'system';
+  if (engine === 'http') return { engine, profile: require('./tts-http-profile').identity(cfg.http), voice: cfg.http?.params?.voice };
   if (engine === 'qwen') return { engine, model: QWEN_FILES.map(f => f.sha256), voice: cfg.qwen?.voice || 'serena' };
   if (engine === 'remote') {
     const catalog = chp.cached(cfg) || await chp.discover(cfg).catch(() => null);
     if (!catalog) return null; // Let ordinary synthesis handle its system fallback.
     return { engine, service: catalog.endpoint, model: [catalog.model, catalog.file, catalog.version], voice: cfg.chp?.voice || catalog.voices[0].id };
   }
+  if (!cfg.voice) return null; // OS default can change without a Bunny setting change.
   return { engine: 'system', model: 'macos-system', voice: pickSystemVoice(cfg.voice), rate: cfg.rate || 200 };
 }
 
@@ -190,7 +194,7 @@ async function synthesize(text, cfg, options = {}) {
     .createHash('sha1')
     .update([clean, engine, cfg.voice, cfg.rate,
       cfg.qwen && cfg.qwen.voice, cfg.qwen?.modelKind, cfg.qwen && cfg.qwen.dir,
-      cfg.model, cfg.instructions, cfg.seed, cfg.speed, cfg.language, cfg.baseURL, cfg.apiKey, cfg.chp?.voice].join('\u0001'))
+      cfg.model, cfg.instructions, cfg.seed, cfg.speed, cfg.language, cfg.baseURL, cfg.apiKey, cfg.chp?.voice, require('./tts-http-profile').identity(cfg.http)].join('\u0001'))
     .digest('hex');
   if (cache.has(hash)) return { ...cache.get(hash), ms: 0, cached: true, streamed: false };
 
@@ -203,10 +207,14 @@ async function synthesize(text, cfg, options = {}) {
   // ① 主人指定的引擎（系统引擎本身就是兜底，不用再包一层）
   if (engine === 'qwen') {
     try {
+      require('./runtime-capabilities').requireQwen();
       const result = await qwenTTS(clean, cfg.qwen, options);
       buffer = result.buffer; streamed = result.streamed; stats = result.stats;
       used = 'qwen';
     } catch (e) { if (e.name === 'AbortError') throw e; options.onStop?.(); lastErr = e; }
+  } else if (engine === 'http') {
+    try { const result = await custom.synthesize(clean, cfg, options); buffer = result.buffer; used = 'http'; stats = { httpVoice: result.voice }; }
+    catch (e) { if (e.name === 'AbortError') throw e; lastErr = e; }
   } else if (engine === 'remote') {
     try {
       const result = await chp.synthesize(clean, cfg, options);
@@ -214,9 +222,10 @@ async function synthesize(text, cfg, options = {}) {
     } catch (e) { if (e.name === 'AbortError') throw e; lastErr = e; }
   }
 
+  if (!buffer && engine !== 'system' && options.strict) throw lastErr || new Error('所选语音未返回音频');
   // ② 兜底：系统语音。绝不让"她不说话"成为一个可能的状态。
   if (!buffer) {
-    const voice = engine === 'system' ? pickSystemVoice(cfg.voice) : pickSystemVoice();
+    const voice = engine === 'system' ? pickSystemVoice(cfg.voice) : '';
     try {
       buffer = await systemTTS(clean, voice, cfg.rate, { signal: options.signal });
     } catch (e) {
@@ -238,7 +247,7 @@ async function synthesize(text, cfg, options = {}) {
 
   if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
   const result = { buffer, ms: Date.now() - t0, cached: false, engine: used,
-    voice: used === 'qwen' ? cfg.qwen?.voice : stats?.chpVoice, streamed, ...(used === 'qwen' ? { stats } : {}) };
+    voice: used === 'qwen' ? cfg.qwen?.voice : stats?.chpVoice || stats?.httpVoice, streamed, ...(used === 'qwen' ? { stats } : {}) };
   cache.set(hash, result);
   return result;
 }
@@ -266,10 +275,10 @@ function reset() { clearSpeechCache(); }
 module.exports = {
   synthesize, probe, voiceIdentity,
   systemVoices, pickSystemVoice,
-  downloadQwen, downloadState, cancelDownload, qwenReady, QWEN_FILES, qwenVoices,
+  downloadQwen: (...args) => { require('./runtime-capabilities').requireQwen(); return downloadQwen(...args); }, downloadState, cancelDownload, qwenReady, QWEN_FILES, qwenVoices,
   findSpeechRuntime, reset, clearSpeechCache, prewarm,
   createSystemTTS,
-  runtimeStatus: qwenRuntime.status, cancel: () => { qwenRuntime.cancel(); chp.cancel(); }, shutdown: () => { qwenRuntime.close(); chp.cancel(); },
+  runtimeStatus: qwenRuntime.status, cancel: () => { qwenRuntime.cancel(); chp.cancel(); custom.cancel(); }, shutdown: () => { qwenRuntime.close(); chp.cancel(); custom.cancel(); },
   deleteQwen: qwenDownload.deleteQwen,
   checkQwen: qwenDownload.checkQwen,
 };

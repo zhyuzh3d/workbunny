@@ -1,0 +1,30 @@
+{
+  "format": "workbunny-tts-http/v1",
+  "url": "",
+  "headers": {
+    "Authorization": {
+      "$secret": "authorization"
+    }
+  },
+  "body": {
+    "input": {
+      "$param": "text"
+    },
+    "model": {
+      "$param": "model"
+    },
+    "voice": {
+      "$param": "voice"
+    },
+    "response_format": "wav"
+  },
+  "response": {
+    "framing": "binary",
+    "audio": {
+      "encoding": "binary",
+      "format": "wav",
+      "sampleRate": 24000,
+      "channels": 1
+    }
+  }
+}

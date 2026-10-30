@@ -221,7 +221,7 @@ let fitInfo = { dist: 3, centerY: 1, visibleH: 2, modelH: 1.5 };
 /* 角色取景：100% 半身 / 100% 全身 / 150% 放大；半身内部值沿用 0.5。
  * 超过 100% 时窗口会跟着撑大（她真的变大，而不是被窗口裁掉），
  * 所以取景比例只有「小于 100%」时才需要压 —— 放大交给窗口。 */
-let viewScale = 1;
+let viewScale = 0.5;
 
 /* 侧面板占掉右侧多少像素时，角色要往左让位。
  * 让位不是把相机歪过去（会有透视畸变），而是直接把角色挪到剩余区域的中间 ——
@@ -481,6 +481,7 @@ let analyserData = null;
 let currentSource = null;
 let pcmPlayer = null;
 let audioRevision = 0;
+let activeAudioId = null;
 
 function ensureAudio() {
   if (audioCtx) return audioCtx;
@@ -492,17 +493,18 @@ function ensureAudio() {
   analyserData = new Uint8Array(analyser.fftSize);
   pcmPlayer = createPCMPlayer({ context: audioCtx, destination: analyser,
     onStart: () => { markReplyStarted(); pet.audioStarted(); },
-    onDone: () => { talkLevel = 0; pet.audioDone(); },
+    onDone: id => { talkLevel = 0; pet.audioDone(true, id); },
     onUnderrun: () => pet.log('[tts] 流式播放缓冲不足'),
   });
   return audioCtx;
 }
 
-async function playWav(u8) {
+async function playWav(u8, id) {
   stopAudio(true);
+  activeAudioId = id;
   const revision = audioRevision;
   const ctx = ensureAudio();
-  if (ctx.state === 'suspended') await ctx.resume();
+  if (ctx.state === 'suspended') { try { await ctx.resume(); } catch { if (revision === audioRevision) pet.audioDone(false, id); return; } }
   const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
   let buf;
   try {
@@ -510,7 +512,7 @@ async function playWav(u8) {
   } catch (e) {
     if (revision !== audioRevision) return;
     console.warn('decode 失败', e);
-    pet.audioDone(false);
+    pet.audioDone(false, id);
     return;
   }
   if (revision !== audioRevision) return;
@@ -521,7 +523,7 @@ async function playWav(u8) {
     if (currentSource === src) {
       currentSource = null;
       talkLevel = 0;
-      pet.audioDone();
+      pet.audioDone(true, id);
     }
   };
   currentSource = src;
@@ -537,14 +539,15 @@ function stopAudio(keepQuiet) {
     currentSource = null;
   }
   talkLevel = 0;
-  if (!keepQuiet) pet.audioDone();
+  if (!keepQuiet) pet.audioDone(false, activeAudioId);
 }
 
 function playPCM(event) {
   if (event.start) {
     stopAudio(true);
+    activeAudioId = event.id;
     const ctx = ensureAudio();
-    if (ctx.state === 'suspended') ctx.resume().catch(() => { pcmPlayer.stop(event.id); pet.audioDone(false); });
+    if (ctx.state === 'suspended') ctx.resume().catch(() => { pcmPlayer.stop(event.id); pet.audioDone(false, event.id); });
     pcmPlayer.begin(event.id);
   }
   if (event.stop) pcmPlayer?.stop(event.id);
@@ -561,7 +564,7 @@ function loadMotions() {
   // 以主进程送来的表为准（那张表带中文名和槽位）；还没拿到就退回本地常量
   const keys = MOTIONS.length ? MOTIONS.map((m) => m.key) : MOTION_FILES;
   return Promise.all(keys.map((k) => new Promise((res) => {
-    animLoader.load(`./assets/motions/${k}.vrma`, (g) => {
+    animLoader.load(MOTIONS.find(m => m.key === k)?.url || `./assets/motions/${k}.vrma`, (g) => {
       const a = g.userData.vrmAnimations && g.userData.vrmAnimations[0];
       if (a) rawAnims.set(k, a);
       res();
@@ -576,7 +579,7 @@ function loadAvatar(key) {
   const info = AVATARS[key] || AVATAR_LIST[0];
   setLoading(true, `正在努力加载 ${info.label || '角色'}…`);
 
-  return new Promise((resolve) => vrmLoader.load(`./assets/models/${info.file}`, (gltf) => {
+  return new Promise((resolve) => vrmLoader.load(info.url || `./assets/models/${info.file}`, (gltf) => {
     if (mixer) { mixer.stopAllAction(); mixer.uncacheRoot(mixer.getRoot()); mixer = null; }
     currentAction = null;
     if (vrm) {
@@ -1353,6 +1356,7 @@ function wire() {
         clearWebSources();
         paintHeard('', false); paintLive(''); paintRecallButton([]);
         break;
+      case 'avatars': setAvatarList(ev.avatars || []); break;
       case 'config':
         cfg = ev.config;
         if (currentMotion && !motionEnabled(currentMotion)) toIdle(0.25);
@@ -1433,7 +1437,7 @@ function wire() {
         if (ev.stop) { stopAudio(true); hideBubble(); break; }
         if (ev.stream) { playPCM(ev.stream); break; }
         if (ev.buffer) {
-          playWav(ev.buffer);
+          playWav(ev.buffer, ev.id);
         }
         break;
       case 'phase': {
@@ -1792,7 +1796,7 @@ setInterval(() => {
     setAvatarList(init.avatars);
     MOTIONS = Array.isArray(init.motions) ? init.motions : [];
     if (Array.isArray(init.motionGroups) && init.motionGroups.length) MOTION_GROUPS = init.motionGroups;
-    viewScale = (cfg.window && cfg.window.scale) || 1;
+    viewScale = (cfg.window && cfg.window.scale) || 0.5;
     paintScale();
     paintMute();
     wire();

@@ -403,7 +403,7 @@
     "keyFilesPreserved": true,
     "parityFiles": 270,
     "parityFailures": [],
-    "backup": "/Users/zhyuzh/Library/Caches/workbunny-release-backup/20261029-142838-before-0.12.0",
+    "backup": "~/Library/Caches/workbunny-release-backup/20261029-142838-before-0.12.0",
     "realApp": "version visible; encrypted role loaded; ears remain off"
   },
   "keychainHelperCDHash": "9b5308ef38651a0928b016482e000f63bb309c53",

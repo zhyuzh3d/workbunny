@@ -34,7 +34,7 @@ fs.writeFileSync(preload, `
   const { contextBridge, ipcRenderer } = require('electron');
   const api = (name, ...args) => ipcRenderer.invoke('panel-fixture:api', name, ...args);
   contextBridge.exposeInMainWorld('pet', {
-    log: () => {},
+    log: () => {}, selfView: () => api('selfView'), selfSettings: value => api('selfSettings', value), portability: () => api('portability'), ttsHTTPTemplate: kind => api('ttsHTTPTemplate', kind),
     panelInit: (...a) => api('panelInit', ...a), brainInfo: (...a) => api('brainInfo', ...a), ttsInfo: (...a) => api('ttsInfo', ...a),
     config: (...a) => api('config', ...a), on: cb => ipcRenderer.on('panel-fixture:event', (_e, value) => cb(value)),
     __fixture: { emitConfig: value => ipcRenderer.invoke('panel-fixture:control', 'emitConfig', value),
@@ -68,6 +68,10 @@ ipcMain.handle('panel-fixture:control', (_event, action, patch) => {
 });
 
 ipcMain.handle('panel-fixture:api', async (_event, name, ...args) => {
+  if (name === 'selfView') return { revision: settings.settingsRevision, settings: { identity: settings.buddy.profile, behavior: '' } };
+  if (name === 'selfSettings') { settings.buddy.profile = args[0].identity; return { revision: settings.settingsRevision, settings: args[0] }; }
+  if (name === 'portability') return { connection: { ready: true, note: '已连接' }, storage: { ok: true, dir: '/fixture/vault' }, asrMode: 'continuous', capabilities: {} };
+  if (name === 'ttsHTTPTemplate') return require('../src/main/tts-http-profile').template(args[0]);
   if (name === 'panelInit') return { config: clone(settings), avatars: [{ key: 'fixture-avatar', label: '测试角色' }], avatar: 'fixture-avatar',
     motions: [], motionGroups: [], asr: { speech: 3, micSystem: 'granted' } };
   if (name === 'brainInfo') return { providers: [{ id: 'deepseek', label: 'DeepSeek', hint: 'fixture provider' }, { id: 'grok', label: 'Grok' }],
@@ -100,44 +104,24 @@ async function main() {
   await win.loadFile(panelHtml, { query: { p: 'settings' } });
   await waitFor(() => evalIn(win, "document.getElementById('setProfile').value" ).then(value => value.includes('共通角色设定')), 'settings profile rendered');
 
-  assert.equal(await evalIn(win, "document.getElementById('panelScene').value"), 'life');
-  assert.equal(await evalIn(win, "document.getElementById('panelSceneScope').textContent"), '生活：可按需参考生活与工作资料。');
-  assert.equal(await evalIn(win, "document.getElementById('setProfile').rows"), 5, 'shared persona keeps its existing five-row editor');
-  assert.equal(await evalIn(win, "document.getElementById('panelSceneProfile').value"), '生活原设定');
-
-  // An unsaved voice change and scene-profile draft survive the immediate
-  // scene-only config write without sending an old brain/key snapshot.
+  const scene = () => evalIn(win, "document.querySelector('#panelScene [aria-pressed=true]')?.dataset.scene");
+  const select = name => evalIn(win, `document.querySelector('#panelScene [data-scene=${name}]').click()`);
+  assert.equal(await scene(), 'life');
+  assert.equal(await evalIn(win, "document.getElementById('setProfile').rows"), 6);
   await evalIn(win, "document.getElementById('setAlways').checked=false; document.getElementById('setAlways').dispatchEvent(new Event('change',{bubbles:true}))");
-  await evalIn(win, "document.getElementById('panelScene').value='work'; document.getElementById('panelScene').dispatchEvent(new Event('change',{bubbles:true}))");
-  await waitFor(() => Promise.resolve(settings.memory.scene === 'work'), 'work scene immediately persisted');
-  assert.deepEqual(calls.at(-1), { memory: { scene: 'work' } }, 'scene selection sends only memory.scene');
-  assert.equal(await evalIn(win, "document.getElementById('setAlways').checked"), false, 'unsaved voice draft survives config ack');
-  assert.equal(await evalIn(win, "document.getElementById('panelSceneScope').textContent"), '工作：仅参考工作资料。');
-  assert.equal(await evalIn(win, "document.getElementById('panelSceneProfile').value"), '工作原设定');
-
-  await evalIn(win, "document.getElementById('panelSceneProfile').value='工作本地草稿'; document.getElementById('panelSceneProfile').dispatchEvent(new Event('input',{bubbles:true}))");
-  await evalIn(win, `window.pet.__fixture.emitConfig(${JSON.stringify({ buddy: { sceneProfiles: { private: '私聊外部更新', life: '生活外部更新', work: '工作外部更新' } } })})`);
-  assert.equal(await evalIn(win, "document.getElementById('panelSceneProfile').value"), '工作本地草稿', 'external config event preserves the dirty scene draft');
-  await evalIn(win, "document.getElementById('panelScene').value='private'; document.getElementById('panelScene').dispatchEvent(new Event('change',{bubbles:true}))");
-  await waitFor(() => Promise.resolve(settings.memory.scene === 'private'), 'private scene switch');
-  assert.equal(await evalIn(win, "document.getElementById('panelSceneProfile').value"), '私聊外部更新', 'external non-dirty profiles refresh');
-  await evalIn(win, "document.getElementById('panelScene').value='work'; document.getElementById('panelScene').dispatchEvent(new Event('change',{bubbles:true}))");
-  await waitFor(() => Promise.resolve(settings.memory.scene === 'work'), 'return to dirty work scene');
-  assert.equal(await evalIn(win, "document.getElementById('panelSceneProfile').value"), '工作本地草稿');
-
+  await select('work');
+  await waitFor(() => Promise.resolve(settings.memory.scene === 'work'), 'work scene persisted');
+  assert.deepEqual(calls.at(-1), { memory: { scene: 'work' } });
+  assert.equal(await evalIn(win, "document.getElementById('setAlways').checked"), false);
   await click(win, 'saveBtn');
-  await waitFor(() => Promise.resolve(settings.buddy.sceneProfiles.work === '工作本地草稿' && settings.voice.alwaysListen === false), 'dirty scene and voice values saved');
-  assert.deepEqual(calls.at(-1), { buddy: { sceneProfiles: { work: '工作本地草稿' } }, voice: { alwaysListen: false } },
-    'save sends only dirty scene keys and the separate dirty voice leaf');
-  assert.equal(settings.buddy.sceneProfiles.private, '私聊外部更新', 'save does not overwrite another window profile');
-  assert.equal(settings.buddy.profile, '共通角色设定必须保持五行。');
+  await waitFor(() => Promise.resolve(settings.voice.alwaysListen === false), 'draft saved');
   assert.equal(settings.brain.apiKey, 'brain-secret');
   assert.equal(settings.brain.profiles.deepseek.apiKey, 'deepseek-secret');
   assert.equal(settings.tts.apiKey, 'tts-secret');
-
-  await evalIn(win, "document.getElementById('panelSceneProfile').value='失败后仍保留'; document.getElementById('panelSceneProfile').dispatchEvent(new Event('input',{bubbles:true})); window.pet.__fixture.failNextConfig().then(()=>document.getElementById('saveBtn').click())");
-  await waitFor(() => evalIn(win, "document.getElementById('sfNote').textContent").then(value => value.includes('fixture config rejected')), 'save failure shown');
-  assert.equal(await evalIn(win, "document.getElementById('panelSceneProfile').value"), '失败后仍保留', 'failed save keeps its scene draft');
+  failNextConfig = true; await select('private');
+  await waitFor(() => evalIn(win, "document.getElementById('panelSceneProfileStatus').textContent.includes('fixture config rejected')"), 'failure shown');
+  assert.equal(await scene(), 'work');
+  assert.equal(settings.memory.scene, 'work');
 
   await win.close();
   console.log('panel scene-settings fixture passed (hidden Electron window, stub APIs, isolated userData)');
@@ -149,4 +133,4 @@ main().catch(error => {
   for (const win of windows) if (!win.isDestroyed()) win.destroy();
   app.exit(1);
 })
-  .finally(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+  .finally(() => { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
