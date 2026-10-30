@@ -543,25 +543,18 @@ function setInteractive(v) {
   win.setIgnoreMouseEvents(!v, { forward: true });
 }
 
-/* ── 拖拽（用光标屏幕坐标，鼠标移出窗口也不会断） ── */
-let dragTimer = null;
+/* ── 拖拽：使用原始按下坐标与事件坐标，快拖也不丢失第一段位移。 ── */
 let dragAnchor = null;
-ipcMain.on('pet:drag', (_e, action) => {
-  if (!win) return;
-  if (action === 'start') {
-    if (dragTimer) clearInterval(dragTimer);
-    const cur = screen.getCursorScreenPoint();
+ipcMain.on('pet:drag', (event, action) => {
+  if (!win || event.sender !== win.webContents || !action || typeof action !== 'object') return;
+  if (action.type === 'end') { dragAnchor = null; saveWindowPosition(); return; }
+  if (!Number.isFinite(action.x) || !Number.isFinite(action.y)) return;
+  if (action.type === 'start') {
     const logical = windowLayout?.logical || win.getBounds();
-    dragAnchor = { cx: cur.x, cy: cur.y, wx: logical.x, wy: logical.y };
-    dragTimer = setInterval(() => {
-      if (!dragAnchor || !win) return;
-      const p = screen.getCursorScreenPoint();
-      const size = windowLayout.logical;
-      placeWindow({ x: dragAnchor.wx + p.x - dragAnchor.cx, y: dragAnchor.wy + p.y - dragAnchor.cy, width: size.width, height: size.height });
-    }, 16);
-  } else {
-    if (dragTimer) { clearInterval(dragTimer); dragTimer = null; }
-    dragAnchor = null; saveWindowPosition();
+    dragAnchor = { cx: action.x, cy: action.y, wx: logical.x, wy: logical.y };
+  } else if (action.type === 'move' && dragAnchor) {
+    const size = windowLayout.logical;
+    placeWindow({ x: dragAnchor.wx + action.x - dragAnchor.cx, y: dragAnchor.wy + action.y - dragAnchor.cy, width: size.width, height: size.height });
   }
 });
 
@@ -658,7 +651,7 @@ let mutedSince = 0;
 
 function muteAsr(reason) {
   if (!asr) return;
-  if (alwaysOn) { asr.unmute(); return; }
+  if (alwaysOn) { unmuteAsr('持续聆听'); return; }
   if (!mutedSince) mutedSince = Date.now();
   asr.mute();
   if (muteWatchdog) clearTimeout(muteWatchdog);
@@ -791,7 +784,7 @@ async function pumpSpeech() {
   const gen = speechGen;
   activeSpeechReplyId = item.messageId || null;
   const c = config.load();
-  // 合成期间继续识别；缺少 AEC 时只在即将播放音频时闭麦。
+  // 持续聆听保持识别；没有 AEC 时同时用文字过滤回声。
   send('speaking', { on: true, text: item.text, interaction: item.interaction === true });
 
   if (c.tts.enabled && c.voice.enabled) {
@@ -1401,8 +1394,8 @@ function toggleRecord() {
 /* ══════════ 常驻聆听 ══════════
  * 设计要点（用户明确要求）：
  *   · 麦克风与识别常开（系统 ASR，端侧），但这不等于一直在调模型
- *   · 只有「听到一句人话」或「WorkBuddy 有事件」时才调 LLM，空闲时零调用
- *   · 娃娃自己在说话时 mute 掉采集，避免自听自答
+ *   · 有效语音才进入已有前台模型请求，任务提醒本地处理
+ *   · AEC/文字回声过滤与说话人初筛都在本地，保持可打断
  */
 let alwaysOn = false;
 let asrStartedAt = 0;    // 上一次 ASR 进程起来的时刻：用来判"秒死"并退避
@@ -1438,6 +1431,7 @@ function startListen(reason) {
   if (!fs.existsSync(ASR_BIN)) { send('listen', { on: false, error: '缺少 bin/asr' }); return; }
   alwaysOn = true;
   send('listen', { on: true, reason: reason || '' });
+  if (asr.running && !asr.always) asr.kill({ discard: true });
   if (asr.running) return;
   asrStatus = { ...asrStatus, captureReady: false, note: 'starting' };
   send('asrStatus', asrStatus);
@@ -1870,8 +1864,7 @@ ipcMain.on('pet:body-ready', (e, event) => {
 });
 
 ipcMain.on('pet:stop-speak', () => {
-  // 点她一下 = 打断。没有回声消除时，主人"开口"她听不见（说着话是闭麦的），
-  // 所以必须给一个不需要她听见的打断方式 —— 点一下最直觉。
+  // 点击始终可打断，也供语音没有正确识别时直接收声。
   if (speaking || speechQueue.length || busy) {
     log('[speak] 主人点了一下，收声');
     stopSpeaking('click'); voiceTurns.reset();
@@ -2951,7 +2944,7 @@ let shutdownStarted = false, shutdownFlushed = false;
 app.on('before-quit', event => {
   connection.close(); speakerFilter.cancel(); embodiment.close();
   for (const controller of avatarDescriptionPending.values()) controller.abort();
-  clearInterval(maintenanceTimer); clearInterval(supervisionTimer); clearInterval(dragTimer); clearTimeout(positionSaveTimer);
+  clearInterval(maintenanceTimer); clearInterval(supervisionTimer); clearTimeout(positionSaveTimer);
   quitting = true;
   autonomy?.pause(); secretary?.close(); clearTimeout(taskReportTimer); delegationMonitor?.stop();
   vaultKeyAbort?.abort();

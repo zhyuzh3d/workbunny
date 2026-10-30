@@ -1,6 +1,21 @@
 'use strict';
 const { test } = require('node:test'), assert = require('node:assert/strict');
 const { layoutWindow } = require('../src/main/window-geometry');
+test('actual drag IPC preserves a fast initial displacement and ignores other windows', () => {
+  const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
+  const source = fs.readFileSync(path.resolve('src/main/index.js'), 'utf8'), handlers = {};
+  const sender = {}, area = { x: 0, y: 25, width: 1920, height: 1080 }; let saves = 0;
+  const ctx = { win: { webContents: sender }, windowLayout: layoutWindow({ x: 100, y: 75, width: 832, height: 800 }, area),
+    ipcMain: { on: (name, fn) => { handlers[name] = fn; } }, saveWindowPosition: () => saves++,
+    placeWindow: rect => { ctx.windowLayout = layoutWindow(rect, area); } };
+  vm.runInNewContext(source.slice(source.indexOf('let dragAnchor = null;'), source.indexOf('/* ── 事件推给渲染层')), ctx);
+  const drag = handlers['pet:drag']; drag({ sender: {} }, { type: 'start', x: 400, y: 500 });
+  drag({ sender }, { type: 'move', x: 400, y: -50 }); assert.equal(ctx.windowLayout.logical.y, 75);
+  drag({ sender }, { type: 'start', x: 400, y: 500 }); drag({ sender }, { type: 'move', x: 400, y: -50 });
+  assert.equal(ctx.windowLayout.logical.y, -475); assert.equal(ctx.windowLayout.bounds.y, 25); assert(ctx.windowLayout.viewport.offsetY < 0);
+  drag({ sender }, { type: 'end' }); assert.equal(saves, 1);
+  drag({ sender }, { type: 'move', x: 400, y: 0 }); assert.equal(ctx.windowLayout.logical.y, -475);
+});
 test('a large logical canvas can move above the menu bar without losing its bottom anchor', () => {
   const area={x:0,y:32,width:1280,height:688};
   const result=layoutWindow({x:200,y:-180,width:832,height:800},area);

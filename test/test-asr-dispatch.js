@@ -56,3 +56,11 @@ test('self echo is filtered throughout a long playback and its ending tail',()=>
  ctx.speaking=false;ctx.lastSpokeAt=at;at+=2000;assert(ctx.recentEcho('仍然不能把自己的声音当作用户插话'));
  at+=1000;assert(!ctx.recentEcho('已经播放了三十秒的长句'),'a later owner repetition is admitted');
 });
+test('switching from one-shot recording to continuous listening replaces the recognizer generation',()=>{
+ const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');let killed=0,started=0;
+ const asr={running:true,always:false,kill(opts){assert(opts.discard);killed++;this.running=false;},start(opts){assert(opts.always);started++;this.running=true;this.always=true;}};
+ const ctx={asr,asrMode:'continuous',storageBusy:false,screenLocked:false,memory:{ready:true},alwaysOn:false,systemPreferences:{getMediaAccessStatus:()=> 'granted'},
+  config:{load:()=>({memory:{enabled:true},voice:{alwaysListen:true}})},fs:{existsSync:()=>true},ASR_BIN:'fixture',send(){},log(){},Date,asrStatus:{},asrStartedAt:0,asrOpts:always=>({always})};
+ vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function startListen('),source.indexOf('function stopListen(')),ctx);
+ ctx.startListen('test');assert.equal(killed,1);assert.equal(started,1);assert(ctx.alwaysOn);ctx.startListen('again');assert.equal(started,1);
+});

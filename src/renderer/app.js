@@ -739,7 +739,7 @@ let interactiveState = false;
 function updateHit(e) {
   const overUi = !!(e.target && e.target.closest &&
     e.target.closest('#ear, #dock, #bubble, #settings, #motions, #fab, #rec, #activity, button, input, textarea'));
-  let inside = overUi;
+  let inside = dragging || overUi;
   if (!inside) {
     const r = lastHit;
     if (r) inside = e.clientX >= r.x0 && e.clientX <= r.x1 && e.clientY >= r.y0 && e.clientY <= r.y1;
@@ -753,22 +753,27 @@ function updateHit(e) {
 /* ═══════════ 拖拽 ═══════════ */
 let dragging = false;
 let dragMoved = false;
-let downAt = null;
+let downAt = null, dragPoint = null, dragFrame = 0;
 
-stage.addEventListener('mousedown', (e) => {
+stage.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
+  stage.setPointerCapture(e.pointerId);
   dragging = true;
   dragMoved = false;
   downAt = { x: e.screenX, y: e.screenY };
 });
-addEventListener('mousemove', (e) => {
+addEventListener('pointermove', (e) => {
   if (dragging) {
     const dx = e.screenX - downAt.x;
     const dy = e.screenY - downAt.y;
     if (!dragMoved && Math.hypot(dx, dy) > 4) {
       dragMoved = true;
-      pet.drag('start');
+      pet.drag({ type: 'start', ...downAt });
       document.body.style.cursor = 'grabbing';
+    }
+    if (dragMoved) {
+      dragPoint = { type: 'move', x: e.screenX, y: e.screenY };
+      if (!dragFrame) dragFrame = requestAnimationFrame(() => { dragFrame = 0; if (dragPoint) pet.drag(dragPoint); });
     }
   }
   // 眼球跟随
@@ -776,16 +781,19 @@ addEventListener('mousemove', (e) => {
   pointer.y = -(((e.clientY - stageViewport.offsetY) / stageViewport.height) * 2 - 1);
   updateHit(e);
 });
-addEventListener('mouseup', (e) => {
+addEventListener('pointerup', (e) => {
   if (dragging) {
     dragging = false;
-    if (dragMoved) pet.drag('end');
+    if (dragMoved) { pet.drag({ type: 'move', x: e.screenX, y: e.screenY }); pet.drag({ type: 'end' }); }
     else onPetClick(e);
     dragMoved = false;
     document.body.style.cursor = 'default';
+    cancelAnimationFrame(dragFrame); dragFrame = 0; dragPoint = null; updateHit(e);
   }
 });
+addEventListener('pointercancel', () => { dragging = false; dragMoved = false; cancelAnimationFrame(dragFrame); dragFrame = 0; dragPoint = null; pet.drag({ type: 'end' }); document.body.style.cursor = 'default'; });
 stage.addEventListener('mouseleave', () => {
+  if (dragging) return;
   if (interactiveState) { interactiveState = false; pet.hit(false); }
 });
 
@@ -1044,9 +1052,7 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeDock();
 });
 
-/* 点她一下 = 打断她。
- * 为什么需要这个：她说话时是闭麦的（没有可用的系统回声消除），所以"主人开口"
- * 她根本听不见 —— 语音打断在物理上不可能。点一下是最直觉、最可靠的替代。 */
+/* 点击角色也能立即打断，不必等待语音识别。 */
 const stageEl = document.getElementById('stage');
 let lastInterruptedAt = -Infinity;
 stageEl.addEventListener('pointerdown', () => {
