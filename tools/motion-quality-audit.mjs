@@ -7,7 +7,7 @@ import { analyzeMotionTracks, processMotionClip } from '../src/renderer/motion-q
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dir = path.join(root, 'src/renderer/assets/motions');
-const output = path.join(root, 'tools/motion-quality-report.json');
+const output = path.join(root, '.cache/motion-quality-report.json');
 const COMPONENTS = { 5120: ['getInt8', 1], 5121: ['getUint8', 1], 5122: ['getInt16', 2], 5123: ['getUint16', 2], 5125: ['getUint32', 4], 5126: ['getFloat32', 4] };
 const WIDTHS = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
 const { createRequire } = await import('node:module');
@@ -90,5 +90,6 @@ const report = { generatedAt: new Date().toISOString(), source: 'src/renderer/as
     inMemoryRepairs: Object.fromEntries(['normalizedQuaternionKeys', 'quaternionSignFlips', 'isolatedSpikes', 'loopSeamsSmoothed'].map((key) => [key, motions.reduce((n, m) => n + (m.repairs?.[key] || 0), 0)])) },
   motions };
 if (!report.totals.quaternionTracks || !report.totals.positionTracks) throw new Error('Audit failed: no quaternion/position tracks classified');
+fs.mkdirSync(path.dirname(output), { recursive: true });
 fs.writeFileSync(output, `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify(report.totals, null, 2));

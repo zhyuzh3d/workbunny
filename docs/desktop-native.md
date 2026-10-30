@@ -16,4 +16,4 @@ WorkBuddy 5.9.2 的空编辑器把提示文案包含在 AXValue 中，空段落�
 
 主进程保持 AppKit 主运行循环活跃，同时在后台读取 JSONL，避免空闲时 NSWorkspace 前台应用通知积压导致读取陈旧前台信息。首次屏幕录制授权由 macOS 隐私设置管理，程序无法绕过。`permissions` 只查询状态；显式调用 `requestPermission` 后，系统可能要求用户在“系统设置 → 隐私与安全性”中允许 workbunny，并重新启动应用。权限被拒绝时，截图和输入接口返回可读错误。
 
-构建：`zsh tools/build-desktop.sh`。协议单测：`node --test tools/test-desktop-native.js`。合成 OCR 集成验证：`node tools/test-desktop-ocr.cjs`（脚本以独立临时用户目录启动 Electron offscreen 并生成 PNG，不截图桌面）。打包集成还需在 `tools/package.sh` 构建并复制 `bin/desktop`，对其签名后再签外层 app；主进程集成应将 `DesktopNative` 放入受信 IPC 处理器中，仅转发固定操作字段，并由调用方按用户授权定义 WorkBuddy 派发验收流程。
+构建：`zsh tools/build-desktop.sh`。协议单测：`node --test test/test-desktop-native.js`。合成 OCR 集成验证：`node test/test-desktop-ocr.cjs`（脚本以独立临时用户目录启动 Electron offscreen 并生成 PNG，不截图桌面）。打包集成还需在 `tools/package.sh` 构建并复制 `bin/desktop`，对其签名后再签外层 app；主进程集成应将 `DesktopNative` 放入受信 IPC 处理器中，仅转发固定操作字段，并由调用方按用户授权定义 WorkBuddy 派发验收流程。

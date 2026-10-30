@@ -7,7 +7,8 @@
   "private": true,
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --dev"
+    "dev": "electron . --dev",
+    "test": "node --test --test-concurrency=1 test/*.js test/*.mjs"
   },
   "devDependencies": {
     "electron": "44.10.0"

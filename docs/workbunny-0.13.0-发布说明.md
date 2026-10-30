@@ -32,6 +32,6 @@ macOS 13/14/15、另一台Mac首次下载与权限/钥匙串、真实云TTS账�
 
 安装与兼容：[`workbunny-macOS安装与兼容.md`](workbunny-macOS安装与兼容.md)
 
-验收记录：[`workbunny-0.13.0-验收.json`](workbunny-0.13.0-验收.json)
+开发与测试入口：[`architecture.md`](architecture.md)。历史验收过程保留在 v0.13.0 标签及对应源码快照中。
 
 源代码采用MIT；第三方模型、动作及标志保留各自条款。本次不重写旧Git历史；源码快照不含 `.git` 和个人资源。

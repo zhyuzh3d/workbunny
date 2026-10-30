@@ -7,9 +7,9 @@ const built=JSON.parse(fs.readFileSync(path.join(bundle,'resources-manifest.json
 const stage=path.join(root,'dist',`workbunny-${version}-source`),archive=stage+'.zip';
 fs.rmSync(stage,{recursive:true,force:true});fs.mkdirSync(stage,{recursive:true});const files=new Set(built.files.map(f=>f.path));
 function walk(dir){for(const e of fs.readdirSync(path.join(root,dir),{withFileTypes:true})){
- const p=dir+'/'+e.name;if(e.isDirectory())walk(p);else if(e.isFile()&&!e.name.startsWith('.')&&/\.(js|cjs|mjs|py|sh|swift|json|md|txt)$/.test(p))files.add(p);
+ const p=dir+'/'+e.name;if(e.isDirectory())walk(p);else if(e.isFile()&&!e.name.startsWith('.')&&/\.(js|cjs|mjs|py|sh|swift|json|md|txt|html|css)$/.test(p))files.add(p);
 }}
-for(const dir of ['tools','native','docs','licenses','.github'])walk(dir);
+for(const dir of ['tools','test','native','docs','licenses','.github'])walk(dir);
 for(const p of ['README.md','package-lock.json','resources-manifest.json','.gitignore'])files.add(p);
 const inventory=[];
 for(const p of [...files].sort()){
