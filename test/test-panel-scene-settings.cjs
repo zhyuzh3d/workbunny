@@ -30,6 +30,9 @@ let settings = {
   motions: { disabled: [] },
 };
 const windows = [];
+settings.tts.http = {profile:require('../src/main/tts-http-profile').template('binary'),secrets:{authorization:'fixture-http-secret-last',password:'private-password'},params:{}};
+settings.tts.http.profile.headers['X-Password'] = {$secret:'password'};
+const publicSettings = () => require('../src/main/config').publicConfig(settings);
 const modelCatalog = require('../src/main/model-catalog').createCatalog();
 modelCatalog.setPath(path.join(tmp, 'models.json'));
 let modelBase, rejectModels = false, modelRequests = 0;
@@ -67,7 +70,7 @@ function merge(target, patch) {
 function applyConfig(patch) {
   settings = merge(settings, patch);
   settings.settingsRevision++;
-  return clone(settings);
+  return publicSettings();
 }
 
 ipcMain.handle('panel-fixture:control', (_event, action, patch) => {
@@ -86,7 +89,7 @@ ipcMain.handle('panel-fixture:api', async (_event, name, ...args) => {
   if (name === 'selfSettings') { settings.buddy.profile = args[0].identity; return { revision: settings.settingsRevision, settings: args[0] }; }
   if (name === 'portability') return { connection: { ready: true, note: '已连接' }, storage: { ok: true, dir: '/fixture/vault' }, asrMode: 'continuous', capabilities: {} };
   if (name === 'ttsHTTPTemplate') return require('../src/main/tts-http-profile').template(args[0]);
-  if (name === 'panelInit') return { config: clone(settings), avatars: [{ key: 'fixture-avatar', label: '测试角色' }], avatar: 'fixture-avatar',
+  if (name === 'panelInit') return { config: publicSettings(), avatars: [{ key: 'fixture-avatar', label: '测试角色' }], avatar: 'fixture-avatar',
     motions: [], motionGroups: [], asr: { speech: 3, micSystem: 'granted' } };
   if (name === 'brainInfo') return { providers: ['deepseek','openai','grok'].map(id => ({id,label:id,baseURL:modelBase+'/'+id+'/v1'})),
     workbuddyModels: [{ id: 'hy3', label: 'Hy3', thinking: [{ id: 'low', label: '低' }] }], workbuddyThinking: [{ id: 'low', label: '低' }], thinkingLevels: [] };
@@ -144,6 +147,19 @@ async function main() {
   assert.equal(await scene(), 'work');
   assert.equal(settings.memory.scene, 'work');
 
+  assert.equal(await evalIn(win, 'document.getElementById("rmKey").parentElement.querySelector(".credential-preview").textContent'), 'tts••••••••ret');
+  await evalIn(win, 'document.getElementById("rmKey").value="fixture-chp-secret-1234";document.getElementById("rmKey").dispatchEvent(new Event("input"));document.getElementById("rmKey").dispatchEvent(new Event("change"))');
+  await waitFor(() => Promise.resolve(settings.tts.apiKey==='fixture-chp-secret-1234'),'raw CHP key saved');
+  await waitFor(() => evalIn(win, 'document.getElementById("rmKey").parentElement.querySelector(".credential-preview").textContent==="fixt••••••••1234"'),'saved key preview');
+  await click(win,'saveBtn');
+  await waitFor(() => evalIn(win, 'document.getElementById("sfNote").textContent.includes("已保存")'),'unchanged key saved');
+  assert.equal(settings.tts.apiKey,'fixture-chp-secret-1234','preview must never overwrite the saved key');
+  await evalIn(win, 'document.getElementById("doubaoKey").value="fixture-doubao-secret-last";document.getElementById("doubaoKey").dispatchEvent(new Event("input"));document.getElementById("saveBtn").click()');
+  await waitFor(() => Promise.resolve(settings.tts.doubao?.apiKey==='fixture-doubao-secret-last'),'raw Doubao key saved');
+  await waitFor(() => evalIn(win,'document.getElementById("doubaoKey").parentElement.querySelector(".credential-preview").textContent==="fixt••••••••last"'),'saved Doubao preview');
+
+  assert.equal(await evalIn(win, '!!document.querySelector("#httpSecrets [data-secret=password]").closest(".credential-field")'), false,'password remains a native fully masked field');
+
   await evalIn(win, 'document.querySelector("[data-t=brain]").click()');
   const modelIds = () => evalIn(win, '[...document.getElementById("brainModel").options].map(o=>o.value).filter(Boolean)');
   for (const provider of ['grok','deepseek','openai']) {
@@ -151,6 +167,8 @@ async function main() {
     assert.deepEqual(await modelIds(), [], 'no predefined or saved-model placeholder before fetch: '+provider);
     assert.match(await evalIn(win, 'document.getElementById("brainHint").textContent'), /填写密钥/, 'no capability hint from a model that has not been fetched');
     await evalIn(win, `document.getElementById('brainKeyInput').value='fixture-'+${JSON.stringify(provider)};document.getElementById('brainKeyInput').dispatchEvent(new Event('input'))`);
+    assert.match(await evalIn(win,'document.getElementById("brainKeyInput").parentElement.querySelector(".credential-preview").textContent'), /^fixt•+/, 'pasted key immediately shows a partial preview');
+    if (provider === 'grok') fs.writeFileSync(path.resolve('.cache/test-credential-preview.png'), (await win.webContents.capturePage()).toPNG());
     await click(win,'brainModelsBtn');
     await waitFor(() => evalIn(win, '!document.getElementById("brainModelsBtn").disabled'), 'model fetch '+provider);
     assert.deepEqual(await modelIds(), [provider+'-actual-first',provider+'-actual-second']);
@@ -170,6 +188,12 @@ async function main() {
   }
   assert.equal(modelRequests, 9, 'three providers used real Electron network requests and retry');
   assert.equal(await evalIn(win,'document.getElementById("asrNetworkRow").hidden'), true);
+  await evalIn(win, 'document.getElementById("httpURL").value="http://fixture";const k=document.querySelector("#httpSecrets [data-secret=authorization]");k.value="fixture-http-new-key-last";k.dispatchEvent(new Event("input"));document.getElementById("httpSave").click()');
+  await waitFor(() => evalIn(win,'document.getElementById("httpStatus").textContent.includes("已保存并使用")'),'HTTP secret saved');
+  assert.equal(settings.tts.http.secrets.authorization,'fixture-http-new-key-last');
+  assert.equal(settings.tts.http.secrets.password,'private-password');
+  assert(!Object.hasOwn(calls.at(-1).tts.http,'secretPreviews'));
+  assert.equal(await evalIn(win,'document.querySelector("#httpSecrets [data-secret=authorization]").parentElement.querySelector(".credential-preview").textContent'),'fixt••••••••last');
 
   await win.close();
   server.close();

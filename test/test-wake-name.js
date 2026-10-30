@@ -20,12 +20,16 @@ test('the actual utterance handler rejects unnamed speech before LLM, memory or 
   let skips=0;await ctx.handleUtterance('旁边的人说请安静',{skip:()=>skips++});assert.equal(skips,1);assert.equal(requests.length,0);assert(!events.some(e=>e[0]==='chat'));
   await ctx.handleUtterance('芊芊，帮我看看',{isCurrent:()=>true});assert.equal(requests.length,1);assert(requests[0].judge);
 });
-test('tray icon never hides the pet and text input opens an interactive focused dock',()=>{
+test('tray text input and visibility labels toggle with actual state; clicking the icon never hides the pet',()=>{
  const source=fs.readFileSync(path.resolve('src/main/index.js'),'utf8');let shown=0,hidden=0,focused=0,interactive=false,visible=true,icon;
  const ctx={config:{load:()=>({buddy:{name:'倩倩'},asr:{},voice:{enabled:true},monitor:{},window:{scale:1}})},
- win:{isVisible:()=>visible,focus:()=>focused++},Menu:{buildFromTemplate:x=>x},avatars:{scan:()=>[]},clampScale:v=>v,SCALES:[1],SCALE_LABELS:{1:'100%'},scopePolicy:{LABELS:{life:'生活',work:'工作',private:'私聊'}},currentScene:()=> 'life',asrStatus:{speech:3,mic:true},
- showWindow:()=>shown++,hideWindow:()=>hidden++,setInteractive:v=>interactive=v,send:(type)=>assert.equal(type,'ask'),tray:{on:(event,fn)=>{assert.equal(event,'click');icon=fn;}}};
+ win:{isVisible:()=>visible,focus:()=>focused++},textInputOpen:false,Menu:{buildFromTemplate:x=>x},avatars:{scan:()=>[]},clampScale:v=>v,SCALES:[1],SCALE_LABELS:{1:'100%'},scopePolicy:{LABELS:{life:'生活',work:'工作',private:'私聊'}},currentScene:()=> 'life',asrStatus:{speech:3,mic:true},
+ showWindow:()=>{shown++;visible=true;},hideWindow:()=>{hidden++;visible=false;},setInteractive:v=>interactive=v,send:(type,value)=>{assert.equal(type,'ask');ctx.textInputOpen=value.open;},tray:{on:(event,fn)=>{assert.equal(event,'click');icon=fn;}}};
  vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function buildTrayMenu()'),source.indexOf('function rebuildTray()')),ctx);
- const menu=ctx.buildTrayMenu();assert(!menu.some(m=>/按住说话|说句话/.test(m.label||'')));menu.find(m=>m.label==='文字输入').click();assert(interactive);assert.equal(focused,1);
- const line=source.split('\n').find(l=>l.includes("tray.on('click',"));vm.runInContext(line,ctx);icon();assert.equal(hidden,0);visible=false;icon();assert.equal(shown,2);
+ const menu=ctx.buildTrayMenu();assert(!menu.some(m=>/按住说话|说句话/.test(m.label||'')));menu.find(m=>m.label==='打开文字输入').click();assert(interactive);assert.equal(focused,1);
+ ctx.buildTrayMenu().find(m=>m.label==='关闭文字输入').click();assert.equal(ctx.textInputOpen,false);
+ ctx.buildTrayMenu().find(m=>m.label==='让它隐藏').click();assert.equal(visible,false);
+ ctx.textInputOpen=true;assert(ctx.buildTrayMenu().some(m=>m.label==='打开文字输入'));
+ ctx.buildTrayMenu().find(m=>m.label==='叫它出来').click();assert.equal(visible,true);
+ const hides=hidden;const line=source.split('\n').find(l=>l.includes("tray.on('click',"));vm.runInContext(line,ctx);icon();assert.equal(hidden,hides);visible=false;icon();assert.equal(shown,3);
 });

@@ -434,7 +434,11 @@ function preview(patch) { return deepMerge(load(), patch || {}); }
 function publicConfig(c = load()) {
   const out = JSON.parse(JSON.stringify(c));
   for (const section of [out.brain, out.llm, out.tts, out.tts?.doubao, ...Object.values(out.brain?.profiles || {})]) {
-    if (section && Object.hasOwn(section, 'apiKey')) { section.hasApiKey = !!section.apiKey; delete section.apiKey; }
+    if (section && Object.hasOwn(section, 'apiKey')) {
+      section.hasApiKey = !!section.apiKey;
+      section.apiKeyPreview = require('../shared/credential-mask').mask(section.apiKey);
+      delete section.apiKey;
+    }
   }
   if (out.tts?.http) out.tts.http = require('./tts-http-profile').publicHTTP(c.tts.http);
   return out;

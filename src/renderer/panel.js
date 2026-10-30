@@ -2,6 +2,7 @@ import '../shared/motion-core.js';
 import { mountPortability } from './portability-ui.js';
 import { autoGrow } from './auto-grow.js';
 import { createSelfSettings } from './self-settings.js';
+import { paintCredential } from './credential-input.js';
 /**
  * 独立窗口（设置 / 动作库）的逻辑。
  *
@@ -291,7 +292,7 @@ function fillSelect(el, items, cur) {
 }
 
 let brainDraft = null;
-const KEY_MASK = '••••••••';
+const KEY_MASK = globalThis.BunnyCredential.MASK;
 function initBrainDraft() {
   const b = cfg.brain || {};
   brainDraft = {
@@ -356,7 +357,7 @@ function paintBrain() {
   $('brainModel').disabled = !models.length;
   if (!wb && models.length) p.modelId = $('brainModel').value;
   $('brainURL').value = p.baseURL || provider?.baseURL || '';
-  $('brainKeyInput').value = p.apiKey || (p.hasApiKey ? KEY_MASK : '');
+  paintCredential($('brainKeyInput'), p.apiKey || (p.hasApiKey ? KEY_MASK : ''), {preview:p.apiKeyPreview});
   $('brainHint').textContent = wb ? '使用当前登录账号的模型。思考选项按所选模型提供；额度以 WorkBuddy 账号为准。' : provider?.hint || '';
   paintThinking(); paintModelFetch(); paintBrainHint();
 }
@@ -461,7 +462,7 @@ let doubaoCatalogVisible = false;
 function paintDoubao() {
   const defaults = TTSI.doubao || {}, c = cfg.tts.doubao || {};
   fillSelect($('doubaoModel'), defaults.models || [], pendingValue('tts.doubao.model', c.model || 'seed-tts-2.0'));
-  $('doubaoKey').value = pendingValue('tts.doubao.apiKey', c.hasApiKey ? KEY_MASK : '');
+  paintCredential($('doubaoKey'), pendingValue('tts.doubao.apiKey', c.hasApiKey ? KEY_MASK : ''), {preview:c.apiKeyPreview});
   $('doubaoURL').value = pendingValue('tts.doubao.url', c.url || defaults.url || '');
   $('doubaoVoice').value = pendingValue('tts.doubao.voice', c.voice || '');
   const cloned = $('doubaoModel').value === 'seed-icl-2.0';
@@ -572,7 +573,7 @@ function syncTts(c, acknowledged = []) {
   for (const [id, path, fallback] of [['setName', 'buddy.name', 'baby'], ['setOwnerName', 'buddy.ownerName', '主人'], ['rmUrl', 'tts.baseURL', '']])
     if (!edits.has(path)) $(id).value = readPath(c, path) ?? fallback;
   paintSceneProfile(c);
-  if (!edits.has('tts.apiKey')) $('rmKey').value = c.tts.hasApiKey ? KEY_MASK : '';
+  if (!edits.has('tts.apiKey')) paintCredential($('rmKey'), c.tts.hasApiKey ? KEY_MASK : '', {preview:c.tts.apiKeyPreview});
   $('setAlways').checked = pendingValue('voice.alwaysListen', false);
   $('setJudge').checked = pendingValue('asr.judge', true);
   $('setWakeOnly').checked = pendingValue('asr.wakeOnly', false);
@@ -612,7 +613,7 @@ function fillForm() {
     chpVoice: t.chp?.voice || '',
   };
   $('rmUrl').value = t.baseURL || '';
-  $('rmKey').value = t.hasApiKey ? '••••••••' : '';
+  paintCredential($('rmKey'), t.hasApiKey ? KEY_MASK : '', {preview:t.apiKeyPreview});
   chpCatalog = TTSI.chp || null;
   paintAvatars();
   paintScale();

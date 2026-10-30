@@ -61,3 +61,15 @@ input[type="checkbox"]:checked { background:#5b805f; border-color:#5b805f; }
 input[type="checkbox"]:checked::before { transform:translateX(16px); }
 input[type="checkbox"]:focus-visible { box-shadow:0 0 0 2px rgba(74,80,88,.18); }
 input[type="checkbox"]:disabled { opacity:.4; cursor:default; }
+
+.row > .credential-field, .credential-field {
+  position:relative; display:block; flex:1 1 auto; min-width:0; color:var(--ink);
+}
+.credential-field > input { width:100%; box-sizing:border-box; color:transparent; caret-color:var(--ink); }
+.credential-field.has-preview > input::placeholder { color:transparent; }
+.credential-field > .credential-preview {
+  position:absolute; left:10px; right:10px; top:50%; transform:translateY(-50%);
+  overflow:hidden; white-space:nowrap; text-overflow:ellipsis; pointer-events:none;
+  color:var(--ink); font:12px/1.5 var(--font);
+}
+.credential-field > input:disabled + .credential-preview { opacity:.5; }

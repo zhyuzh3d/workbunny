@@ -84,6 +84,8 @@ function template(kind = 'jsonl') {
 }
 function publicHTTP(value = {}) {
   const p = structuredClone(value); const secrets = p.secrets || {};
+  const { mask, isPassword } = require('../shared/credential-mask');
+  p.secretPreviews = Object.fromEntries(Object.entries(secrets).filter(([k]) => !isPassword(k)).map(([k, v]) => [k, mask(v)]));
   p.hasSecrets = Object.fromEntries(Object.entries(secrets).map(([k, v]) => [k, !!v])); delete p.secrets;
   // Imported literal headers are credentials too. Rebind at save, never echo.
   for (const headers of [p.profile?.headers, ...Object.values(p.profile?.catalogs || {}).map(c => c.headers)]) if (headers) for (const [k, v] of Object.entries(headers)) if (typeof v === 'string') headers[k] = { $secret: 'header_' + k.replace(/-/g, '_') };
@@ -93,6 +95,7 @@ function normalize(value, prior = {}) {
   const out = structuredClone(value); validate(out.profile, { allowEmptyURL: true });
   out.secrets = { ...prior.secrets, ...out.secrets };
   delete out.hasSecrets;
+  delete out.secretPreviews;
   for (const headers of [out.profile.headers, ...Object.values(out.profile.catalogs || {}).map(c => c.headers)]) for (const [k, v] of Object.entries(headers || {})) if (typeof v === 'string') {
     const name = 'header_' + k.replace(/-/g, '_'); out.secrets[name] = v; out.profile.headers[k] = { $secret: name };
   }

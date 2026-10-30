@@ -85,6 +85,7 @@ const connection = new (require('./workbuddy-connection').WorkBuddyConnection)({
 
 let win = null;
 let tray = null;
+let textInputOpen = false;
 let monitor = null;
 let monitorScoped = { view: { running: [], done: [], primary: null }, text: '' };
 let monitorUpdateToken = 0;
@@ -1295,8 +1296,11 @@ function buildTrayMenu() {
   return Menu.buildFromTemplate([
     { label: `${c.buddy.name} · ${vis ? '在屏幕上' : '已收起'}`, enabled: false },
     { type: 'separator' },
-    { label: vis ? '收起' : '叫出来', click: () => (vis ? hideWindow() : showWindow()) },
-    { label: '文字输入', click: () => { showWindow(); setInteractive(true); win.focus(); send('ask', { focus: true }); } },
+    { label: vis ? '让它隐藏' : '叫它出来', click: () => (win?.isVisible() ? hideWindow() : showWindow()) },
+    { label: vis && textInputOpen ? '关闭文字输入' : '打开文字输入', click: () => {
+      if (win?.isVisible() && textInputOpen) send('ask', { open:false });
+      else { showWindow(); setInteractive(true); win.focus(); send('ask', { open:true, focus:true }); }
+    } },
     { type: 'separator' },
     { label: '动作列表…', click: () => { showWindow(); openPanel('motions'); } },
     { label: '记忆与关系…', click: () => openPanel('memory') },
@@ -1972,6 +1976,10 @@ ipcMain.handle('pet:probe', async () => {
 });
 
 ipcMain.on('pet:hit', (_e, v) => setInteractive(!!v));
+ipcMain.on('pet:input-state', (event, open) => {
+  if (event.sender !== win?.webContents || textInputOpen === (open === true)) return;
+  textInputOpen = open === true; rebuildTray();
+});
 ipcMain.on('pet:log', (_e, m) => log('[ui] ' + String(m).slice(0, 2400)));
 ipcMain.on('pet:audio-done', (e, value) => {
   if (e.sender !== win?.webContents || !value || value.id !== activeAudioId || !speaking) return;

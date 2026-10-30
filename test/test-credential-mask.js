@@ -1,0 +1,20 @@
+'use strict';
+const {test} = require('node:test'), assert = require('node:assert/strict');
+const {mask} = require('../src/shared/credential-mask');
+const config = require('../src/main/config'), http = require('../src/main/tts-http-profile');
+test('public settings expose only credential ends, retain raw keys internally, and keep passwords fully private', () => {
+  const key = 'sk-test-1234567890-abcdef', password = 'password-must-stay-private';
+  const value = {brain:{profiles:{grok:{apiKey:key}}},tts:{apiKey:key,doubao:{apiKey:key},http:{profile:http.template('jsonl'),secrets:{authorization:key,password}}}};
+  const pub = config.publicConfig(value);
+  assert.equal(pub.brain.profiles.grok.apiKeyPreview,'sk-t••••••••cdef');
+  assert.equal(pub.tts.apiKeyPreview,pub.brain.profiles.grok.apiKeyPreview);
+  assert.equal(pub.tts.doubao.apiKeyPreview,pub.tts.apiKeyPreview);
+  assert.equal(pub.tts.http.secretPreviews.authorization,pub.tts.apiKeyPreview);
+  assert(!Object.hasOwn(pub.tts.http.secretPreviews,'password'));
+  assert(!JSON.stringify(pub).includes(key)); assert(!JSON.stringify(pub).includes(password));
+  assert.equal(value.brain.profiles.grok.apiKey,key);
+  const saved = http.normalize({...pub.tts.http,secrets:{authorization:'replacement-key'}},value.tts.http);
+  assert.equal(saved.secrets.authorization,'replacement-key'); assert.equal(saved.secrets.password,password);
+  assert(!Object.hasOwn(saved,'secretPreviews')); assert(!Object.hasOwn(saved,'hasSecrets'));
+  assert.equal(mask(''),''); for(const text of ['a','ab','abc','abcdef']) assert(!mask(text).includes(text));
+});

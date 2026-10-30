@@ -1,3 +1,4 @@
+import { paintCredential } from './credential-input.js';
 export async function mountPortability(pet) {
   const $ = id => document.getElementById(id);
   let state = await pet.portability(), initial = await pet.panelInit(), config = initial.config;
@@ -39,6 +40,7 @@ export async function mountPortability(pet) {
       input.type = 'password'; input.autocomplete = 'off'; input.dataset.secret = name; input.value = draftSecrets.get(name) || '';
       input.placeholder = stored.hasSecrets?.[name] ? '已保存，留空保持' : name === 'authorization' ? '例如 Bearer 加密钥' : '请输入凭据';
       row.append(label, input); $('httpSecrets').append(row);
+      if (!globalThis.BunnyCredential.isPassword(name)) paintCredential(input, input.value, {preview:stored.secretPreviews?.[name], preserveEmpty:true});
     }
   }
   renderProfile();

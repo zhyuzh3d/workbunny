@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('pet', {
   quit: () => ipcRenderer.send('pet:quit'),
   stopSpeak: () => ipcRenderer.send('pet:stop-speak'),
   composing: active => ipcRenderer.send('pet:composing', { active: active === true }),
+  inputState: open => ipcRenderer.send('pet:input-state', open === true),
   log: (m) => ipcRenderer.send('pet:log', m),
   open: (what) => ipcRenderer.send('pet:open', what),
   openWebSource: url => ipcRenderer.invoke('pet:open-web-source', url),

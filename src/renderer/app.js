@@ -894,6 +894,7 @@ const activity = document.getElementById('activity');
  *   .expand  刚听到话 —— 撑满整窗宽，长了就横向滚动，不省略
  * 一个元素承担全部状态，所以"在听"永远不会跟输入框打架。 */
 let dockMode = 'mini';        // mini | open
+pet.inputState?.(false);
 let listening = false;        // 耳朵开着（常驻聆听）
 let shownHeard = '';          // 「你说 · …」
 let shownState = '';          // pending | ready | reply | done | skip | not-addressed
@@ -983,6 +984,7 @@ function paintLive(text) {
 function openDock() {
   hideBubble();
   dockMode = 'open';
+  pet.inputState?.(true);
   dock.classList.remove('hidden');
   hint.classList.add('hidden');
   // 刚才听到、还没发出去的话带进输入框，主人可以改一改再发
@@ -997,6 +999,7 @@ function closeDock() {
   pet.composing?.(false);
   if (document.activeElement === input) input.blur();
   dockMode = 'mini';
+  pet.inputState?.(false);
   dock.classList.add('hidden');
 }
 
@@ -1571,7 +1574,8 @@ function wire() {
         showBubble('嗓子哑了：' + ev.message, 6000);
         break;
       case 'ask':
-        pet.hit(true); openDock();
+        if (ev.open === false) closeDock();
+        else { pet.hit(true); openDock(); }
         break;
       case 'settings':
         openSettings();
