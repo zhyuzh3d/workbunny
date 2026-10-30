@@ -681,13 +681,13 @@ $('memoryClear').addEventListener('click', async () => {
 });
 
 /* ── 桌面任务 ── */
-let desktopStatus = null, insertPending = false, insertPromise = null, paintedTaskId = null;
+let desktopStatus = null, paintedTaskId = null;
 let resumePendingId = null, resumePreviousStatus = null, resumeTimer = null;
 let workBuddyMonitorSnapshot = null;
 let watchRows = [], watchRequestRevision = 0;
 const watchActionsPending = new Set(), watchFeedback = new Map();
 const PERMISSION_NAMES = { accessibilityTrusted: '辅助功能', screenCaptureAllowed: '屏幕录制', postEventAllowed: '输入控制', accessibility: '辅助功能', screenRecording: '屏幕录制', automation: '自动化', inputMonitoring: '输入监控' };
-const TASK_STATUS_LABELS = { starting: '正在准备', running: '代理操作中', awaiting: '等待 WorkBuddy 开始处理', monitoring: '观察 WorkBuddy', verifying: '核对结果', paused: '代理已暂停', stopped: '代理已暂停', review: '待你确认', accepted: '你已确认', failed: '代理未完成' };
+const TASK_STATUS_LABELS = { starting: '正在准备', running: '代理操作中', awaiting: '等待 WorkBuddy 开始处理', monitoring: '观察 WorkBuddy', verifying: '核对结果', paused: '代理已暂停', stopped: '代理已暂停', cancelled: '已取消', review: '待你确认', accepted: '你已确认', failed: '代理未完成' };
 function taskStatusLabel(status) { return TASK_STATUS_LABELS[status] || labelStatus(status); }
 function taskFieldValue(value) {
   if (typeof value === 'string') return value;
@@ -700,7 +700,7 @@ function taskFieldValue(value) {
 function taskSourceLabel(task) {
   if (task?.inputSource === 'voice') return '口头交代';
   if (task?.inputSource === 'text') return '文字交代';
-  if (task?.inputSource === 'panel' || task?.origin === 'panel') return '手动交代';
+  if (task?.inputSource === 'panel' || task?.origin === 'panel') return '设定任务';
   return '对话交代';
 }
 function taskTargetLabel(target) {
@@ -740,18 +740,19 @@ function paintDesktopStatus(status) {
     clearResumePending(); resumeFeedback = `状态已更新：${taskLabel || '当前代办状态已变化'}`;
   }
   setPill('desktopStatus', task ? taskLabel : running ? '代理操作中' : '空闲', tone);
-  const taskFormOpen = $('taskFormDetails').open;
   const userReview = task?.status === 'review' && task.origin !== 'dialogue';
   const resumable = !!task?.id && task.target === 'workbuddy' && ['paused', 'stopped', 'review'].includes(task.status);
   $('taskStop').disabled = !running;
   $('taskStop').hidden = !running;
   $('taskStart').disabled = running;
-  $('taskStart').hidden = !taskFormOpen;
+  $('taskSetup').disabled = running;
+  $('taskCancel').hidden = !task || ['accepted', 'failed', 'cancelled'].includes(task.status);
+  $('taskCancel').disabled = false;
   $('taskAccept').disabled = !userReview;
   $('taskAccept').hidden = !userReview;
   $('taskResume').hidden = !resumable;
   $('taskResume').disabled = resumePendingId === task?.id;
-  $('desktopActions').hidden = !running && !userReview && !resumable && !taskFormOpen;
+  $('desktopActions').hidden = !running && !userReview && !resumable && $('taskCancel').hidden;
   const stateDetail = task?.status === 'verifying' ? ''
     : task?.status === 'review' && task.origin === 'dialogue' && /正在(?:核对|检查)/.test(task.note || '') ? ''
     : ['accepted', 'failed'].includes(task?.status) ? task.report || ''
@@ -770,11 +771,6 @@ function paintDesktopStatus(status) {
   pauseNoteEl.dataset.characterText = pauseNote;
   pauseNoteEl.hidden = !pauseNote;
   const permissions = desktopStatus.permissions || {};
-  const requiredPermissions = ['accessibilityTrusted', 'screenCaptureAllowed', 'postEventAllowed'];
-  const permissionGranted = key => Array.isArray(permissions)
-    ? permissions.some(item => (item?.id || item?.name) === key && (item.granted === true || item.status === true))
-    : permissions[key] === true;
-  $('permissionsDetails').open = !requiredPermissions.every(permissionGranted);
   const permissionList = $('permissionList'); permissionList.replaceChildren();
   const entries = Array.isArray(permissions) ? permissions.map((item) => [item.name || item.id, item.granted ?? item.status]) : Object.entries(permissions);
   if (!entries.length) permissionList.append(node('div', 'inline-note', '尚未读取权限状态'));
@@ -929,18 +925,14 @@ async function refreshDesktop() {
   catch (error) { setPill('desktopStatus', '状态读取失败', 'bad'); showError(error); }
 }
 $('desktopRefresh').addEventListener('click', refreshDesktop);
-$('taskFormDetails').addEventListener('toggle', () => paintDesktopStatus(desktopStatus || {}));
-$('taskTarget').addEventListener('change', () => {
-  const workbuddy = $('taskTarget').value === 'workbuddy';
-  $('workModelRow').hidden = !workbuddy;
-  $('workbuddyMonitorCard').hidden = !workbuddy;
-  $('taskGoalLabel').textContent = workbuddy ? '交给 WorkBuddy 的任务' : '想在微信做什么';
-  $('taskGoal').placeholder = workbuddy ? '写下要原文交给 WorkBuddy 的任务' : '写下希望在微信文件传输助手完成的操作';
-  $('taskCriteriaLabel').textContent = workbuddy ? '验收条件' : '如何确认完成';
-  $('taskCriteria').placeholder = workbuddy ? '写下可观察的验收条件' : '写下如何从微信画面确认操作结果';
-  $('taskStart').textContent = workbuddy ? '发送给 WorkBuddy' : '开始代办';
-});
-$('workModelRow').hidden = $('taskTarget').value !== 'workbuddy';
+$('taskSetup').onclick = () => { $('taskDialogNote').textContent = ''; $('taskDialog').showModal(); $('taskGoal').focus(); };
+$('taskDialogClose').onclick = () => $('taskDialog').close();
+$('desktopTabs').onclick = event => {
+  const button = event.target.closest('[data-desktop-tab]'); if (!button) return;
+  const tab = button.dataset.desktopTab;
+  for (const el of $('desktopTabs').querySelectorAll('button')) { const on = el === button; el.classList.toggle('active', on); el.setAttribute('aria-selected', String(on)); }
+  for (const el of document.querySelectorAll('[data-desktop-page]')) el.hidden = el.dataset.desktopPage !== tab;
+};
 $('workbuddyOpen').addEventListener('click', async () => {
   $('workbuddyOpen').disabled = true;
   try {
@@ -962,19 +954,21 @@ $('desktopPermission').addEventListener('click', async () => {
   finally { $('desktopPermission').disabled = false; }
 });
 $('taskStart').addEventListener('click', async () => {
-  const goal = $('taskGoal').value;
-  if (!goal.trim()) { showError(new Error('请先写下任务内容')); $('taskGoal').focus(); return; }
-  const criteria = $('taskCriteria').value;
-  if (!criteria.trim()) { showError(new Error('请补充可观察的验收条件')); $('taskCriteria').focus(); return; }
+  const goal = $('taskGoal').value.trim();
+  if (!goal) { $('taskDialogNote').textContent = '请写下要做的事情'; $('taskGoal').focus(); return; }
+  $('taskStart').disabled = true; $('taskDialogClose').disabled = true;
   try {
-    hideError(); $('taskStart').disabled = true;
-    const target = $('taskTarget').value;
-    const result = await api('taskStart', { goal, criteria, target, workModel: $('workModel').value });
-    if (!result?.ok) throw new Error(result?.error || '任务没有开始');
-    setNote('desktopActionNote', target === 'workbuddy' ? '正在向 WorkBuddy 填入并提交任务…' : '微信代理已开始'); await refreshDesktop();
-  } catch (error) { showError(error); }
-  finally { $('taskStart').disabled = !!desktopStatus?.running; }
+    const result = await api('say', '请安排并执行这个任务：\n' + goal);
+    if (!result?.ok) throw new Error(result?.error || '任务没有交代成功');
+    $('taskDialog').close(); $('taskGoal').value = ''; setNote('desktopActionNote', '任务已交代，正在安排。'); await refreshDesktop();
+  } catch (error) { $('taskDialogNote').textContent = error.message; }
+  finally { $('taskStart').disabled = !!desktopStatus?.running; $('taskDialogClose').disabled = false; }
 });
+$('taskCancel').onclick = async () => {
+  $('taskCancel').disabled = true;
+  try { const result = await api('taskCancel'); if (!result?.ok) throw new Error(result?.error || '未能取消'); await refreshDesktop(); setNote('desktopActionNote', '已取消 Bunny 跟进。'); }
+  catch (error) { showError(error); } finally { $('taskCancel').disabled = false; }
+};
 $('taskResume').addEventListener('click', async () => {
   const task = desktopStatus?.task;
   if (!task?.id || !['paused', 'stopped', 'review'].includes(task.status) || resumePendingId) return;
@@ -1007,42 +1001,6 @@ $('taskAccept').addEventListener('click', async () => {
   try { const result = await api('taskAccept'); if (result === false || result?.ok === false) throw new Error(result?.error || '任务没有验收'); setNote('desktopActionNote', '任务已验收'); await refreshDesktop(); }
   catch (error) { showError(error); }
 });
-async function cancelInsert() {
-  if (!insertPending) return;
-  $('desktopInsertCancel').disabled = true;
-  setNote('desktopInsertNote', '正在取消…');
-  try {
-    const result = await api('taskStop');
-    if (result === false || result?.ok === false) throw new Error(result?.error || '取消没有完成');
-    setNote('desktopInsertNote', '已取消输入');
-  } catch (error) { setNote('desktopInsertNote', error.message || '取消失败', true); }
-  finally { $('desktopInsertCancel').disabled = false; }
-}
-$('desktopInsertCancel').addEventListener('click', cancelInsert);
-$('desktopInsert').addEventListener('click', async () => {
-  const text = $('desktopInsertText').value;
-  if (!text.trim()) { setNote('desktopInsertNote', '请先写下要输入的文字', true); $('desktopInsertText').focus(); return; }
-  if (insertPending) return;
-  insertPending = true; $('desktopInsert').disabled = true; $('desktopInsertCancel').hidden = false;
-  setNote('desktopInsertNote', '请求已发出；服务将在 3 秒内输入，请切换焦点。');
-  insertPromise = (async () => {
-    try {
-      const result = await api('desktopInsert', text);
-      if (!result?.ok) throw new Error(result?.error || '没有输入文字');
-      setNote('desktopInsertNote', '文字已输入');
-    } catch (error) { setNote('desktopInsertNote', error.message || '输入失败', true); }
-    finally {
-      insertPending = false; insertPromise = null;
-      $('desktopInsert').disabled = false; $('desktopInsertCancel').hidden = true;
-    }
-  })();
-  await insertPromise;
-});
-
-addEventListener('beforeunload', () => {
-  if (insertPending) { try { api('taskStop'); } catch {} }
-});
-
 if (page === 'memory') {
   initMemory();
   if (new URLSearchParams(location.search).get('section') === 'self') void selfEditor.open();
@@ -1063,7 +1021,6 @@ else {
   refreshDesktop();
   refreshWatches();
   $('watchRefresh').addEventListener('click', refreshWatches);
-  $('workbuddyMonitorCard').hidden = $('taskTarget').value !== 'workbuddy';
   if (typeof window.pet?.init === 'function') Promise.resolve(window.pet.init()).then(result => {
     setCharacterConfig(result?.config);
     paintWorkBuddyMonitor(result?.monitor);

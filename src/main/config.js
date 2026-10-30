@@ -287,7 +287,8 @@ function thinkingFields(provider, model, thinking) { return modelCatalog.body(pr
 const TTS_ENGINES = [
   { id: 'system', label: '系统语音', hint: 'macOS 自带，离线、立刻出声。' },
   { id: 'qwen', label: 'Qwen 本地', hint: 'CustomVoice 离线合成，内置九种音色。' },
-  { id: 'http', label: '自定义 HTTP', hint: '通用接口配置，支持 JSON 音频分片与 SSE。' },
+  { id: 'doubao', label: '豆包语音', hint: '填写 API Key，选择模型和音色后试听。' },
+  { id: 'http', label: '已有接口', legacy: true, hint: '继续使用已有的接口配置。' },
   { id: 'remote', label: '局域网 CHP', hint: '连接 CHP 服务，获取已加载的模型与可用音色。' },
 ];
 
@@ -320,6 +321,7 @@ const DEFAULTS = {
       voice: 'serena',
       streaming: false,   // Enabled only after on-device generation/playback speed validation.
     },
+    doubao: { url: 'https://openspeech.bytedance.com/api/v3/tts/unidirectional', apiKey: '', model: 'seed-tts-2.0', voice: 'zh_female_vv_uranus_bigtts' },
     // CHP（engine = 'remote' 时才用）；保留旧字段以兼容既有数据。
     baseURL: '',
     chp: { voice: '' },
@@ -345,8 +347,10 @@ const DEFAULTS = {
     silenceMs: 900,          // 一句话说完静多久算「说完了」
     maxSeconds: 45,          // 单次识别最长时长（常驻模式不生效）
     recycleUtterances: 30,   // 常驻模式听够这么多句就换个新进程，防长会话漂移
+    wakeAliases: [],
+    wakeOnly: false,       // 每句话先叫名字，再进入正常对话判断
     judge: true,             // 先判断「这句是不是在对我说」，是才回
-    ownerOnly: false,        // 需显式录入三段样本；不是身份认证
+    ownerOnly: false,        // 需显式朗读录入声音；不是身份认证
   },
   voice: { enabled: true, autoSpeak: true, alwaysListen: true },
   monitor: {
@@ -395,6 +399,14 @@ function readWorkBuddyLLM() {
 function listWorkBuddyModels() { return modelCatalog.get('workbuddy').models; }
 function resolveLLM(c) {
   const b = (c || load()).brain || {}, catalog = modelCatalog.get('workbuddy');
+  if (b.source === 'apikey') {
+    const provider = PROVIDERS.find(p => p.id === b.provider);
+    if (!provider) throw new Error('请选择支持的智力服务');
+    const p = b.profiles?.[provider.id] || {}, model = p.modelId || b.modelId || provider.models[0];
+    return { transport: 'apikey', provider: provider.id, model, apiKey: p.apiKey || '',
+      baseURL: modelCatalog.apiBase(p.baseURL || provider.baseURL), thinking: p.thinking || 'none',
+      extraBody: modelCatalog.apiThinking(provider.id, model, p.thinking), maxTokens: 4096, timeoutMs: 55000 };
+  }
   const model = b.model || catalog.models[0]?.id || 'hy3';
   const thinking = thinkingOptions('workbuddy', model).some(t => t.id === b.thinking) ? b.thinking : 'auto';
   return { transport: 'workbuddy', provider: 'workbuddy', model, apiKey: '', thinking,
@@ -415,13 +427,13 @@ function migrateBrain(c) {
     if (b.source === 'apikey') { b.source = 'workbuddy'; b.model = 'hy3'; b.thinking = 'low'; }
     b.provider = 'deepseek';
   }
-  for (const p of PROVIDERS) b.profiles[p.id] = { apiKey: '', modelId: p.models[0], thinking: 'auto', ...b.profiles[p.id] };
+  for (const p of PROVIDERS) b.profiles[p.id] = { apiKey: '', modelId: p.models[0], thinking: 'none', baseURL: p.baseURL, ...b.profiles[p.id] };
   return c;
 }
 function preview(patch) { return deepMerge(load(), patch || {}); }
 function publicConfig(c = load()) {
   const out = JSON.parse(JSON.stringify(c));
-  for (const section of [out.brain, out.llm, out.tts, ...Object.values(out.brain?.profiles || {})]) {
+  for (const section of [out.brain, out.llm, out.tts, out.tts?.doubao, ...Object.values(out.brain?.profiles || {})]) {
     if (section && Object.hasOwn(section, 'apiKey')) { section.hasApiKey = !!section.apiKey; delete section.apiKey; }
   }
   if (out.tts?.http) out.tts.http = require('./tts-http-profile').publicHTTP(c.tts.http);
@@ -442,7 +454,6 @@ function load() {
   if (disk.window && disk.window.canvasWidthVersion !== 1) merged.window.canvasWidthVersion = 0;
   if (disk.window && disk.window.canvasExpansionVersion !== 2) merged.window.canvasExpansionVersion = 0;
   cache = migrateBrain(merged);
-  cache.brain.source = 'workbuddy';
   const known = new Set([...MOTIONS, ...(cache.motions.library?.items || [])].map(m => m.key));
   cache.motions.disabled = [...new Set((Array.isArray(cache.motions.disabled) ? cache.motions.disabled : []).filter(k => known.has(k)))];
   if (availableMotions().filter(m => m.slot === 'idle').every(m => cache.motions.disabled.includes(m.key)))
@@ -456,11 +467,21 @@ function load() {
 function save(patch, { replaceAvatarDescriptions = false } = {}) {
   const next = deepMerge(load(), patch || {});
   if (replaceAvatarDescriptions) next.avatarDescriptions = { ...patch?.avatarDescriptions };
-  next.brain.source = 'workbuddy';
+  if (patch?.brain) {
+    if (!['workbuddy', 'apikey'].includes(next.brain.source)) throw new Error('未知的智力服务');
+    if (next.brain.source === 'apikey') resolveLLM(next);
+    for (const p of PROVIDERS) {
+      const profile = next.brain.profiles?.[p.id];
+      if (profile?.baseURL) profile.baseURL = modelCatalog.apiBase(profile.baseURL);
+      if (profile?.apiKey && /[\r\n]/.test(profile.apiKey)) throw new Error('API Key 不能包含换行');
+    }
+  }
+  if (patch?.tts?.doubao) next.tts.doubao = require('./doubao-tts').normalize(next.tts.doubao);
   if (patch?.tts?.http) next.tts.http = require('./tts-http-profile').normalize(next.tts.http, load().tts.http);
   if (next.tts?.engine === 'http') require('./tts-http-profile').validate(next.tts.http?.profile);
   if (patch?.tts?.engine === 'qwen') require('./runtime-capabilities').requireQwen();
   next.settingsRevision = (Number(load().settingsRevision) || 0) + 1;
+  if (patch?.asr?.wakeAliases !== undefined && (!Array.isArray(next.asr.wakeAliases) || next.asr.wakeAliases.length > 8 || next.asr.wakeAliases.some(v => typeof v !== 'string' || v.length > 64 || containsSecret(v)))) throw new Error('其他叫法最多8个，每个不超过64字，不得包含密钥');
   if (patch?.buddy) {
     next.buddy.name = String(next.buddy.name || 'baby').trim().slice(0, 64) || 'baby';
     next.buddy.ownerName = String(next.buddy.ownerName || '主人').trim().slice(0, 64) || '主人';

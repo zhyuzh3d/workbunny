@@ -1,4 +1,5 @@
 import { characterName, characterText, paintCharacterNames } from './character-name.mjs';
+import { autoGrow } from './auto-grow.js';
 const $ = id => document.getElementById(id);
 
 export function createSelfSettings(pet, { save, getConfig = () => ({}) }) {
@@ -6,6 +7,7 @@ export function createSelfSettings(pet, { save, getConfig = () => ({}) }) {
   let phase = 'idle', outcome = '';
   let failedAt = 0;
   const status = text => { $('selfSettingsStatus').textContent = text; };
+  const resize = () => { for (const id of ['setProfile', 'setBehavior']) autoGrow($(id)); };
   function paint() {
     const config = { ...getConfig(), buddy: { ...getConfig()?.buddy, name: $('setName').value || getConfig()?.buddy?.name } };
     const name = characterName(config);
@@ -14,7 +16,7 @@ export function createSelfSettings(pet, { save, getConfig = () => ({}) }) {
     $('selfUnderstand').title = `让${characterName(config, 64)}自己理解并更新`;
     $('selfUnderstand').disabled = !view || view.locked || saving || understanding;
     if (!view) return;
-    status(understanding ? `${name}正在更新…正在调用模型，将你的新设定融合到现有自我理解中。`
+    status(understanding ? `${name}正在理解你的新设定…`
       : phase === 'failed' ? `${name}更新未完成：${characterText(outcome, config)}`
       : phase === 'completed' ? `${name}更新完毕。${characterText(outcome, config)}`
       : view.locked ? `自我理解已锁定。你仍可手工微调；如需${name}自己更新，请先在微调弹窗中解锁。`
@@ -33,6 +35,7 @@ export function createSelfSettings(pet, { save, getConfig = () => ({}) }) {
         view = latest;
         $('setProfile').value = view.settings.identity;
         $('setBehavior').value = view.settings.behavior;
+        resize();
       } else if (view && latest.revision !== view.revision) {
         view = { ...view, locked: latest.locked };
       }
@@ -66,7 +69,8 @@ export function createSelfSettings(pet, { save, getConfig = () => ({}) }) {
     if (!$('selfUnderstand')) return;
     paint();
     $('setName').addEventListener('input', paint);
-    for (const id of ['setProfile', 'setBehavior']) $(id).addEventListener('input', () => { dirty = true; if (!understanding) phase = 'idle'; paint(); });
+    for (const id of ['setProfile', 'setBehavior']) $(id).addEventListener('input', () => { dirty = true; resize(); if (!understanding) phase = 'idle'; paint(); });
+    addEventListener('resize', resize);
     $('selfManual').addEventListener('click', () => pet.open('self'));
     $('selfUnderstand').addEventListener('click', async () => {
       if (understanding || saving || view?.locked) return;
@@ -81,5 +85,5 @@ export function createSelfSettings(pet, { save, getConfig = () => ({}) }) {
     });
     pet.on?.(event => { if (['memory-changed', 'memory-ready', 'self-changed'].includes(event.type)) void load(); });
   });
-  return { load, saveInputs, paint };
+  return { load, saveInputs, paint, resize };
 }

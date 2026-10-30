@@ -1,3 +1,4 @@
+import '../shared/motion-core.js';
 import { mountPortability } from './portability-ui.js';
 import { createSelfSettings } from './self-settings.js';
 /**
@@ -124,6 +125,7 @@ function showTab(t) {
   document.body.dataset.tab = t;
   for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('on', b.dataset.t === t);
   for (const p of document.querySelectorAll('.pb[data-page]')) p.classList.toggle('on', p.dataset.page === t);
+  if (t === 'persona') selfSettings.resize();
 }
 document.getElementById('tabs').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-t]');
@@ -166,47 +168,80 @@ function paintPerm(st) {
 }
 
 /* ═══════════ 外貌 ═══════════ */
+let avatarEditorKey = '';
+function avatarButton(info, personal = false) {
+  const button = document.createElement('button');
+  button.dataset.key = info.key; button.type = 'button';
+  button.className = personal ? 'avatarPick' : '';
+  button.setAttribute('aria-pressed', String(info.key === avatarKey));
+  button.title = [info.label || info.key, info.author].filter(Boolean).join(' · ');
+  if (personal) {
+    const name = document.createElement('span'); name.className = 'avatarName'; name.textContent = info.label || info.key;
+    const state = document.createElement('span'); state.className = 'avatarUse'; state.textContent = info.key === avatarKey ? '使用中' : '点击使用';
+    button.append(name, state);
+  } else button.textContent = info.label || info.key;
+  button.classList.toggle('on', info.key === avatarKey);
+  button.onclick = () => pickAvatar(info.key).catch(error => { $('avatarImportStatus').textContent = error.message; });
+  return button;
+}
 function paintAvatars() {
-  const row = $('avRow');
-  if (!row) return;
-  if (row.childElementCount !== AVATAR_LIST.length) {
-    row.innerHTML = '';
-    for (const info of AVATAR_LIST) {
-      const b = document.createElement('button');
-      b.dataset.key = info.key;
-      b.textContent = info.label || info.key;
-      b.title = [info.label, info.title && info.title !== info.label ? `（${info.title}）` : '',
-        info.author ? `· ${info.author}` : ''].join(' ').trim();
-      b.addEventListener('click', () => pickAvatar(info.key).catch(e => { $('sfNote').textContent = e.message; }));
-      row.appendChild(b);
-    }
+  const row = $('avRow'), personal = $('personalAvatars'), editor = $('avatarEditor');
+  if (!row || !personal || !editor) return;
+  // Keep one editor and its event handlers; move it into the selected model.
+  $('stockAvatarEditor').append(editor);
+  row.replaceChildren(); personal.replaceChildren();
+  for (const info of AVATAR_LIST.filter(a => !a.personal)) row.append(avatarButton(info));
+  const custom = AVATAR_LIST.filter(a => a.personal);
+  for (const info of custom) {
+    const card = document.createElement('article'); card.className = 'avatarCard'; card.dataset.key = info.key;
+    card.classList.toggle('active', info.key === avatarKey);
+    card.append(avatarButton(info, true));
+    if (info.key === avatarKey) card.append(editor);
+    personal.append(card);
   }
-  for (const b of row.children) b.classList.toggle('on', b.dataset.key === avatarKey);
+  if (!custom.length) {
+    const empty = document.createElement('div'); empty.className = 'avatarEmpty';
+    empty.textContent = '还没有定制外形，导入VRM文件后会显示在这里。'; personal.append(empty);
+  }
   paintAvatarDetails();
 }
 
 function paintAvatarDetails() {
   const item = AVATAR_LIST.find(a => a.key === avatarKey), field = $('avatarDescription');
-  if (field && document.activeElement !== field) field.value = cfg.avatarDescriptions?.[avatarKey] || item?.description || '';
-  if ($('deleteAvatar')) $('deleteAvatar').disabled = !item?.personal;
+  if (field && document.activeElement !== field) field.value = cfg.avatarDescriptions?.[avatarKey] ?? item?.description ?? '';
+  const personal = !!item?.personal;
+  if ($('deleteAvatar')) { $('deleteAvatar').disabled = !personal; $('deleteAvatar').hidden = !personal; }
+  if ($('stockAppearanceDetails')) $('stockAppearanceDetails').hidden = personal;
+  if (avatarEditorKey !== avatarKey) {
+    avatarEditorKey = avatarKey;
+    $('avatarDescriptionStatus').textContent = '仅识别角色预览；描述可以直接修改。';
+  }
 }
 
 async function pickAvatar(k) {
   if (k === avatarKey) return;
-  avatarKey = k;
-  paintAvatars();
-  edit('avatar', k);
-  await persist({ avatar: k });
-  log('换形象 ' + k);
+  const previous = avatarKey;
+  avatarKey = k; paintAvatars(); edit('avatar', k);
+  const revision = edits.get('avatar').revision;
+  try { await persist({ avatar: k }); log('换形象 ' + k); }
+  catch (error) {
+    if (edits.get('avatar')?.revision === revision) edits.delete('avatar');
+    if (avatarKey === k) { avatarKey = cfg.avatar || previous; paintAvatars(); }
+    throw error;
+  }
 }
 
+let speakerState = { ready: false, enrolling: false, samples: 0 }, speakerRequestBusy = false;
 function paintSpeaker(status) {
   if (!$('speakerEnabled') || !status) return;
+  speakerState = status;
   $('speakerEnabled').checked = !!status.enabled;
-  $('speakerEnabled').disabled = !status.ready && !status.enabled;
-  $('speakerEnroll').disabled = !!status.enrolling;
-  const verdicts = { owner: '像主人', other: '其他声音', uncertain: '暂不能确定', 'device-changed': '麦克风已变化，请重新录入', 'needs-enrollment': '请完成三段录入' };
-  $('speakerStatus').textContent = status.enrolling ? '正在采集清楚的人声，请自然说至少三秒…' : `已录入${status.samples || 0}段${status.ready ? '，可以启用' : '，至少需要3段'}。${verdicts[status.latest?.status] || ''}`;
+  $('speakerToggle').hidden = !status.ready;
+  $('speakerEnroll').disabled = speakerRequestBusy && !status.enrolling;
+  $('speakerEnroll').textContent = status.enrolling ? '取消朗读' : status.ready ? '重新朗读' : '开始朗读';
+  $('speakerReset').hidden = !status.samples || status.enrolling || speakerRequestBusy;
+  $('speakerStatus').textContent = status.enrolling ? '正在听，读完后稍等片刻。' : status.latest?.status === 'device-changed'
+    ? '麦克风变了，请重新朗读。' : status.ready ? '已记住你的声音，可开启下方开关。' : '点击开始，再自然读完。';
 }
 
 function paintScale() {
@@ -242,7 +277,7 @@ function initBrainDraft() {
     workbuddy: { modelId: b.model || 'hy3', thinking: b.thinking || 'low' },
     profiles: JSON.parse(JSON.stringify(b.profiles || {})),
   };
-  if (!['workbuddy', 'deepseek', 'grok'].includes(brainDraft.source)) brainDraft.source = 'workbuddy';
+  if (!['workbuddy', 'deepseek', 'openai', 'grok'].includes(brainDraft.source)) brainDraft.source = 'workbuddy';
 }
 function draftProfile() {
   if (brainDraft.source === 'workbuddy') return brainDraft.workbuddy;
@@ -253,6 +288,7 @@ function stashBrain() {
   p.modelId = $('brainModel').value;
   p.thinking = $('brainThinking').value;
   if (brainDraft.source !== 'workbuddy') {
+    p.baseURL = $('brainURL').value.trim();
     const value = $('brainKeyInput').value;
     if (value !== KEY_MASK) { p.apiKey = value.trim(); p.hasApiKey = !!p.apiKey; }
   }
@@ -267,8 +303,8 @@ function brainCatalog(id = brainDraft.source) {
 function paintThinking() {
   const p = draftProfile();
   $('brainThinkingRow').querySelector('span').textContent = brainDraft.source === 'grok' && /^grok-4\.20-multi-agent(?:$|-)/.test(p.modelId) ? '协作规模' : '思考';
-  const options = brainCatalog().models.find(m => m.id === p.modelId)?.thinking || [{ id: 'auto', label: '模型默认' }];
-  fillSelect($('brainThinking'), options, p.thinking || 'auto');
+  const options = brainDraft.source === 'workbuddy' ? brainCatalog().models.find(m => m.id === p.modelId)?.thinking || [{ id: 'auto', label: '模型默认' }] : ['none', 'low', 'medium', 'high'].map(id => ({ id, label: id }));
+  fillSelect($('brainThinking'), options, p.thinking === 'off' ? 'none' : p.thinking || (brainDraft.source === 'workbuddy' ? 'auto' : 'none'));
   p.thinking = $('brainThinking').value;
   $('brainThinkingRow').classList.toggle('hidden', options.length < 2);
 }
@@ -292,23 +328,32 @@ function paintBrain() {
   if (!p.modelId) p.modelId = models[0]?.id || '';
   if (p.modelId && !models.some(x => x.id === p.modelId)) models.push({ id: p.modelId, label: p.modelId + '（已保存）' });
   fillSelect($('brainModel'), models, p.modelId);
+  $('brainURL').value = p.baseURL || provider?.baseURL || '';
   $('brainKeyInput').value = p.apiKey || (p.hasApiKey ? KEY_MASK : '');
   $('brainHint').textContent = wb ? '使用当前登录账号的模型。思考选项按所选模型提供；额度以 WorkBuddy 账号为准。' : provider?.hint || '';
-  paintThinking(); paintModelFetch();
+  paintThinking(); paintModelFetch(); paintBrainHint();
+}
+function paintBrainHint() {
+  const p = draftProfile(), id = brainDraft.source;
+  let text = id === 'workbuddy' ? '使用已登录的 WorkBuddy。' : '填写密钥，获取模型后选择并保存。';
+  if (id === 'grok' && /^grok-4\.(?:[567]|20)(?:$|-)/.test(p.modelId) && $('brainThinking').value === 'none') text = '此模型不能关闭思考，none 使用最低的 low。';
+  if (id === 'deepseek' && $('brainThinking').value === 'medium') text = '此模型的 medium 按官方规则使用 high。';
+  if (id === 'openai' && /^(?:gpt-5(?:-|$)|o[134](?:[.-]|$))/.test(p.modelId) && $('brainThinking').value === 'none') text = '此模型不能关闭思考，none 使用最低的 low。';
+  $('brainHint').textContent = text;
 }
 async function refreshBrainModels() {
   stashBrain();
-  const source = brainDraft.source, keyAtStart = $('brainKeyInput').value;
+  const source = brainDraft.source, keyAtStart = $('brainKeyInput').value, urlAtStart = $('brainURL').value;
   brainPending.add(source); paintModelFetch();
   $('brainStatus').textContent = '正在获取当前账号可用模型…';
   try {
     const r = await window.pet.brainModels(collectBrain());
     if (!r.ok) throw new Error(r.error);
-    BRAIN.catalogs ||= {}; BRAIN.catalogs[source] = r.catalog;
     if (brainDraft.source !== source) return;
-    if ($('brainKeyInput').value !== keyAtStart) {
+    if ($('brainKeyInput').value !== keyAtStart || $('brainURL').value !== urlAtStart) {
       $('brainStatus').textContent = '密钥已更改，请使用新密钥重新获取列表。'; return;
     }
+    BRAIN.catalogs ||= {}; BRAIN.catalogs[source] = r.catalog;
     const p = draftProfile();
     if (!r.catalog.models.some(m => m.id === p.modelId)) { p.modelId = r.catalog.models[0]?.id || ''; p.thinking = 'auto'; }
     edit('brain', true); paintBrain();
@@ -323,7 +368,7 @@ function collectBrain() {
   const profiles = {};
   for (const [id, p] of Object.entries(brainDraft.profiles)) {
     if (!BRAIN.providers.some(provider => provider.id === id)) continue;
-    profiles[id] = { modelId: p.modelId, thinking: p.thinking || 'auto' };
+    profiles[id] = { modelId: p.modelId, thinking: p.thinking || 'none', baseURL: p.baseURL || BRAIN.providers.find(x => x.id === id)?.baseURL };
     if (typeof p.apiKey === 'string') profiles[id].apiKey = p.apiKey;
   }
   return { source: brainDraft.source === 'workbuddy' ? 'workbuddy' : 'apikey',
@@ -336,7 +381,8 @@ function collectBrain() {
 const ENGINE_HINT = {
   system: 'macOS 自带，离线可用。',
   qwen: '本地运行，支持中英文。',
-  http: '使用已保存的通用接口配置；可先获取目录，再试听。',
+  http: '继续使用已有接口。',
+  doubao: '填写 API Key，选择模型和音色后试听。',
   remote: '使用同一局域网的 CHP 服务；不可用时回退系统语音。',
 };
 function paintTts() {
@@ -344,14 +390,14 @@ function paintTts() {
   const eng = t.engine || 'system';
   const row = $('ttsEngine');
   if (!row.childElementCount) {
-    for (const e of TTSI.engines) {
+    for (const e of TTSI.engines.filter(e => !e.legacy || cfg.tts.http?.profile?.url)) {
       const b = document.createElement('button');
       b.dataset.e = e.id;
       b.textContent = e.label;
       b.addEventListener('click', async () => {
         edit('tts.engine', e.id); ttsDraft.engine = e.id; paintTts();
         if (e.id === 'http' && !cfg.tts.http?.profile?.url) { $('sfNote').textContent = '请先填写接口，点击“保存并使用”后生效。'; return; }
-        try { await persist({ tts: { engine: e.id } }); }
+        try { await persist(e.id === 'doubao' ? { tts: { engine: e.id, doubao: doubaoPatch() } } : { tts: { engine: e.id } }); }
         catch (err) { $('sfNote').textContent = '切换失败：' + err.message; }
       });
       row.appendChild(b);
@@ -360,10 +406,12 @@ function paintTts() {
   for (const b of row.children) b.classList.toggle('on', b.dataset.e === ttsDraft.engine);
   for (const b of row.children) if (b.dataset.e === 'qwen') { b.disabled = TTSI.qwen?.available === false; b.title = TTSI.qwen?.reason || ''; }
   $('ttsHint').textContent = ENGINE_HINT[ttsDraft.engine] || '';
-  $('ttsCurrent').textContent = cfg.tts.enabled ? ({ system: '系统语音', qwen: 'Qwen 本地', remote: 'CHP', http: '自定义 HTTP' }[ttsDraft.engine] || '系统语音') : '语音已关闭';
+  $('ttsCurrent').textContent = cfg.tts.enabled ? ({ system: '系统语音', qwen: 'Qwen 本地', remote: 'CHP', http: '已有接口', doubao: '豆包语音' }[ttsDraft.engine] || '系统语音') : '语音已关闭';
   $('ttsSystem').classList.toggle('on', ttsDraft.engine === 'system');
   $('ttsQwen').classList.toggle('on', ttsDraft.engine === 'qwen');
   $('ttsRemote').classList.toggle('on', ttsDraft.engine === 'remote');
+  $('ttsDoubao').classList.toggle('on', ttsDraft.engine === 'doubao');
+  paintDoubao();
   $('ttsHTTP').classList.toggle('on', ttsDraft.engine === 'http');
 
   fillSelect($('sysVoice'), (TTSI.systemVoices || []).map((v) => ({ id: v.id, label: v.label || v.id + '　' + v.lang })), ttsDraft.voice);
@@ -375,6 +423,27 @@ function paintTts() {
   paintDl(TTSI.dl || {});
 }
 
+function doubaoPatch() {
+  const patch = {};
+  for (const [id, key] of [['doubaoURL', 'url'], ['doubaoModel', 'model'], ['doubaoVoice', 'voice'], ['doubaoKey', 'apiKey']]) {
+    const value = $(id).value.trim(); if (value !== KEY_MASK) patch[key] = value;
+  }
+  return patch;
+}
+let doubaoCatalogVisible = false;
+function paintDoubao() {
+  const defaults = TTSI.doubao || {}, c = cfg.tts.doubao || {};
+  fillSelect($('doubaoModel'), defaults.models || [], pendingValue('tts.doubao.model', c.model || 'seed-tts-2.0'));
+  $('doubaoKey').value = pendingValue('tts.doubao.apiKey', c.hasApiKey ? KEY_MASK : '');
+  $('doubaoURL').value = pendingValue('tts.doubao.url', c.url || defaults.url || '');
+  $('doubaoVoice').value = pendingValue('tts.doubao.voice', c.voice || '');
+  const cloned = $('doubaoModel').value === 'seed-icl-2.0';
+  $('doubaoFetch').disabled = cloned;
+  $('doubaoVoiceRow').hidden = cloned || !doubaoCatalogVisible;
+  const voices = [{ id: '', label: '选择音色，或在下方手填' }, ...(defaults.voices || [])];
+  fillSelect($('doubaoVoices'), voices, voices.some(v => v.id === $('doubaoVoice').value) ? $('doubaoVoice').value : '');
+  $('doubaoStatus').textContent = cloned ? '填写你的复刻音色编号后试听。' : doubaoCatalogVisible ? '已载入官方公共音色，试听确认是否可用。' : '选择音色后，点击底部试听。';
+}
 let chpCatalog = null, chpGeneration = 0, chpPending = false;
 function chpPatch() {
   const patch = { baseURL: $('rmUrl').value.trim() };
@@ -479,6 +548,8 @@ function syncTts(c, acknowledged = []) {
   if (!edits.has('tts.apiKey')) $('rmKey').value = c.tts.hasApiKey ? KEY_MASK : '';
   $('setAlways').checked = pendingValue('voice.alwaysListen', false);
   $('setJudge').checked = pendingValue('asr.judge', true);
+  $('setWakeOnly').checked = pendingValue('asr.wakeOnly', false);
+  if (!edits.has('asr.wakeAliases')) $('setWakeAliases').value = (c.asr.wakeAliases || []).join('，');
   $('setTtsOn').checked = pendingValue('tts.enabled', true);
   if (!edits.has('avatar') && (previous?.avatar !== c.avatar || acknowledged.includes('avatar'))) {
     avatarKey = AVATAR_LIST.find(a => a.key === c.avatar || a.file === c.avatar || a.label === c.avatar)?.key || avatarKey;
@@ -502,6 +573,8 @@ function fillForm() {
   selfSettings.paint();
   $('setAlways').checked = !!(c.voice && c.voice.alwaysListen);
   $('setJudge').checked = !(c.asr && c.asr.judge === false);
+  $('setWakeOnly').checked = !!c.asr?.wakeOnly;
+  $('setWakeAliases').value = (c.asr?.wakeAliases || []).join('，');
   $('setTtsOn').checked = !!c.tts.enabled;
   const t = c.tts || {};
   ttsDraft = {
@@ -536,7 +609,7 @@ async function save() {
 
 /* ═══════════ 动作库 ═══════════ */
 let motionSaving = false;
-const motionExpanded = new Set(['idle']);
+const motionCollapsed = new Set();
 async function setDisabledMotions(disabled) {
   if (motionSaving) return;
   motionSaving = true; buildMotionList();
@@ -556,7 +629,7 @@ function motionField(parent, label, value, type = 'text') {
   const caption = document.createElement('span'); caption.textContent = label;
   const input = document.createElement(type === 'textarea' ? 'textarea' : 'input');
   if (type !== 'textarea') input.type = type;
-  if (type === 'checkbox') input.checked = !!value; else input.value = value ?? '';
+  if (type === 'checkbox') { input.checked = !!value; input.setAttribute('role', 'switch'); } else input.value = value ?? '';
   input.setAttribute('aria-label', label); row.append(caption, input); parent.append(row); return input;
 }
 function applyMotionView(view) {
@@ -568,54 +641,81 @@ function applyMotionView(view) {
 async function motionOperation(change) {
   if (motionSaving) return;
   motionSaving = true; $('mStatus').textContent = '正在保存…';
-  try { applyMotionView(await window.pet.motionEdit(change)); $('mStatus').textContent = '动作库已保存'; }
-  catch (error) { $('mStatus').textContent = error.message; }
+  try { applyMotionView(await window.pet.motionEdit(change)); $('mStatus').textContent = '动作库已保存'; return true; }
+  catch (error) { $('mStatus').textContent = error.message; return false; }
   finally { motionSaving = false; buildMotionList(); }
 }
+function motionIcon(symbol, label, action) {
+  const button = motionButton(symbol, action); button.classList.add('motionIcon'); button.title = label; button.setAttribute('aria-label', label); return button;
+}
+function openMotionEditor(entity, category = false) {
+  const body = $('motionDialogBody'); body.replaceChildren(); $('motionDialogStatus').textContent = '';
+  $('motionDialogTitle').textContent = category ? '编辑分类' : '编辑动作';
+  const label = motionField(body, '名称', entity.label), meaning = motionField(body, '含义', category ? entity.description : entity.use, 'textarea');
+  label.maxLength = category ? 40 : 80; meaning.maxLength = category ? 240 : 300;
+  let slot, loop, idle;
+  if (!category) {
+    const row = document.createElement('label'); row.className = 'motionField'; row.textContent = '分类';
+    slot = document.createElement('select'); slot.setAttribute('aria-label', '所属分类'); fillSelect(slot, MOTION_GROUPS.map(g => ({ id:g.id, label:g.label })), entity.slot); row.append(slot); body.append(row);
+    loop = motionField(body, '循环播放', entity.loop, 'checkbox'); idle = motionField(body, '可作待机', entity.idle, 'checkbox');
+  }
+  const expected = Object.fromEntries((category ? ['label','description'] : ['label','use','slot','loop','idle']).map(k=>[k,entity[k]]));
+  $('motionDialogSave').onclick = async () => {
+    $('motionDialogSave').disabled = $('motionDialogClose').disabled = true;
+    try {
+      const ok = await motionOperation(category ? { type:'category-update', id:entity.id, label:label.value, description:meaning.value, expected }
+        : { type:'motion-update', key:entity.key, label:label.value, use:meaning.value, slot:slot.value, loop:loop.checked, idle:idle.checked, expected });
+      if (ok) $('motionDialog').close(); else $('motionDialogStatus').textContent = $('mStatus').textContent;
+    } finally { $('motionDialogSave').disabled = $('motionDialogClose').disabled = false; }
+  };
+  $('motionDialogClose').onclick = () => $('motionDialog').close();
+  $('motionDialog').showModal(); label.focus();
+}
+function deleteMotion(motion) {
+  if (confirm(motion.personal ? '删除这个动作？文件会移到废纸篓。' : '移除这个动作？之后可恢复内置动作。')) void motionOperation({ type:'motion-delete', key:motion.key });
+}
 function buildMotionList() {
-  const box = $('motionList'); if (!box) return; box.replaceChildren();
+  const box = $('motionList'); if (!box) return; const scroll = box.scrollTop; box.replaceChildren();
   const disabled = new Set(cfg.motions?.disabled || []);
-  const idleCount = MOTIONS.filter(m => (m.idle ?? (m.slot === 'idle')) && !disabled.has(m.key) && m.weight !== 0).length;
+  const idleCount = MOTIONS.filter(m => m.idle && !disabled.has(m.key) && m.weight > 0).length;
   for (const group of MOTION_GROUPS) {
     const items = MOTIONS.filter(m => m.slot === group.id), details = document.createElement('details');
-    details.className = 'motionGroup'; details.dataset.slot = group.id; details.open = motionExpanded.has(group.id);
-    details.ontoggle = () => details.open ? motionExpanded.add(group.id) : motionExpanded.delete(group.id);
-    const title = document.createElement('summary'); title.textContent = `${group.label}　${items.filter(m => !disabled.has(m.key)).length}/${items.length}`; details.append(title);
-    const settings = document.createElement('details'); settings.className = 'motionEditor';
-    const caption = document.createElement('summary'); caption.textContent = '分类设置'; settings.append(caption);
-    const label = motionField(settings, '分类名称', group.label), meaning = motionField(settings, '这类动作的意思', group.description || '', 'textarea');
-    settings.append(motionButton('保存分类', () => motionOperation({ type: 'category-update', id: group.id, label: label.value, description: meaning.value })));
-    settings.append(motionButton('删除分类', () => { if (confirm('删除分类？其中的动作会移到其他分类，不会删除文件。')) motionOperation({ type: 'category-delete', id: group.id }); }));
-    details.append(settings);
-    const totalWeight = items.filter(m => !disabled.has(m.key)).reduce((n, m) => n + Number(m.weight ?? 1), 0);
+    details.className = 'motionGroup'; details.dataset.slot = group.id; details.open = !motionCollapsed.has(group.id);
+    details.ontoggle = () => details.open ? motionCollapsed.delete(group.id) : motionCollapsed.add(group.id);
+    const title = document.createElement('summary'), caption = document.createElement('span'); caption.className = 'motionGroupName'; caption.textContent = `${group.label} · ${items.length}`; title.append(caption);
+    const categoryEdit = motionIcon('✎', '编辑分类' + group.label, event => { event.preventDefault(); event.stopPropagation(); openMotionEditor(group, true); });
+    const categoryToggle = motionIcon('⏻', '启用或停用分类' + group.label, event => {
+      event.preventDefault(); event.stopPropagation(); const next = new Set(cfg.motions?.disabled || []), turnOn = items.every(m=>next.has(m.key));
+      for (const m of items) turnOn ? next.delete(m.key) : next.add(m.key); void setDisabledMotions([...next]);
+    });
+    categoryToggle.setAttribute('aria-pressed', String(items.some(m=>!disabled.has(m.key)))); categoryToggle.disabled ||= !items.length;
+    const categoryDelete = motionIcon('×', '删除分类' + group.label, event => { event.preventDefault(); event.stopPropagation(); if(confirm('删除分类？其中动作会移入其他分类。')) void motionOperation({type:'category-delete',id:group.id}); });
+    title.append(categoryEdit,categoryToggle,categoryDelete); details.append(title);
+    const total = items.filter(m=>!disabled.has(m.key)).reduce((n,m)=>n+Number(m.weight??1),0), inputs = new Map();
+    const repaintRatios = weights => {
+      for (const [key, controls] of inputs) { const value = weights[key] ?? 0; controls.slider.value = value; controls.value.textContent = `${Math.round(value)}%`; }
+    };
     for (const motion of items) {
-      const enabled = !disabled.has(motion.key), row = document.createElement('div'); row.className = 'motionRow';
-      const check = document.createElement('input'); check.type = 'checkbox'; check.checked = enabled; check.dataset.key = motion.key; check.setAttribute('aria-label', '启用' + motion.label);
-      check.disabled = motionSaving || ((motion.idle ?? (motion.slot === 'idle')) && enabled && idleCount === 1 && motion.weight !== 0);
-      check.onchange = () => { const next = new Set(cfg.motions?.disabled || []); check.checked ? next.delete(motion.key) : next.add(motion.key); setDisabledMotions([...next]); };
-      const preview = document.createElement('button'); preview.className = 'mItem' + (motion.key === curMotion ? ' on' : ''); preview.dataset.key = motion.key; preview.disabled = !enabled;
-      const name = document.createElement('span'); name.className = 'nm'; name.textContent = motion.label;
-      const hint = document.createElement('span'); hint.className = 'us'; hint.textContent = motion.use || ''; name.append(hint); preview.append(name);
-      preview.onclick = () => { curMotion = motion.key; window.pet.panelMotion(motion.key); buildMotionList(); };
-      const probability = document.createElement('span'); probability.className = 'motionChance'; probability.textContent = `${enabled && totalWeight ? Math.round(Number(motion.weight ?? 1) / totalWeight * 100) : 0}%`;
-      const weight = document.createElement('input'); weight.type = 'number'; weight.min = '0'; weight.max = '100'; weight.step = '0.1'; weight.value = motion.weight ?? 1; weight.className = 'motionWeight'; weight.setAttribute('aria-label', motion.label + '随机权重');
-      weight.onchange = () => motionOperation({ type: 'motion-update', key: motion.key, weight: Number(weight.value) });
-      row.append(check, preview, weight, probability); details.append(row);
-      const editor = document.createElement('details'); editor.className = 'motionEditor';
-      const heading = document.createElement('summary'); heading.textContent = '编辑“' + motion.label + '”'; editor.append(heading);
-      const motionName = motionField(editor, '动作名称', motion.label), use = motionField(editor, '动作含义', motion.use || '', 'textarea');
-      const select = document.createElement('select'); select.setAttribute('aria-label', motion.label + '所属分类');
-      for (const g of MOTION_GROUPS) { const option = document.createElement('option'); option.value = g.id; option.textContent = g.label; select.append(option); } select.value = motion.slot; editor.append(select);
-      const loop = motionField(editor, '循环播放', motion.loop, 'checkbox');
-      const idle = motionField(editor, '可作空闲待机', motion.idle, 'checkbox');
-      editor.append(motionButton('保存动作', () => motionOperation({ type: 'motion-update', key: motion.key, label: motionName.value, use: use.value, slot: select.value, loop: loop.checked, idle: idle.checked })));
-      editor.append(motionButton(motion.personal ? '删除个人动作' : '移除此动作', () => { if (confirm(motion.personal ? '删除个人动作？文件移到废纸篓。' : '从动作库移除？可通过“恢复内置动作”找回。')) motionOperation({ type: 'motion-delete', key: motion.key }); }));
-      details.append(editor);
+      const enabled = !disabled.has(motion.key), row = document.createElement('div'); row.className = 'motionRow' + (enabled ? '' : ' disabled'); row.dataset.motion = motion.key;
+      const preview = document.createElement('button'); preview.className = 'mItem' + (motion.key === curMotion ? ' on' : ''); preview.dataset.key = motion.key; preview.disabled = !enabled; preview.title = motion.use || motion.label;
+      const name = document.createElement('span'); name.className = 'nm'; name.textContent = motion.label; preview.append(name);
+      preview.onclick = () => { curMotion = motion.key; window.pet.panelMotion(motion.key); for(const b of box.querySelectorAll('.mItem')) b.classList.toggle('on',b.dataset.key === curMotion); };
+      const slider = document.createElement('input'); slider.type = 'range'; slider.min = 0; slider.max = 100; slider.step = 1; slider.className = 'motionRatio'; slider.disabled = !enabled || motionSaving; slider.setAttribute('aria-label', motion.label + '概率百分比');
+      const probability = document.createElement('span'); probability.className = 'motionChance'; const value = enabled && total ? motion.weight / total * 100 : 0; slider.value = value; probability.textContent = `${Math.round(value)}%`;
+      inputs.set(motion.key, {slider,value:probability});
+      slider.oninput = () => { const weights = globalThis.BunnyMotion.probabilities(MOTIONS.map(m=>({...m,enabled:!disabled.has(m.key)})),motion.key,Number(slider.value)); repaintRatios(weights); };
+      slider.onchange = () => void motionOperation({type:'motion-probability',key:motion.key,percent:Number(slider.value)});
+      const editButton = motionIcon('✎', '编辑动作' + motion.label, () => openMotionEditor(motion));
+      const toggle = motionIcon('⏻', (enabled ? '停用' : '启用') + motion.label, () => { const next = new Set(cfg.motions?.disabled || []); enabled ? next.add(motion.key) : next.delete(motion.key); void setDisabledMotions([...next]); });
+      toggle.setAttribute('aria-pressed',String(enabled)); toggle.disabled ||= !!motion.idle && enabled && idleCount === 1 && motion.weight > 0;
+      const remove = motionIcon('×', '删除动作' + motion.label, () => deleteMotion(motion));
+      row.append(preview,slider,probability,editButton,toggle,remove); details.append(row);
     }
-    if (!items.length) { const empty = document.createElement('p'); empty.className = 'note'; empty.textContent = '选择这个分类后导入VRMA，或把现有动作移入。'; details.append(empty); }
+    if (!items.length) { const empty = document.createElement('p'); empty.className='note'; empty.textContent='还没有动作，可以导入VRMA。'; details.append(empty); }
     box.append(details);
   }
-  $('mCount').textContent = `启用 ${MOTIONS.filter(m => !disabled.has(m.key)).length}/${MOTIONS.length}`;
+  box.scrollTop = scroll;
+  $('mCount').textContent = `启用 ${MOTIONS.filter(m=>!disabled.has(m.key)).length}/${MOTIONS.length}`;
   $('mAll').disabled = motionSaving || disabled.size === 0;
 }
 
@@ -632,7 +732,7 @@ function buildMotionList() {
   if (which === 'settings') {
     await mountPortability(window.pet);
     $('importAvatar').onclick = async () => {
-      try { const r = await window.pet.avatarImport(); if (r.cancelled) return; AVATAR_LIST = r.avatars; $('avRow').replaceChildren(); paintAvatars(); await pickAvatar(r.key); $('avatarImportStatus').textContent = '已导入个人模型，仅本机使用。'; }
+      try { const r = await window.pet.avatarImport(); if (r.cancelled) return; AVATAR_LIST = r.avatars; paintAvatars(); await pickAvatar(r.key); $('avatarImportStatus').textContent = '已导入个人模型，仅本机使用。'; }
       catch (e) { $('avatarImportStatus').textContent = e.message; }
     };
     $('avatarDescription').addEventListener('change', async () => {
@@ -648,7 +748,7 @@ function buildMotionList() {
     $('deleteAvatar').onclick = async () => {
       const item = AVATAR_LIST.find(a => a.key === avatarKey);
       if (!item?.personal || !confirm('删除这个个人模型？文件会移到废纸篓，内置模型不会受影响。')) return;
-      try { const r = await window.pet.avatarDelete(avatarKey); AVATAR_LIST = r.avatars; avatarKey = r.avatar; $('avRow').replaceChildren(); paintAvatars(); $('avatarImportStatus').textContent = '个人模型已移到废纸篓。'; }
+      try { const r = await window.pet.avatarDelete(avatarKey); AVATAR_LIST = r.avatars; avatarKey = r.avatar; paintAvatars(); $('avatarImportStatus').textContent = '个人模型已移到废纸篓。'; }
       catch (error) { $('avatarImportStatus').textContent = error.message; }
     };
     BRAIN = await window.pet.brainInfo();
@@ -656,7 +756,8 @@ function buildMotionList() {
     if (TTSI.config) cfg = TTSI.config;
     fillForm();
     window.pet.on((ev) => {
-      if (ev.type === 'config' && ev.config) { syncTts(ev.config); cfg.avatarDescriptions = ev.config.avatarDescriptions || {}; if(ev.config.avatar && avatarKey !== ev.config.avatar) { avatarKey = ev.config.avatar; paintAvatars(); } paintAvatarDetails(); }
+      if (ev.type === 'config' && ev.config && (Number(ev.config.settingsRevision) || 0) >= (Number(cfg.settingsRevision) || 0)) { syncTts(ev.config); paintAvatarDetails(); }
+      if (ev.type === 'avatars' && Array.isArray(ev.avatars)) { AVATAR_LIST = ev.avatars; paintAvatars(); }
       if (ev.type === 'speaker-status') paintSpeaker(ev);
       if (ev.type === 'avatar-description' && ev.key === avatarKey) {
         if (ev.ok) { cfg.avatarDescriptions ||= {}; cfg.avatarDescriptions[ev.key] = ev.description; paintAvatarDetails(); }
@@ -664,7 +765,7 @@ function buildMotionList() {
       }
     });
     paintPerm(init.asr || null);
-    showTab(init.storage?.ok === false ? 'data' : init.connection?.ready === false ? 'brain' : 'look');
+    showTab(init.storage?.ok === false ? 'data' : init.connection?.ready === false && cfg.brain.source !== 'apikey' ? 'brain' : 'look');
 
     $('sizeRow').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-k]');
@@ -678,14 +779,13 @@ function buildMotionList() {
       $('brainStatus').textContent = '切换的是草稿，点保存后用于对话。';
     });
     $('brainModelsBtn').addEventListener('click', refreshBrainModels);
-    $('openMemory').addEventListener('click', () => window.pet.open('memory'));
-    $('openDesktop').addEventListener('click', () => window.pet.open('desktop'));
     $('openWorkBuddy').addEventListener('click', async () => {
       const result = await window.pet.workbuddyOpen();
       $('brainStatus').textContent = result.ok ? 'WorkBuddy 已打开。登录后获取模型列表。' : result.error;
     });
     $('brainKeyInput').addEventListener('input', () => edit('brain', true));
-    $('brainThinking').addEventListener('change', () => edit('brain', true));
+    $('brainThinking').addEventListener('change', () => { edit('brain', true); paintBrainHint(); });
+    $('brainURL').addEventListener('input', () => edit('brain', true));
     $('panelScene').addEventListener('click', event => {
       const button = event.target.closest('button[data-scene]');
       if (button) changePanelScene(button.dataset.scene);
@@ -693,27 +793,34 @@ function buildMotionList() {
     for (const [id, path] of [['setName', 'buddy.name'], ['setOwnerName', 'buddy.ownerName']])
       $(id).addEventListener('input', () => edit(path, $(id).value));
     $('setAlways').addEventListener('change', () => edit('voice.alwaysListen', $('setAlways').checked));
+    $('setWakeAliases').addEventListener('input', () => edit('asr.wakeAliases', $('setWakeAliases').value.split(/[,，、]/).map(s=>s.trim()).filter(Boolean)));
     $('setJudge').addEventListener('change', () => edit('asr.judge', $('setJudge').checked));
+    $('setWakeOnly').addEventListener('change', async () => {
+      try { await persist({asr:{wakeOnly:$('setWakeOnly').checked}}); } catch(error) { $('setWakeOnly').checked = !!cfg.asr.wakeOnly; $('permTip').textContent = error.message; }
+    });
     if (window.pet.speakerStatus) paintSpeaker(await window.pet.speakerStatus());
     $('speakerEnabled').onchange = async () => {
       try { await persist({ asr: { ownerOnly: $('speakerEnabled').checked } }); paintSpeaker(await window.pet.speakerStatus()); }
-      catch (error) { $('speakerStatus').textContent = error.message; }
+      catch (error) { paintSpeaker(await window.pet.speakerStatus()); $('speakerStatus').textContent = error.message; }
     };
     $('speakerEnroll').onclick = async () => {
-      $('speakerEnroll').disabled = true; $('speakerStatus').textContent = '请靠近麦克风，自然说至少三秒，内容与之前不同。';
+      if (speakerState.enrolling) { await window.pet.speakerCancel(); return; }
+      if (speakerRequestBusy) return;
+      speakerRequestBusy = true; paintSpeaker(speakerState); $('speakerStatus').textContent = '正在准备，请稍等…';
+      let failure;
       try { paintSpeaker(await window.pet.speakerEnroll()); }
-      catch (error) { $('speakerStatus').textContent = error.message; }
-      finally { $('speakerEnroll').disabled = false; }
+      catch (error) { failure = error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''); }
+      finally { speakerRequestBusy = false; paintSpeaker(await window.pet.speakerStatus()); if (failure) $('speakerStatus').textContent = failure; }
     };
     $('speakerReset').onclick = async () => {
-      if (!confirm('清除本机加密保存的声音样本并关闭声音筛选？')) return;
+      if (!confirm('清除已记住的声音？')) return;
       try { paintSpeaker(await window.pet.speakerReset()); } catch (error) { $('speakerStatus').textContent = error.message; }
     };
     $('brainModel').addEventListener('change', () => {
       const p = draftProfile();
       p.modelId = $('brainModel').value;
-      p.thinking = 'auto'; edit('brain', true);
-      paintThinking();
+      p.thinking = brainDraft.source === 'workbuddy' ? 'auto' : 'none'; edit('brain', true);
+      paintThinking(); paintBrainHint();
       $('brainStatus').textContent = '模型已选择，可测试连接。';
     });
     $('brainTestBtn').addEventListener('click', async () => {
@@ -732,6 +839,21 @@ function buildMotionList() {
       for (const path of leafPaths(patch)) edit(path, readPath(patch, path));
       try { await persist(patch); }
       catch (e) { $('sfNote').textContent = '语音设置失败：' + e.message; }
+    };
+    for (const [id, key] of [['doubaoURL', 'url'], ['doubaoModel', 'model'], ['doubaoVoice', 'voice'], ['doubaoKey', 'apiKey']]) {
+      $(id).addEventListener(key === 'model' ? 'change' : 'input', () => {
+        edit('tts.doubao.' + key, $(id).value.trim());
+        if (key === 'model') {
+          const voice = $('doubaoVoice').value;
+          if (TTSI.doubao?.voices?.some(v => v.id === voice) && $(id).value === 'seed-icl-2.0') edit('tts.doubao.voice', '');
+          paintDoubao();
+        }
+      });
+    }
+    $('doubaoFetch').onclick = () => { doubaoCatalogVisible = true; paintDoubao(); };
+    $('doubaoVoices').onchange = () => {
+      if (!$('doubaoVoices').value) return;
+      edit('tts.doubao.voice', $('doubaoVoices').value); paintDoubao();
     };
     $('setTtsOn').addEventListener('change', () => live({ tts: { enabled: $('setTtsOn').checked } }));
     for (const [id, field] of [['rmUrl', 'baseURL'], ['rmKey', 'apiKey']]) {
@@ -804,7 +926,7 @@ function buildMotionList() {
         await writeTail;
         const r = await window.pet.ttsTest();
         $('sfNote').textContent = r.ok
-          ? (r.degraded ? `所选语音不可用，已切换系统语音：${r.reason}` : `用的是 ${r.engine === 'system' ? '系统语音' : r.engine === 'qwen' ? '本地 Qwen 语音' : r.engine === 'http' ? '自定义 HTTP' : '局域网 CHP'}${r.voice ? ' · ' + r.voice : ''}（${(r.ms / 1000).toFixed(1)} 秒）`)
+          ? (r.degraded ? `所选语音不可用，已切换系统语音：${r.reason}` : `用的是 ${r.engine === 'system' ? '系统语音' : r.engine === 'qwen' ? '本地 Qwen 语音' : r.engine === 'doubao' ? '豆包语音' : r.engine === 'http' ? '已有接口' : '局域网 CHP'}${r.voice ? ' · ' + r.voice : ''}（${(r.ms / 1000).toFixed(1)} 秒）`)
           : ('试听失败：' + r.error);
       } catch (e) { $('sfNote').textContent = '试听失败：' + e.message; }
       finally { button.disabled = false; button.textContent = '试听一句'; }
@@ -812,7 +934,7 @@ function buildMotionList() {
   } else {
     applyMotionView({ motions: MOTIONS, categories: MOTION_GROUPS }); buildMotionList();
     window.pet.on(ev => {
-      if (ev.type === 'config' && ev.config) { cfg = ev.config; buildMotionList(); }
+      if (ev.type === 'config' && ev.config) { const changed = JSON.stringify(cfg.motions) !== JSON.stringify(ev.config.motions); cfg = ev.config; if (changed) buildMotionList(); }
       if (ev.type === 'motion-library') { applyMotionView(ev); buildMotionList(); }
       if (ev.type === 'motion-error') $('mStatus').textContent = ev.error;
     });

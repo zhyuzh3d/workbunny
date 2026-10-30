@@ -81,6 +81,7 @@ body[data-p="motions"]  #motions  { display: flex; }
 .setting-field { display: block; margin: 16px 0 10px; }
 .setting-field > span { display: block; margin-bottom: 7px; color: var(--ink-soft); }
 .setting-field textarea { display: block; width: 100%; }
+.setting-field :is(#setProfile, #setBehavior) { resize:none; overflow-y:hidden; }
 .persona-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
 .persona-actions #selfUnderstand { flex: 2 1 190px; }
 .persona-actions #selfManual { flex: 1 1 86px; }
@@ -149,7 +150,8 @@ input[type="range"] { flex: 1 1 auto; min-width: 0; accent-color: #4a5058; curso
 .row > input:not([type="checkbox"]):not([type="range"]), .row > textarea {
   flex: 1 1 auto; min-width: 0;
 }
-.row > input[type="checkbox"] { width: 16px; height: 16px; }
+.row > input[type="checkbox"] { flex:none; }
+.row:has(>input[type="checkbox"]) > span { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .modelRefresh { display:flex; align-items:center; gap:8px; margin:0 0 12px 86px; }
 .modelRefresh button.mini { flex:0 0 auto; }
 .modelRefresh span { font-size:10px; color:var(--muted); }
@@ -232,6 +234,35 @@ body[data-tab="mouth"] #testBtn { background:#a94b32; color:white; border-color:
 .avRow button.on:hover { background:#3a3e44; border-color:#3a3e44; color:#fff; filter:none; }
 .avRow button:disabled { opacity: .55; }
 
+/* Appearance: built-ins first; personal models each own their active editor. */
+.pb[data-page="look"] { padding:16px; }
+.lookSection + .lookSection { margin-top:18px; padding-top:16px; border-top:1px solid var(--line); }
+.lookTitle { margin:0 0 10px; font-size:12px; font-weight:600; color:var(--ink-soft); }
+.lookHeading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+.lookHeading .lookTitle { margin:0; }
+.lookHeading button.mini { flex:0 0 auto; }
+.avRow button { flex:1 1 0; min-width:0; }
+.stockDescription { margin-top:10px; color:var(--muted); }
+.stockDescription > summary { cursor:pointer; padding:3px 0; font-size:11px; }
+.personalAvatars { display:grid; gap:8px; }
+.avatarCard { overflow:hidden; border:1px solid var(--line); border-radius:11px; background:#fffdfa; }
+.avatarCard.active { border-color:#b8afa0; }
+.avatarPick { display:flex; align-items:center; gap:12px; width:100%; padding:11px 12px; border:0; background:transparent; text-align:left; font:12px var(--font); color:var(--ink-soft); }
+.avatarPick:hover { background:#f3efe8; }
+.avatarPick.on { color:var(--ink); }
+.avatarName { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.avatarUse { flex:none; font-size:10px; color:var(--muted); }
+.avatarPick.on .avatarUse { color:#4c7253; }
+.avatarEmpty { padding:16px 12px; border:1px dashed #d7d0c4; border-radius:10px; color:var(--muted); line-height:1.6; }
+.avatarEditor { padding:10px 12px 12px; }
+.avatarCard .avatarEditor { border-top:1px solid var(--line); }
+.stockDescription .avatarEditor { padding:8px 0 0; }
+.avatarEditor > label { display:block; margin-bottom:6px; color:var(--ink-soft); font-size:11px; }
+.avatarEditor #avatarDescription { display:block; min-height:64px; width:100%; resize:vertical; }
+.avatarActions { display:flex; gap:8px; margin-top:8px; }
+.avatarActions button.mini { flex:0 0 auto; }
+#stockAppearanceDetails[hidden], #deleteAvatar[hidden] { display:none; }
+
 /* ── 动作条目 ── */
 .mGroup {
   font-size: 10px; letter-spacing: .08em; color: var(--muted);
@@ -264,7 +295,7 @@ button.mItem .lp { font-size: 9.5px; opacity: .55; flex: 0 0 auto; }
 .motionGroup { margin-bottom:6px; }
 .motionGroup summary { cursor:pointer; color:var(--ink-soft); font-weight:600; padding:9px 2px; font-size:11.5px; }
 .motionRow { display:flex; align-items:center; gap:8px; }
-.motionRow > input[type="checkbox"] { flex:0 0 auto; width:15px; height:15px; accent-color:var(--ink); cursor:pointer; }
+.motionRow > input[type="checkbox"] { flex:none; }
 .motionRow > input:disabled { cursor:default; }
 .motionRow .mItem { flex:1 1 auto; }
 button.mItem:disabled { opacity:.45; cursor:default; background:#fffdfa; color:var(--ink-soft); }
@@ -305,3 +336,39 @@ button.wide.primary:hover:not(:disabled) { background:#3a3e44; border-color:#3a3
 .hidden { display: none !important; }
 
 .motionTools{padding:10px 16px;border-bottom:1px solid #ddd8cf}.motionTools .actions{display:flex;gap:8px;margin:6px 0;flex-wrap:wrap}.motionTools input,.motionTools select{flex:1;min-width:120px}.motionEditor{margin:4px 0 12px 24px;padding:8px 10px;background:rgba(255,255,255,.5);border-radius:10px;font-size:12px}.motionEditor>summary{cursor:pointer;color:#666}.motionField{display:flex;gap:10px;align-items:center;margin:8px 0}.motionField>span{min-width:90px}.motionField input:not([type=checkbox]),.motionField textarea{flex:1;min-width:0}.motionField textarea{min-height:56px}.motionWeight{flex:0 0 58px;width:58px;height:30px;min-width:0;padding:4px;text-align:center;cursor:text}.motionChance{min-width:36px;color:#777;font-size:11px}.motionRow .mItem{min-width:0}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}#avatarDescription{box-sizing:border-box;width:100%;resize:vertical;min-height:70px}#deleteAvatar:disabled{opacity:.4}
+
+.motionField:has(input[type="checkbox"]) { justify-content:space-between; }
+.motionField:has(input[type="checkbox"]) > span { white-space:nowrap; }
+.speakerReading { padding:12px; border:1px solid var(--line); border-radius:11px; background:#fffdfa; }
+.speakerReading p { margin:0 0 8px; color:var(--ink-soft); font-size:11px; }
+.speakerReading blockquote { margin:0; font-size:12px; line-height:1.85; color:var(--ink-soft); user-select:text; }
+.speakerToggle { margin-top:14px; }
+#speakerToggle[hidden], #speakerReset[hidden] { display:none; }
+.serviceAdvanced { margin: 10px 0; }
+.serviceAdvanced input { width:100%; margin-top:8px; box-sizing:border-box; }
+/* Compact motion rows; all descriptive editing lives in one dialog. */
+.motionGroup { border-bottom:1px solid var(--line); padding:0 0 8px; margin:0 0 8px; }
+.motionGroup > summary { display:flex; align-items:center; gap:5px; padding:7px 0; list-style:none; }
+.motionGroup > summary::before { content:'▾'; font-size:11px; width:12px; color:var(--muted); }
+.motionGroup:not([open]) > summary::before { content:'▸'; }
+.motionGroupName { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.motionRow { gap:5px; margin:4px 0; min-height:31px; }
+.motionRow .mItem { margin:0; padding:6px 8px; flex:1 1 auto; font-size:11.5px; }
+.motionRow .nm { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.motionRatio { flex:0 0 98px; width:98px; min-width:0; accent-color:#5b805f; cursor:pointer; }
+.motionChance { flex:0 0 34px; min-width:34px; text-align:right; font-size:10px; font-variant-numeric:tabular-nums; }
+button.motionIcon { width:25px; min-width:25px; height:25px; flex:none; padding:0; line-height:1; font-size:16px; border-color:transparent; background:transparent; color:var(--muted); }
+button.motionIcon:hover { background:#ebe7df; color:var(--ink); }
+button.motionIcon[aria-pressed="true"] { color:#3e8a5c; }
+.motionRow.disabled .mItem { opacity:.45; }
+.motionDialog { width:min(460px,calc(100vw - 32px)); padding:0; max-height:calc(100vh - 32px); border:1px solid var(--line); border-radius:13px; color:var(--ink); background:var(--paper); }
+.motionDialog::backdrop { background:rgba(20,18,15,.22); }
+.motionDialog[open] { display:flex; flex-direction:column; }
+.motionDialog header,.motionDialog footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; flex:none; }
+.motionDialog header { border-bottom:1px solid var(--line); font-size:13px; }
+.motionDialog footer { border-top:1px solid var(--line); }
+#motionDialogBody { overflow:auto; padding:2px 16px 8px; }
+#motionDialogBody .motionField { align-items:center; }
+#motionDialogBody select { flex:1; min-width:0; }
+#motionDialogStatus { flex:1; font-size:11px; color:var(--muted); }
+#motionList input.motionRatio { flex:0 0 110px; width:110px; }

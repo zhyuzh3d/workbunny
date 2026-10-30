@@ -83,7 +83,7 @@ function chat(opts) {
     const payload = JSON.stringify({
       model,
       messages: messages.map(require('./context-budget').wire),
-      max_tokens: maxTokens,
+      ...(opts.provider === 'openai' ? { max_completion_tokens: maxTokens } : { max_tokens: maxTokens }),
       stream: true,
       // 部分网关认这个；不认的会忽略
       stream_options: { include_usage: true },

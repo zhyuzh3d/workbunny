@@ -26,28 +26,40 @@ class SpeakerFilter {
     return { accepted: score >= threshold, status: score >= threshold ? 'owner' : score >= threshold - .035 ? 'uncertain' : 'other', score };
   }
   offer(feature) {
-    const vector = unit(feature?.vector);
-    if (this.enrollment && vector && feature.quality >= .2 && feature.frames >= 12) {
-      const pending = this.enrollment;
-      pending.vectors.push(vector); pending.duration += Math.min(1200, Math.max(0, Number(feature.durationMs) || 0));
-      if (pending.duration >= 2500) {
-        clearTimeout(pending.timer); this.enrollment = null;
-        const sample = mean(pending.vectors), old = this.profile?.samples || [];
-        if (!sample || old.length && cosine(sample, mean(old)) < .8) { pending.reject(Error('这段声音与先前差异太大，请保持同一麦克风并重新录制')); return this.classify(feature); }
-        const samples = [...old, sample].slice(-6);
-        const center = mean(samples), within = Math.min(...samples.map(v => cosine(v, center)));
-        this.profile = { schema: 'local-speaker/v1', samples, threshold: Math.max(.84, Math.min(.96, within - .035)), device: this.device, enrolledAt: this.clock() };
-        pending.resolve({ samples: samples.length, ready: samples.length >= 3 });
+    const vector = unit(feature?.vector), pending = this.enrollment;
+    if (pending && vector && feature.speech !== false && feature.quality >= .2 && feature.frames >= 12) {
+      if (pending.device && this.device && pending.device !== this.device) this.cancel('麦克风变了，请重新朗读');
+      else {
+        pending.device ||= this.device;
+        if (pending.samples.length < 3) {
+          pending.vectors.push(vector); pending.vectors = pending.vectors.slice(-32);
+          pending.duration += Math.min(1200, Math.max(0, Number(feature.durationMs) || 0));
+          if (pending.duration >= 3000) {
+            const sample = mean(pending.vectors);
+            if (!sample || pending.samples.length && cosine(sample, mean(pending.samples)) < .8) this.cancel('没有听清同一个声音，请重新朗读');
+            else { pending.samples.push(sample); pending.vectors = []; pending.duration = 0; }
+          }
+        }
+        // Wait for the owner to finish the passage; its tail must not become a chat.
+        if (this.enrollment === pending && pending.samples.length === 3) {
+          clearTimeout(pending.quietTimer);
+          pending.quietTimer = setTimeout(() => {
+            if (this.enrollment !== pending) return;
+            clearTimeout(pending.timer); this.enrollment = null;
+            const center = mean(pending.samples), within = Math.min(...pending.samples.map(v => cosine(v, center)));
+            this.profile = { schema: 'local-speaker/v1', samples: pending.samples, threshold: Math.max(.84, Math.min(.96, within - .035)), device: pending.device, enrolledAt: this.clock() };
+            pending.resolve({ samples: 3, ready: true });
+          }, pending.quietMs);
+        }
       }
     }
     const result = this.classify(feature); this.latest = { ...result, at: this.clock() }; return result;
   }
-  enroll({ timeoutMs = 20000 } = {}) {
-    if (this.enrollment) return Promise.reject(Error('正在录入，请先完成当前这段'));
-    if (this.profile?.device && this.device && this.profile.device !== this.device) { this.profile = null; this.latest = null; }
+  enroll({ timeoutMs = 45000, quietMs = 1500 } = {}) {
+    if (this.enrollment) return Promise.reject(Error('正在听，请先读完这一段'));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.enrollment = null; reject(Error('没有录到足够清楚的人声，请靠近麦克风再读一段')); }, timeoutMs);
-      this.enrollment = { resolve, reject, timer, vectors: [], duration: 0 };
+      const timer = setTimeout(() => this.cancel('没有听清，请靠近麦克风重新朗读'), timeoutMs);
+      this.enrollment = { resolve, reject, timer, quietMs, quietTimer: null, vectors: [], samples: [], duration: 0, device: this.device };
     });
   }
   acceptsText() {
@@ -55,8 +67,8 @@ class SpeakerFilter {
     return !this.enabled || !!(this.latest?.accepted && this.clock() - this.latest.at < 6000);
   }
   status() { return { enabled: this.enabled, samples: this.profile?.samples.length || 0, ready: (this.profile?.samples.length || 0) >= 3,
-    enrolling: !!this.enrollment, latest: this.latest ? { status: this.latest.status, score: this.latest.score } : null, approximate: true }; }
+    enrolling: !!this.enrollment, progress: this.enrollment?.samples.length || 0, latest: this.latest ? { status: this.latest.status, score: this.latest.score } : null, approximate: true }; }
   reset() { this.cancel(); this.profile = null; this.latest = null; this.enabled = false; }
-  cancel() { if (this.enrollment) { clearTimeout(this.enrollment.timer); this.enrollment.reject(Error('录入已取消')); this.enrollment = null; } }
+  cancel(message = '已取消朗读') { if (this.enrollment) { const pending = this.enrollment; clearTimeout(pending.timer); clearTimeout(pending.quietTimer); this.enrollment = null; pending.reject(Error(message)); } }
 }
 module.exports = { SpeakerFilter, unit, cosine, mean, DIMENSION };

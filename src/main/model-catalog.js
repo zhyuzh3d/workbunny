@@ -5,8 +5,9 @@ const https = require('https');
 const http = require('http');
 
 const PROVIDERS = [
-  { id: 'deepseek', label: 'DeepSeek 官方', baseURL: 'https://api.deepseek.com/v1', models: ['deepseek-flash', 'deepseek-v4-pro'], hint: '填写官方 API Key，再获取当前账号可用的模型。' },
-  { id: 'grok', label: 'Grok 官方', baseURL: 'https://api.x.ai/v1', models: ['grok-4.7', 'grok-4.6', 'grok-4.5'], hint: '填写 xAI 官方 API Key，再获取当前账号可用的对话模型。' },
+  { id: 'deepseek', label: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', models: ['deepseek-flash', 'deepseek-v4-pro'], hint: '填写官方 API Key，再获取当前账号可用的模型。' },
+  { id: 'openai', label: 'ChatGPT', baseURL: 'https://api.openai.com/v1', models: ['gpt-4.1'], hint: '填写 OpenAI API Key，获取模型后选择。' },
+  { id: 'grok', label: 'Grok', baseURL: 'https://api.x.ai/v1', models: ['grok-4.7', 'grok-4.6', 'grok-4.5'], hint: '填写 xAI 官方 API Key，再获取当前账号可用的对话模型。' },
 ];
 const EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const LABELS = { minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '超高', max: '极致', ultra: '极致' };
@@ -48,6 +49,7 @@ function normalize(provider, items) {
     if (!item || typeof item !== 'object') continue;
     const id = clean(item.id);
     if (!id || seen.has(id) || item.disabled || (item.configurable && !item.configured)) continue;
+    if (provider === 'openai' && /(?:embedding|whisper|tts|dall-e|image|realtime|transcribe|audio|moderation|codex|search|computer-use|deep-research|^o[13]-pro|^o1-(?:mini|preview)|^gpt-5(?:\.\d+)?-pro)/i.test(id)) continue;
     if (provider === 'workbuddy' && item.tags?.includes('text-to-image')) continue;
     if (Array.isArray(item.output_modalities) && !item.output_modalities.includes('text')) continue;
     if (Array.isArray(item.input_modalities) && !item.input_modalities.includes('text')) continue;
@@ -76,6 +78,31 @@ function normalize(provider, items) {
   if (!models.length) throw new Error('当前账号没有返回可用的对话模型');
   return models;
 }
+// Dedicated providers share the Chat Completions transport, not their capability rules.
+function apiBase(value) {
+  const u = require('./tts-http-profile').url(value);
+  if (u.search) throw new Error('服务地址不能包含查询参数');
+  return u.href.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '');
+}
+function apiThinking(provider, model, selection = 'none') {
+  const choice = ['none', 'low', 'medium', 'high'].includes(selection) ? selection : selection === 'off' ? 'none' : 'low';
+  if (provider === 'deepseek') {
+    if (model === 'deepseek-chat' || model === 'deepseek-reasoner') return {};
+    return { thinking: { type: choice === 'none' ? 'disabled' : 'enabled' }, reasoning_effort: choice };
+  }
+  if (provider === 'grok') {
+    if (/^grok-4\.(?:[567]|20)(?:$|-)/.test(model)) return { reasoning_effort: choice === 'none' ? 'low' : choice };
+    if (/^grok-3-mini(?:$|-)/.test(model)) return { reasoning_effort: choice === 'high' ? 'high' : 'low' };
+    if (/^grok-4\.3(?:$|-)/.test(model)) return { reasoning_effort: choice };
+    return {}; // Older Grok models reject this parameter.
+  }
+  if (provider === 'openai' && !/chat-latest/.test(model) && /^(?:gpt-5|o[134])(?:[.-]|$)/.test(model)) {
+    // GPT-5 before 5.1 and o-series do not accept 'none'.
+    const supportsNone = /^gpt-5\.(?:[1-9]|[1-9]\d)/.test(model);
+    return { reasoning_effort: choice === 'none' && !supportsNone ? 'low' : choice };
+  }
+  return {};
+}
 function requestJSON(url, apiKey) {
   return new Promise((resolve, reject) => {
     const u = new URL(url), mod = u.protocol === 'https:' ? https : http;
@@ -102,7 +129,7 @@ function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => 
     try {
       const disk = JSON.parse(fs.readFileSync(file, 'utf8'));
       // Read only our whitelisted metadata, never propagate credentials or arbitrary response fields.
-      for (const id of ['workbuddy', 'deepseek', 'grok']) {
+      for (const id of ['workbuddy', 'deepseek', 'openai', 'grok']) {
         const row = disk[id];
         if (Array.isArray(row?.models)) cache[id] = { at: Number(row.at) || 0, models: row.models.filter(m => clean(m.id) && Array.isArray(m.thinking)).map(m => ({
           id: clean(m.id), label: clean(m.label), thinking: m.thinking.filter(t => ['auto', 'off', 'on', ...EFFORTS].includes(t.id)).map(t => ({ id: t.id, label: clean(t.label) })),
@@ -137,7 +164,7 @@ function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => 
     if (provider === 'grok') return { reasoning_effort: t === 'off' ? 'none' : t };
     return {};
   }
-  async function refresh(provider, apiKey = '') {
+  async function refresh(provider, apiKey = '', baseURL) {
     let models;
     if (provider === 'workbuddy') {
       const response = await workbuddyRequest({ method: 'GET', path: '/v2/enterprises/personal/models' }, { timeoutMs: 20000 });
@@ -149,7 +176,7 @@ function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => 
       if (!p) throw new Error('不支持的模型服务商');
       if (!String(apiKey).trim()) throw new Error('请先填写该服务商的 API Key');
       // Grok's language endpoint excludes image/video generators and includes capability metadata.
-      const data = await request(p.baseURL + (provider === 'grok' ? '/language-models' : '/models'), String(apiKey).trim());
+      const data = await request(apiBase(baseURL || p.baseURL) + (provider === 'grok' ? '/language-models' : '/models'), String(apiKey).trim());
       models = normalize(provider, provider === 'grok' ? data.models : data.data);
     }
     const previous = cache[provider];
@@ -160,4 +187,4 @@ function createCatalog({ request = requestJSON, workbuddyRequest = (...args) => 
   function invalidate(provider) { delete cache[provider]; save(); }
   return { setPath, get, thinking, body, refresh, invalidate };
 }
-module.exports = { ...createCatalog(), createCatalog, PROVIDERS, normalize, fallbackThinking, requestJSON };
+module.exports = { ...createCatalog(), createCatalog, PROVIDERS, normalize, fallbackThinking, requestJSON, apiBase, apiThinking };

@@ -53,3 +53,15 @@ test('only actual current-avatar starts enter the five-action history and resolv
   assert.equal(body.recent.length, 5);assert.equal(body.recent.at(-1).key, 'wave_one');
   assert.equal((await body.perform('wave_one')).ok, false);
 });
+test('percentage edits coordinate the enabled peers atomically and retain idle safety', t => {
+  const f = fixture(t);
+  const added = f.library.import(path.resolve('src/renderer/assets/motions/greet_sachi.vrma'), {slot:'greet'});
+  f.library.save({type:'motion-probability',key:'wave_one',percent:75});
+  const peers = f.library.catalog().motions.filter(m=>m.slot==='greet');
+  assert.equal(peers.find(m=>m.key==='wave_one').weight,75); assert.equal(peers.find(m=>m.key===added.key).weight,25);
+  assert.equal(peers.reduce((s,m)=>s+m.weight,0),100);
+  f.library.save({type:'motion-probability',key:'wave_one',percent:100});assert.equal(f.library.select(added.key,{exact:true}).key,added.key);
+  assert.throws(()=>f.library.save({type:'motion-probability',key:'idle_one',percent:0}),/至少保留/);
+  const before=JSON.stringify(f.config());assert.throws(()=>f.library.save({type:'motion-probability',key:'wave_one',percent:NaN}),/比例/);assert.equal(JSON.stringify(f.config()),before);
+  assert.throws(()=>f.library.save({type:'motion-update',key:'wave_one',label:'覆盖',expected:{label:'旧名字'}}),/刚被更新/);
+});

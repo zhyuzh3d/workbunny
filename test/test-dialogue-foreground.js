@@ -15,7 +15,7 @@ const reply = () => JSON.stringify({ protocol: 'dialogue-v2', stages: [
 ] });
 const ctx = { storageBusy: false, storageError: '', connection: { status: () => ({ ready: true }) }, require: localRequire, AbortController, Date, Set, JSON, randomUUID: require('node:crypto').randomUUID,
   inputAdmission: localRequire('./conversation-input'), scopePolicy: localRequire('./memory-scope'),
-  config: { load: () => ({ memory: settings }), resolveLLM: () => ({ transport: 'workbuddy', provider: 'synthetic', model: 'test' }), buildSystemPrompt: () => '合成角色与操作规则' },
+  config: { load: () => ({ memory: settings, brain: { source: 'workbuddy' } }), resolveLLM: () => ({ transport: 'workbuddy', provider: 'synthetic', model: 'test' }), buildSystemPrompt: () => '合成角色与操作规则' },
   memory: m, currentScene: () => settings.scene, contextEpoch: 0, screenLocked: false, activeThought: null, busy: false,
   desktop: null, monitor: null, secretary: null, history: [], presentedReplies: new Set(), lastDialogueAt: 0,
   embodiment: { context: () => ({ appearance: { name: '可可', description: '短发' }, recentActions: [] }), perform: async () => ({ ok: true }) },
@@ -27,8 +27,8 @@ const ctx = { storageBusy: false, storageError: '', connection: { status: () => 
   presentConversation: text => text, conversationText: text => text, maintenance: { requestReflection() {} },
   pushHistory: (...args) => m.addMessage(...args), selfMutationOwner: false };
 vm.createContext(ctx);
-vm.runInContext(source.slice(source.indexOf('async function think('), source.indexOf('/* ── 主动播报')), ctx);
-vm.runInContext(source.slice(source.indexOf('function worthJudging('), source.indexOf('/** 听见有人叫我名字')), ctx);
+vm.runInContext(source.slice(source.indexOf('function dialogueReady('), source.indexOf('/* ── 主动播报')), ctx);
+vm.runInContext(source.slice(source.indexOf('function worthJudging('), source.indexOf('/** Exact configured name')), ctx);
 async function run() {
   await m.init(); assert(m.ready, m.error); await m.cognition.ensure({ profile: '我认真倾听。' });
   const first = await m.addMessage('user', 'PrivateHistorySentinel，我只是想说说。');
@@ -75,6 +75,13 @@ async function run() {
   assert.equal(changed.value.content, interrupted.value.content);assert.deepEqual(changed.value.interrupted, { at: 123456, by: 'voice' });
   assert.equal(localRequire('./dialogue-cognition').context([changed], { dialogueId: 'owner:life' }).data.previous, null);
   assert(JSON.parse(calls[0].find(r => r._contextLane === 'body').content).appearance.description);
+  const load = ctx.config.load, resolve = ctx.config.resolveLLM, status = ctx.connection.status;
+  ctx.config.load = () => ({memory:settings,brain:{source:'apikey'}});
+  ctx.config.resolveLLM = () => ({transport:'apikey',provider:'openai',model:'fixture',apiKey:'fixture-key'});
+  ctx.connection.status = () => ({ready:false,note:'WorkBuddy offline'});
+  assert(ctx.dialogueReady()); assert(await ctx.think({userText:'直接接口仍可对话',allowSpeech:false}));
+  ctx.config.resolveLLM = () => ({transport:'apikey',apiKey:''});assert(!ctx.dialogueReady());
+  ctx.config.load=load;ctx.config.resolveLLM=resolve;ctx.connection.status=status;
   // The actual periodic callback must not create an idle-activity promise
   // while maintenance is entering its own asynchronous permission checks.
   const { MemoryMaintenance } = localRequire('./memory-maintenance');

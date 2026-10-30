@@ -20,9 +20,10 @@
   --listen-bottom: 0px;
   --task-bottom: calc(var(--listen-bottom) + var(--status-h) + 8px);
   --dock-bottom: calc(var(--task-bottom) + var(--status-h) + 6px);
-  /* 画布宽度不变，UI 原范围两侧各向内收 10%。 */
-  --ui-gutter: 21.42857143vw;
-  --ui-width: 57.14285714vw;
+  /* Renderer sets the 100% canvas width once per layout/scale change. */
+  --ui-base-width: 57.14285714vw;
+  --ui-width: min(var(--ui-base-width), calc(100vw - 24px));
+  --ui-gutter: calc((100vw - var(--ui-width)) / 2);
 }
 
 * { box-sizing: border-box; }
@@ -316,34 +317,6 @@ html, body {
 #fab button:hover { background: #fff; color: var(--ink); }
 #fab button:active { transform: scale(.92); }
 #fab button.muted { color: var(--bad); }
-
-/* ── 录制律动 ── */
-#rec {
-  position: fixed;
-  left: 50%;
-  bottom: calc(var(--dock-bottom) + 52px);
-  transform: translateX(-50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 7px;
-  z-index: 22;
-}
-#rec.hidden { display: none; }
-#rec .ring { display: flex; align-items: flex-end; gap: 3px; height: 22px; }
-#rec .ring i {
-  display: block;
-  width: 4px;
-  border-radius: 2px;
-  background: var(--accent);
-  height: calc(6px + var(--lvl, .2) * 16px);
-  transition: height .07s linear;
-  opacity: .9;
-}
-#rec .ring i:nth-child(2) { height: calc(9px + var(--lvl, .2) * 20px); background: #d0744f; }
-#rec .ring i:nth-child(3) { height: calc(5px + var(--lvl, .2) * 14px); }
-#recText { font-size: 11px; color: var(--ink-soft); background: rgba(255, 253, 250, .88);
-  padding: 3px 9px; border-radius: 9px; border: 1px solid var(--line); white-space: nowrap; }
 
 /* ══ 脚下那条：耳朵状态 + 电平 + 听到的话 ══
  * 左端固定在地面左下角；宽度是「内容要多少给多少，最多整窗」。

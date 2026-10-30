@@ -394,6 +394,15 @@ class DesktopService {
     if (this.task && ['running', 'starting', 'monitoring', 'verifying', 'awaiting', 'review'].includes(this.task.status)) { this.update({ status: 'stopped', note: reason, updatedAt: Date.now() }); await this.journal(); }
     this.emit(this.publicStatus()); return { ok: true };
   }
+  async cancel() {
+    const id = this.task?.id;
+    await this.stop('用户取消了这件事');
+    if (id && this.task?.id === id && ['stopped', 'paused', 'review'].includes(this.task.status)) {
+      this.update({ status: 'cancelled', note: '已取消 Bunny 跟进；已提交的外部工作可能仍在继续', updatedAt: Date.now() });
+      await this.journal(); this.emit(this.publicStatus());
+    }
+    return { ok: true };
+  }
   async capture(scope, gen) {
     this.assertLive(gen);
     const f = await this.native.request('frontmost', {}, 5000); this.assertLive(gen);

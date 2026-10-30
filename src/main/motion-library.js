@@ -64,7 +64,14 @@ class MotionLibrary {
   save(change) {
     const current = this.getConfig(), library = clone(current.motions?.library || {});
     library.categories ||= clone(this.groups); library.items ||= []; library.overrides ||= {}; library.removed ||= [];
-    if (change.type === 'category-add') {
+    if (change.expected) {
+      const entity = change.type === 'category-update' ? this.catalog(current).categories.find(g => g.id === change.id) : this.catalog(current).motions.find(m => m.key === change.key);
+      if (!entity || Object.entries(change.expected).some(([k,v]) => entity[k] !== v)) throw Error('内容刚被更新，请重新打开编辑');
+    }
+    if (change.type === 'motion-probability') {
+      const weights = core.probabilities(this.catalog(current).motions, change.key, Number(change.percent));
+      for (const [key, weight] of Object.entries(weights)) library.overrides[key] = { ...library.overrides[key], weight };
+    } else if (change.type === 'category-add') {
       const id = 'group_' + crypto.randomUUID().replaceAll('-', '');
       library.categories.push({ id, label: text(change.label, 40), description: text(change.description, 240) });
     } else if (change.type === 'category-update') {

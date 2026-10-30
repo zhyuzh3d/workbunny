@@ -167,6 +167,7 @@ async function prewarm(q) { require('./runtime-capabilities').requireQwen(); if 
 /** Stable identity for persistent interaction audio, based on the active engine. */
 async function voiceIdentity(cfg) {
   const engine = cfg.engine || 'system';
+  if (engine === 'doubao') return { engine, service: cfg.doubao?.url, model: cfg.doubao?.model, voice: cfg.doubao?.voice };
   if (engine === 'http') return { engine, profile: require('./tts-http-profile').identity(cfg.http), voice: cfg.http?.params?.voice };
   if (engine === 'qwen') return { engine, model: QWEN_FILES.map(f => f.sha256), voice: cfg.qwen?.voice || 'serena' };
   if (engine === 'remote') {
@@ -194,7 +195,7 @@ async function synthesize(text, cfg, options = {}) {
     .createHash('sha1')
     .update([clean, engine, cfg.voice, cfg.rate,
       cfg.qwen && cfg.qwen.voice, cfg.qwen?.modelKind, cfg.qwen && cfg.qwen.dir,
-      cfg.model, cfg.instructions, cfg.seed, cfg.speed, cfg.language, cfg.baseURL, cfg.apiKey, cfg.chp?.voice, require('./tts-http-profile').identity(cfg.http)].join('\u0001'))
+      cfg.model, cfg.instructions, cfg.seed, cfg.speed, cfg.language, cfg.baseURL, cfg.apiKey, cfg.chp?.voice, require('./tts-http-profile').identity(cfg.http), require('./tts-http-profile').identity(cfg.doubao)].join('\u0001'))
     .digest('hex');
   if (cache.has(hash)) return { ...cache.get(hash), ms: 0, cached: true, streamed: false };
 
@@ -212,6 +213,9 @@ async function synthesize(text, cfg, options = {}) {
       buffer = result.buffer; streamed = result.streamed; stats = result.stats;
       used = 'qwen';
     } catch (e) { if (e.name === 'AbortError') throw e; options.onStop?.(); lastErr = e; }
+  } else if (engine === 'doubao') {
+    try { const result = await require('./doubao-tts').synthesize(clean, cfg, options); buffer = result.buffer; used = 'doubao'; stats = { httpVoice: result.voice }; }
+    catch (e) { if (e.name === 'AbortError') throw e; lastErr = e; }
   } else if (engine === 'http') {
     try { const result = await custom.synthesize(clean, cfg, options); buffer = result.buffer; used = 'http'; stats = { httpVoice: result.voice }; }
     catch (e) { if (e.name === 'AbortError') throw e; lastErr = e; }

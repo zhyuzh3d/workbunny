@@ -34,8 +34,8 @@
           <p class="inline-note">三个场景共用一份自我理解。</p>
           <button id="openSelfSettings" class="button quiet">自我理解 · 查看与微调</button>
         </div>
-        <div class="setting-row"><div><strong>使用记忆</strong><p>保存聊天并参考历史记忆；关闭后只保留当前临时对话</p></div><label class="switch"><input id="memoryEnabled" type="checkbox"><span></span></label></div>
-        <div class="setting-row"><div><strong>整理新记忆</strong><p>空闲时将近期对话交给 WorkBuddy 免费模型整理</p></div><label class="switch"><input id="memoryExtract" type="checkbox"><span></span></label></div>
+        <div class="setting-row"><div><strong>使用记忆</strong><p>保存聊天并参考历史记忆；关闭后只保留当前临时对话</p></div><label class="switch"><input id="memoryEnabled" type="checkbox" role="switch"><span></span></label></div>
+        <div class="setting-row"><div><strong>整理新记忆</strong><p>空闲时将近期对话交给 WorkBuddy 免费模型整理</p></div><label class="switch"><input id="memoryExtract" type="checkbox" role="switch"><span></span></label></div>
         <div id="memoryConfigNote" class="inline-note" role="status"></div>
       </div>
 
@@ -89,7 +89,16 @@
       <div><div class="eyebrow">WORKBUNNY</div><h1>工作与日常</h1></div>
       <span id="desktopStatus" class="status-pill">尚未读取</span>
     </header>
+    <nav id="desktopTabs" class="tabs desktop-tabs" role="tablist" aria-label="工作与日常">
+      <button class="tab active" role="tab" aria-selected="true" data-desktop-tab="current">当前任务</button>
+      <button class="tab" role="tab" aria-selected="false" data-desktop-tab="watches">持续关注</button>
+      <button class="tab" role="tab" aria-selected="false" data-desktop-tab="workbuddy">WorkBuddy</button>
+      <button class="tab" role="tab" aria-selected="false" data-desktop-tab="autonomy">自主生活</button>
+      <button class="tab" role="tab" aria-selected="false" data-desktop-tab="permissions">系统权限</button>
+    </nav>
     <section class="main desktop-main">
+      <section data-desktop-page="current" role="tabpanel">
+        <div class="button-row task-toolbar"><button id="taskSetup" class="button primary">设定任务</button><button id="desktopRefresh" class="button quiet">刷新</button></div>
       <div id="taskStateCard" class="card task-state-card">
         <div class="section-heading"><div><h2 data-character-text="Bunny 当前操作">她 当前操作</h2><p id="taskStateNote">没有进行中的代理操作</p></div></div>
         <p id="taskPauseNote" class="inline-note task-pause-note" hidden></p>
@@ -105,80 +114,64 @@
         </details>
       </div>
 
-      <section class="card" id="autonomyCard">
-        <div class="section-heading"><div><h2>她自己的小天地</h2><p>在你授权的范围里，自主选题、尝试和分享。</p></div></div>
-        <p class="inline-note">默认关闭。每天最多两次模型尝试、两次问候或分享，间隔至少六小时，22:00—09:00安静。没有回应不会继续追问；正在交流时暂停。</p>
-        <label class="field-label">活动<select id="autonomyKind"><option value="greet">桌面问候</option><option value="create">本地创作</option></select></label>
-        <label class="field-label">可参考的资料<select id="autonomyScene"><option value="life">生活与工作</option><option value="work">仅工作</option><option value="private">包含私聊</option></select></label>
-        <label class="field-label">兴趣与范围<textarea id="autonomySubject" rows="2" maxlength="400" placeholder="例如短篇故事、小工具源码、对最近问题的新想法"></textarea></label>
-        <div class="button-row"><button id="autonomyDirectory" class="button quiet">选择专用创作目录</button><span id="autonomyPath" class="inline-note"></span></div>
-        <label class="field-label">授权期限<select id="autonomyDays"><option value="1">一天</option><option value="7" selected>七天</option><option value="30">三十天</option></select></label>
-        <p class="inline-note">只使用确认免费的模型。作品仅在专用目录内新建文件，源码不自动运行；问候只在本机送达。第三方账号、社交发送和公开发布需独立接入。</p>
-        <div class="button-row"><button id="autonomyEnable" class="button primary">授权这项活动</button><button id="autonomyRevoke" class="button danger">撤销这项授权</button><button id="autonomyRefresh" class="button quiet">刷新</button></div>
-        <div id="autonomyStatus" class="inline-note" role="status"></div><div id="autonomyGrants" class="inline-note"></div>
-        <details><summary>她正在理解和在意的事</summary><p class="inline-note">认识保留条件和反例，目标可以调整或结束。移除后不再作为当前依据；长期兴趣和愿景可在自我理解中编辑、锁定。</p><div id="growthList" class="records" aria-live="polite"></div></details>
+        <div id="desktopActions" class="button-row" hidden><button id="taskResume" class="button primary" hidden>继续处理</button><button id="taskStop" class="button" hidden>暂停</button><button id="taskCancel" class="button danger" hidden>取消任务</button><button id="taskAccept" class="button quiet" hidden>确认结果</button></div>
+        <p id="desktopActionNote" class="inline-note" role="status"></p>
       </section>
+      <section data-desktop-page="watches" role="tabpanel" hidden>
       <section id="watchCard" class="card watch-card" aria-label="持续关注">
         <div class="section-heading"><div><h2>持续关注</h2><p>与当前桌面操作分开运行</p></div><button id="watchRefresh" class="button quiet">刷新</button></div>
         <div id="watchList" class="watch-list" aria-live="polite"><div class="inline-note">正在读取关注事项…</div></div>
       </section>
 
+      </section>
+      <section data-desktop-page="workbuddy" role="tabpanel" hidden>
+        <div class="button-row"><button id="workbuddyOpen" class="button quiet">打开 WorkBuddy</button></div>
       <div id="workbuddyMonitorCard" class="card monitor-card">
         <div class="section-heading"><div><h2>WorkBuddy 实际进度</h2><p>来自现有会话监视</p></div></div>
         <div id="workbuddyMonitorTasks" class="task-details"></div>
       </div>
 
-      <details id="taskFormDetails" class="card task-card">
-        <summary>手动交代（备用）</summary>
-        <div class="task-form">
-        <p class="desktop-intro" data-character-text="你可以直接告诉 Bunny 要办什么。">你可以直接告诉 她 要办什么。</p>
-        <label class="field-label" for="taskTarget">代理对象</label>
-        <select id="taskTarget">
-          <option value="workbuddy">工作代理 · WorkBuddy</option>
-          <option value="wechat">日常社交 · 微信文件传输助手</option>
-        </select>
-        <p class="inline-note">微信目标仅用于文件传输助手实验。</p>
-        <div id="workModelRow">
-          <label class="field-label" for="workModel">协作模型</label>
-          <select id="workModel">
-            <option value="deepseek-v4.1-flash">DeepSeek 4.1 Flash</option>
-            <option value="hy3">Hy3 · 简单会话</option>
-          </select>
-          <p class="inline-note">Flash 的代理操作使用 high；WorkBuddy 对话的思考强度以其自身设置为准。</p>
+      </section>
+      <section data-desktop-page="autonomy" role="tabpanel" hidden>
+        <div class="card" id="autonomyCard">
+          <div class="section-heading"><div><h2>自主生活</h2><p>空闲超过15分钟，自己找些事情做。</p></div><button id="autonomyRefresh" class="button quiet">刷新</button></div>
+          <p id="autonomyStatus" class="inline-note" role="status"></p>
+          <div class="button-row"><button id="autonomyPause" class="button">暂停</button><button id="autonomyResume" class="button" hidden>恢复</button><button id="autonomyCancel" class="button danger" hidden>取消这次任务</button></div>
+          <details class="autonomy-directory"><summary>自主目录</summary><p id="autonomyPath" class="inline-note"></p><button id="autonomyDirectory" class="button quiet">修改目录</button></details>
         </div>
-        <label id="taskGoalLabel" class="field-label" for="taskGoal">交给 WorkBuddy 的任务</label>
-        <textarea id="taskGoal" rows="3" maxlength="1200" placeholder="写下要原文交给 WorkBuddy 的任务"></textarea>
-        <label id="taskCriteriaLabel" class="field-label" for="taskCriteria">验收条件</label>
-        <textarea id="taskCriteria" rows="2" maxlength="1200" placeholder="写下如何确认结果；例如：WorkBuddy 中可见交付回复"></textarea>
-        <div class="button-row"><button id="desktopRefresh" class="button quiet">刷新状态</button><button id="workbuddyOpen" class="button quiet">查看 WorkBuddy</button></div>
+        <div id="autonomyHistory" class="records" aria-live="polite"></div>
+      </section>
+      <section data-desktop-page="permissions" role="tabpanel" hidden>
+        <div id="permissionsDetails" class="card permissions-card">
+          <div class="section-heading"><div><h2>系统权限</h2><p>在系统设置中允许后即可使用。</p></div><button id="desktopPermission" class="button quiet">请求权限</button></div>
+          <div id="permissionList" class="permission-list"></div><p id="permissionNote" class="inline-note"></p>
         </div>
-      </details>
-
-      <details id="permissionsDetails" class="card permissions-card">
-        <summary>系统权限</summary>
-        <div class="permissions-content">
-        <div class="section-heading"><div><h2>系统权限</h2><p>权限需要在系统设置中授权。</p></div><button id="desktopPermission" class="button quiet">请求权限</button></div>
-        <div id="permissionList" class="permission-list"></div>
-        <p id="permissionNote" class="inline-note"></p>
-        </div>
-      </details>
-
-      <details class="card insert-card"><summary>输入辅助</summary>
-        <p class="inline-note">点击后有 3 秒切换输入焦点。</p>
-        <textarea id="desktopInsertText" rows="2" maxlength="3500" placeholder="要输入的单段文字（3500 字以内）"></textarea>
-        <div class="button-row"><button id="desktopInsert" class="button">倒计时输入</button><button id="desktopInsertCancel" class="button quiet" hidden>取消</button><span id="desktopInsertNote" class="inline-note" role="status"></span></div>
-      </details>
-      <p class="safety-note">截图只会随任务发送给所选模型，不会常驻截屏。</p>
+      </section>
     </section>
-    <footer id="desktopActions" class="sticky-actions" hidden><div class="sticky-button-row"><button id="taskStart" class="button primary" hidden>发送给 WorkBuddy</button><button id="taskResume" class="button primary" hidden>继续处理</button><button id="taskStop" class="button danger" disabled hidden>暂停代理操作</button><button id="taskAccept" class="button quiet" disabled hidden>确认结果</button></div><span id="desktopActionNote" class="inline-note" role="status"></span></footer>
   </main>
+  <dialog id="taskDialog" class="task-dialog" aria-labelledby="taskDialogTitle">
+    <header class="self-dialog-head"><h2 id="taskDialogTitle">设定任务</h2><button id="taskDialogClose" class="button quiet">关闭</button></header>
+    <div class="task-dialog-body"><textarea id="taskGoal" rows="5" maxlength="1200" placeholder="希望 Bunny 帮你做什么？" aria-label="任务内容"></textarea><p id="taskDialogNote" class="inline-note" role="status"></p></div>
+    <footer class="self-entry-actions"><span></span><button id="taskStart" class="button primary">交代任务</button></footer>
+  </dialog>
 
   <dialog id="selfDialog" class="self-dialog" aria-labelledby="selfDialogTitle">
-    <header class="self-dialog-head"><div><h2 id="selfDialogTitle" data-character-text="Bunny 的自我理解">她 的自我理解</h2><p class="inline-note">三个场景共用。分类只用于整理，每类都可以有多条理解。</p></div><button id="selfClose" class="button quiet" aria-label="关闭自我理解">关闭</button></header>
-    <div class="self-dialog-toolbar"><button id="selfGlobalLock" class="button">锁定自我理解</button><button id="selfAdd" class="button">增加条目</button><button id="selfRefresh" class="button quiet">刷新</button></div>
+    <header class="self-dialog-head"><div><h2 id="selfDialogTitle" data-character-text="Bunny 的自我理解">她 的自我理解</h2><p class="inline-note">三个场景共用。点击条目右侧的编辑按钮修改。</p></div><button id="selfClose" class="button quiet" aria-label="关闭自我理解">关闭</button></header>
+    <div class="self-dialog-toolbar"><button id="selfGlobalLock" class="button">锁定自我理解</button><button id="selfRefresh" class="button quiet">刷新</button><button id="selfAdd" class="button primary">添加理解</button></div>
     <div id="selfLockNote" class="inline-note self-lock-note"></div>
     <div id="selfEntries" class="self-entries"></div>
     <footer class="self-dialog-foot"><div id="selfStatus" class="inline-note" role="status" aria-live="polite"></div></footer>
+  </dialog>
+  <dialog id="selfEntryDialog" class="self-entry-dialog" aria-labelledby="selfEntryTitle">
+    <header class="self-dialog-head"><h2 id="selfEntryTitle">编辑理解</h2><button id="selfEntryClose" class="button quiet" aria-label="关闭条目编辑">关闭</button></header>
+    <div class="self-entry-body">
+      <label class="self-field" for="selfEntryFacet">分类<select id="selfEntryFacet" aria-label="理解的分类"></select></label>
+      <label class="self-field" for="selfEntryText">内容<textarea id="selfEntryText" rows="3" maxlength="400" aria-label="自我理解正文"></textarea></label>
+      <label class="self-field" for="selfEntryCondition">条件 <span class="inline-note">选填</span><input id="selfEntryCondition" type="text" maxlength="160" placeholder="例如：主人倾诉时" aria-label="适用条件"></label>
+      <details id="selfEntryHistory" class="self-revisions"><summary>修订记录</summary><div id="selfEntryHistoryList" class="self-history"></div></details>
+      <div id="selfEntryStatus" class="inline-note" role="status" aria-live="polite"></div>
+    </div>
+    <footer class="self-entry-actions"><button id="selfEntryDelete" class="button danger">删除</button><span></span><button id="selfEntryCancel" class="button quiet">取消</button><button id="selfEntrySave" class="button primary">保存</button></footer>
   </dialog>
   <footer id="pageError" class="global-note" role="status" hidden></footer>
   <script type="module" src="./companion.js"></script>

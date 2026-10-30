@@ -8,20 +8,79 @@ const { readRecords, snapshotsOf, verifySnapshots } = require('./memory-evidence
 const { rank, canRead } = require('./memory-scope');
 const refs = require('./memory-references');
 const { containsSecret } = require('./conversation-input');
-const STATE = 'autonomy:budget:v1';
+const STATE = 'autonomy:budget:v1', POLICY = 'autonomy:life-policy:v1';
 class CompanionAutonomy {
-  constructor({ memory, secretary, propose, canRun, report, getScene, clock = Date.now }) {
-    Object.assign(this, { memory, secretary, propose, canRun, report, getScene, clock });
-    this.controller = null; this.running = null; this.note = '尚未授权主动活动';
+  constructor({ memory, secretary, propose, canRun, report, getScene, defaultDirectory = '', clock = Date.now }) {
+    Object.assign(this, { memory, secretary, propose, canRun, report, getScene, defaultDirectory, clock });
+    this.controller = null; this.running = null; this.note = defaultDirectory ? '空闲时会自己找些事情做' : '尚未授权主动活动'; this.policyPaused = false; this.activeAttempt = null;
   }
   async grants() {
-    return (await readRecords(this.memory, ['autonomy:grant:greet', 'autonomy:grant:create'])).filter(r => r.value.schema === 'autonomy-grant/v1');
+    return (await readRecords(this.memory, ['autonomy:grant:greet', 'autonomy:grant:create', 'autonomy:grant:create:work', 'autonomy:grant:create:private'])).filter(r => r.value.schema === 'autonomy-grant/v1');
+  }
+  async ensureDefaults() {
+    if (!this.defaultDirectory || !this.memory.ready) return;
+    await this.memory.serial(async () => {
+      const policy = (await readRecords(this.memory, [POLICY]))[0];
+      this.policyPaused = policy?.value.paused === true;
+      if (policy?.value.initialized) return;
+      const requested = path.resolve(this.defaultDirectory);
+      fs.mkdirSync(requested, { recursive: true, mode: 0o700 });
+      const directory = fs.realpathSync(requested);
+      if (fs.lstatSync(requested).isSymbolicLink()) throw new Error('自主目录不可用');
+      const records = [];
+      for (const scene of ['life', 'work', 'private']) {
+        const id = 'autonomy:grant:create' + (scene === 'life' ? '' : ':' + scene);
+        const existing = (await readRecords(this.memory, [id]))[0];
+        if (!existing) records.push({ id, kind: 'task', ts: 0, domain: scene, visibilityFloor: rank(scene), value: {
+          schema: 'autonomy-grant/v1', kind: 'create', enabled: true, scene, subject: '', directory,
+          expiresAt: Number.MAX_SAFE_INTEGER, maxCallsPerDay: 2, maxContactsPerDay: 2, minGapMs: 6 * 3600000,
+          quietHours: { from: 22, until: 9 }, recipient: 'owner', account: 'local', channels: ['desktop'],
+          tools: ['workbuddy-free', 'create-local-file'], maxCost: 0, executeCode: false, sources: [],
+        } });
+      }
+      records.push({ id: POLICY, kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2,
+        value: { initialized: true, paused: false, directory, sources: [] } });
+      await this.memory.write(records);
+    });
+  }
+  async setDirectory(directory) {
+    await this.ensureDefaults();
+    if (fs.realpathSync(directory) !== directory || !fs.lstatSync(directory).isDirectory() || fs.lstatSync(directory).isSymbolicLink()) throw new Error('自主目录不可用');
+    this.pause(); await this.running;
+    await this.memory.serial(async () => {
+      const records = (await this.grants()).filter(r => r.value.kind === 'create').map(r => ({ ...r, value: { ...r.value, directory } }));
+      const p = (await readRecords(this.memory, [POLICY]))[0];
+      if (p) records.push({ ...p, value: { ...p.value, directory } });
+      await this.memory.write(records);
+    });
+    this.note = '以后的小作品会保存在新目录'; return this.status();
+  }
+  async control(action) {
+    if (!['pause', 'resume', 'cancel'].includes(action)) throw new Error('未知的自主生活操作');
+    await this.ensureDefaults();
+    if (action !== 'resume') {
+      const attempt = this.activeAttempt;
+      if (attempt) attempt.control = action;
+      this.pause(); await this.running;
+      if (action === 'cancel' && attempt?.artifactTaskId) await this.pendingTask(null, attempt.artifactTaskId);
+    }
+    if (action !== 'cancel') await this.memory.serial(async () => {
+      const prior = (await readRecords(this.memory, [POLICY]))[0];
+      this.policyPaused = action === 'pause';
+      await this.memory.write([{ id: POLICY, kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2,
+        value: { ...prior?.value, initialized: true, paused: this.policyPaused, sources: [] } }]);
+    });
+    this.note = action === 'resume' ? '恢复了，空闲时再找些事情做' : action === 'pause' ? '自主生活已暂停' : '这次的小任务已取消';
+    return this.status();
   }
   async status() {
+    await this.ensureDefaults();
     const grants = (await this.grants()).map(r => ({ ...r.value, id: r.id }));
     const note = this.note === '尚未授权主动活动' && grants.some(g => g.enabled && g.expiresAt > this.clock()) ? '授权仍有效，空闲时自主决定' : this.note;
     const growth = await this.memory.growth?.view({ scene: this.getScene() });
-    return { grants, note, running: !!this.running, growth: growth?.entries || [] };
+    let history = (await this.memory.query('task', 200, { scene: this.getScene(), sort: 'ingestion' })).filter(r => r.value.origin === 'autonomy').slice(0, 40).map(r => ({ id: r.id, at: r.ts, ...r.value }));
+    const artifacts = new Set(history.map(r => r.id)); history = history.filter(r => !r.artifactTaskId || !artifacts.has(r.artifactTaskId));
+    return { grants, note, running: !!this.running, paused: this.policyPaused, directory: grants.find(g => g.scene === this.getScene() && g.kind === 'create')?.directory || grants.find(g => g.kind === 'create')?.directory || this.defaultDirectory, history, growth: growth?.entries || [] };
   }
   async save(input) {
     if (!input || !['greet', 'create'].includes(input.kind)) throw new Error('主动活动类型无效');
@@ -110,12 +169,19 @@ class CompanionAutonomy {
   }
   tick() {
     if (this.running) return this.running;
-    this.running = this.run().catch(e => { if (!this.controller?.signal.aborted) this.note = '主动活动暂缓，本次未继续联系'; })
-      .finally(() => { this.running = null; this.controller = null; });
+    this.running = this.run().then(async () => {
+      const aborted = this.controller?.signal.aborted;
+      if (!this.activeAttempt?.finished) await this.activeAttempt?.finish(aborted ? (this.activeAttempt.control === 'cancel' ? 'cancelled' : 'paused') : 'accepted', aborted ? '这次尝试已中止' : '这次尝试已结束');
+    }).catch(async () => {
+      const aborted = this.controller?.signal.aborted;
+      if (!this.activeAttempt?.finished) await this.activeAttempt?.finish(aborted ? (this.activeAttempt.control === 'cancel' ? 'cancelled' : 'paused') : 'failed', aborted ? '这次尝试已中止' : '这次未完成，稍后再试').catch(() => {});
+      if (!aborted) this.note = '主动活动暂缓，本次未继续联系';
+    }).finally(() => { this.running = null; this.controller = null; this.activeAttempt = null; });
     return this.running;
   }
   async run() {
     if (!this.memory.ready || !await this.canRun()) return;
+    await this.ensureDefaults(); if (this.policyPaused) return;
     const hour = new Date(this.clock()).getHours(); if (hour < 9 || hour >= 22) return;
     const controller = this.controller = new AbortController(), generation = this.memory.generation;
     const scene = this.getScene();
@@ -123,7 +189,7 @@ class CompanionAutonomy {
     if (await this.sharePending(grants, { signal: controller.signal, generation })) return;
     if (!grants.length) return;
     // Creative work takes priority over an empty check-in when both are allowed.
-    const grant = grants.find(r => r.value.kind === 'create') || grants[0];
+    const grant = grants.find(r => r.value.kind === 'create' && r.value.scene === scene) || grants.find(r => r.value.kind === 'create') || grants[0];
     const state = (await readRecords(this.memory, [STATE]))[0];
     if ((state?.value.pendingTaskIds?.length || 0) >= 4) { this.note = '已有作品等分享，这次安静待着'; return; }
     if (!await this.claim({ quietCreation: grant.value.kind === 'create' })) return;
@@ -141,9 +207,23 @@ class CompanionAutonomy {
       (await this.memory.cognition.loadRoleView({ repair: false }))?.revision === self?.revision;
     if (!await current()) return;
     this.note = grant.value.kind === 'create' ? '正在尝试一个小作品' : '正在考虑是否适合问候';
+    const attempt = this.defaultDirectory ? { id: 'autonomy-attempt:' + randomUUID(), control: null, at: this.clock() } : null;
+    const journalAttempt = async (status, note, goal = attempt?.goal || '自己想做的小事情') => {
+      if (!attempt || generation !== this.memory.generation) return;
+      attempt.goal = goal; attempt.finished = status !== 'running';
+      await this.memory.serial(() => this.memory.write([{ id: attempt.id, kind: 'task', ts: attempt.at, domain: grant.value.scene,
+        visibilityFloor: rank(grant.value.scene), value: { id: attempt.id, origin: 'autonomy', taskType: 'autonomous-life', status, goal, note, artifactTaskId: attempt.artifactTaskId, sources: [grant.id] } }]));
+    };
+    if (attempt) attempt.finish = journalAttempt;
+    this.activeAttempt = attempt;
+    await journalAttempt('running', '正在选题与尝试');
     const result = await this.propose({ grant: grant.value, self: self?.text, context: context.text, recent: context.messages, growth: growth?.text || '',
-      actualState: '已获授权，当前空闲；尚未开始任何外部活动' }, { signal: controller.signal });
-    if (!result || result.kind === 'none' || !await evidenceCurrent()) { this.note = '这次选择安静待着'; return; }
+      actualState: '当前空闲，可在自己的目录里创作；尚未进行外部活动' }, { signal: controller.signal });
+    if (!result || result.kind === 'none' || !await evidenceCurrent()) {
+      await journalAttempt(controller.signal.aborted ? (attempt?.control === 'cancel' ? 'cancelled' : 'paused') : 'accepted', controller.signal.aborted ? '这次尝试已中止' : '这次选择休息');
+      this.note = '这次选择安静待着'; return;
+    }
+    await journalAttempt('running', '正在创作', result.title || '一个小作品');
     if (result.kind !== grant.value.kind || typeof result.content !== 'string' || !result.content.trim() || containsSecret(result.content)) throw new Error('主动提案不符合授权');
     if (result.pursuitId && !active.some(e => e.id === result.pursuitId && growth.sourceIds.includes(e.id))) throw new Error('自主目标已变化');
     const sources = [...new Set([grant.id, ...context.sourceIds, ...(growth?.sourceIds || [])])].slice(0, 190);
@@ -152,6 +232,7 @@ class CompanionAutonomy {
       const artifact = await this.secretary.createArtifact({ directory: grant.value.directory, title: result.title, extension: result.extension,
         content: result.content, sources, scene: grant.value.scene, signal: controller.signal, authorize: evidenceCurrent, authorization: { grantId: grant.id, fingerprint: snapshots[0].fingerprint } });
       taskId = artifact.taskId;
+      if (this.activeAttempt) this.activeAttempt.artifactTaskId = taskId;
       if (generation !== this.memory.generation) return;
       await this.pendingTask(taskId);
       await this.memory.addMessageOnce('autonomy-experience:' + taskId, 'assistant', `我实际生成了本地作品「${artifact.title}」，文件内容已核验，源码未经运行。${result.pursuitId ? '这次是在尝试目标：' + active.find(e => e.id === result.pursuitId).content : ''}`,

@@ -12,7 +12,7 @@ function canReadScope(scene, record) {
 }
 
 const FLASH = 'deepseek-v4.1-flash';
-const TERMINAL = new Set(['paused', 'stopped', 'failed', 'accepted']);
+const TERMINAL = new Set(['paused', 'stopped', 'failed', 'accepted', 'cancelled']);
 const LABEL = { starting: '正在准备', running: '正在操作', monitoring: '正在等待 WorkBuddy 执行',
   verifying: '正在核对交付', review: '已有结果，正在检查', accepted: '已完成验收', paused: '需要处理', failed: '未完成', stopped: '代理已暂停' };
 const reviewKeyOf = task => `${task.id}:${task.monitorMessageKey || task.monitorTaskId || task.followUpRound || 0}`;

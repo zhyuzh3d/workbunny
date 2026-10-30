@@ -315,13 +315,13 @@ function defaultPos(w, h) {
 }
 
 /* ── 角色大小 ────────────────────────────────────────────────
- * 三档：100% 半身 / 100% 全身 / 150% 放大。半身沿用内部值 0.5，
+ * 四档：100% 半身 / 100% 全身 / 150% 放大 / 200% 放大。半身沿用内部值 0.5，
  * 窗口的 w/h 永远是 100% 的基准，
  * 只是「放大时」把窗口按倍数撑开（她在屏幕上也真的变大了）；
  * 缩小时窗口一点不动 —— 只是她自己在窗口中变小，绝不能把窗口缩到 UI 挤成一团。
  * 切换时以窗口底部中心为锚点。 */
-const SCALES = [0.5, 1, 1.5];
-const SCALE_LABELS = { 0.5: '100% 半身', 1: '100% 全身', 1.5: '150% 放大' };
+const SCALES = [0.5, 1, 1.5, 2];
+const SCALE_LABELS = { 0.5: '100% 半身', 1: '100% 全身', 1.5: '150% 放大', 2: '200% 放大' };
 function clampScale(v) {
   const n = Number(v);
   if (!isFinite(n)) return 1;
@@ -473,10 +473,11 @@ function createWindow() {
  *
  * 同一个窗口只开一个：再点一次就把它提到前台，不叠出一排一样的窗。 */
 const panels = new Map();
+const LIBRARY_PANEL_WIDTH = 580;
 const PANEL_SIZE = {
-  settings: { w: 420, h: 760, title: 'workbunny · 设置' },
-  motions: { w: 580, h: 800, title: 'workbunny · 动作库' },
-  memory: { w: 560, h: 760, title: 'workbunny · 记忆与关系' },
+  settings: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'workbunny · 设置' },
+  motions: { w: LIBRARY_PANEL_WIDTH, h: 800, title: 'workbunny · 动作库' },
+  memory: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'workbunny · 记忆与关系' },
   desktop: { w: 560, h: 760, title: 'workbunny · 工作与日常' },
 };
 
@@ -715,7 +716,7 @@ function ttsChanged(c = config.load()) {
 }
 
 let fallbackLogged = '';
-const cfgEngineName = (t) => (t?.engine === 'http' ? '自定义 HTTP' : t && t.engine === 'qwen' ? '本地大模型' : (t && t.engine === 'remote' ? 'CHP' : '系统语音'));
+const cfgEngineName = (t) => (t?.engine === 'doubao' ? '豆包语音' : t?.engine === 'http' ? '已有接口' : t && t.engine === 'qwen' ? '本地大模型' : (t && t.engine === 'remote' ? 'CHP' : '系统语音'));
 
 function synthBuffer(text, emo, options, c = config.load()) {
   const key = JSON.stringify([emo || '', text, c.tts]);
@@ -798,7 +799,7 @@ async function pumpSpeech() {
         log('[tts] 合成超时，放弃这句');
         finishSpeech(false);
       }
-    }, c.tts.engine === 'qwen' ? 145000 : ['remote', 'http'].includes(c.tts.engine) ? 95000 : 30000);
+    }, c.tts.engine === 'qwen' ? 145000 : ['remote', 'http', 'doubao'].includes(c.tts.engine) ? 95000 : 30000);
     try {
       const playback = streamingPlayback(c, gen, item.text);
       const bufP = item.interaction
@@ -894,8 +895,13 @@ const JUDGE_RULE = replyPolicy.RULE;
 
 const HISTORY_TURNS = 6;   // 只带最近 3 轮对话，够接话又不撑爆上下文
 
+function dialogueReady() {
+  const c = config.load();
+  return c.brain.source === 'apikey' ? !!config.resolveLLM(c).apiKey : connection.status().ready;
+}
+
 async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn, userMessage }) {
-  if (storageBusy || storageError || !connection.status().ready) { voiceTurn?.skip(); send('toast', { text: storageError || connection.status().note }); return null; }
+  if (storageBusy || storageError || !dialogueReady()) { voiceTurn?.skip(); send('toast', { text: storageError || connection.status().note }); return null; }
   if (!internal && inputAdmission.containsSecret(userText)) { voiceTurn?.skip(); send('toast', { text: inputAdmission.NOTICE }); return null; }
   const c = config.load(), scene = currentScene();
   let requestEpoch = contextEpoch;
@@ -1291,8 +1297,7 @@ function buildTrayMenu() {
     { label: `${c.buddy.name} · ${vis ? '在屏幕上' : '已收起'}`, enabled: false },
     { type: 'separator' },
     { label: vis ? '收起' : '叫出来', click: () => (vis ? hideWindow() : showWindow()) },
-    { label: '说句话', click: () => { showWindow(); send('ask', { focus: true }); } },
-    { label: '按住说话  ⌘⇧Space', click: () => toggleRecord() },
+    { label: '文字输入', click: () => { showWindow(); setInteractive(true); win.focus(); send('ask', { focus: true }); } },
     { type: 'separator' },
     { label: '动作列表…', click: () => { showWindow(); openPanel('motions'); } },
     { label: '记忆与关系…', click: () => openPanel('memory') },
@@ -1325,18 +1330,8 @@ function buildTrayMenu() {
           click: (i) => { config.save({ voice: { enabled: i.checked } }); rebuildTray(); },
         },
         {
-          label: '只在我叫它时才说', type: 'checkbox', checked: !c.monitor.speakOnDone,
-          click: (i) => {
-            config.save({
-              monitor: {
-                speakOnDone: !i.checked,
-                speakOnLong: !i.checked,
-                speakOnStall: !i.checked,
-                speakOnRest: !i.checked,
-              },
-            });
-            rebuildTray();
-          },
+          label: '叫名字才回应', type: 'checkbox', checked: !!c.asr.wakeOnly,
+          click: i => { applySettings({ asr: { wakeOnly:i.checked } }).catch(() => send('toast', { text:'唤醒设置保存失败' })); },
         },
       ],
     },
@@ -1375,22 +1370,6 @@ function hideWindow() {
   rebuildTray();
 }
 
-/* ── 录音（单次，按住说话） ── */
-function toggleRecord() {
-  if (!asr) { log('[asr] not initialized'); return; }
-  if (asr.running) {
-    log('[asr] stop requested');
-    asr.stop();
-    send('record', { state: 'stopping' });
-  } else {
-    stopSpeaking();
-    const c = config.load();
-    log('[asr] start requested, bin=' + ASR_BIN + ' exists=' + fs.existsSync(ASR_BIN));
-    asr.start({ lang: c.asr.lang, silenceMs: c.asr.silenceMs, maxSeconds: c.asr.maxSeconds, askSpeech: asrMode === 'single', allowNetwork: c.asr.allowNetwork === true });
-    send('record', { state: 'starting' });
-  }
-}
-
 /* ══════════ 常驻聆听 ══════════
  * 设计要点（用户明确要求）：
  *   · 麦克风与识别常开（系统 ASR，端侧），但这不等于一直在调模型
@@ -1411,7 +1390,7 @@ let lastPartialLogAt = 0;  // "半句"日志节流（漏声明过一次，导致
 function asrOpts(always) {
   const c = config.load();
   return {
-    lang: c.asr.lang,
+    lang: c.asr.lang, wakeNames:[c.buddy.name, ...(c.asr.wakeAliases || [])].filter(Boolean).slice(0,9),
     silenceMs: c.asr.silenceMs,
     maxSeconds: c.asr.maxSeconds,
     always,
@@ -1423,7 +1402,7 @@ function asrOpts(always) {
 }
 
 function startListen(reason) {
-  if (!asr || storageBusy || asrMode !== 'continuous') return;
+  if (!asr || storageBusy) return;
   if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') return;
   const c = config.load();
   if (screenLocked || (c.memory.enabled && !memory?.ready)) return;
@@ -1467,15 +1446,8 @@ function worthJudging(text) {
   return require('./voice-turns').meaningful(text, Date.now() - lastDialogueAt < 90_000);
 }
 
-/** 听见有人叫我名字（含常见误听写法）→ 直接当在跟我说话，省一次判断 */
-function nameHit(text) {
-  const t = String(text || '').toLowerCase();
-  const c = config.load();
-  const hints = [
-    c.buddy.name, 'baby', 'bab', '贝比', '贝贝', '宝贝', '小伴', '小曼', '小班', '小半', '小帮',
-  ];
-  return hints.some((h) => h && t.includes(String(h).toLowerCase()));
-}
+/** Exact configured name and a bounded set of common ASR homophones. */
+function nameHit(text) { const c = config.load(); return asr?.wakeHit?.(text) === true || require('./wake-name').hit(text, c.buddy.name, c.asr.wakeAliases || []); }
 
 /** 每听到一句 → 先判断是不是在对我说，是就回，不是就闭嘴（一次调用搞定） */
 const voiceTurns = require('./voice-turns').createVoiceTurns({
@@ -1503,6 +1475,7 @@ async function handleUtterance(text, voiceTurn) {
     stopSpeaking('voice');
   }
   const c = config.load();
+  if (c.asr.wakeOnly && !nameHit(t)) { voiceTurn?.skip(); send('heard', { text:t, replied:false }); return; }
   turnT0 = voiceTurn?.heardAt || Date.now();
   lastHeardAt = Date.now();
   autonomy?.pause();
@@ -1521,8 +1494,8 @@ async function handleUtterance(text, voiceTurn) {
     return;
   }
 
-  // 叫名字时直接回答，不附加跳过规则；仍然只调用一次模型。
-  if (nameHit(t)) {
+  // 名字唤醒通过后，仍使用同一次请求判断是否在对她说话。
+  if (nameHit(t) && !c.asr.judge) {
     const userMessage = voiceTurn ? undefined : pushHistory('user', t);
     log('[listen] name hit -> direct reply');
     const r = await think({ userText: t, voiceTurn, userMessage });
@@ -1599,8 +1572,9 @@ ipcMain.handle('pet:autonomy-directory', async e => {
   const directory = path.join(fs.realpathSync(selected.filePaths[0]), 'Bunny-Creations');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (fs.lstatSync(directory).isSymbolicLink()) throw new Error('专用目录不能是符号链接');
-  return fs.realpathSync(directory);
+  return autonomy.setDirectory(fs.realpathSync(directory));
 });
+ipcMain.handle('pet:autonomy-control', async (e, action) => { selfAccess(e); return autonomy.control(action); });
 ipcMain.handle('pet:self-view', async e => { selfAccess(e); return memory.cognition.loadRoleView(); });
 ipcMain.handle('pet:self-history', async (e, id) => { selfAccess(e); return memory.cognition.history(id); });
 ipcMain.handle('pet:self-settings', async (e, value) => {
@@ -1710,6 +1684,7 @@ ipcMain.handle('pet:task-start', async (e, v) => {
   if (secretary?.verifying) return { ok: false, error: '正在核对上一件事的交付，请先暂停或等待结果。' };
   try { voiceTurns.reset(); stopSpeaking(); memory?.cancelExtraction(); return await desktop.start(v); } catch (error) { return { ok: false, error: error.message }; }
 });
+ipcMain.handle('pet:task-cancel', async e => { trustedCompanion(e, 'desktop'); return desktop.cancel(); });
 ipcMain.handle('pet:task-stop', e => { trustedCompanion(e, 'desktop'); return desktop.stop(); });
 ipcMain.handle('pet:task-accept', e => { trustedCompanion(e, 'desktop'); return desktop.accept(); });
 ipcMain.handle('watch:list', e => { trustedCompanion(e, 'desktop'); return watches?.list() || []; });
@@ -1760,7 +1735,7 @@ ipcMain.handle('pet:init', async () => {
   };
 });
 
-/* 角色大小三档：只改取景倍数与（放大时的）窗口尺寸，UI 一律不动 */
+/* 角色大小四档：只改取景倍数与（放大时的）窗口尺寸，UI 一律不动 */
 ipcMain.handle('pet:scale', (_e, { scale } = {}) => {
   const k = clampScale(scale);
   config.save({ window: { scale: k } });
@@ -1882,7 +1857,7 @@ ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
   if (inputAdmission.containsSecret(t)) return { ok: false, error: inputAdmission.NOTICE };
   if (!t) return { ok: false };
   if (storageBusy || storageError) return { ok: false, error: storageError || '数据库正在迁移' };
-  if (!connection.status().ready) return { ok: false, error: connection.status().note };
+  if (!dialogueReady()) return { ok: false, error: config.load().brain.source === 'apikey' ? '请在智力设置中填写 API Key' : connection.status().note };
   if (screenLocked || (config.load().memory.enabled && !memory?.ready)) return { ok: false, error: '记忆尚未解锁，请在“记忆与关系”中解锁后继续。' };
   try { require('./message-identity').validateText(t); } catch (e) { return { ok: false, error: e.message }; }
   composing = false; stopSpeaking('text');
@@ -1906,7 +1881,7 @@ async function applySettings(patch) {
   const previous = config.load();
   if (patch?.avatar && !avatarList().some(item => item.key === patch.avatar)) throw Error('形象不存在或已删除');
   if (patch?.motions) motionLibrary.validate(config.preview(patch));
-  if (patch?.asr?.ownerOnly && !speakerFilter.status().ready) throw Error('请先录入三段主人声音');
+  if (patch?.asr?.ownerOnly && !speakerFilter.status().ready) throw Error('请先朗读录入主人声音');
   if (patch?.window && Object.hasOwn(patch.window, 'scale')) patch = { ...patch, window: { ...patch.window, scale: clampScale(patch.window.scale) } };
   const c = config.save(patch || {});
   speakerFilter.enabled = c.asr.ownerOnly === true;
@@ -1948,6 +1923,7 @@ async function applySettings(patch) {
     if (!c.memory.extract) memory?.cancelExtraction();
     else { maintenance?.request('doze', { automatic: true }); maintenance?.tick().catch(() => {}); }
   }
+  if ((c.buddy.name !== previous.buddy.name || JSON.stringify(c.asr.wakeAliases) !== JSON.stringify(previous.asr.wakeAliases)) && alwaysOn) { voiceTurns.reset(); asr?.kill({ discard:true }); scheduleListenRestart(200); }
   if (patch?.monitor && JSON.stringify(previous.monitor) !== JSON.stringify(c.monitor)) startMonitor();
   if (patch?.avatar && c.avatar !== previous.avatar) send('avatar', { key: c.avatar });
   if (patch?.voice && c.voice.alwaysListen !== previous.voice.alwaysListen) {
@@ -1999,15 +1975,15 @@ ipcMain.on('pet:audio-done', (e, value) => {
 ipcMain.on('pet:audio-started', () => {
   if (turnT0 && speaking) { log(`[turn] 停顿→开始播放 ${Date.now() - turnT0}ms`); turnT0 = 0; }
 });
-ipcMain.on('pet:record', async () => { if (storageBusy) return; if (!asr?.running && systemPreferences.getMediaAccessStatus('microphone') !== 'granted') await systemPreferences.askForMediaAccess('microphone'); toggleRecord(); });
 ipcMain.on('pet:listen', (_e, v) => {
   const want = v === 'toggle' ? !alwaysOn : !!v;
-  if (want && asrMode !== 'continuous') { send('toast', { text: '当前使用按次识别，请点麦克风说话，每次最多45秒' }); return; }
-  if (want && systemPreferences.getMediaAccessStatus('microphone') !== 'granted') { void requestAsrPermission().then(() => startListen('permission')); return; }
-  if (want) { config.save({ voice: { alwaysListen: true } }); startListen('user'); }
-  else { stopListen(); config.save({ voice: { alwaysListen: false } }); }
-  send('listen', { on: alwaysOn });
-  sendConfig(config.load());
+  if (storageBusy) return;
+  if (want) {
+    config.save({ voice: { alwaysListen:true } });
+    if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') void requestAsrPermission().then(() => startListen('permission'));
+    else startListen('user');
+  } else { stopListen(); config.save({ voice: { alwaysListen:false } }); }
+  send('listen', { on:alwaysOn }); sendConfig(config.load());
 });
 ipcMain.handle('pet:speaker-status', e => { trustedCompanion(e, 'settings'); return publishSpeakerStatus(); });
 ipcMain.handle('pet:speaker-enroll', async e => {
@@ -2018,20 +1994,21 @@ ipcMain.handle('pet:speaker-enroll', async e => {
   if (permission.mic !== true && permission.micSystem !== 'granted') throw Error('请先允许麦克风');
   stopSpeaking('user'); voiceTurns.reset(); suppressEnrollmentFinal = true;
   const wasRunning = asr?.running;
+  const previousProfile = speakerFilter.profile; let captured = false;
   const pending = speakerFilter.enroll(); publishSpeakerStatus();
   if (!asr?.running) asr?.start({ ...asrOpts(asrMode === 'continuous'), askSpeech: asrMode === 'single' });
   try {
-    const result = await pending;
+    await pending; captured = true;
     await memory.serial(() => memory.write([{ id: 'local:speaker-profile', kind: 'state', ts: Date.now(), domain: 'private', visibilityFloor: 2,
       value: { schema: 'local-speaker-profile/v1', profile: speakerFilter.profile, sources: [] } }], memory.epoch, { notify: false }));
-    if (result.ready) { config.save({ asr: { ownerOnly: true } }); speakerFilter.enabled = true; sendConfig(); }
     return { ...publishSpeakerStatus(), ok: true };
-  } finally {
+  } catch (error) { if (captured) speakerFilter.load(previousProfile); throw error; } finally {
     voiceTurns.reset(); asr?.kill({ discard: true }); speakerFilter.latest = null; suppressEnrollmentFinal = false;
     if (wasRunning && alwaysOn) scheduleListenRestart(200);
     publishSpeakerStatus();
   }
 });
+ipcMain.handle('pet:speaker-cancel', e => { trustedCompanion(e, 'settings'); speakerFilter.cancel(); return publishSpeakerStatus(); });
 ipcMain.handle('pet:speaker-reset', async e => {
   trustedCompanion(e, 'settings'); if (!memory?.ready) throw Error('请先解锁记忆');
   speakerFilter.reset(); config.save({ asr: { ownerOnly: false } });
@@ -2134,7 +2111,7 @@ ipcMain.handle('pet:storage-reconnect', async e => {
 });
 
 ipcMain.handle('pet:brain-info', () => ({
-  providers: [], connection: connection.status(),
+  providers: config.PROVIDERS, connection: connection.status(),
   catalogs: Object.fromEntries(['workbuddy', ...config.PROVIDERS.map(p => p.id)].map(id => [id, require('./model-catalog').get(id)])),
   thinkingLevels: config.THINKING_LEVELS,
   workbuddyModels: config.listWorkBuddyModels(),
@@ -2148,21 +2125,21 @@ ipcMain.handle('pet:workbuddy-open', async () => {
 });
 
 ipcMain.handle('pet:brain-models', async (_e, brain) => {
-  const L = config.resolveLLM(config.preview({ brain: brain || {} }));
+  let L;
   try {
-    const catalog = await require('./model-catalog').refresh(L.provider, L.apiKey);
+    L = config.resolveLLM(config.preview({ brain: brain || {} }));
+    const catalog = await require('./model-catalog').refresh(L.provider, L.apiKey, L.baseURL);
     return { ok: true, provider: L.provider, catalog };
   } catch (e) { return { ok: false, provider: L.provider, error: e.message }; }
 });
 
 ipcMain.handle('pet:brain-test', async (_e, brain) => {
-  const c = config.preview({ brain: brain || {} });
-  const L = config.resolveLLM(c), t0 = Date.now();
-  if (L.transport !== 'workbuddy' && !L.apiKey) return { ok: false, error: '请先填写这个服务商的 API Key。' };
+  const t0 = Date.now();
   try {
-    const role = memory?.ready ? await memory.cognition.loadRoleView() : { revision: 0, text: '我温和、诚实、好奇。' };
+    const L = config.resolveLLM(config.preview({ brain: brain || {} }));
+    if (L.transport !== 'workbuddy' && !L.apiKey) return { ok: false, error: '请先填写这个服务商的 API Key。' };
     const r = await requestReply({ chat: llm.chat, allowActions: false, request: { ...L, cognitive: true, deferPresentation: true,
-      messages: [{ role: 'system', content: config.buildSystemPrompt(nowLine(), { roleView: role }) + '\n\n' + dialogueActions.RULE + '\n' + require('./dialogue-cognition').RULE },
+      messages: [{ role: 'system', content: '你是连接测试用的桌面伙伴，请只回复连接成功。' + '\n\n' + dialogueActions.RULE + '\n' + require('./dialogue-cognition').RULE },
         { role: 'user', content: '这次是连接与对话协议测试，使用dialogue-v2，reply选chat回复“连接成功”。没有上一轮预测，不执行操作。' }] } });
     const validated = r.reply;
     return { ok: true, protocolVerified: true, provider: L.provider, model: r.model || L.model, text: validated.text,
@@ -2187,6 +2164,7 @@ ipcMain.handle('pet:tts-info', () => {
   return {
     config: config.publicConfig(c),
     engines: config.TTS_ENGINES,
+    doubao: { models: require('./doubao-tts').MODELS, voices: require('./doubao-tts').VOICES, url: require('./doubao-tts').URL },
     systemVoices: [{ id: '', lang: '', label: '系统默认音色' }, ...tts.systemVoices()],
     chp: require('./chp-tts').cached(c.tts),
     qwen: {
@@ -2274,7 +2252,7 @@ ipcMain.handle('pet:tts-test', async () => {
   const gen = speechGen;
   speaking = true;
   send('speaking', { on: true, text: '' });
-  speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(false); }, c.tts.engine === 'qwen' ? 145000 : ['remote', 'http'].includes(c.tts.engine) ? 95000 : 30000);
+  speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(false); }, c.tts.engine === 'qwen' ? 145000 : ['remote', 'http', 'doubao'].includes(c.tts.engine) ? 95000 : 30000);
   try {
     const text = '让我试试这个声音，你觉得顺耳吗？';
     const playback = streamingPlayback(c, gen, text);
@@ -2307,7 +2285,7 @@ ipcMain.handle('pet:resize', (_e, { w, h }) => {
  *  两种驱动方式：
  *   1) 环境变量 BUDDY_PET_SHOT / _SCRIPT / _SHOT_MS / _SHOT_DELAY / _SHOT_EXTRA
  *   2) <userData>/selftest.json（打包版用 open 启动时拿不到环境变量，只能走这个）
- *      { "shotDir": "/tmp/ps", "script": ["window.pet.record()"], "delay": 5000, "every": 2500, "extra": 0 }
+ *      { "shotDir": "/tmp/ps", "script": ["window.pet.listen(true)"], "delay": 5000, "every": 2500, "extra": 0 }
  */
 function readSelfTestSpec() {
   const env = process.env.BUDDY_PET_SHOT;
@@ -2502,7 +2480,7 @@ if (!lock) {
       if (status.running) setInteractive(false);
       send('desktop', status);
       secretary?.onStatus(status);
-      if (['accepted', 'paused', 'stopped'].includes(status.task?.status)) { delegationMonitor?.stop(); delegationMonitor = null; }
+      if (['accepted', 'paused', 'stopped', 'cancelled'].includes(status.task?.status)) { delegationMonitor?.stop(); delegationMonitor = null; }
       for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'desktop', ...status });
     }, imageResize, observeWorkBuddy: task => {
       let source = monitor?.enabled ? monitor : delegationMonitor;
@@ -2575,9 +2553,9 @@ if (!lock) {
     secretary = new Secretary({ desktop, watches, contacts, memory, getScene: currentScene, ready: readyForTasks,
       epoch: () => memory?.generation, report: queueTaskReport });
     autonomy = new (require('./companion-autonomy').CompanionAutonomy)({ memory, secretary,
-      propose: require('./workbuddy-free').proposeActivity, getScene: currentScene, report: queueTaskReport,
+      defaultDirectory: path.join(USER_DIR, 'creations'), propose: require('./workbuddy-free').proposeActivity, getScene: currentScene, report: queueTaskReport,
       canRun: () => readyForTasks() && config.load().memory.enabled && !busy && !speaking && !activeThought && !desktop?.running && !secretary?.verifying &&
-        !maintenance?.activeMode && !taskReports.length && Date.now() >= quietUntil && Date.now() - lastHeardAt >= 30 * 60_000 && Date.now() - BOOT_AT >= 10 * 60_000 });
+        !maintenance?.activeMode && !taskReports.length && Date.now() >= quietUntil && Date.now() - lastHeardAt >= 15 * 60_000 && Date.now() - BOOT_AT >= 15 * 60_000 });
     memory.blocks.summarize = require('./workbuddy-free').summarizeBlock;
     memory.compression = new ContextCompression({ memory, recentMessages: 20, summarize: require('./workbuddy-free').summarizeContext });
     require('./model-catalog').refresh('workbuddy').catch(() => {});
@@ -2687,7 +2665,7 @@ if (!lock) {
       tray = new Tray(trayImage());
       tray.setToolTip('workbunny · ' + scopePolicy.LABELS[currentScene()]);
       tray.setContextMenu(buildTrayMenu());
-      tray.on('click', () => (win && win.isVisible() ? hideWindow() : showWindow()));
+      tray.on('click', () => { if (win && !win.isVisible()) showWindow(); });
     } catch (e) {
       console.error('[tray]', e.message);
     }
@@ -2758,7 +2736,7 @@ if (!lock) {
       if (mutedSince) asr.mute();
       log('[asr] ready' + (alwaysOn ? ' (always)' : ''));
       if (alwaysOn) send('listen', { on: true, ready: true });
-      else send('record', { state: 'listening' });
+
     });
     asr.on('capture', message => {
       if (message.t === 'tap') log(`[asr] 已收到真实音频输入（${message.frames} 帧）`);
@@ -2837,29 +2815,23 @@ if (!lock) {
     });
     asr.on('final', (t) => {
       if (speakerFilter.enrollment || suppressEnrollmentFinal) { suppressEnrollmentFinal = !!speakerFilter.enrollment; return; }
-      if (!speakerFilter.acceptsText()) return;
-      if (asr.always && !alwaysOn) return; // A stopped continuous recognizer is not a manual recording.
-      log(`[asr] final ${String(t || '').length} 字`);
-      send('asrFinal', { text: t });
-      if (!alwaysOn && t && t.trim().length >= 1) {
-        if (speaking && !echoLike(t)) stopSpeaking('voice');
-        void handleUtterance(t.trim());
-      }
+      if (!alwaysOn || !speakerFilter.acceptsText()) return;
+      // The legacy recognizer commits one utterance, then rearms automatically.
+      if (asrMode === 'single' && !recentEcho(t)) voiceTurns.final(t);
     });
     asr.on('recycle', (n) => log('[asr] recycled after ' + n + ' utterances'));
     asr.on('error', (m) => {
       applyStatus({ captureReady: false, note: 'reconnecting', error: m });
       log('[asr] error', m); send('asrError', { message: m });
     });
-    asr.on('end', () => { if (!alwaysOn) send('record', { state: 'idle' }); });
-    asr.on('exit', () => {
+    asr.on('exit', code => {
       applyStatus({ captureReady: false, note: alwaysOn ? 'reconnecting' : 'off' });
       voiceTurns.recognizerStopped();
-      if (!alwaysOn) { send('record', { state: 'idle' }); return; }
+      if (!alwaysOn) return;
       // 起来 3 秒内就死的算一次失败。连续失败就退避，否则「授权没了」这种情况
       // 会每 1.2 秒刷一次日志、把 CPU 白烧掉。
       const lived = Date.now() - (asrStartedAt || 0);
-      asrFailStreak = lived < 3000 ? asrFailStreak + 1 : 0;
+      asrFailStreak = asrMode === 'single' && code === 0 ? 0 : lived < 3000 ? asrFailStreak + 1 : 0;
       if (asrFailStreak >= 3) {
         const wait = Math.min(60000, 4000 * asrFailStreak);
         log(`[listen] 连续失败 ${asrFailStreak} 次，${Math.round(wait / 1000)} 秒后再试`);
@@ -2868,7 +2840,7 @@ if (!lock) {
         }
         scheduleListenRestart(wait);
       } else {
-        scheduleListenRestart(1200);
+        scheduleListenRestart(asrMode === 'single' && code === 0 ? 150 : 1200);
       }
     });
 
@@ -2915,7 +2887,7 @@ if (!lock) {
      * launchd 用不了（bootstrap 报 EIO），所以自己带一个脱离进程组的影子。
      * 它靠"父进程活着吗"来判断，主进程被 -9 / 段错误都拦不住它。 */
     startWatchdog();
-    setTimeout(() => { if (!connection.status().ready || storageError) openPanel('settings'); }, 1800);
+    setTimeout(() => { if (!dialogueReady() || storageError) openPanel('settings'); }, 1800);
 
     setTimeout(() => {
       refreshAsrStatus({ timeoutMs: 4000 })
@@ -2927,9 +2899,9 @@ if (!lock) {
 
     try {
       globalShortcut.register('CommandOrControl+Shift+Space', () => {
-        if (asrMode === 'single') { void requestAsrPermission().then(() => toggleRecord()); } else if (alwaysOn) stopListen();
-        else if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') void requestAsrPermission().then(() => startListen('hotkey'));
-        else startListen('hotkey');
+        if (alwaysOn) { stopListen(); config.save({ voice:{ alwaysListen:false } }); }
+        else { config.save({ voice:{ alwaysListen:true } }); void requestAsrPermission().then(() => startListen('hotkey')); }
+        sendConfig(config.load());
       });
       globalShortcut.register('CommandOrControl+Shift+B', () => (win && win.isVisible() ? hideWindow() : showWindow()));
     } catch (e) {

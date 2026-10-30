@@ -1,62 +1,47 @@
 export function setupAutonomy(pet) {
   const $ = id => document.getElementById(id);
-  let state, directory = '', dirty = false;
+  let state, revision = 0, timer, busy = false;
   const note = text => { $('autonomyStatus').textContent = text; };
   function paint() {
     if (!state) return;
-    const grant = state.grants.find(g => g.kind === $('autonomyKind').value);
-    if (!dirty) {
-      $('autonomySubject').value = grant?.subject || '';
-      $('autonomyScene').value = grant?.scene || 'life';
-      directory = grant?.directory || '';
-    }
-    $('autonomyPath').textContent = directory || '尚未选择目录';
-    $('autonomyDirectory').hidden = $('autonomyKind').value !== 'create';
-    $('autonomyGrants').textContent = state.grants.map(g => `${g.kind === 'create' ? '本地创作' : '桌面问候'}：${g.enabled && g.expiresAt > Date.now() ? '已授权至 ' + new Date(g.expiresAt).toLocaleString() : '未启用或已到期'}`).join('；');
-    note(state.note);
-    const list = $('growthList');
-    if (list) {
-      const labels = { user_model: '对你的认识', relationship: '相处理解', strategy: '相处方式', pursuit: '在意的目标',
-        tentative: '暂定', stable: '稳定', recheck: '待重看', active: '正在尝试', paused: '暂缓', done: '已完成', abandoned: '已结束' };
-      list.replaceChildren(...(state.growth || []).map(row => {
-        const box = document.createElement('article'); box.className = 'record';
-        const title = document.createElement('strong'); title.textContent = `${labels[row.type]} · ${labels[row.status]}`;
-        const content = document.createElement('p'); content.textContent = row.content;
-        const detail = document.createElement('p'); detail.className = 'inline-note';
-        detail.textContent = [row.condition && '适用时：' + row.condition, row.nextStep && '下一步：' + row.nextStep,
-          '最近核对：' + new Date(row.lastVerifiedAt).toLocaleString()].filter(Boolean).join('；');
-        const evidence = document.createElement('div'); evidence.className = 'inline-note';
-        evidence.textContent = [...row.support.map(q => '依据：“' + q.quote + '”'), ...row.counter.map(q => '反例：“' + q.quote + '”')].join('\n');
-        const remove = document.createElement('button'); remove.className = 'button quiet'; remove.textContent = '移除这项';
-        remove.onclick = async () => { remove.disabled = true; try { state = await pet.growthDismiss(row.entryId); paint(); } catch (e) { note(e.message); } finally { remove.disabled = false; } };
-        box.append(title, content, detail, evidence, remove); return box;
-      }));
-      if (!list.children.length) list.textContent = '还没有形成可保留的认识或目标，随相处和尝试逐渐积累。';
-    }
+    note(state.paused ? '自主生活已暂停' : state.note);
+    $('autonomyPath').textContent = state.directory || '等待资料库就绪';
+    $('autonomyPause').hidden = !!state.paused;
+    $('autonomyResume').hidden = !state.paused;
+    $('autonomyCancel').hidden = !state.running;
+    for (const id of ['autonomyPause', 'autonomyResume', 'autonomyCancel', 'autonomyDirectory']) $(id).disabled = busy;
+    const labels = { running:'正在尝试', paused:'已暂停', cancelled:'已取消', failed:'这次未完成', accepted:'已完成', stopped:'已暂停' };
+    const list = $('autonomyHistory');
+    list.replaceChildren(...(state.history || []).map(row => {
+      const box = document.createElement('article'); box.className = 'record';
+      const title = document.createElement('strong'); title.textContent = row.goal || '一件小事情';
+      const meta = document.createElement('p'); meta.className = 'inline-note';
+      meta.textContent = [new Date(row.at || row.startedAt).toLocaleString(), labels[row.status] || row.status].filter(Boolean).join(' · ');
+      const content = document.createElement('p'); content.textContent = row.note || row.report || '';
+      box.append(title, meta, content);
+      for (const file of row.artifactManifest?.files || []) { const path = document.createElement('p'); path.className = 'inline-note artifact-path'; path.textContent = file.path; box.append(path); }
+      return box;
+    }));
+    if (!list.children.length) list.textContent = '还没有生活记录，空闲时慢慢开始。';
   }
-  async function load() { const ticket = ++revision; try { const result = await pet.autonomyStatus(); if (ticket !== revision) return; state = result; paint(); } catch (e) { if (ticket === revision) note(e.message); } }
-  async function save(enabled) {
-    $('autonomyEnable').disabled = $('autonomyRevoke').disabled = true;
-    try {
-      state = await pet.autonomySave({ kind: $('autonomyKind').value, enabled, directory,
-        subject: $('autonomySubject').value, scene: $('autonomyScene').value, days: Number($('autonomyDays').value) });
-      dirty = false; paint();
-    } catch (e) { note(e.message); }
-    finally { $('autonomyEnable').disabled = $('autonomyRevoke').disabled = false; }
+  async function load() {
+    const current = ++revision;
+    try { const result = await pet.autonomyStatus(); if (current !== revision || busy) return; state = result; paint(); }
+    catch (error) { if (current === revision) note(error.message); }
   }
-  $('autonomyKind').onchange = () => { dirty = false; paint(); };
-  for (const id of ['autonomySubject', 'autonomyScene']) $(id).oninput = () => { dirty = true; };
-  $('autonomyDirectory').onclick = async () => { try { const selected = await pet.autonomyDirectory(); if (selected) { directory = selected; dirty = true; paint(); } } catch (e) { note(e.message); } };
-  $('autonomyEnable').onclick = () => save(true);
-  $('autonomyRevoke').onclick = () => save(false);
+  async function operate(operation) {
+    if (busy) return; busy = true; revision++; paint();
+    let failure;
+    try { const result = await operation(); if (result) state = result; }
+    catch (error) { failure = error.message; }
+    finally { busy = false; if (state) paint(); if (failure) note(failure); }
+  }
+  for (const [id, action] of [['autonomyPause','pause'],['autonomyResume','resume'],['autonomyCancel','cancel']]) $(id).onclick = () => operate(() => pet.autonomyControl(action));
+  $('autonomyDirectory').onclick = () => operate(() => pet.autonomyDirectory());
   $('autonomyRefresh').onclick = load;
-  let refreshTimer, revision = 0;
   pet.on(event => {
-    if (event.type === 'config') {
-      revision++; state = null; $('growthList')?.replaceChildren(); clearTimeout(refreshTimer); void load();
-    } else if (['memory-ready', 'memory-changed'].includes(event.type)) {
-      clearTimeout(refreshTimer); refreshTimer = setTimeout(() => { void load(); }, 250);
-    }
+    if (event.type === 'config') { revision++; state = null; $('autonomyHistory').replaceChildren(); }
+    if (['config','memory-ready','memory-changed'].includes(event.type)) { clearTimeout(timer); timer = setTimeout(load, 250); }
   });
   void load();
 }

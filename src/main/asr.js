@@ -24,7 +24,7 @@ class Asr extends EventEmitter {
     this.retiring = new WeakSet();
     this.ready = false;
     this.lastError = null;
-    this.partial = '';
+    this.partial = ''; this.wakeHits = new Map();
     this.log = log;
     this.authWaitTimer = null;
     this.aec = false;      // 回声消除是否可用（决定能不能边说边听）
@@ -47,6 +47,8 @@ class Asr extends EventEmitter {
     if (opts.always) {
       args.push('--always', '--utterances', String(opts.maxUtterances || 30));
     }
+    this.wakeHits.clear();
+    if (opts.wakeNames?.length) args.push('--wake-names', JSON.stringify(opts.wakeNames));
     if (opts.allowNetwork) args.push('--allow-network');
     if (opts.askSpeech) args.push('--ask-speech');
     args.push('--aec'); // Native audio tries voice processing once, then falls back automatically.
@@ -136,6 +138,10 @@ class Asr extends EventEmitter {
 
   onMessage(m, sourceProc = null) {
     if (sourceProc && (this.proc !== sourceProc || this.discarded.has(sourceProc))) return;
+    if (typeof m.wakeNameHit === 'boolean' && typeof m.v === 'string' && m.v.length <= 4000 && ['partial','utterance','final'].includes(m.t)) {
+      this.wakeHits.set(m.v.trim(), m.wakeNameHit);
+      if (this.wakeHits.size > 32) this.wakeHits.delete(this.wakeHits.keys().next().value);
+    }
     switch (m.t) {
       case 'auth':
         this.emit('auth', { speech: m.speech, mic: m.mic, locale: m.locale || '', engine: m.engine || '' });
@@ -221,6 +227,8 @@ class Asr extends EventEmitter {
         break;
     }
   }
+
+  wakeHit(text) { return this.wakeHits.get(String(text || '').trim()) ?? this.wakeHits.get(String(text || '').split('\n')[0].trim()); }
 
   /** 抑制自听：娃娃自己出声时别把自己说的当成主人在说话 */
   mute() {

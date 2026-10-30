@@ -107,7 +107,7 @@ async function main() {
   const scene = () => evalIn(win, "document.querySelector('#panelScene [aria-pressed=true]')?.dataset.scene");
   const select = name => evalIn(win, `document.querySelector('#panelScene [data-scene=${name}]').click()`);
   assert.equal(await scene(), 'life');
-  assert.equal(await evalIn(win, "document.getElementById('setProfile').rows"), 6);
+  assert.equal(await evalIn(win, "document.getElementById('setProfile').rows"), 3);
   await evalIn(win, "document.getElementById('setAlways').checked=false; document.getElementById('setAlways').dispatchEvent(new Event('change',{bubbles:true}))");
   await select('work');
   await waitFor(() => Promise.resolve(settings.memory.scene === 'work'), 'work scene persisted');

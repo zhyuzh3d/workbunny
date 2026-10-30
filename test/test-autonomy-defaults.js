@@ -1,0 +1,22 @@
+'use strict';
+const {test}=require('node:test'),assert=require('node:assert/strict');
+const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {MemoryService}=require('../src/main/memory-service'),{CompanionAutonomy}=require('../src/main/companion-autonomy'),{Secretary}=require('../src/main/secretary');
+test('default idle life needs no setup, writes verified files, persists pause and cancels an in-flight idea',async t=>{
+  const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bunny-idle-'))); let life, now=new Date('2026-10-30T12:00:00+08:00').getTime(),calls=0;
+  const m=new MemoryService({dir:path.join(root,'vault'),bin:path.resolve('bin/vault'),openKey:async()=>Buffer.alloc(32,69),getSettings:()=>({scene:'life',enabled:true,extract:false})});
+  t.after(async()=>{await life?.close();await m.close();fs.rmSync(root,{recursive:true,force:true});});
+  await m.init();await m.cognition.ensure({profile:'喜欢写作。'});
+  const secretary=new Secretary({memory:m,ready:()=>true,epoch:()=>m.generation});
+  life=new CompanionAutonomy({memory:m,secretary,getScene:()=> 'life',defaultDirectory:path.join(root,'creations'),clock:()=>now,canRun:()=>true,report:async()=>{},propose:async()=>{calls++;return{kind:'create',title:'第一篇小故事',extension:'md',content:'这是一个有趣的开场。'};}});
+  let state=await life.status();assert.equal(state.grants.length,3);assert(fs.existsSync(state.directory));
+  await life.tick();assert.equal(calls,1);assert.equal(fs.readdirSync(state.directory).length,1);
+  state=await life.status();assert(state.history.some(r=>r.goal==='第一篇小故事'&&r.artifactManifest));
+  await life.control('pause');assert((await life.status()).paused);await life.tick();assert.equal(calls,1);
+  life.policyPaused=false;await life.status();assert(life.policyPaused,'pause is persisted');
+  await life.control('resume');now+=24*3600000;await life.ownerInput();
+  life.propose=(_input,{signal})=>new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new Error('cancelled')),{once:true}));
+  const running=life.tick();for(let i=0;i<100&&!life.activeAttempt;i++)await new Promise(r=>setTimeout(r,10));assert(life.activeAttempt);
+  await life.control('cancel');await running;state=await life.status();assert(state.history.some(r=>r.status==='cancelled'));assert.equal(fs.readdirSync(state.directory).length,1);
+  const alternate=path.join(root,'alternate');fs.mkdirSync(alternate);await life.setDirectory(alternate);assert.equal((await life.status()).directory,alternate);
+});

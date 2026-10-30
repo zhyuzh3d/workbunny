@@ -153,7 +153,6 @@ let lastDonePoseAt = -1e9;
 let lastMasterAt = performance.now();
 let speakingNow = false;
 let thinkingNow = false;   // 主人说完 → 她正在想：这段时间不能一动不动
-let recording = false;
 
 /* ═══════════ three 基础 ═══════════ */
 const stage = document.getElementById('stage');
@@ -300,8 +299,13 @@ function fitCamera(obj) {
   groundEl.style.opacity = bust ? '0' : '1';
 }
 
+function syncUIWidth() {
+  const baseline = stageViewport.width / Math.max(1, viewScale);
+  document.documentElement.style.setProperty('--ui-base-width', `${baseline * 4 / 7}px`);
+}
 function onResize() {
   if (!viewportManaged) stageViewport = { width: innerWidth, height: innerHeight, offsetY: 0 };
+  syncUIWidth();
   const w = stageViewport.width, h = stageViewport.height;
   const old = renderer.getSize(new THREE.Vector2());
   if (old.x !== w || old.y !== h) {
@@ -872,7 +876,6 @@ input.addEventListener('input', () => pet.composing?.(!!input.value.trim()));
 input.addEventListener('blur', () => pet.composing?.(false));
 const hint = document.getElementById('hint');
 const fab = document.getElementById('fab');
-const recEl = document.getElementById('rec');
 const activity = document.getElementById('activity');
 
 /* 脚下那条（同时是"耳朵"的开关和"我说了什么"的显示器）：
@@ -1111,18 +1114,6 @@ function paintMute() {
 }
 
 /* ═══════════ 录制 ═══════════ */
-function startRecordUI() {
-  recording = true;
-  recEl.classList.remove('hidden');
-  document.getElementById('recText').textContent = '在听…';
-  stopAudio();
-  hideBubble();
-}
-function stopRecordUI() {
-  recording = false;
-  recEl.classList.add('hidden');
-  recEl.style.setProperty('--lvl', 0.2);
-}
 addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeDock();
 });
@@ -1235,9 +1226,10 @@ function paintAvatars() {
   for (const b of row.children) b.classList.toggle('on', b.dataset.key === avatarKey);
 }
 
-/* 角色大小三档。放大交给主进程撑窗口（以底部中心为锚点），
+/* 角色大小四档。放大交给主进程撑窗口（以底部中心为锚点），
  * 缩小则窗口一动不动 —— 只是取景推近成半身（见 fitCamera）。 */
 function paintScale() {
+  syncUIWidth();
   const row = document.getElementById('sizeRow');
   if (!row) return;
   for (const b of row.children) {
@@ -1377,7 +1369,7 @@ function frame() {
     }
 
     // 空闲自娱自乐：没在说话、没在录、没开输入框、没在思考、没开动作列表，就隔一会儿动一动
-    if (!speakingNow && !thinkingNow && !recording && dockMode !== 'open' && !emoActive() && !motionOpenFlag) {
+    if (!speakingNow && !thinkingNow && dockMode !== 'open' && !emoActive() && !motionOpenFlag) {
       ambientTimer -= dt;
       if (ambientTimer <= 0) {
         // 抽一个槽位，槽内随机。抽到 idle 且抽中循环站姿 → 换一种站法站着；
@@ -1563,19 +1555,8 @@ function wire() {
         ambientTimer = 26;
         toIdle(0.3);
         break;
-      case 'record':
-        if (ev.state === 'listening') { startRecordUI(); document.getElementById('recText').textContent = '在听…'; }
-        else if (ev.state === 'idle') stopRecordUI();
-        else if (ev.state === 'starting') {
-          startRecordUI();
-          // 还没拿到权限时别说"准备"，要说清在等什么
-          document.getElementById('recText').textContent =
-            asrStat.note === 'pending' ? '等授权…' : '准备…';
-        }
-        break;
       case 'asrLevel': {
         const l = Math.max(0.08, Math.min(1, ev.v * 2.2));
-        recEl.style.setProperty('--lvl', l.toFixed(3));
         // 脚下那条的电平条跟着真实音量走 ——
         // 这是"它在听我说话"最直接的证据，比任何文案都管用。
         const earEl = document.getElementById('ear');
@@ -1585,25 +1566,18 @@ function wire() {
         }
         break;
       }
-      case 'asrPartial':
-        document.getElementById('recText').textContent = ev.text || '在听…';
-        break;
-      case 'asrFinal':
-        stopRecordUI();
-        if (ev.text) showBubble(ev.text, 2600);
-        break;
+      case 'asrPartial': paintLive(ev.text || ''); break;
       case 'asrStatus':
         paintPerm(ev);
         break;
       case 'asrError':
-        stopRecordUI();
         showBubble(ev.message, 7000);
         break;
       case 'ttsError':
         showBubble('嗓子哑了：' + ev.message, 6000);
         break;
       case 'ask':
-        openDock();
+        pet.hit(true); openDock();
         break;
       case 'settings':
         openSettings();
@@ -1896,7 +1870,7 @@ setInterval(() => {
 
 window.__pet = () => ({
   vrm: !!vrm, loading, mixer: !!mixer, clips: clips.size, currentMotion, phase, speakingNow,
-  talkLevel: +talkLevel.toFixed(3), recording, avatarKey,
+  talkLevel: +talkLevel.toFixed(3), avatarKey,
   audio: !!currentSource, emo: emoTimer > 0,
   hit: lastHit, dockOpen: dockMode === 'open',
   hiddenMeshes: [...new Set(hiddenAvatarMeshes)],

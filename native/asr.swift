@@ -137,7 +137,7 @@ func probeAllDevices(seconds: Double) async {
 let outLock = NSLock()
 
 func emit(_ obj: [String: Any]) {
-    guard let d = try? JSONSerialization.data(withJSONObject: obj) else { return }
+    guard let d = try? JSONSerialization.data(withJSONObject: WakeName.annotate(obj)) else { return }
     var line = d
     line.append(0x0A)
     outLock.lock()
@@ -394,6 +394,9 @@ func startSession() async {
     let detector = SpeechDetector(detectionOptions: .init(sensitivityLevel: .medium), reportResults: true)
     speakerFeatures.requireSpeechConfirmation()
     let an = SpeechAnalyzer(modules: [transcriber, detector])
+    let context = AnalysisContext()
+    context.contextualStrings[.general] = WakeName.configured.names
+    try? await an.setContext(context)
     speechDetectorTask?.cancel()
     speechDetectorTask = Task {
         do { for try await result in detector.results { speakerFeatures.speechDetected(result.speechDetected) } }
@@ -683,6 +686,7 @@ func run() async {
 
 @main struct ASRMain {
 static func main() {
+    if CommandLine.arguments.contains("--wake-name-test") { emit(WakeName.selfTest()); return }
     if CommandLine.arguments.contains("--voice-feature-test") { SpeakerFeatures.selfTest(emit); return }
 // 只枚举设备：不采集、不弹窗，可以随便从命令行跑
 if listMics {

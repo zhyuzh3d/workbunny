@@ -20,7 +20,7 @@
 
 ## 语音与角色
 
-`asr.js` 驱动 `native/asr.swift` 或 `native/asr-legacy.swift`，持续识别与按次识别共享前台调度。`tts.js` 路由系统朗读、Qwen、CHP 与通用 HTTP；`tts-http-profile.js` 限定配置能力，`tts-session.js` 与播放标识管理取消和结束确认。Qwen 使用固定版本 speech.cpp，源码由 `tools/build-tts-runtime.sh` 拉取并构建，不保留旧 llama.cpp worker。
+`asr.js` 驱动 `native/asr.swift` 或 `native/asr-legacy.swift`，持续识别与按次识别共享前台调度。`tts.js` 路由系统朗读、Qwen、CHP、豆包语音与已有 HTTP 配置；`tts-http-profile.js` 限定配置能力，`tts-session.js` 与播放标识管理取消和结束确认。Qwen 使用固定版本 speech.cpp，源码由 `tools/build-tts-runtime.sh` 拉取并构建，不保留旧 llama.cpp worker。
 
 `speaker-features.swift` 用本地 MFCC、音高与人声活动构造轻量描述，`speaker-filter.js` 管理多段模板、设备变化和近似筛选；模板仅存在加密 Vault，不保存或上传录音。声学筛选通过后才进入原有语义回复/跳过判断，复用前台模型请求。`memory-service.markInterrupted` 标记被用户打断的回复，其预测不再用于下一轮评估。
 
@@ -43,3 +43,5 @@
 - 私人模型、创作实验、参考音频、历史报告与旧构建产物不放进 Git 项目；源码包不收集项目同层级目录。
 
 兼容性和已知验收范围见 [安装与兼容](workbunny-macOS安装与兼容.md)。本次目录整理不修改 v0.13.0 标签或已公开的 Release 附件。
+
+0.14.1：前台对话按所选服务独立解析连接，WorkBuddy仍负责监督与后台免费模型；豆包适配器复用受约束的HTTP音频解析。名字唤醒在原生ASR中使用Foundation拼音转换和上下文名字提示，随识别文本返回命中结果，主进程在请求模型前设本地门槛。自主生活复用原有授权、预算、Secretary作品核验与加密任务记录；新安装自动建立限本地目录的活动范围，暂停状态持久化，不扩大社交或代码执行权限。

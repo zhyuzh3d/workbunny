@@ -82,8 +82,9 @@ fs.writeFileSync(preload, `
     memoryExport: (...a) => api('memoryExport', ...a), memoryRestore: (...a) => api('memoryRestore', ...a),
     memoryMaintain: (...a) => api('memoryMaintain', ...a), memoryMaintenanceStatus: (...a) => api('memoryMaintenanceStatus', ...a),
     config: (...a) => api('config', ...a), taskStatus: (...a) => api('taskStatus', ...a),
-    taskStart: (...a) => api('taskStart', ...a), taskStop: (...a) => api('taskStop', ...a),
+    taskStart: (...a) => api('taskStart', ...a), taskStop: (...a) => api('taskStop', ...a), taskCancel: (...a) => api('taskCancel', ...a),
     taskAccept: (...a) => api('taskAccept', ...a), desktopPermission: (...a) => api('desktopPermission', ...a),
+    autonomyStatus: () => api('autonomyStatus'), autonomyControl: action => api('autonomyControl', action), autonomyDirectory: () => api('autonomyDirectory'),
     desktopRefresh: (...a) => api('taskStatus', ...a), desktopInsert: (...a) => api('desktopInsert', ...a),
     watchList: (...a) => api('watchList', ...a), watchPause: (...a) => api('watchPause', ...a),
     watchResume: (...a) => api('watchResume', ...a), watchStop: (...a) => api('watchStop', ...a), watchCheck: (...a) => api('watchCheck', ...a),
@@ -240,6 +241,8 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
     return { ok: true };
   }
   if (name === 'desktopPermission') return status.permissions;
+  if (name === 'autonomyStatus') return { note:'等待空闲', paused:false, running:false, directory:'/fixture/creations', history:[] };
+  if (name === 'taskCancel') { status = { ...status, running:false, task:{...status.task,status:'cancelled'} }; return {ok:true}; }
   if (name === 'taskStart') { status = { ...status, running: true, task: { status: 'running', goal: args[0].goal, criteria: args[0].criteria, target: args[0].target, workModel: args[0].workModel, thinking: args[0].workModel === 'hy3' ? 'low' : 'high', note: '运行中' } }; return { ok: true }; }
   if (name === 'taskStop') {
     status = { ...status, running: false, task: { ...(status.task || {}), status: 'stopped', note: '已停止' } };
@@ -297,52 +300,11 @@ async function testMemory() {
   assert.equal(calls.memoryMaintain[2][0], 'deepdream');
   assert.equal(await evalIn(win, "document.getElementById('memoryScene').value"), 'life', 'life is the default scene');
   assert.equal(await evalIn(win, "document.getElementById('memorySceneScope').textContent"), '生活：可按需参考生活与工作资料');
-  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '生活补充', 'the life overlay loads independently of the common profile');
-  await evalIn(win, "document.getElementById('memoryScene').value='work'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
+  await evalIn(win, "document.getElementById('memoryScene').value='work';document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
   await waitFor(() => Promise.resolve(settings.memory.scene === 'work'), 'work scene persisted');
-  assert.deepEqual(calls.config.at(-1)[0], { memory: { scene: 'work' } }, 'scene changes send only the scene patch');
-  assert.equal(await evalIn(win, "document.getElementById('memorySceneScope').textContent"), '工作：可按需参考工作资料');
-  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '工作补充');
-  await evalIn(win, "document.getElementById('sceneProfile').value='工作场景专属补充'; document.getElementById('sceneProfile').dispatchEvent(new Event('input',{bubbles:true})); document.getElementById('sceneProfileSave').click()");
-  await waitFor(() => Promise.resolve(settings.buddy.sceneProfiles.work === '工作场景专属补充'), 'work profile saved');
-  assert.deepEqual(calls.config.at(-1)[0], { buddy: { sceneProfiles: { work: '工作场景专属补充' } } }, 'profile save writes only the dirty scene key');
-  assert.equal(settings.buddy.profile, '共通角色设定', 'scene overlay saves do not replace the shared persona');
-  assert.equal(settings.voice.alwaysListen, true);
-  assert.equal(settings.tts.apiKey, 'fixture-tts-secret', 'scene settings preserve voice credentials');
-  assert.equal(settings.brain.apiKey, 'fixture-brain-secret', 'scene settings preserve intelligence credentials');
-  assert.equal(settings.brain.profiles.deepseek.apiKey, 'fixture-provider-secret', 'scene settings preserve provider credentials');
-  await evalIn(win, "document.getElementById('sceneProfile').value='工作未保存草稿'; document.getElementById('sceneProfile').dispatchEvent(new Event('input',{bubbles:true}))");
-  await evalIn(win, `window.pet.__fixture.emitConfig(${JSON.stringify({ buddy: { sceneProfiles: { private: '私聊外部更新', life: '生活外部更新', work: '工作外部更新' } } })})`);
-  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '工作未保存草稿', 'config events preserve the dirty current scene draft');
-  await evalIn(win, "document.getElementById('memoryScene').value='private'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
-  await waitFor(() => Promise.resolve(settings.memory.scene === 'private'), 'live config scene change');
-  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '私聊外部更新', 'config events refresh non-dirty scene profiles');
-  await evalIn(win, "document.getElementById('memoryScene').value='work'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
-  await waitFor(() => Promise.resolve(settings.memory.scene === 'work'), 'return to work scene with draft');
-  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '工作未保存草稿', 'dirty scene draft survives switching away and back');
-  await click(win, 'sceneProfileSave');
-  await waitFor(() => Promise.resolve(settings.buddy.sceneProfiles.work === '工作未保存草稿'), 'save dirty work profile after external update');
-  assert.deepEqual(calls.config.at(-1)[0], { buddy: { sceneProfiles: { work: '工作未保存草稿' } } }, 'saving does not overwrite another window scene edits');
-  await evalIn(win, "document.getElementById('memoryScene').value='private'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
-  await waitFor(() => Promise.resolve(settings.memory.scene === 'private'), 'private scene persisted');
-  assert.equal(await evalIn(win, "document.getElementById('memorySceneScope').textContent"), '私聊：可按需参考私聊、生活与工作资料');
-  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '私聊外部更新');
-  await evalIn(win, "document.getElementById('sceneProfile').value='私聊草稿'; document.getElementById('sceneProfile').dispatchEvent(new Event('input',{bubbles:true})); document.getElementById('memoryScene').value='life'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
-  await waitFor(() => Promise.resolve(settings.memory.scene === 'life'), 'return to life scene');
-  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '生活外部更新', 'scene change loads the matching overlay');
-  await evalIn(win, "document.getElementById('memoryScene').value='private'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
-  await waitFor(() => Promise.resolve(settings.memory.scene === 'private'), 'private scene restored');
-  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '私聊草稿', 'unsaved overlay drafts stay with their scene when switching');
-  assert.equal(await evalIn(win, "(() => { const e=new Event('beforeunload',{cancelable:true}); window.dispatchEvent(e); return e.defaultPrevented })()"), true, 'unsaved scene overlay prevents silent close');
-  await click(win, 'sceneProfileSave');
-  await waitFor(() => Promise.resolve(settings.buddy.sceneProfiles.private === '私聊草稿'), 'private profile saved');
-  await evalIn(win, "window.pet.__fixture.failConfig().then(()=>{document.getElementById('sceneProfile').value='私聊失败后保留';document.getElementById('sceneProfile').dispatchEvent(new Event('input',{bubbles:true}));document.getElementById('sceneProfileSave').click()})");
-  await waitFor(() => evalIn(win, "document.getElementById('sceneProfileNote').textContent").then(text => text.includes('保存失败')), 'profile save failure feedback');
-  assert.equal(await evalIn(win, "document.getElementById('sceneProfile').value"), '私聊失败后保留', 'failed profile save keeps its draft');
-  await click(win, 'sceneProfileSave');
-  await waitFor(() => Promise.resolve(settings.buddy.sceneProfiles.private === '私聊失败后保留'), 'retry private profile save');
-  await evalIn(win, "document.getElementById('memoryScene').value='life'; document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
-  await waitFor(() => Promise.resolve(settings.memory.scene === 'life'), 'restore default scene for existing memory tests');
+  assert.deepEqual(calls.config.at(-1)[0], {memory:{scene:'work'}});
+  await evalIn(win, "document.getElementById('memoryScene').value='life';document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))");
+  await waitFor(() => Promise.resolve(settings.memory.scene === 'life'), 'life scene restored');
   await evalIn(win, "window.pet.__fixture.failConfig().then(()=>{document.getElementById('memoryScene').value='work';document.getElementById('memoryScene').dispatchEvent(new Event('change',{bubbles:true}))})");
   await waitFor(() => evalIn(win, "document.getElementById('memoryConfigNote').textContent").then(text => text.includes('场景切换失败')), 'scene switch failure feedback');
   assert.equal(await evalIn(win, "document.getElementById('memoryScene').value"), 'life', 'failed scene write restores the last saved scene');
@@ -372,7 +334,7 @@ async function testMemory() {
   await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=memory-pending-1]') !== null"), 'jump from recalled fact to the editable memory record');
   assert.equal(await evalIn(win, "document.getElementById('memorySearch').value"), '', 'an already loaded record opens without replacing the current query');
   const recalledRecordActions = await evalIn(win, "[...document.querySelector('#memoryList [data-record-id=memory-pending-1]').querySelectorAll('button')].map(button=>button.textContent)");
-  assert(recalledRecordActions.includes('编辑') && recalledRecordActions.includes('删除'), 'recalled records retain existing edit and delete actions');
+  assert(recalledRecordActions.includes('编辑') && recalledRecordActions.includes('彻底遗忘'), 'recalled records retain existing edit and delete actions');
   assert.match(await evalIn(win, "document.getElementById('memoryStatus').textContent"), /(?:工作|生活|私聊).*已就绪/);
   assert.doesNotMatch(await evalIn(win, "document.getElementById('memoryStatus').textContent"), /72|精力/);
   assert.equal(await evalIn(win, "document.querySelector('#memoryList img') === null"), true, 'record text must not create markup');
@@ -632,14 +594,10 @@ async function testDesktop() {
   await waitFor(() => evalIn(win, "document.getElementById('watchList').textContent").then(text => text.includes('帮我关注某位联系人的新消息')) , 'generic empty watch state');
   assert.doesNotMatch(await evalIn(win, "document.getElementById('watchList').textContent"), /Alice/, 'empty-state guidance does not hard-code a contact');
   assert.match(await evalIn(win, "document.getElementById('taskStateNote').textContent"), /代理已暂停.*可以继续检查/, 'restored paused status is visible as a report, not accepted');
-  assert.equal(await evalIn(win, "document.getElementById('taskFormDetails').open"), false, 'manual task form is folded beneath the status view');
   assert.equal(await evalIn(win, "document.getElementById('desktopActions').hidden"), false, 'a paused task offers a continuation control');
   assert.equal(await evalIn(win, "document.getElementById('taskResume').hidden"), false);
-  assert.equal(await evalIn(win, "document.getElementById('permissionsDetails').open"), true, 'missing system permission auto-opens the permission section');
-  assert.equal(await evalIn(win, "!!(document.getElementById('taskStateCard').compareDocumentPosition(document.getElementById('taskFormDetails')) & 4)"), true, 'current status precedes the manual fallback');
   assert.match(await evalIn(win, "document.querySelector('#permissionList').textContent"), /辅助功能.*屏幕录制.*输入控制/);
-  assert.match(await evalIn(win, "document.querySelector('#desktopPage').textContent"), /你可以直接告诉 Bunny 要办什么/);
-  assert.match(await evalIn(win, "document.getElementById('taskPauseNote').textContent"), /暂停只停止 Bunny 的代理操作；WorkBuddy 已接收的会话可能仍在继续/);
+  assert.match(await evalIn(win, "document.getElementById('taskPauseNote').textContent"), /暂停只停止 (?:Bunny|伙伴) 的代理操作；WorkBuddy 已接收的会话可能仍在继续/);
   assert.equal(await evalIn(win, "document.getElementById('taskAccept').disabled"), true, 'paused tasks cannot be accepted');
   await click(win, 'taskResume');
   await waitFor(() => Promise.resolve((calls.say || []).length === 1), 'resume routes through normal dialogue');
@@ -658,7 +616,6 @@ async function testDesktop() {
   await evalIn(win, "window.pet.__fixture.emitMonitor({tasks:[{sessionId:'session-1',name:'Monitor 实际进展',status:'running'}]})");
   await waitFor(() => evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent").then(text => text.includes('Monitor 实际进展')), 'WorkBuddy monitor event refresh');
   await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{accessibilityTrusted:true,screenCaptureAllowed:true,postEventAllowed:true},running:false,task:{id:'task-2',status:'paused',goal:'fixture paused task',note:'可以继续检查'}})");
-  assert.equal(await evalIn(win, "document.getElementById('permissionsDetails').open"), false, 'all required permissions collapse after they are granted');
   assert.match(await evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent"), /Monitor 实际进展/, 'paused status does not obscure the real WorkBuddy monitor');
   await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:true,task:{id:'task-text-wechat',status:'paused',origin:'dialogue',inputSource:'text',target:'wechat',goal:'已提交任务'}})");
   await waitFor(() => evalIn(win, "document.getElementById('taskMeta').textContent").then(text => text.includes('文字交代 · 微信')), 'text source and WeChat target labels');
@@ -692,80 +649,29 @@ async function testDesktop() {
   assert.doesNotMatch(await evalIn(win, "document.getElementById('taskStateNote').textContent"), /WorkBuddy 会话可能仍在继续/);
   assert.doesNotMatch(await evalIn(win, "document.getElementById('taskStateNote').textContent"), /WorkBuddy 已停止/);
   await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:false,task:{id:'task-panel',status:'paused',origin:'panel',inputSource:'panel',target:'wechat',goal:'手动交代测试'}})");
-  await waitFor(() => evalIn(win, "document.getElementById('taskMeta').textContent").then(text => text.includes('手动交代 · 微信')), 'manual source and WeChat target labels');
-  assert.match(await evalIn(win, "document.getElementById('taskMeta').textContent"), /手动交代 · 微信/);
-  assert.match(await evalIn(win, "document.getElementById('taskPauseNote').textContent"), /暂停只停止 Bunny 的微信代理操作/);
+  await waitFor(() => evalIn(win, "document.getElementById('taskMeta').textContent").then(text => text.includes('设定任务 · 微信')), 'manual source and WeChat target labels');
+  assert.match(await evalIn(win, "document.getElementById('taskMeta').textContent"), /设定任务 · 微信/);
+  assert.match(await evalIn(win, "document.getElementById('taskPauseNote').textContent"), /暂停只停止 (?:Bunny|伙伴) 的微信代理操作/);
   assert.doesNotMatch(await evalIn(win, "document.getElementById('taskPauseNote').textContent"), /WorkBuddy/);
   await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:false,task:{id:'task-panel',status:'accepted',origin:'panel',inputSource:'panel',target:'wechat',goal:'手动交代测试',report:'已核对微信结果'}})");
   assert.equal(await evalIn(win, "document.getElementById('taskPauseNote').hidden"), true, 'completed tasks do not show pause instructions');
   await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:false,task:{id:'task-monitor',status:'paused',origin:'dialogue',inputSource:'voice',target:'workbuddy',goal:'检查交付',monitorSessionId:'session-1',handoffSent:true,note:'用户暂停'}})");
   await evalIn(win, "window.pet.__fixture.emitMonitor({tasks:[{sessionId:'session-1',name:'Monitor 实际交付',status:'ok'}]})");
   await waitFor(() => evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent").then(text => text.includes('Monitor 实际交付 · 已有答复')), 'native monitor completion status');
-  await evalIn(win, "document.getElementById('taskFormDetails').open=true");
-  await waitFor(() => evalIn(win, "document.getElementById('taskStart').hidden").then(hidden => !hidden), 'manual fallback opens');
-  await click(win, 'workbuddyOpen');
-  await waitFor(() => Promise.resolve((calls.workbuddyOpen || []).length === 1), 'open WorkBuddy');
-  const initialStatusCalls = (calls.taskStatus || []).length;
-  await evalIn(win, `window.pet.__fixture.emitDesktop({permissions:{accessibilityTrusted:true,screenCaptureAllowed:true,postEventAllowed:true},running:false,task:{id:'task-dialogue-review',status:'review',origin:'dialogue',goal:'交付验收',target:'workbuddy',verification:{verdict:'need_user',report:'请确认交付范围',at:1761000000000},note:'正在核对'}})`);
-  assert.match(await evalIn(win, "document.getElementById('desktopStatus').textContent"), /已有结果，Bunny 正在核对/);
-  assert.match(await evalIn(win, "document.getElementById('taskMeta').textContent"), /对话交代 · WorkBuddy/);
-  assert.match(await evalIn(win, "document.getElementById('taskDetails').textContent"), /核对结论：需要你确认：请确认交付范围/);
-  assert.equal(await evalIn(win, "document.getElementById('taskAccept').hidden"), true, 'dialogue review is not an invitation to accept yet');
-  await evalIn(win, `window.pet.__fixture.emitDesktop({permissions:{accessibilityTrusted:true,screenCaptureAllowed:true,postEventAllowed:true},running:false,task:{id:'task-3',target:'workbuddy',status:'review',goal:'review this',note:'视觉结果已完成'},screenshot:${JSON.stringify(pixel)}})`);
-  await waitFor(() => evalIn(win, "document.getElementById('taskAccept').disabled").then(disabled => !disabled), 'review state event');
-  assert.equal(await evalIn(win, "document.getElementById('taskResume').hidden"), false, 'review tasks can be explicitly continued through dialogue');
-  assert.equal((calls.taskStatus || []).length, initialStatusCalls, 'desktop events paint directly without a second native status call');
-  assert.equal(await evalIn(win, "document.getElementById('taskPreview').hidden"), false);
-  assert.equal(await evalIn(win, "document.getElementById('taskPreview').open"), false, 'the recent screenshot stays folded by default');
-  await evalIn(win, "document.querySelector('#taskPreview summary').click()");
-  assert.equal(await evalIn(win, "document.getElementById('taskPreview').open"), true, 'the screenshot remains available on demand');
-  assert.match(await evalIn(win, "document.getElementById('taskScreenshot').src"), /^data:image\//);
-  assert.match(await evalIn(win, "document.getElementById('taskStateNote').textContent"), /待你确认.*视觉结果已完成/);
-  await click(win, 'taskAccept');
-  await waitFor(() => Promise.resolve((calls.taskAccept || []).length === 1), 'task acceptance');
-  assert.equal(status.task.status, 'accepted');
-  await waitFor(() => evalIn(win, "document.getElementById('taskAccept').disabled"), 'accepted state paint');
-  assert.equal(await evalIn(win, "document.getElementById('desktopStatus').textContent"), '你已确认', 'manual acceptance is correctly attributed to the user');
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{accessibilityTrusted:true,screenCaptureAllowed:true,postEventAllowed:true},running:false,task:{id:'task-auto',status:'accepted',origin:'dialogue',target:'workbuddy',automaticAccepted:true,report:'已核对交付',verification:{verdict:'pass',report:'所有条件均已满足',at:1761000000000}}})");
-  assert.match(await evalIn(win, "document.getElementById('desktopStatus').textContent"), /Bunny 已核对代理结果/);
-  assert.match(await evalIn(win, "document.getElementById('taskDetails').textContent"), /核对结论：核对通过：所有条件均已满足/);
-  assert.equal(await evalIn(win, "document.getElementById('taskPauseNote').hidden"), true, 'accepted tasks do not retain pause instructions');
-
-  const permissionCalls = (calls.desktopPermission || []).length;
-  await click(win, 'desktopPermission');
-  await waitFor(() => Promise.resolve((calls.desktopPermission || []).length === permissionCalls + 1), 'permission prompt');
-  assert.equal((calls.desktopPermission || []).length, permissionCalls + 1, 'permission is requested once per button press');
-
-  assert.equal(await evalIn(win, "document.getElementById('workModel').value"), 'deepseek-v4.1-flash', 'Flash high is the default task profile');
-  assert.equal(await evalIn(win, "document.getElementById('workbuddyMonitorCard').hidden"), false);
-  await evalIn(win, "document.getElementById('taskTarget').value='wechat'; document.getElementById('taskTarget').dispatchEvent(new Event('change',{bubbles:true}))");
-  assert.equal(await evalIn(win, "document.getElementById('workModelRow').hidden"), true, 'WorkBuddy profile is hidden for other targets');
-  assert.equal(await evalIn(win, "document.getElementById('workbuddyMonitorCard').hidden"), true, 'WorkBuddy monitor is hidden for the WeChat route');
-  assert.equal(await evalIn(win, "document.getElementById('taskGoalLabel').textContent"), '想在微信做什么');
-  assert.equal(await evalIn(win, "document.getElementById('taskCriteriaLabel').textContent"), '如何确认完成');
-  assert.equal(await evalIn(win, "document.getElementById('taskStart').textContent"), '开始代办');
-  await evalIn(win, "document.getElementById('taskTarget').value='workbuddy'; document.getElementById('taskTarget').dispatchEvent(new Event('change',{bubbles:true}))");
-
-  await evalIn(win, "document.getElementById('taskGoal').value='  原样交给 WorkBuddy\\n保留第二行  '; document.getElementById('taskStart').click()");
-  assert.equal((calls.taskStart || []).length, 0, 'tasks require explicit acceptance criteria');
-  await evalIn(win, "document.getElementById('taskCriteria').value='WorkBuddy 会话中显示回复'; document.getElementById('taskStart').click()");
-  await waitFor(() => Promise.resolve((calls.taskStart || []).length === 1), 'task start');
-  assert.equal(calls.taskStart[0][0].workModel, 'deepseek-v4.1-flash', 'selected execution profile is passed to main');
-  assert.equal(calls.taskStart[0][0].goal, '  原样交给 WorkBuddy\n保留第二行  ', 'the entered WorkBuddy request reaches main unchanged');
-  assert.equal(calls.taskStart[0][0].criteria, 'WorkBuddy 会话中显示回复');
-  assert.equal(status.task.thinking, 'high');
-  await evalIn(win, "window.dispatchEvent(new Event('beforeunload',{cancelable:true}))");
-  assert.equal((calls.taskStop || []).length, 0, 'closing UI does not cancel a background task');
-  await click(win, 'taskStop');
-  await waitFor(() => Promise.resolve((calls.taskStop || []).length === 1), 'explicit stop');
-
-  await evalIn(win, "document.getElementById('desktopInsertText').value='fixture text'; document.getElementById('desktopInsert').click()");
-  await waitFor(() => Promise.resolve((calls.desktopInsert || []).length === 1), 'insert invoked immediately');
-  assert.equal(await evalIn(win, "document.getElementById('desktopInsertCancel').hidden"), false);
-  assert.match(await evalIn(win, "document.getElementById('desktopInsertNote').textContent"), /3 秒/);
-  await click(win, 'desktopInsertCancel');
-  await waitFor(() => Promise.resolve((calls.taskStop || []).length === 2), 'insert cancellation');
-  await waitFor(() => evalIn(win, "document.getElementById('desktopInsertCancel').hidden"), 'insert settles after cancel');
+  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:false,task:null})");
+  assert.deepEqual(await evalIn(win, "[...document.querySelectorAll('#desktopTabs button')].map(b=>b.textContent)"), ['当前任务','持续关注','WorkBuddy','自主生活','系统权限']);
+  await click(win, 'taskSetup');
+  assert.equal(await evalIn(win, "document.getElementById('taskDialog').open"), true);
+  assert.equal(await evalIn(win, "document.querySelectorAll('#taskDialog textarea').length"), 1);
+  await evalIn(win, "document.getElementById('taskGoal').value='整理今天的资料';document.getElementById('taskStart').click()");
+  await waitFor(() => Promise.resolve((calls.say || []).length === 2), 'simple task routes through dialogue');
+  assert.equal(calls.say.at(-1)[0], '请安排并执行这个任务：\n整理今天的资料');
+  await waitFor(() => evalIn(win, "!document.getElementById('taskDialog').open"), 'task dialog closes after accepted input');
+  assert.equal(await evalIn(win, "document.querySelectorAll('#desktopInsert,#taskCriteria,#taskTarget').length"), 0);
+  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:true,task:{id:'to-cancel',status:'running',target:'workbuddy'}})");
+  await click(win, 'taskCancel');
+  await waitFor(() => Promise.resolve((calls.taskCancel || []).length === 1), 'cancel current task');
+  await waitFor(() => evalIn(win, "document.getElementById('desktopStatus').textContent.includes('已取消')"), 'cancelled state visible');
   win.hide();
 }
 

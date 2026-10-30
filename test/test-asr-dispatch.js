@@ -31,12 +31,12 @@ test('late final from disabled continuous listening never becomes a manual chat'
  const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');
  const handler=source.slice(source.indexOf("    asr.on('final', (t) => {"),source.indexOf("    asr.on('recycle'"));
  const asr=new Asr('/unused'),requests=[],events=[],messages=[];
- const ctx={asr,speakerFilter:new SpeakerFilter(),suppressEnrollmentFinal:false,alwaysOn:false,speaking:false,handleUtterance:text=>requests.push(text),log:()=>{},send:(type,data)=>events.push({type,...data}),pushHistory:(...a)=>messages.push(a),think:q=>requests.push(q)};
+ const ctx={asr,asrMode:'single',voiceTurns:{final:text=>requests.push(text)},recentEcho:()=>false,speakerFilter:new SpeakerFilter(),suppressEnrollmentFinal:false,alwaysOn:false,speaking:false,log:()=>{},send:(type,data)=>events.push({type,...data}),pushHistory:(...a)=>messages.push(a),think:q=>requests.push(q)};
  vm.runInNewContext(handler,ctx);
  asr.always=true;asr.emit('final','停用之前尚未提交的半句');
  assert.equal(requests.length,0);assert.equal(messages.length,0);assert.equal(events.length,0);
- asr.always=false;asr.emit('final','真正的手动录音');
- assert.equal(requests.length,1);assert.equal(messages.length,0);assert.equal(requests[0],'真正的手动录音','manual ASR goes through the same semantic admission as continuous listening');
+ asr.always=false;asr.emit('final','已经关闭的旧录音');assert.equal(requests.length,0);
+ ctx.alwaysOn=true;asr.emit('final','自动分段识别');assert.equal(requests.length,1);assert.equal(requests[0],'自动分段识别');
 });
 
 test('non-owner evidence rejects new words without cancelling an already confirmed owner turn',()=>{

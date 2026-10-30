@@ -25,9 +25,9 @@
   <div class="pb" data-page="persona">
     <label class="row"><span>名字</span><input id="setName" type="text" /></label>
     <label class="row"><span>怎么称呼你</span><input id="setOwnerName" type="text" maxlength="64" placeholder="主人" /></label>
-    <label class="setting-field"><span data-character-text="你给 Bunny 的设定">你给她的设定</span><textarea id="setProfile" rows="6" maxlength="2000" data-character-placeholder="你希望 Bunny 是怎样的伙伴，有怎样的性格、兴趣或愿景" placeholder="你希望她是怎样的伙伴"></textarea></label>
-    <label class="setting-field"><span>你希望她怎样与你相处</span><textarea id="setBehavior" rows="4" maxlength="2000" placeholder="例如：我倾诉时先听完，不急着给建议；可以表达自己的不同看法"></textarea></label>
-    <div class="note" data-character-text="这里保留你的原始设定。点击后，Bunny 会立即融合新设定与现有理解；也可以手工微调她当前的自我理解。">这里保留你的原始设定，可立即融合更新或手工微调。</div>
+    <label class="setting-field"><span data-character-text="你给 Bunny 的设定">你给她的设定</span><textarea id="setProfile" rows="3" maxlength="2000" data-character-placeholder="你希望 Bunny 是怎样的伙伴，有怎样的性格、兴趣或愿景" placeholder="你希望她是怎样的伙伴"></textarea></label>
+    <label class="setting-field"><span>你希望她怎样与你相处</span><textarea id="setBehavior" rows="3" maxlength="2000" placeholder="例如：我倾诉时先听完，不急着给建议；可以表达自己的不同看法"></textarea></label>
+    <div class="note" data-character-text="保存设定后，可让 Bunny 理解并更新，也可手工微调。">这里保留你的原始设定，可立即融合更新或手工微调。</div>
     <div class="persona-actions"><button id="selfUnderstand" class="mini">理解并更新设定</button><button id="selfManual" class="mini">手工微调</button></div>
     <div id="selfSettingsStatus" class="permTip" role="status"></div>
   </div>
@@ -40,26 +40,42 @@
       <button data-scene="work" aria-pressed="false">工作</button>
     </div>
     <div class="note scene-scope" id="panelSceneScope">生活：可参考生活与工作资料。</div>
-    <div class="note">三个场景共用同一份自我理解，场景决定可参考的资料范围。选择后立即生效。</div>
+    <div class="note">切换后立即生效，自我理解始终共用。</div>
     <div class="scene-profile-status" id="panelSceneProfileStatus" role="status"></div>
   </div>
 
   <div class="pb" data-page="look">
-    <div class="group">形象</div>
-    <div class="avRow" id="avRow"></div>
-    <button id="importAvatar" class="mini">导入个人模型</button><div class="note" id="avatarImportStatus">个人模型仅保存在这台电脑，更新应用不会移除。</div>
-    <label class="row" for="avatarDescription">当前形象描述</label>
-    <textarea id="avatarDescription" rows="3" maxlength="600" placeholder="描述发型、服装与配饰；不改变她的自我理解"></textarea>
-    <div class="actions"><button id="describeAvatar" class="mini">识别形象</button><button id="deleteAvatar" class="mini">删除个人模型</button></div>
-    <div class="note" id="avatarDescriptionStatus">识别只把角色预览发送给WorkBuddy，不截图桌面。内置四个模型不能删除。</div>
+    <section class="lookSection" aria-label="内置形象">
+      <h2 class="lookTitle">形象</h2>
+      <div class="avRow" id="avRow" role="group" aria-label="内置形象"></div>
+      <details class="stockDescription" id="stockAppearanceDetails">
+        <summary>形象描述</summary>
+        <div id="stockAvatarEditor">
+          <div class="avatarEditor" id="avatarEditor">
+            <label for="avatarDescription">形象描述</label>
+            <textarea id="avatarDescription" rows="2" maxlength="600" placeholder="描述发型、服装与配饰；不改变她的自我理解"></textarea>
+            <div class="avatarActions"><button id="describeAvatar" class="mini">识别形象</button><button id="deleteAvatar" class="mini danger">删除模型</button></div>
+            <div class="note" id="avatarDescriptionStatus" role="status">仅识别角色预览；描述可以直接修改。</div>
+          </div>
+        </div>
+      </details>
+    </section>
+    <section class="lookSection" aria-label="定制外形">
+      <div class="lookHeading"><h2 class="lookTitle">定制外形</h2><button id="importAvatar" class="mini">导入VRM文件</button></div>
+      <div id="personalAvatars" class="personalAvatars" aria-label="已导入的模型"></div>
+      <div class="note" id="avatarImportStatus" role="status">仅保存在本机，点击模型即可使用。</div>
+    </section>
 
-    <div class="group">大小</div>
-    <div class="segRow" id="sizeRow">
+    <section class="lookSection" aria-label="显示大小">
+    <h2 class="lookTitle">显示大小</h2>
+    <div class="segRow" id="sizeRow" role="group" aria-label="显示大小">
       <button data-k="0.5">100% 半身</button>
       <button data-k="1">100% 全身</button>
       <button data-k="1.5">150% 放大</button>
+      <button data-k="2">200% 放大</button>
     </div>
-    <div class="note">半身显示上半身，全身与放大显示完整角色。切换大小时保持底部中心位置不变。</div>
+    <div class="note">放大角色时，底部控件保持原宽度。</div>
+    </section>
   </div>
 
   <!-- 听力 -->
@@ -76,33 +92,39 @@
       <div id="permTip" class="permTip"></div>
     </div>
 <div id="asrModeInfo" class="note"></div>
-    <label class="row"><span>允许旧版识别联网</span><input id="asrAllowNetwork" type="checkbox" /></label>
+    <label class="row"><span>允许旧版识别联网</span><input id="asrAllowNetwork" type="checkbox" role="switch" /></label>
     <div class="group">一直听着</div>
-    <label class="row"><span>常驻监听</span><input id="setAlways" type="checkbox" /></label>
-    <label class="row"><span>只回应对我说的话</span><input id="setJudge" type="checkbox" /></label>
-    <div class="group">主人声音（本地近似筛选）</div>
-    <div class="note">录入三段不同的自然说话后启用；先筛说话人，再判断是否对Bunny说话。录音不保存、不上传，声学特征只在本机加密保存。嘈杂、设备变化或相似声音可能误判，不用于身份认证。</div>
-    <label class="row"><span>只接收主人声音</span><input id="speakerEnabled" type="checkbox"></label>
-    <div class="actions"><button id="speakerEnroll" class="mini">录入一段声音</button><button id="speakerReset" class="mini">清除声音样本</button></div>
-    <div id="speakerStatus" class="note" role="status">尚未录入；每段请清楚地说至少三秒，三段内容尽量不同。</div>
-    <div class="note">常驻监听可随时关闭；⌘⇧Space 开关耳朵。开着时可以用讲话打断朗读，回声消除不可用时会过滤自己的话。</div>
+    <label class="row"><span>常驻监听</span><input id="setAlways" type="checkbox" role="switch" /></label>
+    <label class="row"><span>只回应对我说的话</span><input id="setJudge" type="checkbox" role="switch" /></label>
+    <label class="row"><span>叫名字才回应</span><input id="setWakeOnly" type="checkbox" role="switch" /></label>
+    <div class="note">每句话先叫名字，中文同音字也能识别。</div>
+    <label class="row"><span>其他叫法</span><input id="setWakeAliases" type="text" maxlength="520" placeholder="选填，例如外文名的中文叫法；用逗号分隔" /></label>
+    <div class="group">主人声音</div>
+    <div class="speakerReading"><p>请朗读下面这段文字：</p><blockquote id="speakerPassage">今天我想慢慢把手里的事情做好，遇到问题就一步一步来。忙的时候认真工作，累的时候起来走走。现在我在和你说话，希望我们可以自然地聊天，也一起发现一些有趣的新想法。</blockquote></div>
+    <div class="actions"><button id="speakerEnroll" class="mini">开始朗读</button><button id="speakerReset" class="mini" hidden>清除声音</button></div>
+    <div id="speakerStatus" class="note" role="status">点击开始，再自然读完。</div>
+    <label class="row speakerToggle" id="speakerToggle" hidden><span>只接收主人声音</span><input id="speakerEnabled" type="checkbox" role="switch"></label>
+    <div class="note">⌘⇧Space 开关聆听；讲话或打字可打断朗读。</div>
   </div>
 
   <!-- 大脑：选择来源后，只显示对应的密钥、模型和思考 -->
   <div class="pb" data-page="brain">
     <div class="group">对话来源</div>
     <label class="row"><span>服务</span><select id="brainSource">
-      <option value="workbuddy">WorkBuddy（默认）</option>
+      <option value="workbuddy">WorkBuddy</option>
+      <option value="deepseek">DeepSeek</option>
+      <option value="openai">ChatGPT</option>
+      <option value="grok">Grok</option>
 
     </select></label>
     <div id="brainWb" class="sub">
-      <div class="note">使用当前登录的 WorkBuddy 账号和额度。请保持 WorkBuddy 已打开并登录。</div>
-      <div class="note">对话默认按需联网搜索，参考来源显示在气泡下方。聊天与记忆整理不会每次都搜索。</div>
+      <div class="note">请保持 WorkBuddy 已打开并登录。</div>
+      <div class="note">需要搜索时，参考来源会显示在回答下方。</div>
       <div class="permBtns"><button id="openWorkBuddy" class="mini">连接 WorkBuddy</button><button id="installWorkBuddy" class="mini">下载安装</button></div>
     </div>
     <div id="brainKey" class="sub">
       <label class="row"><span>API Key</span><input id="brainKeyInput" type="password" autocomplete="off" placeholder="填写这个服务商的密钥" /></label>
-      <div class="note">每个服务商独立保存密钥和模型，切换后原来的配置仍会保留。</div>
+      <label class="row"><span>服务地址</span><input id="brainURL" type="url" spellcheck="false" /></label>
     </div>
     <label class="row brainModelRow" id="brainModelRow"><span>模型</span><select id="brainModel"></select></label>
     <div class="modelRefresh" id="brainModelsActions">
@@ -111,15 +133,13 @@
     </div>
     <label class="row" id="brainThinkingRow"><span>思考</span><select id="brainThinking"></select></label>
     <div class="note" id="brainHint"></div>
-    <div class="permBtns"><button id="openMemory" class="mini">记忆与关系</button><button id="openDesktop" class="mini">工作与日常</button></div>
-    <div class="note">记忆保存在本机；相关片段随对话发送给所选模型。后台整理使用 WorkBuddy 免费模型，可在“记忆与关系”中关闭。</div>
     <div class="permBtns"><button id="brainTestBtn" class="mini">测试当前选择</button></div>
     <div id="brainStatus" class="permTip" role="status">选择后可先测试，点保存后用于对话。</div>
   </div>
 
   <div class="pb" data-page="data">
     <div class="group">数据库位置</div><p class="note" id="storagePath"></p>
-    <div class="note">包含聊天、记忆、人格和任务记录。迁移保留旧快照并重启，模型和作品目录不移动。</div>
+    <div class="note">迁移聊天、记忆和设定，完成后自动重启。模型和作品保留原位。</div>
     <div class="permBtns"><button class="mini" id="storageMove">迁移并重启</button><button class="mini" id="storageReconnect">连接已有数据库</button></div>
     <div class="permTip" id="storageStatus" role="status"></div>
   </div>
@@ -168,6 +188,15 @@
       <div class="note">配置方法见 <a id="chpHelp" class="projectLink" href="https://github.com/zhyuzh3d/haminn-chp"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .3a12 12 0 0 0-3.79 23.38c.6.11.82-.26.82-.58v-2.23c-3.34.73-4.04-1.42-4.04-1.42-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.23 1.84 1.23 1.07 1.83 2.81 1.3 3.49.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.93 0-1.31.47-2.38 1.23-3.22-.12-.3-.53-1.52.12-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.3-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.6-2.8 5.63-5.48 5.93.43.37.81 1.1.81 2.22v3.3c0 .32.22.7.83.58A12 12 0 0 0 12 .3Z"/></svg>haminn-chp 项目</a>。</div>
     </div>
 
+    <div id="ttsDoubao" class="sub">
+      <label class="row"><span>API Key</span><input id="doubaoKey" type="password" autocomplete="off" placeholder="填写豆包语音 API Key" /></label>
+      <label class="row"><span>模型</span><select id="doubaoModel"></select></label>
+      <div class="modelRefresh"><button id="doubaoFetch" class="mini">获取音色列表</button></div>
+      <label class="row" id="doubaoVoiceRow" hidden><span>选择音色</span><select id="doubaoVoices"></select></label>
+      <label class="row"><span>音色编号</span><input id="doubaoVoice" spellcheck="false" placeholder="也可直接填写音色编号" /></label>
+      <details class="serviceAdvanced"><summary>服务地址</summary><input id="doubaoURL" type="url" spellcheck="false" aria-label="豆包语音服务地址" /></details>
+      <div id="doubaoStatus" class="permTip" role="status">选择音色后，点击底部试听。</div>
+    </div>
     <div id="ttsHTTP" class="sub">
       <label class="row"><span>起始模板</span><select id="httpTemplate"><option value="jsonl">HTTP JSON 音频分片</option><option value="binary">HTTP 直接音频</option></select></label>
       <div class="permBtns"><button class="mini" id="httpApplyTemplate">使用模板</button><button class="mini" id="httpImport">导入配置</button><button class="mini" id="httpExport">导出无密钥配置</button></div>
@@ -181,7 +210,7 @@
       <div class="permBtns"><button class="mini" id="httpSave">保存并使用</button><button class="mini" id="httpCatalog">获取模型与音色</button></div>
       <div id="httpStatus" class="permTip" role="status">填写后保存，再点击底部试听。未提供目录接口时可填写 ID。</div>
     </div>
-    <label class="row voiceEnabled"><span>启用语音播放</span><input id="setTtsOn" type="checkbox" /></label>
+    <label class="row voiceEnabled"><span>启用语音播放</span><input id="setTtsOn" type="checkbox" role="switch" /></label>
   </div>
 
   <div class="sf">
@@ -204,7 +233,7 @@
   <div class="motionTools">
     <div class="actions"><input id="mNewCategory" maxlength="40" placeholder="新分类名称" aria-label="新分类名称"><button id="mAddCategory" class="mini">添加分类</button></div>
     <div class="actions"><select id="mImportGroup" aria-label="导入到分类"></select><button id="mImport" class="mini">导入VRMA</button><button id="mRestore" class="mini">恢复内置动作</button></div>
-    <div class="note">按语义选择分类，再按权重随机；指定动作精确播放。权重0只允许手动或指定触发。</div>
+    <div class="note">点击动作立即播放；拖动比例，同类动作自动协调。</div>
   </div>
   <div class="pb" id="motionList"></div>
   <div class="pFoot">
@@ -212,6 +241,12 @@
     <span id="mStatus" role="status">至少保留一个空闲动作</span>
   </div>
 </div>
+
+<dialog id="motionDialog" class="motionDialog" aria-labelledby="motionDialogTitle">
+  <header><strong id="motionDialogTitle">编辑动作</strong><button id="motionDialogClose" class="mini">关闭</button></header>
+  <div id="motionDialogBody"></div>
+  <footer><span id="motionDialogStatus" role="status"></span><button id="motionDialogSave" class="mini primary">保存</button></footer>
+</dialog>
 
 <script type="module" src="./panel.js"></script>
 </body>

@@ -23,6 +23,8 @@ async function main() {
     '(async()=>{for(let i=0;i<100;i++){const s=window.__pet();if(s.avatarKey==="AvatarSample_F.vrm"&&s.vrm&&!s.loading)return {rapidAvatarConsistent:(await window.pet.panelInit()).avatar===s.avatarKey};await new Promise(r=>setTimeout(r,100));}throw Error("rapid switch did not converge")})()',
     'window.pet.config({avatar:"AvatarSample_D.vrm"})',
     'window.pet.open("motions")',
+    '@panel:motions:({allGroupsOpen:[...document.querySelectorAll(".motionGroup")].every(g=>g.open),readOnlyList:document.querySelectorAll("#motionList input:not([type=range]),#motionList textarea").length===0})',
+    '@panel:motions:(async()=>{const b=document.querySelector(".motionRow .motionIcon");b.click();const opened=document.getElementById("motionDialog").open;document.getElementById("motionDialogClose").click();return {motionEditorPopup:opened}})()',
     '@panel:motions:(async()=>{document.getElementById("mNewCategory").value="测试开心";await document.getElementById("mAddCategory").onclick();return {categoryCreated:document.getElementById("motionList").textContent.includes("测试开心")}})()',
     `@panel:motions:(async()=>{const lib=await window.pet.motionLibrary(),g=lib.categories.find(g=>g.label==="测试开心");await window.pet.motionEdit({type:"motion-update",key:${JSON.stringify(imported.key)},slot:g.id,weight:0});window.pet.panelMotion(${JSON.stringify(imported.key)});return {manualZeroWeight:true}})()`,
     `window.pet.panelInit().then(s=>({actualPersonalMotion:s.body.recentActions.at(-1)?.key===${JSON.stringify(imported.key)},why:s.body.recentActions.at(-1)?.reason}))`,
@@ -32,10 +34,22 @@ async function main() {
     '@panel:motions:({disabledRejected:document.getElementById("mStatus").textContent.includes("已禁用")})',
     `@panel:motions:(async()=>{await window.pet.motionEdit({type:"motion-delete",key:${JSON.stringify(imported.key)}});return {personalMotionRemoved:!(await window.pet.motionLibrary()).motions.some(m=>m.key===${JSON.stringify(imported.key)})}})()`,
     'window.pet.open("settings")',
+    '@panel:settings:({settingsWidth:innerWidth,stockOnly:document.querySelectorAll("#avRow button").length===4,customCards:document.querySelectorAll("#personalAvatars .avatarCard").length===1,hasGuidedReading:document.getElementById("speakerPassage").textContent.length>60,ownerSwitchHidden:document.getElementById("speakerToggle").hidden,providers:[...document.getElementById("brainSource").options].map(o=>o.value).length===4,hasDoubao:!!document.querySelector("#ttsEngine [data-e=doubao]"),noNewGenericHTTP:!document.querySelector("#ttsEngine [data-e=http]")})',
+    '@panel:settings:(()=>{document.querySelector("[data-t=persona]").click();const f=document.getElementById("setProfile");f.value="短内容";f.dispatchEvent(new Event("input"));const small=f.offsetHeight;f.value="长内容".repeat(200);f.dispatchEvent(new Event("input"));const grown=f.offsetHeight>small;f.value="短内容";f.dispatchEvent(new Event("input"));return {threeRows:f.rows===3,autoGrowShrink:grown&&Math.abs(f.offsetHeight-small)<1}})()',
+    'window.pet.scale(1)',
+    'window.__ui100=["statusRow","dock","ear"].map(id=>getComputedStyle(document.getElementById(id)).width);({uiBaseline:true})',
+    'window.pet.scale(1.5)',
+    '({ui150Fixed:["statusRow","dock","ear"].every((id,i)=>getComputedStyle(document.getElementById(id)).width===window.__ui100[i])})',
+    'window.pet.scale(2)',
+    '({ui200Fixed:["statusRow","dock","ear"].every((id,i)=>getComputedStyle(document.getElementById(id)).width===window.__ui100[i])})',
+    'window.pet.scale(.5)',
     '@panel:settings:(async()=>{try{await window.pet.avatarDelete("AvatarSample_D.vrm");return {stockProtected:false}}catch(e){return {stockProtected:e.message.includes("不能删除")}}})()',
     `window.pet.config({avatar:${JSON.stringify(model)},avatarDescriptions:{[${JSON.stringify(model)}]:"深蓝短发，白色衬衫，深色背心。"}})`,
     `({personalLoaded:window.__pet().avatarKey===${JSON.stringify(model)}&&window.__pet().vrm})`,
     `@panel:settings:(async()=>{const r=await window.pet.avatarDelete(${JSON.stringify(model)});return {personalDeleted:r.avatars.length===4,defaultAfterDelete:r.avatar==="AvatarSample_D.vrm",descriptionRemoved:!(await window.pet.panelInit()).config.avatarDescriptions[${JSON.stringify(model)}]}})()`,
+    '@panel:settings:(()=>{document.querySelector("[data-t=brain]").click();document.getElementById("brainSource").value="grok";document.getElementById("brainSource").dispatchEvent(new Event("change"));return {fourEfforts:[...document.getElementById("brainThinking").options].map(o=>o.value).join(",")==="none,low,medium,high"}})()',
+    '@panel:settings:(()=>{document.querySelector("[data-t=mouth]").click();document.querySelector("#ttsEngine [data-e=doubao]").click();document.getElementById("doubaoFetch").click();return {simpleDoubao:document.getElementById("ttsDoubao").classList.contains("on")&&!document.getElementById("doubaoVoiceRow").hidden}})()',
+    '@panel:settings:(()=>{document.querySelector("[data-t=ear]").click();return {switches:[...document.querySelectorAll("input[type=checkbox]")].every(e=>e.getAttribute("role")==="switch"),wakeAliases:!!document.getElementById("setWakeAliases")}})()',
     '@panel:settings:window.pet.speakerStatus().then(s=>({voiceOptIn:!s.enabled&&s.samples===0}))',
   ];
   fs.writeFileSync(path.join(root, 'selftest.json'), JSON.stringify({ shotDir: path.join(root, 'shots'), delay: 5000, every: 650, extra: 0, script }));
@@ -43,13 +57,13 @@ async function main() {
   const command = path.resolve(source ? 'node_modules/.bin/electron' : 'dist/workbunny.app/Contents/MacOS/workbunny');
   const env = { ...process.env, BUDDY_PET_HOME: root }; delete env.ELECTRON_RUN_AS_NODE;
   const child = spawn(command, source ? ['.', '--dev'] : [], { env, stdio: 'ignore' });
-  const timer = setTimeout(() => child.kill('SIGTERM'), 65000);
+  const timer = setTimeout(() => child.kill('SIGTERM'), 85000);
   try {
     const code = await new Promise((resolve, reject) => { child.once('exit', resolve); child.once('error', reject); });
     const log = fs.readFileSync(path.join(root, 'buddy.log'), 'utf8'); assert.equal(code, 0, log.slice(-3000));
     for (const marker of ['"stock":4', '"described":true', '"overflow":true', '"categoryCreated":true', '"actualPersonalMotion":true', '"why":"manual"',
       '"fiveActual":true', '"disabledRejected":true', '"personalMotionRemoved":true', '"stockProtected":true', '"rapidAvatarConsistent":true', '"personalLoaded":true',
-      '"personalDeleted":true', '"defaultAfterDelete":true', '"descriptionRemoved":true', '"voiceOptIn":true']) assert(log.includes(marker), marker + '\n' + log.slice(-9000));
+      '"allGroupsOpen":true', '"readOnlyList":true', '"motionEditorPopup":true', '"stockOnly":true', '"customCards":true', '"hasGuidedReading":true', '"ownerSwitchHidden":true', '"providers":true', '"hasDoubao":true', '"noNewGenericHTTP":true', '"autoGrowShrink":true', '"ui150Fixed":true', '"ui200Fixed":true', '"personalDeleted":true', '"defaultAfterDelete":true', '"descriptionRemoved":true', '"voiceOptIn":true', '"fourEfforts":true', '"simpleDoubao":true', '"switches":true', '"wakeAliases":true']) assert(log.includes(marker), marker + '\n' + log.slice(-9000));
     assert(!fs.existsSync(assets.personalFile('model', model) || path.join(root, 'avatars', model)));
     assert(!fs.existsSync(path.join(root, 'motions', imported.key + '.vrma')));
     assert(!log.includes('[brain] 完成'), 'UI operations do not use an LLM');
