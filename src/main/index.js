@@ -646,21 +646,31 @@ function noteSpoken(text) {
   lastSpokeAt = Date.now();
 }
 
-/** 这句识别结果是不是我自己刚说过的？用 2-gram 覆盖率判，够糙也够稳 */
+/** 比较最近播报内容与识别结果，容忍少量识别错误和标点差异。 */
 function echoLike(text) {
-  const clean = (s) => String(s || '').replace(/[^\p{L}\p{N}]/gu, '');
-  const a = clean(text);
-  const b = clean(recentSpeech);
+  const clean = (s) => String(s || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  const a = clean(text).slice(-160);
+  const b = clean(recentSpeech).slice(-1200);
   if (a.length < 2 || b.length < 2) return false;
-  let hit = 0;
-  let n = 0;
-  for (let i = 0; i < a.length - 1; i++) {
-    n++;
-    if (b.includes(a.slice(i, i + 2))) hit++;
+  if (b.includes(a)) return true;
+  if (a.length < 4) return false;
+  // Semiglobal edit distance: the recognized fragment can start anywhere in
+  // the playback text. Bound both input size and tolerated ASR substitutions.
+  let prev = new Uint16Array(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    const row = new Uint16Array(b.length + 1); row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = row;
   }
-  return n > 0 && hit / n > 0.72;
+  return Math.min(...prev) <= Math.min(3, Math.floor(a.length / 4));
 }
 function recentEcho(text) { return (speaking || Date.now() - lastSpokeAt < 2600) && echoLike(text); }
+function bargeInReady(text) {
+  const value = String(text || '').normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
+  return value.length >= 3 || /^(停下|等等|等下|打住|闭嘴|别说)$/u.test(value);
+}
 
 let activeAudioId = null, playbackTest = null;
 let composing = false, lastInterruption = null;
@@ -1158,21 +1168,42 @@ async function refreshSupervision() {
     if (epoch !== memory.generation || scene !== currentScene()) return;
     const unique = [...new Map(all.map(row => [taskSupervision.key(row), row])).values()]; taskSupervision.observe(unique);
     if (!proactiveAllowed() || speaking || composing) return;
-    const event = taskSupervision.take(); if (!event) return;
     const configNow = config.load();
-    if (['done', 'failed'].includes(event.kind) && !configNow.monitor.speakOnDone || event.kind === 'overdue' && !configNow.monitor.speakOnLong ||
-      ['stall', 'repeated-errors', 'abandoned', 'waiting'].includes(event.kind) && !configNow.monitor.speakOnStall) return;
-    if (inputAdmission.containsSecret(event.text)) return;
-    if (event.kind === 'done' && configNow.monitor.speakOnRest !== false && workSpanStart && Date.now() - workSpanStart > 95 * 60e3 && Date.now() - restNoticedAt > 90 * 60e3) {
-      event.text += '你已经连续忙了很久，这一轮后可以起来歇一会儿。';
-      restNoticedAt = Date.now(); workSpanStart = Date.now();
+    const event = taskSupervision.peek(e =>
+      ['done', 'failed'].includes(e.kind) ? configNow.monitor.speakOnDone :
+      e.kind === 'overdue' ? configNow.monitor.speakOnLong : configNow.monitor.speakOnStall);
+    if (!event) return;
+    if (inputAdmission.containsSecret(event.text)) {
+      event.text = ({
+        done: 'WorkBuddy有一项任务已给出答复，请查看结果。',
+        failed: 'WorkBuddy报告有一项任务未能完成，请查看具体情况。',
+        waiting: 'WorkBuddy有一项任务正在等待你的信息或确认。',
+        'repeated-errors': 'WorkBuddy有一项任务多次遇到阻碍，建议查看当前进度。',
+        abandoned: 'WorkBuddy有一项任务长时间没有动静且尚未确认交付，建议查看。',
+        stall: 'WorkBuddy有一项任务较长时间没有新进展，建议查看。',
+        overdue: 'WorkBuddy有一项任务已超过先前预计时间，目前仍在运行。',
+      })[event.kind] || 'WorkBuddy有一项任务需要关注，请查看当前进度。';
     }
+    const restDue = event.kind === 'done' && configNow.monitor.speakOnRest !== false && workSpanStart && Date.now() - workSpanStart > 95 * 60e3 && Date.now() - restNoticedAt > 90 * 60e3;
+    if (restDue) {
+      event.text += '你已经连续忙了很久，这一轮后可以起来歇一会儿。';
+    }
+    let record = null;
+    if (configNow.memory.enabled) {
+      const id = 'supervision:' + require('crypto').createHash('sha256').update(scene + '\0' + event.id).digest('hex');
+      record = (await memory.addMessageOnce(id, 'assistant', event.text, { delivery: 'task-receipt', scene, privacyEpoch: epoch })).record;
+    }
+    if (epoch !== memory.generation || scene !== currentScene() || !proactiveAllowed()) return;
     presentedReplies.clear();
-    const record = await pushHistory('assistant', event.text, { delivery: 'task-receipt', scene });
-    if (epoch !== memory.generation || scene !== currentScene() || composing || speaking) return;
-    lastProactiveAt = Date.now(); taskSupervision.acknowledge(event);
+    history.push({ role: 'assistant', content: event.text, domain: scene, visibilityFloor: scopePolicy.rank(scene) });
+    history = history.slice(-24);
+    if (restDue) { restNoticedAt = Date.now(); workSpanStart = Date.now(); }
+    lastProactiveAt = Date.now();
     const gesture = event.kind === 'done' ? 'greet' : event.kind === 'failed' ? 'sorry' : 'think';
+    send('chat', { role: 'assistant', text: event.text, final: true });
     speak(event.text, { motion: gesture, emo: event.kind === 'failed' ? 'sad' : 'relaxed', messageId: record?.id });
+    if (win && !win.isVisible()) notify('WorkBuddy 任务进展', event.text.slice(0, 100));
+    taskSupervision.acknowledge(event);
     log('[supervision] ' + event.kind + '（本地事件，无模型请求）');
   } catch { log('[supervision] 本次检查未完成，下轮重试'); }
   finally { supervisionBusy = false; }
@@ -1533,6 +1564,7 @@ async function handleUtterance(text, voiceTurn) {
   // 这句可能就是我自己刚说的（回声消除没吃干净）→ 当没听见
   if (recentEcho(t)) {
     log('[listen] drop self echo');
+    voiceTurn?.skip();
     return;
   }
   if (speaking) {
@@ -2961,6 +2993,8 @@ if (!lock) {
     asr.on('partial', (t) => {
       if (speakerFilter.enrollment) { speakerFilter.heard(t); return; }
       if (speakerFilter.enrollment || suppressEnrollmentFinal || !speakerFilter.acceptsText()) return;
+      if (recentEcho(t)) return;
+      if (alwaysOn && speaking && (!bargeInReady(t) || (config.load().asr.wakeOnly && !nameHit(t)))) return;
       send('asrPartial', { text: t });
       // 调试用：能听到"半句"就说明识别真的在工作（限流，别刷屏）
       const now0 = Date.now();
@@ -2970,7 +3004,6 @@ if (!lock) {
       }
       // 一秒停顿即可预请求，无需等待原生识别器最终收句。
       if (!alwaysOn) return;
-      if (recentEcho(t)) return;
       if (t && speaking) stopSpeaking('voice');
       lastLiveText = t;
       voiceTurns.partial(t);
@@ -2980,7 +3013,8 @@ if (!lock) {
       const verdict = speakerFilter.offer(feature);
       if (!enrolled && !speakerFilter.enrollment) {
         if (speakerFilter.enabled && !verdict.accepted && !voiceTurns.snapshot()?.finalized) voiceTurns.reset();
-        if (alwaysOn && !screenLocked && feature.speech === true && verdict.accepted && asr.aec && speaking) stopSpeaking('voice');
+        // Voice activity and AEC readiness do not prove this is the owner:
+        // speaker audio can leak through. Wait for filtered recognition text.
       }
       if (Date.now() - lastSpeakerStatusAt > 1500) { lastSpeakerStatusAt = Date.now(); publishSpeakerStatus(); }
     });

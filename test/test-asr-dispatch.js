@@ -7,7 +7,8 @@ function fixture(){let at=0,next=0;const timers=new Map(),requests=[],events=[];
  const turns=createVoiceTurns({now:()=>at,setTimer:(fn,ms)=>{const id=++next;timers.set(id,{at:at+ms,fn});return id;},clearTimer:id=>timers.delete(id),onRequest:t=>requests.push({at,turn:t}),onInvalidate:()=>{},onRemember:()=>{}});
  const asr=new Asr('/unused');const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');
  const handlers=source.slice(source.indexOf("    asr.on('partial', (t) => {"),source.indexOf("    asr.on('final', (t) => {"));
- const ctx={asr,voiceTurns:turns,speakerFilter:new SpeakerFilter(),suppressEnrollmentFinal:false,screenLocked:false,stopSpeaking:()=>{},publishSpeakerStatus:()=>{},lastSpeakerStatusAt:0,Date:{now:()=>at},send:(type,data)=>events.push({type,...data}),log:()=>{},alwaysOn:true,speaking:false,lastPartialLogAt:0,lastLiveText:'',lastSpokeAt:0,echoLike:()=>false,recentEcho:()=>false,micPeak:0,micPeakAt:0,micQuietLoggedAt:0};
+ const ctx={asr,voiceTurns:turns,speakerFilter:new SpeakerFilter(),suppressEnrollmentFinal:false,screenLocked:false,stopSpeaking:()=>{},publishSpeakerStatus:()=>{},lastSpeakerStatusAt:0,Date:{now:()=>at},send:(type,data)=>events.push({type,...data}),log:()=>{},alwaysOn:true,speaking:false,lastPartialLogAt:0,lastLiveText:'',lastSpokeAt:0,recentSpeech:'',config:{load:()=>({asr:{wakeOnly:false}})},nameHit:()=>true,micPeak:0,micPeakAt:0,micQuietLoggedAt:0};
+ vm.runInNewContext(source.slice(source.indexOf('function echoLike('),source.indexOf('let activeAudioId =')),ctx);
  vm.runInNewContext(handlers,ctx);
  function advance(ms){const end=at+ms;while(true){const due=[...timers].filter(([,v])=>v.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!due)break;at=due[1].at;timers.delete(due[0]);due[1].fn();}at=end;}
  function levels(ms,value=.08){for(let i=0;i<ms/200;i++){advance(200);asr.onMessage({t:'level',v:value});}}
@@ -53,8 +54,25 @@ test('self echo is filtered throughout a long playback and its ending tail',()=>
  const ctx={speaking:true,lastSpokeAt:0,recentSpeech:'这是已经播放了三十秒的长句，仍然不能把自己的声音当作用户插话。',Date:{now:()=>at}};
  vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function echoLike('),source.indexOf('let activeAudioId =')),ctx);
  assert(ctx.recentEcho('已经播放了三十秒的长句'));assert(!ctx.recentEcho('贝比请停下，我有个新想法'));
+ assert(ctx.recentEcho('播放了三十秒的长剧'),'one recognition error does not become a barge-in');
  ctx.speaking=false;ctx.lastSpokeAt=at;at+=2000;assert(ctx.recentEcho('仍然不能把自己的声音当作用户插话'));
  at+=1000;assert(!ctx.recentEcho('已经播放了三十秒的长句'),'a later owner repetition is admitted');
+});
+test('AEC voice activity and short or misrecognized self echo do not interrupt playback, but new owner words do',()=>{
+ const f=fixture();let interruptions=0;f.ctx.stopSpeaking=()=>{interruptions++;f.ctx.speaking=false;};
+ f.ctx.speaking=true;f.ctx.recentSpeech='我已经为你整理好报告，接下来我们可以检查结果。';f.asr.aec=true;
+ f.asr.onMessage({t:'voiceFeatures',vector:Array.from({length:28},(_,i)=>Number(i===0)),frames:40,quality:.9,durationMs:400,speech:true});
+ assert.equal(interruptions,0,'AEC and unfiltered voice activity are not speaker identity');
+ f.asr.onMessage({t:'partial',v:'我'});f.asr.onMessage({t:'partial',v:'整理好报告'});
+ f.asr.onMessage({t:'partial',v:'接下来我们可以检察结果'});
+ assert.equal(interruptions,0);assert.equal(f.requests.length,0);assert.equal(f.events.filter(e=>e.type==='asrPartial').length,0);
+ f.asr.onMessage({t:'partial',v:'等一下我有新问题'});assert.equal(interruptions,1);
+ f.advance(1000);assert.equal(f.requests.length,1);
+});
+test('wake-only mode does not interrupt speech when the name was not called',()=>{
+ const f=fixture();let interruptions=0;f.ctx.stopSpeaking=()=>interruptions++;
+ f.ctx.speaking=true;f.ctx.config.load=()=>({asr:{wakeOnly:true}});f.ctx.nameHit=()=>false;
+ f.asr.onMessage({t:'partial',v:'旁边的人在聊天'});assert.equal(interruptions,0);assert.equal(f.turns.snapshot(),null);
 });
 test('switching from one-shot recording to continuous listening replaces the recognizer generation',()=>{
  const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');let killed=0,started=0;

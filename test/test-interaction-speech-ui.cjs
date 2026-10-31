@@ -95,7 +95,7 @@ async function main() {
     avatar: () => ({ key: config.load().avatar }), send: event => win.webContents.send('pet:ev', { type: 'motion', ...event }) });
   ipcMain.on('pet:motion-started', (_event, value) => embodiment.report(value));
   const mainSource = fs.readFileSync(path.resolve('src/main/index.js'), 'utf8');
-  const state = mainSource.slice(mainSource.indexOf('const speechQueue = []'), mainSource.indexOf('/** 这句识别结果是不是'));
+  const state = mainSource.slice(mainSource.indexOf('const speechQueue = []'), mainSource.indexOf('function echoLike('));
   const pipeline = mainSource.slice(mainSource.indexOf('const synthCache = new Map()'), mainSource.indexOf('\nfunction speak('));
   const handler = mainSource.slice(mainSource.indexOf("ipcMain.handle('pet:interact'"), mainSource.indexOf("ipcMain.handle('pet:init'"));
   context.embodiment = embodiment;

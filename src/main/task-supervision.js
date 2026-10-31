@@ -25,7 +25,18 @@ class TaskSupervision {
   restore(entries) { this.delivered = new Map((Array.isArray(entries) ? entries : []).filter(x => Array.isArray(x) && typeof x[0] === 'string' && Number.isFinite(x[1])).slice(-96)); }
   observe(snapshots) {
     const now = this.clock(), present = new Set();
-    for (const snapshot of snapshots.slice(0, 8)) {
+    // A new instruction can replace the visible task before the 10-second
+    // supervision tick. Keep recent completed rounds from the scoped history.
+    const unique = new Map();
+    for (const snapshot of snapshots.slice(0, 12)) {
+      const key = this.key(snapshot); if (key && !unique.has(key)) unique.set(key, snapshot);
+      for (const task of snapshot.history || []) {
+        if (task.endReason !== 'done' || !Number.isFinite(task.endedAt) || task.endedAt < this.bootAt || now - task.endedAt > 10 * MINUTE) continue;
+        const past = { ...snapshot, sessionId: task.sessionId || snapshot.sessionId, task, history: [], lastEventAt: task.endedAt };
+        const pastKey = this.key(past); if (pastKey && !unique.has(pastKey)) unique.set(pastKey, past);
+      }
+    }
+    for (const snapshot of unique.values()) {
       const key = this.key(snapshot), task = snapshot?.task;
       if (!key || !Number.isFinite(task.startedAt)) continue;
       present.add(key);
@@ -45,7 +56,7 @@ class TaskSupervision {
       this.pending = this.pending.filter(event => event.key !== key || event.kind === 'done' || event.kind === 'failed' || running);
       if (!running) {
         this.pending = this.pending.filter(event => event.key !== key || ['done','failed','abandoned'].includes(event.kind));
-        if (!task.bunnyTaskId && task.endedAt >= this.bootAt) {
+        if (!task.bunnyTaskId && task.endedAt >= this.bootAt && task.endReason !== 'superseded' && now - task.endedAt <= 10 * MINUTE) {
           this.enqueue(state, task.status === 'ok' ? 'done' : task.status === 'failed' ? 'failed' : 'abandoned');
         }
         continue;
@@ -75,8 +86,8 @@ class TaskSupervision {
     this.pending.push({ id, key: state.key, kind, at: now, priority: priorities[kind] });
     this.pending.sort((a,b) => b.priority-a.priority || a.at-b.at); this.pending = this.pending.slice(0, 12);
   }
-  take() {
-    const event = this.pending.shift(); if (!event) return null;
+  peek(accept = () => true) {
+    const event = this.pending.find(accept); if (!event) return null;
     const state = this.tasks.get(event.key); if (!state) return null;
     const task = state.snapshot.task, rawTitle = String(task.title || task.userText || '这项任务').replace(/[<>`]/g, '').replace(/\s+/g, ' ').slice(0, 80);
     const title = /\/Users\/|\/home\/|[a-z]:\\|```|Bearer\s/i.test(rawTitle) ? '你交办的任务' : rawTitle.slice(0, 48);
@@ -91,9 +102,16 @@ class TaskSupervision {
       stall: `“${title}”已超过五分钟没有新进展，我还不能确认原因，建议看一眼。`,
       overdue: `“${title}”已经进行了约${elapsed}分钟，超过${state.estimate.source === '本地参考估计' ? '参考预计' : '先前预计'}的约${minutes}分钟，目前仍在运行。`,
     };
-    return { ...event, text: phrases[event.kind], snapshot: state.snapshot };
+    event.text ||= phrases[event.kind];
+    return { ...event, snapshot: state.snapshot };
+  }
+  take() {
+    const event = this.peek();
+    if (event) this.pending = this.pending.filter(item => item.id !== event.id);
+    return event;
   }
   acknowledge(event) {
+    this.pending = this.pending.filter(item => item.id !== event.id);
     this.delivered.set(event.id, this.clock());
     while (this.delivered.size > 96) this.delivered.delete(this.delivered.keys().next().value);
     Promise.resolve(this.persist([...this.delivered])).catch(() => {});

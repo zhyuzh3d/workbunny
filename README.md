@@ -1,8 +1,8 @@
 # WorkBunny
 
-以长期记忆维系关系的 macOS 桌面伙伴，也是协助你交办、跟进和检查 WorkBuddy 任务的小秘书。当前版本为 **v0.14.10**。
+以长期记忆维系关系的 macOS 桌面伙伴，也是协助你交办、跟进和检查 WorkBuddy 任务的小秘书。当前版本为 **v0.14.11**。
 
-[下载 macOS Apple Silicon 版](https://github.com/zhyuzh3d/workbunny/releases/download/v0.14.10/workbunny-0.14.10-macos-arm64.zip) · [Release 与校验文件](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.14.10) · [发布说明](docs/workbunny-0.14.10-发布说明.md)
+[下载 macOS Apple Silicon 版](https://github.com/zhyuzh3d/workbunny/releases/download/v0.14.11/workbunny-0.14.11-macos-arm64.zip) · [Release 与校验文件](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.14.11) · [发布说明](docs/workbunny-0.14.11-发布说明.md)
 
 ## 使用
 
