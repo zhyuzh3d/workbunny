@@ -19,7 +19,7 @@ const ctx = { storageBusy: false, storageError: '', connection: { status: () => 
   memory: m, currentScene: () => settings.scene, contextEpoch: 0, screenLocked: false, activeThought: null, busy: false,
   desktop: null, monitor: null, secretary: null, history: [], presentedReplies: new Set(), lastDialogueAt: 0,
   embodiment: { context: () => ({ appearance: { name: '可可', description: '短发' }, recentActions: [] }), perform: async () => ({ ok: true }) },
-  motionLibrary: { prompt: () => [] }, taskSupervision: { context: () => '' }, lastInterruption: null,
+  motionLibrary: { prompt: () => [] }, activeAvatarPack: () => null, avatarCatalog: { prompt: () => [] }, taskSupervision: { context: () => '' }, lastInterruption: null,
   dialogueActions: localRequire('./dialogue-actions'), SELF_RULE: localRequire('./dialogue-cognition').SELF_RULE, JUDGE_RULE: '',
   dialogueHistory: localRequire('./reply-format').dialogueHistory, requestReply: localRequire('./reply-request').requestReply,
   llm: { ...localRequire('./llm'), chat: async options => { calls.push(options.messages); return { raw: reply() }; } },

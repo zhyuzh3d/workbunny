@@ -1,7 +1,8 @@
 'use strict';
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
 const { pathToFileURL } = require('url');
-const STOCK_MODELS = new Set(['AvatarSample_D.vrm', 'AvatarSample_E.vrm', 'AvatarSample_F.vrm', 'AvatarSample_G.vrm']);
+// This insertion order is also the built-in appearance order.
+const STOCK_MODELS = new Set(['Bani.vrm', 'AvatarSample_D.vrm', 'AvatarSample_Shino.vrm', 'AvatarSample_E.vrm', 'AvatarSample_F.vrm', 'AvatarSample_G.vrm']);
 let root;
 function setRoot(value) { root = value; }
 function directory(kind) { return root && path.join(root, kind === 'model' ? 'avatars' : 'motions'); }

@@ -20,7 +20,7 @@ function validateMotion(file) {
 }
 class MotionLibrary {
   constructor({ motions, groups, getConfig, saveConfig, random = Math.random }) {
-    this.base = motions.map(m => ({ ...m, idle: m.slot === 'idle', builtin: !m.personal, weight: 1 }));
+    this.base = motions.map(m => ({ ...m, idle: m.idle ?? m.slot === 'idle', builtin: !m.personal, weight: 1 }));
     this.groups = clone(groups); Object.assign(this, { getConfig, saveConfig, random });
   }
   catalog(config = this.getConfig()) {
@@ -32,20 +32,20 @@ class MotionLibrary {
     const added = (library.items || []).filter(m => m && ID.test(m.key) && !baseIds.has(m.key) && m.file === m.key + '.vrma')
       .flatMap(m => { const file = assets.personalFile('motion', m.file); return file ? [{ ...m, builtin: false, personal: true, url: assets.url(file) }] : []; });
     const motions = [...this.base, ...added].filter(m => !removed.has(m.key)).map(m => {
-      const override = library.overrides?.[m.key] || {}, weight = Number(override.weight ?? m.weight ?? 1);
+      const override = library.overrides?.[m.key] || {};
       const slot = groupIds.has(override.slot) ? override.slot : groupIds.has(m.slot) ? m.slot : groups[0]?.id;
-      return { ...m, slot, label: text(override.label || m.label, 80), use: text(override.use ?? m.use, 300),
-        loop: override.loop === undefined ? !!m.loop : !!override.loop, weight: Number.isFinite(weight) ? Math.max(0, Math.min(100, weight)) : 1,
+      return { ...m, posture: m.posture || 'standing', slot, label: text(override.label || m.label, 80), use: text(override.use ?? m.use, 300),
+        loop: override.loop === undefined ? !!m.loop : !!override.loop, weight: 1,
         enabled: !disabled.includes(m.key), tag: 'llm', idle: override.idle === undefined ? !!m.idle : !!override.idle };
     });
     return { categories: groups, motions, revision: config.settingsRevision || 0 };
   }
-  select(selector, { config = this.getConfig(), exact = false, loaded } = {}) {
-    const view = this.catalog(config), allowed = m => m.enabled && (!loaded || loaded.has(m.key));
+  select(selector, { config = this.getConfig(), exact = false, loaded, posture = 'standing', allowPostureChange = false, manual = false, autonomous = false } = {}) {
+    const view = this.catalog(config), allowed = m => m.enabled && (!loaded || loaded.has(m.key)) && (manual || !m.requiresProp) && (!autonomous || m.autonomous !== false) && (allowPostureChange || !m.postureChanging) && (allowPostureChange || (!m.transition && m.posture !== (posture === 'sitting' ? 'standing' : 'sitting')));
     const direct = view.motions.find(m => m.key === selector);
     if (direct) return allowed(direct) ? direct : null;
     if (exact) return null;
-    const pool = view.motions.filter(m => m.slot === selector && allowed(m));
+    const pool = view.motions.filter(m => m.slot === selector && allowed(m) && (manual || m.autonomous !== false));
     return core.choose(pool, this.random);
   }
   idle(config = this.getConfig()) { return core.choose(this.catalog(config).motions.filter(m => m.idle && m.enabled), this.random); }
@@ -53,7 +53,7 @@ class MotionLibrary {
     const lib = config.motions?.library || {}, view = this.catalog(config);
     if ((lib.items || []).length > 256 || (lib.categories || []).length > 64 || !view.categories.length) throw Error('动作库规模不正确（最多64个分类、256个个人动作）');
     if (view.categories.length !== new Set(view.categories.map(g => g.id)).size || (lib.categories && lib.categories.length !== view.categories.length)) throw Error('分类名称或标识不正确');
-    if (!view.motions.some(m => m.idle && m.enabled && m.weight > 0)) throw Error('至少保留一个可随机使用的空闲动作');
+    if (!view.motions.some(m => m.idle && m.enabled)) throw Error('至少保留一个可随机使用的空闲动作');
     if ([...view.categories.flatMap(g => [g.label, g.description]), ...view.motions.flatMap(m => [m.label, m.use])].some(containsSecret)) throw Error('动作说明会提供给模型，请不要填写密码或密钥');
     for (const override of Object.values(lib.overrides || {})) {
       if (override.weight !== undefined && (!Number.isFinite(Number(override.weight)) || Number(override.weight) < 0 || Number(override.weight) > 100)) throw Error('随机权重应在0到100之间');
@@ -68,10 +68,7 @@ class MotionLibrary {
       const entity = change.type === 'category-update' ? this.catalog(current).categories.find(g => g.id === change.id) : this.catalog(current).motions.find(m => m.key === change.key);
       if (!entity || Object.entries(change.expected).some(([k,v]) => entity[k] !== v)) throw Error('内容刚被更新，请重新打开编辑');
     }
-    if (change.type === 'motion-probability') {
-      const weights = core.probabilities(this.catalog(current).motions, change.key, Number(change.percent));
-      for (const [key, weight] of Object.entries(weights)) library.overrides[key] = { ...library.overrides[key], weight };
-    } else if (change.type === 'category-add') {
+    if (change.type === 'category-add') {
       const id = 'group_' + crypto.randomUUID().replaceAll('-', '');
       library.categories.push({ id, label: text(change.label, 40), description: text(change.description, 240) });
     } else if (change.type === 'category-update') {
@@ -85,7 +82,7 @@ class MotionLibrary {
       library.categories = library.categories.filter(g => g.id !== change.id);
     } else if (change.type === 'motion-update') {
       if (!this.catalog(current).motions.some(m => m.key === change.key)) throw Error('动作不存在');
-      const allowed = ['slot', 'label', 'use', 'weight', 'loop', 'idle'];
+      const allowed = ['slot', 'label', 'use', 'loop', 'idle'];
       library.overrides[change.key] = { ...library.overrides[change.key], ...Object.fromEntries(allowed.filter(k => change[k] !== undefined).map(k => [k, change[k]])) };
     } else if (change.type === 'motion-delete') {
       if (!this.catalog(current).motions.some(m => m.key === change.key)) throw Error('动作不存在');
@@ -128,11 +125,19 @@ class MotionLibrary {
   }
   prompt(query = '') {
     const view = this.catalog();
-    let remaining = 6;
+    // Offer matching concrete IDs without flooding every turn with the full library.
+    const q = String(query).replace(/\s+/g, '');
+    const score = m => {
+      const description = (m.label + ' ' + m.use).replace(/\s+/g, '');
+      let n = q.includes(m.label) || q.includes(m.key) ? 20 : 0;
+      for (let i = 0; i + 1 < q.length; i++) if (description.includes(q.slice(i, i + 2))) n++;
+      return n;
+    };
+    const selected = view.motions.filter(m => m.enabled && score(m) > 0).sort((a,b) => score(b) - score(a)).slice(0, 10);
     return view.categories.map(g => {
-      const motions = view.motions.filter(m => m.slot === g.id && m.enabled).sort((a,b) => Number(query.includes(b.label)) - Number(query.includes(a.label)));
-      const selected = motions.filter(m => query.includes(m.label) || query.includes(m.key)).slice(0, remaining); remaining -= selected.length;
-      return motions.length ? { category: g.id, meaning: g.label, use: g.description.slice(0,60), random: motions.some(m => m.weight > 0), actions: selected.map(m => ({ id: m.key, name: m.label, meaning: m.use.slice(0,80), weight: m.weight })) } : null;
+      const motions = view.motions.filter(m => m.slot === g.id && m.enabled);
+      return motions.length ? { category: g.id, meaning: g.label, use: g.description.slice(0,60),
+        actions: selected.filter(m => m.slot === g.id).map(m => ({ id: m.key, name: m.label, meaning: m.use.slice(0,80), posture: m.posture, requiresProp: m.requiresProp })) } : null;
     }).filter(Boolean);
   }
 }

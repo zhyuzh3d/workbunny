@@ -32,7 +32,7 @@ test('first action is synthesized once; the same action/model/voice survives res
     ['greet_hello', '你好呀。', { ...profile, voice: 'vivian' }],
     ['greet_hello', '你好呀。', { ...profile, model: 'model-b' }],
     ['greet_wave', '你好呀。', profile], ['greet_hello', '嗯？我在呢。', profile],
-  ]) await audio.audio(action, phrase, voice, generate);
+  ]) await audio.audio(action, phrase, voice, async () => { calls++; return { ...result(), voice: voice.voice }; });
   assert.equal(calls, 5); assert.equal(fs.readdirSync(dir).length, 5, 'all action/model/voice/phrase variants coexist');
   await audio.audio('greet_hello', '你好呀。', profile, generate); assert.equal(calls, 5, 'switching back reuses the original variant');
 });
@@ -47,6 +47,8 @@ test('concurrent requests share synthesis; corrupt, failed and degraded results 
   await assert.rejects(audio.audio('shy', '轻一点。', profile, async () => { throw new Error('synthetic failure'); }), /synthetic failure/);
   await audio.audio('shy', '轻一点。', profile, async () => ({ ...result(), engine: 'system', degraded: true }));
   assert.equal(fs.readdirSync(dir).length, 1, 'system fallback is never stored under a Qwen key');
+  await audio.audio('shy', '轻一点。', profile, async () => ({ ...result(), voice: 'different-voice' }));
+  assert.equal(fs.readdirSync(dir).length, 1, 'a different actual voice is never stored under the requested voice');
   await audio.audio('shy', '轻一点。', profile, async () => result()); assert.equal(fs.readdirSync(dir).length, 2);
 });
 test('cache storage failure preserves live audio; size limits evict old variants instead of expiring all audio', async t => {
@@ -66,6 +68,9 @@ test('voice identities ignore appearance, credentials and settings for inactive 
   assert.deepEqual(await tts.voiceIdentity({ ...cfg, qwen: { ...cfg.qwen, dir: '/elsewhere', ready: true, streaming: true }, voice: 'other', model: 'unused', apiKey: 'rotated', timeoutMs: 999 }), a);
   assert.notDeepEqual(await tts.voiceIdentity({ ...cfg, qwen: { voice: 'vivian' } }), a);
   assert(!JSON.stringify(a).includes('synthetic-secret'));
+  const http = { engine: 'http', http: { profile: { url: 'https://example.test/speech' }, params: { model: 'one', voice: 'v' }, secrets: { apiKey: 'one' } } };
+  assert.deepEqual(await tts.voiceIdentity(http), await tts.voiceIdentity({ ...http, http: { ...http.http, secrets: { apiKey: 'two' } } }));
+  assert.notDeepEqual(await tts.voiceIdentity(http), await tts.voiceIdentity({ ...http, http: { ...http.http, params: { ...http.http.params, model: 'two' } } }));
 });
 test('remote identity uses the discovered speech model and voice, including refreshed model changes', async t => {
   let name = 'model-a';
@@ -77,6 +82,21 @@ test('remote identity uses the discovered speech model and voice, including refr
   const first = await tts.voiceIdentity(cfg); assert.equal(first.model[0], 'model-a');
   assert.notDeepEqual(await tts.voiceIdentity({ ...cfg, chp: { voice: 'voice-b' } }), first);
   name = 'model-b'; await chp.discover(cfg); assert.notDeepEqual(await tts.voiceIdentity(cfg), first);
+});
+test('a remote model change invalidates both the action cache and the synthesis memory cache', async t => {
+  const { audio } = fixture(t); let model = 'first', calls = 0;
+  const server = http.createServer((req, res) => {
+    if (req.method === 'POST') { calls++; const bytes = wav(); bytes.writeInt16LE(calls, 44); res.writeHead(200, { 'Content-Type': 'audio/wav' }); res.end(bytes); return; }
+    res.end(JSON.stringify({ spec: 'chp/2', plugin: { version: 'test' }, endpoints: { speech: '/speech' }, speech: {
+      rules: [{ signature: 'txt-2-sph', input: 'txt-2-sph/v1' }], input_schemas: { 'txt-2-sph/v1': { properties: { text: {}, voice: {} } } },
+      abilities: [{ name: model, ready: true, files: { engine: model + '.gguf' }, voices: [{ id: 'voice-a' }], audio: { sample_rate: 24000, channels: 1, formats: ['wav'] } }] } }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
+  const cfg = { enabled: true, engine: 'remote', baseURL: `http://127.0.0.1:${server.address().port}`, chp: { voice: 'voice-a' } };
+  const speak = async () => { const identity = await tts.voiceIdentity(cfg, { refresh: true }); return audio.audio('wave', '你好呀。', identity, () => tts.synthesize('你好呀。', cfg)); };
+  const a = await speak(); assert.equal(calls, 1); assert.equal((await speak()).cached, true); assert.equal(calls, 1);
+  model = 'second'; const b = await speak(); assert.equal(calls, 2); assert.notDeepEqual(a.buffer, b.buffer);
+  model = 'first'; assert.equal((await speak()).cached, true); assert.equal(calls, 2);
 });
 test('touch feedback selects a concrete enabled, loaded action while retaining throttling', () => {
   let now = 0;

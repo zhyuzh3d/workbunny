@@ -18,9 +18,11 @@ const MODELS_DIR = path.join(__dirname, '..', 'renderer', 'assets', 'models');
  *
  * 键是文件名去掉 .vrm 再小写；丢一个新文件进来、没配名字就退回 meta 里的原名。
  *
- * 名字是主人定的，顺序按设置列表里出现的先后（D → E → F → G）。 */
+ * 名字由主人指定；内置顺序来自 asset-library.STOCK_MODELS。 */
 const NAMES = {
+  'bani': '芭尼',
   'avatarsample_d': '可可',
+  'avatarsample_shino': '兰兰',
   'avatarsample_e': '阿雅',
   'avatarsample_f': '琪琪',
   'avatarsample_g': '美莉',
@@ -89,7 +91,9 @@ function scan(dir = MODELS_DIR) {
   names = [...sources.keys()];
   // 官方样例排在后面，自己的角色排前面：列表第一项就是默认形象
   const rank = (n) => (/^AvatarSample_/i.test(n) ? 1 : 0);
-  names.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  const stockOrder = new Map([...library.STOCK_MODELS].map((file,index) => [file.toLowerCase(),index]));
+  const position = file => stockOrder.get(file.toLowerCase()) ?? stockOrder.size;
+  names.sort((a, b) => rank(a) - rank(b) || position(a) - position(b) || a.localeCompare(b));
   return names.map((file) => {
     const source = sources.get(file), m = readMeta(source);
     const personal = source !== path.join(dir, file);
@@ -105,7 +109,7 @@ function scan(dir = MODELS_DIR) {
       title: nickname || file.replace(/\.vrm$/i, ''),
       light: Object.hasOwn(LIGHT, base) ? LIGHT[base] : 1,
       hiddenMeshes: Object.hasOwn(HIDDEN_MESHES, base) ? HIDDEN_MESHES[base] : [],
-      author: nickname ? 'VRoid 项目组（pixiv）' : m.author || '',
+      author: nickname && base !== 'bani' ? 'VRoid 项目组（pixiv）' : m.author || '',
       vrmVersion: m.vrmVersion || '',
       redistribute: m.redistribute || false,
     };

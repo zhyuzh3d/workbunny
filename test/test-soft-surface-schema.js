@@ -1,0 +1,8 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const {inspectAvatarPack}=require('../src/main/avatar-pack-reader');
+const {validateSurfaceGraph,validateSurfaceModel}=require('../src/main/avatar-soft-surface-schema');
+const pack=()=>fs.readFileSync(path.join(__dirname,'../src/renderer/assets/avatar-packs/soft-bunny.wbavatar'));
+test('official surface package contains its 100 authored actions and spoken click reactions',async()=>{const p=await inspectAvatarPack(pack());assert.equal(p.catalog.motions.length,101);assert.deepEqual(p.interactions.regions.map(r=>r.id),['head','left_ear','right_ear']);assert.equal(p.runtime.engine,'soft-surface-v1');assert.equal(Object.values(p.interactions.pools).flat().filter(r=>r.speech?.text).length,8);});
+test('surface schema rejects unsafe geometry and unknown scripted channels',async()=>{assert.throws(()=>validateSurfaceModel({positions:[0,0,0,1,0,0,0,1,0],indices:[0,1,9],well:[0,0,0]}));const p=await inspectAvatarPack(pack());const g={palette:p.runtime.palette,actions:structuredClone(p.runtime.actions)};g.actions[0].performance.frames[0][1].execute='alert(1)';assert.throws(()=>validateSurfaceGraph(g,p.catalog));});
+test('palette choices have unique ids and a declared default',async()=>{const p=await inspectAvatarPack(pack());const graph={palette:p.runtime.palette,palettes:structuredClone(p.runtime.palettes),defaultPalette:'plum',actions:p.runtime.actions};validateSurfaceGraph(graph,p.catalog);graph.palettes.push({...graph.palettes[0]});assert.throws(()=>validateSurfaceGraph(graph,p.catalog));graph.palettes.pop();graph.defaultPalette='missing';assert.throws(()=>validateSurfaceGraph(graph,p.catalog));});

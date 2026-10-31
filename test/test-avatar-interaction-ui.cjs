@@ -27,6 +27,7 @@ async function snapshot(file) {
 }
 async function main() {
   await app.whenReady();
+  const {lightingForAvatar}=await import('../src/renderer/avatar-lighting-profiles.mjs');
   config.save({ avatar: 'AvatarSample_E.vrm', voice: { enabled: false, alwaysListen: false }, tts: { enabled: false }, memory: { enabled: false } });
   const list = avatars.scan().filter(info => !process.env.WORKBUNNY_AVATAR || info.key === process.env.WORKBUNNY_AVATAR);
   const motions = config.MOTIONS.filter(m => ['idle', 'greet', 'shy', 'tease', 'surprise', 'refuse', 'thanks'].includes(m.slot));
@@ -55,13 +56,13 @@ async function main() {
     await evaluate(`window.__avatar(${JSON.stringify(info.key)})`);
     await wait(`window.__pet().avatarKey === ${JSON.stringify(info.key)} && document.getElementById('hint').classList.contains('hidden')`);
     await delay(350);
-    assert.equal((await evaluate('window.__light()')).factor, info.light);
+    const expectedLight=lightingForAvatar(info.key,info.light),actualLight=await evaluate('window.__light()');
+    assert.deepEqual(actualLight.profile,expectedLight);
+    assert.equal(actualLight.ambient,Number((expectedLight.ambient.intensity*expectedLight.multiplier).toFixed(2)));
     if (['阿雅', '琪琪', '美莉'].includes(info.label)) {
       await evaluate('window.__freeze(true)');
       await snapshot(info.label + '-after');
-      await evaluate(`window.__light(${info.label === '美莉' ? .76 : 1})`);
-      await snapshot(info.label + '-before');
-      await evaluate(`window.__light(${info.light}); window.__freeze(false)`);
+      await evaluate('window.__freeze(false)');
     }
     for (const scale of [1, .5, 1.5]) {
       // Compare independent idle views. A greeting may deliberately crouch or
@@ -76,7 +77,7 @@ async function main() {
       const hit = (await evaluate('window.__pet()')).hit;
       assert(y < frame.head.y - 16, 'click is above the old head-bone padding');
       assert(y >= hit.y0 && y <= hit.y1 && x >= hit.x0 && x <= hit.x1, info.label + ': crown is interactive');
-      const before = requests.length;
+      const before = requests.length, queuedBefore = queue.length;
       win.webContents.sendInputEvent({ type: 'mouseMove', x, y });
       win.webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
       win.webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
@@ -84,11 +85,13 @@ async function main() {
       const target = await evaluate(`document.elementFromPoint(${x},${y})?.id`);
       assert.equal(requests.length, before + 1, `${info.label}@${scale}: real mouse input reaches interaction IPC ${JSON.stringify({ x, y, target, frame, hit, state: await evaluate('window.__pet()') })}`);
       assert.equal(requests.at(-1).region, 'head');
-      const expected = queue.at(-1).motion;
-      assert(requests.at(-1).motions.includes(expected), 'the chosen action was loaded and enabled');
       await evaluate('window.__freeze(false)');
+      for (let i = 0; i < 150 && queue.length === queuedBefore; i++) await delay(20);
+      assert(queue.length > queuedBefore, 'touch animation should finish loading and start');
+      const expected = queue.at(-1).motion;
+      assert(requests.at(-1).motions.includes(expected), 'the chosen action was available and enabled');
       await wait(`window.__pet().currentMotion === ${JSON.stringify(expected)}`, 'touch animation begins');
-      assert(!config.MOTIONS.find(m => m.key === expected)?.loop, 'head click plays a gesture instead of another idle');
+      assert(!config.MOTIONS.find(m => m.key === expected)?.loop, 'head click plays a gesture instead of another idle: ' + JSON.stringify({ expected, available: requests.at(-1).motions }));
     }
     await evaluate('window.__scale(1)'); win.setContentSize(420, 660); await delay(100);
     console.log(info.label + ': light=' + info.light + ', crown clicks animate in all 3 sizes');

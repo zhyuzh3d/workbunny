@@ -38,3 +38,35 @@ test('Dock height does not constrain the pet canvas, while the menu bar remains 
  const upper={bounds:{x:-1440,y:-900,width:1440,height:900},workArea:{x:-1380,y:-868,width:1380,height:800}};
  assert.deepEqual(canvasArea(upper),{x:-1440,y:-868,width:1440,height:868});
 });
+test('50% bust halves the production canvas around its bottom center and survives restoring/reloading', () => {
+  const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
+  const source = fs.readFileSync(path.resolve('src/main/index.js'), 'utf8');
+  const area = { x: 0, y: 32, width: 1920, height: 1080 };
+  let settings = { window: { w: 520, h: 800, x: 200, y: -180, scale: .5 } }, actual;
+  const ctx = { require, Math, Number, isFinite, clearTimeout,
+    config: { load: () => settings, save: patch => { settings = { window: { ...settings.window, ...patch.window } }; } },
+    screen: { getDisplayNearestPoint: () => ({ bounds: area, workArea: area }) },
+    win: { isDestroyed: () => false, getBounds: () => actual, setBounds: bounds => { actual = bounds; } }, send() {},
+  };
+  // Resolve the production geometry module relative to index.js.
+  ctx.require = name => name === './window-geometry' ? require('../src/main/window-geometry') : require(name);
+  vm.createContext(ctx);
+  vm.runInContext(source.slice(source.indexOf('const SCALES ='), source.indexOf('function createWindow()')) +
+    ';globalThis.geometry = { clampScale, windowSizeFor, applyWindowScale, placeWindow, layout: () => windowLayout };', ctx);
+  const g = ctx.geometry;
+  g.placeWindow({ x: 200, y: -180, width: 832, height: 800 });
+  assert.equal(g.clampScale(.25), .25);
+  const small = g.windowSizeFor(.25); assert.equal(small.w, 416); assert.equal(small.h, 400);
+  g.applyWindowScale(.25);
+  const half = g.layout();
+  assert.equal(half.logical.x + half.logical.width / 2, 616);
+  assert.equal(half.logical.y + half.logical.height, 620);
+  assert.equal(half.logical.width, 416); assert.equal(half.logical.height, 400);
+  assert.equal(g.windowSizeFor(settings.window.scale = .25).w, 416, 'saved preset reopens at half size');
+  settings.window.scale = .5;
+  g.applyWindowScale(.5);
+  const restored = g.layout();
+  assert.equal(restored.logical.x, 200); assert.equal(restored.logical.y, -180);
+  assert.equal(restored.logical.width, 832); assert.equal(restored.logical.height, 800);
+  assert.equal(restored.viewport.offsetY, -212, 'restoring preserves offscreen canvas clipping');
+});

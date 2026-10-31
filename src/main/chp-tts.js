@@ -102,11 +102,11 @@ function parse(doc, infoURL) {
     model: String(a.name || 'TTS').slice(0, 200), file: String(a.files?.engine || '').slice(0, 300), voices,
     maxText: Math.min(2000, Number(schema.properties.text.maxLength) || 2000) };
 }
-async function discover(cfg) {
+async function discover(cfg, { timeoutMs } = {}) {
   const original = address(cfg.baseURL), candidates = [original];
   if (original.pathname === '/') candidates.push(new URL('/chp/info', original));
   for (let i = 0; i < candidates.length; i++) {
-    const response = await request(candidates[i], { key: cfg.apiKey || '' }), doc = json(response);
+    const response = await request(candidates[i], { key: cfg.apiKey || '', ...(timeoutMs ? { timeoutMs } : {}) }), doc = json(response);
     // A CHP 401 proves the address; do not hide a wrong key behind another URL attempt.
     if (doc?.spec === 'chp/2') {
       if (response.status !== 200) throw failure(response.status, doc);

@@ -2,16 +2,20 @@
 const { randomUUID } = require('node:crypto');
 const REASONS = new Set(['reply', 'manual', 'touch', 'autonomy', 'thinking', 'idle', 'work']);
 class Embodiment {
-  constructor({ catalog, avatar, send, persist = async () => {}, clock = Date.now, timeoutMs = 1800 }) {
-    Object.assign(this, { catalog, avatar, send, persist, clock, timeoutMs }); this.recent = []; this.pending = new Map(); this.capabilities = null;
+  constructor({ catalog, avatar, send, persist = async () => {}, clock = Date.now, timeoutMs = 10000 }) {
+    Object.assign(this, { catalog, avatar, send, persist, clock, timeoutMs }); this.recent = []; this.pending = new Map(); this.capabilities = null; this.posture = 'standing'; this.postureAvatar = null;
   }
-  perform(selector, reason = 'reply') {
-    const motion = this.catalog.select(selector); if (!motion) return Promise.resolve({ ok: false, error: '动作不存在、已禁用或该分类没有可随机使用的动作' });
+  perform(selector, reason = 'reply', options = {}) {
+    const avatarKey = this.avatar()?.key;
+    if (this.postureAvatar !== avatarKey) { this.postureAvatar = avatarKey; this.posture = 'standing'; }
+    if (this.avatar()?.kind !== 'avatar-pack' && ((selector === 'hq_world_sit_enter' && this.posture === 'sitting') || (selector === 'hq_world_sit_exit' && this.posture === 'standing'))) return Promise.resolve({ ok: true, alreadyInPosture: true });
+    const allowPostureChange = reason === 'manual' || options.allowPostureChange === true;
+    const motion = this.catalog.select(selector, { posture: this.posture, allowPostureChange, manual: reason === 'manual', autonomous: ['autonomy', 'idle', 'work', 'thinking', 'touch'].includes(reason), reason }); if (!motion) return Promise.resolve({ ok: false, error: '动作不存在、已禁用或该分类没有可随机使用的动作' });
     const id = randomUUID();
     return new Promise(resolve => {
       const timer = setTimeout(() => { this.pending.delete(id); resolve({ ok: false, error: '动作尚未加载完成' }); }, this.timeoutMs);
       this.pending.set(id, { key: motion.key, avatar: this.avatar()?.key, reason, resolve, timer });
-      this.send({ key: motion.key, requestId: id, reason });
+      this.send({ key: motion.key, requestId: id, reason, allowPostureChange });
     });
   }
   report(event) {
@@ -30,10 +34,15 @@ class Embodiment {
     if (request) { clearTimeout(request.timer); this.pending.delete(event.requestId); request.resolve({ ok: true, motion: record }); }
     return true;
   }
-  snapshot() { return { avatar: this.avatar(), recentActions: this.recent.map(r => ({ ...r })), capabilities: this.capabilities }; }
+  setPosture(event) { if (event?.avatar === this.avatar()?.key && ['standing', 'sitting'].includes(event.posture)) { this.postureAvatar = event.avatar; this.posture = event.posture; } }
+  avatarChanged() {
+    for (const p of this.pending.values()) { clearTimeout(p.timer); p.resolve({ ok: false, error: '形象已切换' }); }
+    this.pending.clear(); this.capabilities = null; this.postureAvatar = null; this.posture = 'standing';
+  }
+  snapshot() { return { posture: this.posture, avatar: this.avatar(), recentActions: this.recent.map(r => ({ ...r })), capabilities: this.capabilities }; }
   context() {
     const avatar = this.avatar();
-    return { appearance: avatar ? { name: avatar.name, description: avatar.description } : null,
+    return { posture: this.posture, appearance: avatar ? { name: avatar.name, description: avatar.description } : null,
       recentActions: this.recent.map(r => ({ action: r.label, secondsAgo: Math.max(0, Math.round((this.clock() - r.at) / 1000)), cause: r.reason })),
       expressions: this.capabilities?.expressions || [] };
   }

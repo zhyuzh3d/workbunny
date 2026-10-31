@@ -174,35 +174,44 @@ function paintPerm(st) {
 /* ═══════════ 外貌 ═══════════ */
 let avatarEditorKey = '', expandedAvatarKey = '';
 const avatarDescriptionDrafts = new Map();
-function avatarButton(info, personal = false) {
+function avatarButton(info) {
   const button = document.createElement('button');
   button.dataset.key = info.key; button.type = 'button';
-  button.className = personal ? 'avatarPick' : '';
+  button.className = 'avatarPick';
   button.setAttribute('aria-pressed', String(info.key === avatarKey));
   button.title = [info.label || info.key, info.author].filter(Boolean).join(' · ');
-  if (personal) {
-    const name = document.createElement('span'); name.className = 'avatarName'; name.textContent = info.label || info.key;
-    const state = document.createElement('span'); state.className = 'avatarUse'; state.textContent = info.key === avatarKey ? '使用中' : '点击使用';
-    button.append(name, state);
-  } else button.textContent = info.label || info.key;
+  const name = document.createElement('span'); name.className = 'avatarName'; name.textContent = info.label || info.key;
+  const state = document.createElement('span'); state.className = 'avatarUse'; state.textContent = info.key === avatarKey ? '使用中' : '点击使用';
+  button.append(name, state);
   button.classList.toggle('on', info.key === avatarKey);
   button.onclick = event => { event.preventDefault(); event.stopPropagation(); pickAvatar(info.key).catch(error => { $('avatarImportStatus').textContent = error.message; }); };
   return button;
 }
 function paintAvatars() {
-  const row = $('avRow'), personal = $('personalAvatars'), editor = $('avatarEditor');
-  if (!row || !personal || !editor) return;
+  const select = $('avatarSelect'), personal = $('personalAvatars'), editor = $('avatarEditor');
+  if (!select || !personal || !editor) return;
+  const requested = pendingValue('avatar', avatarKey);
+  avatarKey = AVATAR_LIST.find(a => a.key === requested || a.file === requested || a.label === requested)?.key || avatarKey;
   // A single editor follows the expanded model; using a model remains a separate action.
   $('stockAvatarEditor').append(editor);
-  row.replaceChildren(); personal.replaceChildren();
-  for (const info of AVATAR_LIST.filter(a => !a.personal)) row.append(avatarButton(info));
+  select.replaceChildren(); personal.replaceChildren();
+  for (const [label,items] of [['内置形象',AVATAR_LIST.filter(a => !a.personal)],['定制外形',AVATAR_LIST.filter(a => a.personal)]]) {
+    if (!items.length) continue;
+    const group = document.createElement('optgroup'); group.label = label;
+    for (const info of items) {
+      const option = document.createElement('option'); option.value = info.key; option.textContent = info.label || info.key;
+      group.append(option);
+    }
+    select.append(group);
+  }
+  select.value = avatarKey; select.disabled = !AVATAR_LIST.length;
   const custom = AVATAR_LIST.filter(a => a.personal);
   if (!custom.some(a => a.key === expandedAvatarKey)) expandedAvatarKey = '';
   for (const info of custom) {
     const card = document.createElement('details'); card.className = 'avatarCard'; card.dataset.key = info.key;
     card.classList.toggle('active', info.key === avatarKey);
     const summary = document.createElement('summary'), fold = document.createElement('span');
-    fold.className = 'avatarFold'; fold.textContent = '编辑'; summary.append(avatarButton(info, true), fold); card.append(summary);
+    fold.className = 'avatarFold'; fold.textContent = '编辑'; summary.append(avatarButton(info), fold); card.append(summary);
     card.open = expandedAvatarKey === info.key;
     if (card.open) card.append(editor);
     card.ontoggle = () => {
@@ -219,17 +228,36 @@ function paintAvatars() {
   }
   if (!custom.length) {
     const empty = document.createElement('div'); empty.className = 'avatarEmpty';
-    empty.textContent = '还没有定制外形，导入VRM文件后会显示在这里。'; personal.append(empty);
+    empty.textContent = '还没有定制外形，导入形象文件后会显示在这里。'; personal.append(empty);
   }
   paintAvatarDetails();
 }
 
 function paintAvatarDetails() {
   const key = expandedAvatarKey || avatarKey, item = AVATAR_LIST.find(a => a.key === key), field = $('avatarDescription');
+  const selected = AVATAR_LIST.find(a => a.key === avatarKey), palette = $('avatarPalette'), choices = $('avatarPaletteChoices');
+  if (palette && choices) {
+    palette.hidden = !selected?.palettes?.length; choices.replaceChildren();
+    const path = `avatarPalettes.${avatarKey}`, stored = pendingValue(path, selected?.defaultPalette);
+    const value = selected?.palettes?.some(p => p.id === stored) ? stored : selected?.defaultPalette;
+    for (const p of selected?.palettes || []) {
+      const button = document.createElement('button'); button.type = 'button'; button.style.setProperty('--color', p.color);
+      button.title = p.label; button.setAttribute('aria-label', p.label); button.setAttribute('aria-pressed', String(p.id === value));
+      button.onclick = async () => {
+        const key = avatarKey, editPath = `avatarPalettes.${key}`; edit(editPath, p.id); paintAvatarDetails();
+        try { await persist({ avatarPalettes: { [key]: p.id } }, [editPath]); paintAvatarDetails(); }
+        catch (error) { edits.delete(editPath); paintAvatarDetails(); $('avatarImportStatus').textContent = error.message; }
+      };
+      choices.append(button);
+    }
+  }
+  paintScale();
   if (field && (avatarEditorKey !== key || document.activeElement !== field)) field.value = avatarDescriptionDrafts.get(key) ?? cfg.avatarDescriptions?.[key] ?? item?.description ?? '';
   if (field) { field.dataset.key = key; autoGrow(field, 2); }
   const personal = !!item?.personal;
   if ($('deleteAvatar')) { $('deleteAvatar').disabled = !personal; $('deleteAvatar').hidden = !personal; }
+  if ($('replaceAvatar')) $('replaceAvatar').hidden = item?.kind !== 'avatar-pack';
+  if ($('restoreAvatar')) $('restoreAvatar').hidden = !item?.overridden;
   if ($('stockAppearanceDetails')) $('stockAppearanceDetails').hidden = !!AVATAR_LIST.find(a => a.key === avatarKey)?.personal;
   if (avatarEditorKey !== key) {
     avatarEditorKey = key;
@@ -239,8 +267,9 @@ function paintAvatarDetails() {
 
 async function pickAvatar(k) {
   if (k === avatarKey) return;
+  $('avatarImportStatus').textContent = '';
   const previous = avatarKey;
-  avatarKey = k; paintAvatars(); edit('avatar', k);
+  edit('avatar', k); avatarKey = k; paintAvatars();
   const revision = edits.get('avatar').revision;
   try { await persist({ avatar: k }); log('换形象 ' + k); }
   catch (error) {
@@ -268,7 +297,12 @@ function paintSpeaker(status) {
 }
 
 function paintScale() {
-  for (const b of $('sizeRow').children) b.classList.toggle('on', Math.abs(Number(b.dataset.k) - viewScale) < 0.01);
+  const isPack = AVATAR_LIST.find(a => a.key === avatarKey)?.kind === 'avatar-pack';
+  for (const b of $('sizeRow').children) {
+    const k = Number(b.dataset.k); b.hidden = !!isPack && k === 1;
+    b.textContent = isPack ? ({ .25:'50%', .5:'100%', 1:'100%', 1.5:'150%', 2:'200%' })[k] : ({ .25:'50% 半身', .5:'100% 半身', 1:'100% 全身', 1.5:'150% 放大', 2:'200% 放大' })[k];
+    b.classList.toggle('on', Math.abs(k - (isPack && viewScale === 1 ? .5 : viewScale)) < 0.01);
+  }
 }
 async function setScale(k) {
   viewScale = Number(k) || 1;
@@ -707,8 +741,17 @@ function deleteMotion(motion) {
 }
 function buildMotionList() {
   const box = $('motionList'); if (!box) return; const scroll = box.scrollTop; box.replaceChildren();
+  const isPack = AVATAR_LIST.find(a => a.key === cfg?.avatar)?.kind === 'avatar-pack';
+  const tools = document.querySelector('.motionTools'), footer = document.querySelector('#motions .pFoot');
+  if (tools) tools.hidden = isPack;
+  if (footer) footer.hidden = isPack;
+  $('mAll').hidden = isPack;
+  if (isPack) {
+    const note = document.createElement('p'); note.className = 'note'; note.textContent = '当前形象的动作随形象包提供。动作列表仅适用于 VRM 形象。'; box.append(note);
+    $('mCount').textContent = ''; return;
+  }
   const disabled = new Set(cfg.motions?.disabled || []);
-  const idleCount = MOTIONS.filter(m => m.idle && !disabled.has(m.key) && m.weight > 0).length;
+  const idleCount = MOTIONS.filter(m => m.idle && !disabled.has(m.key)).length;
   for (const group of MOTION_GROUPS) {
     const items = MOTIONS.filter(m => m.slot === group.id), details = document.createElement('details');
     details.className = 'motionGroup'; details.dataset.slot = group.id; details.open = !motionCollapsed.has(group.id);
@@ -722,25 +765,16 @@ function buildMotionList() {
     categoryToggle.setAttribute('aria-pressed', String(items.some(m=>!disabled.has(m.key)))); categoryToggle.disabled ||= !items.length;
     const categoryDelete = motionIcon('×', '删除分类' + group.label, event => { event.preventDefault(); event.stopPropagation(); if(confirm('删除分类？其中动作会移入其他分类。')) void motionOperation({type:'category-delete',id:group.id}); });
     title.append(categoryEdit,categoryToggle,categoryDelete); details.append(title);
-    const total = items.filter(m=>!disabled.has(m.key)).reduce((n,m)=>n+Number(m.weight??1),0), inputs = new Map();
-    const repaintRatios = weights => {
-      for (const [key, controls] of inputs) { const value = weights[key] ?? 0; controls.slider.value = value; controls.value.textContent = `${Math.round(value)}%`; }
-    };
     for (const motion of items) {
       const enabled = !disabled.has(motion.key), row = document.createElement('div'); row.className = 'motionRow' + (enabled ? '' : ' disabled'); row.dataset.motion = motion.key;
       const preview = document.createElement('button'); preview.className = 'mItem' + (motion.key === curMotion ? ' on' : ''); preview.dataset.key = motion.key; preview.disabled = !enabled; preview.title = motion.use || motion.label;
       const name = document.createElement('span'); name.className = 'nm'; name.textContent = motion.label; preview.append(name);
       preview.onclick = () => { curMotion = motion.key; window.pet.panelMotion(motion.key); for(const b of box.querySelectorAll('.mItem')) b.classList.toggle('on',b.dataset.key === curMotion); };
-      const slider = document.createElement('input'); slider.type = 'range'; slider.min = 0; slider.max = 100; slider.step = 1; slider.className = 'motionRatio'; slider.disabled = !enabled || motionSaving; slider.setAttribute('aria-label', motion.label + '概率百分比');
-      const probability = document.createElement('span'); probability.className = 'motionChance'; const value = enabled && total ? motion.weight / total * 100 : 0; slider.value = value; probability.textContent = `${Math.round(value)}%`;
-      inputs.set(motion.key, {slider,value:probability});
-      slider.oninput = () => { const weights = globalThis.BunnyMotion.probabilities(MOTIONS.map(m=>({...m,enabled:!disabled.has(m.key)})),motion.key,Number(slider.value)); repaintRatios(weights); };
-      slider.onchange = () => void motionOperation({type:'motion-probability',key:motion.key,percent:Number(slider.value)});
       const editButton = motionIcon('✎', '编辑动作' + motion.label, () => openMotionEditor(motion));
       const toggle = motionIcon('⏻', (enabled ? '停用' : '启用') + motion.label, () => { const next = new Set(cfg.motions?.disabled || []); enabled ? next.add(motion.key) : next.delete(motion.key); void setDisabledMotions([...next]); });
-      toggle.setAttribute('aria-pressed',String(enabled)); toggle.disabled ||= !!motion.idle && enabled && idleCount === 1 && motion.weight > 0;
+      toggle.setAttribute('aria-pressed',String(enabled)); toggle.disabled ||= !!motion.idle && enabled && idleCount === 1;
       const remove = motionIcon('×', '删除动作' + motion.label, () => deleteMotion(motion));
-      row.append(preview,slider,probability,editButton,toggle,remove); details.append(row);
+      row.append(preview,editButton,toggle,remove); details.append(row);
     }
     if (!items.length) { const empty = document.createElement('p'); empty.className='note'; empty.textContent='还没有动作，可以导入VRMA。'; details.append(empty); }
     box.append(details);
@@ -762,9 +796,14 @@ function buildMotionList() {
 
   if (which === 'settings') {
     await mountPortability(window.pet);
+    $('avatarSelect').onchange = () => pickAvatar($('avatarSelect').value).catch(error => { $('avatarImportStatus').textContent = error.message; });
     $('importAvatar').onclick = async () => {
       try { const r = await window.pet.avatarImport(); if (r.cancelled) return; AVATAR_LIST = r.avatars; paintAvatars(); await pickAvatar(r.key); $('avatarImportStatus').textContent = '已导入个人模型，仅本机使用。'; }
       catch (e) { $('avatarImportStatus').textContent = e.message; }
+    };
+    $('replaceAvatar').onclick = async () => {
+      try { const r = await window.pet.avatarImport({ targetKey: avatarEditorKey }); if (r.cancelled) return; AVATAR_LIST = r.avatars; paintAvatars(); $('avatarImportStatus').textContent = '形象包已替换。'; }
+      catch (error) { $('avatarImportStatus').textContent = error.message; }
     };
     $('stockAppearanceDetails').ontoggle = () => {
       if (!$('stockAppearanceDetails').open) return;
@@ -785,10 +824,14 @@ function buildMotionList() {
       try { const key = avatarEditorKey; if (key !== avatarKey) await pickAvatar(key); const r = await window.pet.avatarDescribeRequest(key); if (!r.ok) $('avatarDescriptionStatus').textContent = r.error; }
       catch (error) { $('avatarDescriptionStatus').textContent = error.message; }
     };
+    $('restoreAvatar').onclick = async () => {
+      try { const r = await window.pet.avatarPackRestore(avatarEditorKey); AVATAR_LIST = r.avatars; paintAvatars(); $('avatarImportStatus').textContent = '已恢复内置版本。'; }
+      catch (error) { $('avatarImportStatus').textContent = error.message; }
+    };
     $('deleteAvatar').onclick = async () => {
       const key = avatarEditorKey, item = AVATAR_LIST.find(a => a.key === key);
-      if (!item?.personal || !confirm('删除这个个人模型？文件会移到废纸篓，内置模型不会受影响。')) return;
-      try { const r = await window.pet.avatarDelete(key); AVATAR_LIST = r.avatars; avatarKey = r.avatar; paintAvatars(); $('avatarImportStatus').textContent = '个人模型已移到废纸篓。'; }
+      if (!item?.personal || !confirm(item.kind === 'avatar-pack' ? '删除这个个人形象包？' : '删除这个个人模型？文件会移到废纸篓，内置模型不会受影响。')) return;
+      try { const r = await window.pet.avatarDelete(key); AVATAR_LIST = r.avatars; avatarKey = r.avatar; paintAvatars(); $('avatarImportStatus').textContent = item.kind === 'avatar-pack' ? '个人形象包已删除。' : '个人模型已移到废纸篓。'; }
       catch (error) { $('avatarImportStatus').textContent = error.message; }
     };
     BRAIN = await window.pet.brainInfo();
@@ -976,7 +1019,8 @@ function buildMotionList() {
   } else {
     applyMotionView({ motions: MOTIONS, categories: MOTION_GROUPS }); buildMotionList();
     window.pet.on(ev => {
-      if (ev.type === 'config' && ev.config) { const changed = JSON.stringify(cfg.motions) !== JSON.stringify(ev.config.motions); cfg = ev.config; if (changed) buildMotionList(); }
+      if (ev.type === 'config' && ev.config) { const changed = cfg.avatar !== ev.config.avatar || JSON.stringify(cfg.motions) !== JSON.stringify(ev.config.motions); cfg = ev.config; if (changed) buildMotionList(); }
+      if (ev.type === 'avatars' && Array.isArray(ev.avatars)) { AVATAR_LIST = ev.avatars; buildMotionList(); }
       if (ev.type === 'motion-library') { applyMotionView(ev); buildMotionList(); }
       if (ev.type === 'motion-error') $('mStatus').textContent = ev.error;
     });

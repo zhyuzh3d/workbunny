@@ -18,6 +18,12 @@ const panelHtml = path.resolve(__dirname, '../src/renderer/panel.html');
 const calls = [];
 let listeners = [];
 let failNextConfig = false;
+let fixtureAvatars = [
+  {key:'fixture-avatar',label:'测试角色'},
+  {key:'fixture-second',label:'第二角色'},
+  {key:'custom-one.vrm',label:'个人模型一',personal:true},
+  {key:'custom-two.vrm',label:'个人模型二',personal:true},
+];
 let settings = {
   settingsRevision: 1,
   avatar: 'fixture-avatar',
@@ -55,6 +61,7 @@ fs.writeFileSync(preload, `
     brainModels: (...a) => api('brainModels', ...a),
     config: (...a) => api('config', ...a), on: cb => ipcRenderer.on('panel-fixture:event', (_e, value) => cb(value)),
     __fixture: { emitConfig: value => ipcRenderer.invoke('panel-fixture:control', 'emitConfig', value),
+      emitAvatars: value => ipcRenderer.invoke('panel-fixture:control', 'emitAvatars', value),
       failNextConfig: () => ipcRenderer.invoke('panel-fixture:control', 'failNextConfig'), getCalls: () => ipcRenderer.invoke('panel-fixture:control', 'getCalls') }
   });
 `);
@@ -76,6 +83,11 @@ function applyConfig(patch) {
 ipcMain.handle('panel-fixture:control', (_event, action, patch) => {
   if (action === 'failNextConfig') { failNextConfig = true; return true; }
   if (action === 'getCalls') return calls;
+  if (action === 'emitAvatars') {
+    fixtureAvatars = patch;
+    for (const win of windows) if (!win.isDestroyed()) win.webContents.send('panel-fixture:event', {type:'avatars',avatars:patch});
+    return true;
+  }
   if (action === 'emitConfig') {
     const config = applyConfig(patch);
     for (const win of windows) if (!win.isDestroyed()) win.webContents.send('panel-fixture:event', { type: 'config', config });
@@ -89,7 +101,7 @@ ipcMain.handle('panel-fixture:api', async (_event, name, ...args) => {
   if (name === 'selfSettings') { settings.buddy.profile = args[0].identity; return { revision: settings.settingsRevision, settings: args[0] }; }
   if (name === 'portability') return { connection: { ready: true, note: '已连接' }, storage: { ok: true, dir: '/fixture/vault' }, asrMode: 'continuous', capabilities: {} };
   if (name === 'ttsHTTPTemplate') return require('../src/main/tts-http-profile').template(args[0]);
-  if (name === 'panelInit') return { config: publicSettings(), avatars: [{ key: 'fixture-avatar', label: '测试角色' }], avatar: 'fixture-avatar',
+  if (name === 'panelInit') return { config: publicSettings(), avatars: fixtureAvatars, avatar: settings.avatar,
     motions: [], motionGroups: [], asr: { speech: 3, micSystem: 'granted' } };
   if (name === 'brainInfo') return { providers: ['deepseek','openai','grok'].map(id => ({id,label:id,baseURL:modelBase+'/'+id+'/v1'})),
     workbuddyModels: [{ id: 'hy3', label: 'Hy3', thinking: [{ id: 'low', label: '低' }] }], workbuddyThinking: [{ id: 'low', label: '低' }], thinkingLevels: [] };
@@ -104,6 +116,7 @@ ipcMain.handle('panel-fixture:api', async (_event, name, ...args) => {
     const patch = args[0] || {};
     calls.push(clone(patch));
     if (failNextConfig) { failNextConfig = false; throw new Error('fixture config rejected'); }
+    if (patch.avatar) await delay(60);
     return applyConfig(patch);
   }
   throw new Error(`unexpected panel fixture API: ${name}`);
@@ -127,6 +140,46 @@ async function main() {
   win.webContents.on('console-message', (_e, level, message, line) => console.error(`panel fixture console[${level}] ${line}: ${message}`));
   await win.loadFile(panelHtml, { query: { p: 'settings' } });
   await waitFor(() => evalIn(win, "document.getElementById('setProfile').value" ).then(value => value.includes('共通角色设定')), 'settings profile rendered');
+
+  const avatarSelected = () => evalIn(win, 'document.getElementById("avatarSelect").value');
+  const chooseAvatar = key => evalIn(win, `document.getElementById('avatarSelect').value=${JSON.stringify(key)};document.getElementById('avatarSelect').dispatchEvent(new Event('change'))`);
+  const activeCustom = () => evalIn(win, 'document.querySelector("#personalAvatars .avatarPick[aria-pressed=true]")?.dataset.key || null');
+  assert.deepEqual(await evalIn(win,'[...document.getElementById("avatarSelect").options].map(o=>o.value)'),fixtureAvatars.map(a=>a.key));
+  assert.deepEqual(await evalIn(win,'[...document.querySelectorAll("#avatarSelect optgroup")].map(g=>g.label)'),['内置形象','定制外形']);
+  await chooseAvatar('custom-one.vrm');
+  assert.equal(await avatarSelected(),'custom-one.vrm');assert.equal(await activeCustom(),'custom-one.vrm');
+  await waitFor(()=>Promise.resolve(settings.avatar==='custom-one.vrm'),'custom model selected through dropdown');
+  await evalIn(win,`document.querySelector('.avatarPick[data-key="custom-two.vrm"]').click()`);
+  assert.equal(await avatarSelected(),'custom-two.vrm');
+  await waitFor(()=>Promise.resolve(settings.avatar==='custom-two.vrm'),'card selection persisted');
+  await evalIn(win,'window.pet.__fixture.emitConfig({avatar:"fixture-avatar"})');
+  await waitFor(()=>avatarSelected().then(key=>key==='fixture-avatar'),'external model selection synchronized');
+  assert.equal(await activeCustom(),null);
+  failNextConfig=true;await chooseAvatar('custom-one.vrm');
+  await waitFor(()=>evalIn(win,'document.getElementById("avatarImportStatus").textContent.includes("fixture config rejected")'),'avatar rejection displayed');
+  assert.equal(await avatarSelected(),'fixture-avatar');assert.equal(await activeCustom(),null);
+  await chooseAvatar('fixture-second');await chooseAvatar('custom-two.vrm');
+  await waitFor(()=>Promise.resolve(settings.avatar==='fixture-second'),'first queued model acknowledgement');
+  assert.equal(await avatarSelected(),'custom-two.vrm','older acknowledgement cannot rewind the picker');
+  await waitFor(()=>Promise.resolve(settings.avatar==='custom-two.vrm'),'latest model persisted');
+  assert.equal(await evalIn(win,'document.getElementById("avatarImportStatus").textContent'),'','successful retry clears old selection error');
+  const newAvatar={key:'new-custom.vrm',label:'新个人模型',personal:true};
+  await evalIn(win,'window.pet.__fixture.emitConfig({avatar:"new-custom.vrm"})');
+  await evalIn(win,`window.pet.__fixture.emitAvatars(${JSON.stringify([...fixtureAvatars,newAvatar])})`);
+  await waitFor(()=>avatarSelected().then(key=>key==='new-custom.vrm'),'new model list catches up with active config');
+  assert.equal(await activeCustom(),'new-custom.vrm');
+  await evalIn(win,`window.pet.__fixture.emitAvatars(${JSON.stringify(fixtureAvatars.filter(a=>a.key!=='new-custom.vrm'))})`);
+  await evalIn(win,'window.pet.__fixture.emitConfig({avatar:"fixture-avatar"})');
+  await waitFor(()=>avatarSelected().then(key=>key==='fixture-avatar'),'deleted model fallback synchronized');
+  assert.equal(await evalIn(win,`!!document.querySelector('#avatarSelect option[value="new-custom.vrm"]')`),false);
+  assert.equal(await activeCustom(),null);
+
+  await chooseAvatar('custom-two.vrm');
+  await waitFor(()=>Promise.resolve(settings.avatar==='custom-two.vrm'),'preview custom selection');
+  await evalIn(win,'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+  fs.writeFileSync(path.resolve('.cache/avatar-select-update/picker.png'),(await win.webContents.capturePage()).toPNG());
+  await chooseAvatar('fixture-avatar');
+  await waitFor(()=>Promise.resolve(settings.avatar==='fixture-avatar'),'restore initial fixture selection');
 
   const scene = () => evalIn(win, "document.querySelector('#panelScene [aria-pressed=true]')?.dataset.scene");
   const select = name => evalIn(win, `document.querySelector('#panelScene [data-scene=${name}]').click()`);
@@ -214,7 +267,7 @@ async function main() {
 
   await win.close();
   server.close();
-  console.log('panel settings passed: scene drafts, all three real HTTP model catalogs, empty/loading/success/auth failure/retry, key/address invalidation and ASR status isolation');
+  console.log('panel settings passed: unified avatar picker, card/config/list synchronization, failure rollback, rapid selection, scene drafts, model catalogs and credentials');
   app.exit(0);
 }
 

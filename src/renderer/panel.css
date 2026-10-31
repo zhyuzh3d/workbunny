@@ -208,7 +208,7 @@ button.mini:disabled { opacity:.4; }
 body:not([data-tab="mouth"]) #testBtn { display:none; }
 body[data-tab="mouth"] #testBtn { background:#a94b32; color:white; border-color:#a94b32; }
 
-/* ── 大小三档 ── */
+/* ── 分段选择 ── */
 .segRow { display: flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: #f3efe8; }
 .segRow button {
   flex: 1 1 0; border: 0; border-right: 1px solid var(--line);
@@ -222,17 +222,12 @@ body[data-tab="mouth"] #testBtn { background:#a94b32; color:white; border-color:
 .segRow button.on:hover { background:#3a3e44; color:#fff; }
 
 /* ── 形象 ── */
-.avRow { display: flex; gap: 7px; flex-wrap: wrap; }
-.avRow button {
-  border: 1px solid var(--line); background: #fffdfa;
-  color: var(--ink-soft); border-radius: 9px; padding: 8px 12px;
-  font-size: 12px; font-family: var(--font);
-  transition: background .14s, color .14s, border-color .14s;
-}
-.avRow button:hover { filter: brightness(.97); }
-.avRow button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
-.avRow button.on:hover { background:#3a3e44; border-color:#3a3e44; color:#fff; filter:none; }
-.avRow button:disabled { opacity: .55; }
+.avatarSelect { display:block; width:100%; min-height:36px; }
+.avatarPalette { margin-top:16px; }
+.avatarPaletteChoices { display:flex; flex-wrap:wrap; gap:10px; }
+.avatarPaletteChoices button { width:32px; height:32px; padding:0; border:3px solid #fff; border-radius:50%; background:var(--color); box-shadow:0 0 0 1px #d6d2cc; cursor:pointer; }
+.avatarPaletteChoices button[aria-pressed="true"] { box-shadow:0 0 0 2px #59525d; }
+.avatarPaletteChoices button:focus-visible { outline:3px solid #b18fd1; outline-offset:3px; }
 
 /* Appearance: borderless custom-model rows expand into a shared editor. */
 .pb[data-page="look"] { padding:16px; }
@@ -241,7 +236,6 @@ body[data-tab="mouth"] #testBtn { background:#a94b32; color:white; border-color:
 .lookHeading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
 .lookHeading .lookTitle { margin:0; }
 .lookHeading button.mini { flex:0 0 auto; }
-.avRow button { flex:1 1 0; min-width:0; }
 .stockDescription { margin-top:10px; color:var(--muted); }
 .stockDescription > summary { cursor:pointer; padding:3px 0; font-size:11px; }
 .personalAvatars { display:grid; gap:4px; }
@@ -266,7 +260,7 @@ body[data-tab="mouth"] #testBtn { background:#a94b32; color:white; border-color:
 .avatarEditor #avatarDescription { display:block; width:100%; resize:none; overflow:hidden; }
 .avatarActions { display:flex; gap:8px; margin-top:8px; }
 .avatarActions button.mini { flex:0 0 auto; }
-#stockAppearanceDetails[hidden], #deleteAvatar[hidden] { display:none; }
+#stockAppearanceDetails[hidden], #deleteAvatar[hidden], #replaceAvatar[hidden], #mAll[hidden], #motions .motionTools[hidden], #motions .pFoot[hidden] { display:none; }
 
 /* ── 动作条目 ── */
 .mGroup {
@@ -340,7 +334,7 @@ button.wide.primary:hover:not(:disabled) { background:#3a3e44; border-color:#3a3
 ::-webkit-scrollbar-track { background: transparent; }
 .hidden { display: none !important; }
 
-.motionTools{padding:10px 16px;border-bottom:1px solid #ddd8cf}.motionTools .actions{display:flex;gap:8px;margin:6px 0;flex-wrap:wrap}.motionTools input,.motionTools select{flex:1;min-width:120px}.motionEditor{margin:4px 0 12px 24px;padding:8px 10px;background:rgba(255,255,255,.5);border-radius:10px;font-size:12px}.motionEditor>summary{cursor:pointer;color:#666}.motionField{display:flex;gap:10px;align-items:center;margin:8px 0}.motionField>span{min-width:90px}.motionField input:not([type=checkbox]),.motionField textarea{flex:1;min-width:0}.motionField textarea{min-height:56px}.motionWeight{flex:0 0 58px;width:58px;height:30px;min-width:0;padding:4px;text-align:center;cursor:text}.motionChance{min-width:36px;color:#777;font-size:11px}.motionRow .mItem{min-width:0}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}#avatarDescription{box-sizing:border-box;width:100%;resize:none;overflow:hidden}#deleteAvatar:disabled{opacity:.4}
+.motionTools{padding:10px 16px;border-bottom:1px solid #ddd8cf}.motionTools .actions{display:flex;gap:8px;margin:6px 0;flex-wrap:wrap}.motionTools input,.motionTools select{flex:1;min-width:120px}.motionEditor{margin:4px 0 12px 24px;padding:8px 10px;background:rgba(255,255,255,.5);border-radius:10px;font-size:12px}.motionEditor>summary{cursor:pointer;color:#666}.motionField{display:flex;gap:10px;align-items:center;margin:8px 0}.motionField>span{min-width:90px}.motionField input:not([type=checkbox]),.motionField textarea{flex:1;min-width:0}.motionField textarea{min-height:56px}.motionRow .mItem{min-width:0}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}#avatarDescription{box-sizing:border-box;width:100%;resize:none;overflow:hidden}#deleteAvatar:disabled{opacity:.4}
 
 .motionField:has(input[type="checkbox"]) { justify-content:space-between; }
 .motionField:has(input[type="checkbox"]) > span { white-space:nowrap; }
@@ -360,8 +354,6 @@ button.wide.primary:hover:not(:disabled) { background:#3a3e44; border-color:#3a3
 .motionRow { gap:5px; margin:4px 0; min-height:31px; }
 .motionRow .mItem { margin:0; padding:6px 8px; flex:1 1 auto; font-size:11.5px; }
 .motionRow .nm { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-.motionRatio { flex:0 0 98px; width:98px; min-width:0; accent-color:#5b805f; cursor:pointer; }
-.motionChance { flex:0 0 34px; min-width:34px; text-align:right; font-size:10px; font-variant-numeric:tabular-nums; }
 button.motionIcon { width:25px; min-width:25px; height:25px; flex:none; padding:0; line-height:1; font-size:16px; border-color:transparent; background:transparent; color:var(--muted); }
 button.motionIcon:hover { background:#ebe7df; color:var(--ink); }
 button.motionIcon[aria-pressed="true"] { color:#3e8a5c; }
@@ -376,8 +368,7 @@ button.motionIcon[aria-pressed="true"] { color:#3e8a5c; }
 #motionDialogBody .motionField { align-items:center; }
 #motionDialogBody select { flex:1; min-width:0; }
 #motionDialogStatus { flex:1; font-size:11px; color:var(--muted); }
-#motionList input.motionRatio { flex:0 0 110px; width:110px; }
-
+#motionList input
 #avatarDescriptionStatus:empty { display:none; }
 
 #asrNetworkRow[hidden], #speakerProgress[hidden] { display:none; }

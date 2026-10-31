@@ -6,6 +6,10 @@
 <title>Workbunny-设置</title>
 <link rel="stylesheet" href="./panel.css" />
 <link rel="stylesheet" href="./form-controls.css" />
+
+<link rel="icon" type="image/svg+xml" href="../../res/logo.svg">
+<link rel="stylesheet" href="./brand.css">
+<script type="module" src="./brand-window.mjs"></script>
 </head>
 <body data-p="settings">
 
@@ -45,23 +49,24 @@
   </div>
 
   <div class="pb" data-page="look">
-    <section class="lookSection" aria-label="内置形象">
+    <section class="lookSection" aria-label="模型选择">
       <h2 class="lookTitle">形象</h2>
-      <div class="avRow" id="avRow" role="group" aria-label="内置形象"></div>
+      <select id="avatarSelect" class="avatarSelect" aria-label="选择模型" disabled></select>
+      <div id="avatarPalette" class="avatarPalette" hidden><div class="lookTitle">颜色</div><div id="avatarPaletteChoices" class="avatarPaletteChoices" role="group" aria-label="形象颜色"></div></div>
       <details class="stockDescription" id="stockAppearanceDetails">
         <summary>形象描述</summary>
         <div id="stockAvatarEditor">
           <div class="avatarEditor" id="avatarEditor">
             <label for="avatarDescription">形象描述</label>
             <textarea id="avatarDescription" rows="2" maxlength="600" placeholder="描述发型、服装与配饰"></textarea>
-            <div class="avatarActions"><button id="describeAvatar" class="mini">识别形象</button><button id="deleteAvatar" class="mini danger">删除模型</button></div>
+            <div class="avatarActions"><button id="describeAvatar" class="mini">识别形象</button><button id="replaceAvatar" class="mini" hidden>替换形象包</button><button id="restoreAvatar" class="mini" hidden>恢复内置版</button><button id="deleteAvatar" class="mini danger">删除模型</button></div>
             <div class="note" id="avatarDescriptionStatus" role="status"></div>
           </div>
         </div>
       </details>
     </section>
     <section class="lookSection" aria-label="定制外形">
-      <div class="lookHeading"><h2 class="lookTitle">定制外形</h2><button id="importAvatar" class="mini">导入VRM文件</button></div>
+      <div class="lookHeading"><h2 class="lookTitle">定制外形</h2><button id="importAvatar" class="mini">导入形象</button></div>
       <div id="personalAvatars" class="personalAvatars" aria-label="已导入的模型"></div>
       <div class="note" id="avatarImportStatus" role="status">仅保存在本机，点击模型即可使用。</div>
     </section>
@@ -69,12 +74,13 @@
     <section class="lookSection" aria-label="显示大小">
     <h2 class="lookTitle">显示大小</h2>
     <div class="segRow" id="sizeRow" role="group" aria-label="显示大小">
+      <button data-k="0.25">50% 半身</button>
       <button data-k="0.5">100% 半身</button>
       <button data-k="1">100% 全身</button>
       <button data-k="1.5">150% 放大</button>
       <button data-k="2">200% 放大</button>
     </div>
-    <div class="note">放大角色时，底部控件保持原宽度。</div>
+    <div class="note">角色大小改变时，底部控件保持原尺寸。</div>
     </section>
   </div>
 
@@ -234,7 +240,7 @@
   <div class="motionTools">
     <div class="actions"><input id="mNewCategory" maxlength="40" placeholder="新分类名称" aria-label="新分类名称"><button id="mAddCategory" class="mini">添加分类</button></div>
     <div class="actions"><select id="mImportGroup" aria-label="导入到分类"></select><button id="mImport" class="mini">导入VRMA</button><button id="mRestore" class="mini">恢复内置动作</button></div>
-    <div class="note">点击动作立即播放；拖动比例，同类动作自动协调。</div>
+    <div class="note">点击动作立即播放；程序会结合当前坐姿、站姿与对话选择动作。部分动作版权待核实，详见随附 README 的授权请求。</div>
   </div>
   <div class="pb" id="motionList"></div>
   <div class="pFoot">

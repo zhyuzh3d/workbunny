@@ -30,7 +30,7 @@ test('category edits preserve motion identities and idle safety, exact requests 
   f.library.save({ type: 'category-delete', id: 'idle', moveTo: group.id });
   assert.equal(f.library.idle().key, 'idle_one');
   assert.throws(() => f.library.save({ type: 'motion-delete', key: 'idle_one' }), /至少保留/);
-  assert.throws(() => f.library.save({ type: 'motion-update', key: 'idle_one', weight: 0 }), /至少保留/);
+  f.library.save({ type: 'motion-update', key: 'idle_one', weight: 0 }); assert.equal(f.library.idle().key, 'idle_one');
   f.config().motions.disabled.push('wave_one'); assert.equal(f.library.select('wave_one'), null);
 });
 test('VRMA import is self contained, deduplicated and does not admit source traversal', t => {
@@ -53,15 +53,35 @@ test('only actual current-avatar starts enter the five-action history and resolv
   assert.equal(body.recent.length, 5);assert.equal(body.recent.at(-1).key, 'wave_one');
   assert.equal((await body.perform('wave_one')).ok, false);
 });
-test('percentage edits coordinate the enabled peers atomically and retain idle safety', t => {
+test('legacy weights do not override program selection and probability editing is removed', t => {
   const f = fixture(t);
-  const added = f.library.import(path.resolve('src/renderer/assets/motions/greet_sachi.vrma'), {slot:'greet'});
-  f.library.save({type:'motion-probability',key:'wave_one',percent:75});
-  const peers = f.library.catalog().motions.filter(m=>m.slot==='greet');
-  assert.equal(peers.find(m=>m.key==='wave_one').weight,75); assert.equal(peers.find(m=>m.key===added.key).weight,25);
-  assert.equal(peers.reduce((s,m)=>s+m.weight,0),100);
-  f.library.save({type:'motion-probability',key:'wave_one',percent:100});assert.equal(f.library.select(added.key,{exact:true}).key,added.key);
-  assert.throws(()=>f.library.save({type:'motion-probability',key:'idle_one',percent:0}),/至少保留/);
-  const before=JSON.stringify(f.config());assert.throws(()=>f.library.save({type:'motion-probability',key:'wave_one',percent:NaN}),/比例/);assert.equal(JSON.stringify(f.config()),before);
-  assert.throws(()=>f.library.save({type:'motion-update',key:'wave_one',label:'覆盖',expected:{label:'旧名字'}}),/刚被更新/);
+  f.config().motions.library = { overrides: { wave_one: { weight: 0 } } };
+  assert.equal(f.library.select('wave_one').key, 'wave_one');
+  assert.equal(f.library.catalog().motions.find(m => m.key === 'wave_one').weight, 1);
+  assert.throws(() => f.library.save({type:'motion-probability',key:'wave_one',percent:75}), /未知/);
+});
+test('posture and prop constraints apply to automatic selection but manual requests can bridge', t => {
+  const f = fixture(t);
+  f.library.base.push(
+    { key:'sit_wave', slot:'greet', label:'坐着挥手', posture:'sitting', weight:1 },
+    { key:'sit_enter', slot:'greet', label:'坐下', posture:'standing', transition:'sit', autonomous:false, weight:1 },
+    { key:'sit_sequence', slot:'greet', label:'坐下再起身', posture:'standing', postureChanging:true, autonomous:false, weight:1 },
+    { key:'phone', slot:'greet', label:'看手机', posture:'standing', requiresProp:true, weight:1 });
+  assert.equal(f.library.select('sit_wave', {posture:'standing'}), null);
+  assert.equal(f.library.select('sit_wave', {posture:'sitting'}).key, 'sit_wave');
+  assert.equal(f.library.select('sit_enter', {posture:'standing', autonomous:true}), null);
+  assert.equal(f.library.select('sit_sequence', {posture:'standing'}), null);
+  assert.equal(f.library.select('sit_sequence', {posture:'standing',manual:true,allowPostureChange:true}).key, 'sit_sequence');
+  assert.equal(f.library.select('phone', {posture:'standing'}), null);
+  assert.equal(f.library.select('sit_wave', {posture:'standing',manual:true,allowPostureChange:true}).key, 'sit_wave');
+  assert.equal(f.library.select('phone', {posture:'standing',manual:true}).key, 'phone');
+});
+
+test('posture requests distinguish commands, refusals, and the owner describing themselves', () => {
+  const {postureIntent}=require('../src/main/posture-intent');
+  assert.equal(postureIntent('可可，你坐下休息吧'), 'hq_world_sit_enter');
+  assert.equal(postureIntent('我想让你站起来'), 'hq_world_sit_exit');
+  assert.equal(postureIntent('我坐下了'), null);
+  assert.equal(postureIntent('你不要坐下'), null);
+  assert.equal(postureIntent('不用站起来'), null);
 });

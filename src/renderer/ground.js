@@ -177,7 +177,7 @@ function setWorldQuat(node, qWorld) {
  * 两骨 IK：把 end（脚踝）拉到 target。
  * 只动 upper（大腿）和 lower（小腿）的旋转，膝盖往原来的方向弯，所以不会翻腿。
  */
-function solveLeg(upper, lower, foot, target) {
+function solveLeg(upper, lower, foot, target, bendState = null) {
   upper.getWorldPosition(_hip);
   lower.getWorldPosition(_knee);
   foot.getWorldPosition(_ank);
@@ -198,11 +198,19 @@ function solveLeg(upper, lower, foot, target) {
   // 原来的弯曲方向：膝盖相对 hip→ankle 这条线偏出去的部分
   _bend.subVectors(_knee, _hip).normalize();
   _perp.copy(_bend).addScaledVector(_aim, -_bend.dot(_aim));
+  if (bendState?.valid && _perp.lengthSq() < 0.0009) {
+    const stable = bendState.direction.clone().addScaledVector(_aim, -bendState.direction.dot(_aim));
+    if (stable.lengthSq() > 1e-8) { _perp.copy(stable); bendState.fallbacks++; }
+  }
   if (_perp.lengthSq() < 1e-8) {
     _perp.set(0, 0, 1).addScaledVector(_aim, -_aim.z);
     if (_perp.lengthSq() < 1e-8) _perp.set(1, 0, 0).addScaledVector(_aim, -_aim.x);
   }
   _perp.normalize();
+  if (bendState) {
+    if (bendState.valid && _perp.dot(bendState.direction) < 0) { _perp.negate(); bendState.flips++; }
+    bendState.direction.copy(_perp); bendState.valid = true;
+  }
 
   // 余弦定理定膝盖张开角
   const cosA = (L1 * L1 + d * d - L2 * L2) / (2 * L1 * d);
@@ -236,7 +244,7 @@ function solveLeg(upper, lower, foot, target) {
  * footskate cleanup：接触段里把脚钉住，两端权重混合。
  * 直接改写 clip 里大腿/小腿/脚掌的旋转轨道，运行时不增加任何计算。
  */
-export function cleanFootSkate(clip, rig) {
+export function cleanFootSkate(clip, rig, { stabilizeKnee = false } = {}) {
   const S = sampleFeet(clip, rig);
   if (!S) return null;
   const { n, dt, dur, lx, lz, cl, rx, rz, cr } = S;
@@ -258,7 +266,8 @@ export function cleanFootSkate(clip, rig) {
   const pullLimit = PULL_LIMIT_R * U;
 
   let contacts = 0, maxPull = 0;
-  for (const L of legs) {
+  for (const [legIndex,L] of legs.entries()) {
+    if (stabilizeKnee === true || (Array.isArray(stabilizeKnee) && stabilizeKnee.includes(legIndex === 0 ? 'left' : 'right'))) L.bendState = { valid:false, direction:new THREE.Vector3(), fallbacks:0, flips:0 };
     L.tx = new Float32Array(n);
     L.tz = new Float32Array(n);
     L.w = new Float32Array(n);
@@ -277,15 +286,18 @@ export function cleanFootSkate(clip, rig) {
           const ramp = Math.min(Math.max(1, Math.round(BLEND_SEC / dt)), Math.floor(len / 2));
           for (let k = s; k <= e; k++) {
             // 端点权重低、中间满 —— 抬脚落脚处不跳
-            const up = Math.min(k - s, e - k);
-            const w = ramp > 0 ? Math.min(1, (up + 1) / (ramp + 1)) : 1;
+            // A foot planted for the whole clip must stay locked at both ends,
+            // including a loop seam; fade only at real landing/liftoff edges.
+            const enter = s === 0 ? 1 : Math.min(1, (k - s + 1) / (ramp + 1));
+            const leave = e === n - 1 ? 1 : Math.min(1, (e - k + 1) / (ramp + 1));
+            const w = Math.min(enter, leave);
             if (w <= 0) continue;
             let dx = ax - L.x[k], dz = az - L.z[k];
             const dd = Math.hypot(dx, dz);
             if (dd > maxPull) maxPull = dd;
             if (dd > pullLimit) { const t = pullLimit / dd; dx *= t; dz *= t; }
-            L.tx[k] = L.x[k] + dx;
-            L.tz[k] = L.z[k] + dz;
+            L.tx[k] = L.x[k] + dx * w;
+            L.tz[k] = L.z[k] + dz * w;
             L.w[k] = w;
           }
           contacts++;
@@ -309,16 +321,18 @@ export function cleanFootSkate(clip, rig) {
   const q4 = [0, 0, 0, 0];
 
   for (let i = 0; i < n; i++) {
+    // Missing source channels must not inherit the previous sample's IK result.
+    resetRig(rig);
     apply(Math.min(dur, i * dt));
     for (const L of legs) {
       if (L.w[i] > 0.004) {
         L.foot.getWorldPosition(ank);
         target.set(L.tx[i], ank.y, L.tz[i]);      // 只治水平滑动，竖直交给地面线
         L.foot.getWorldQuaternion(qFoot);
-        solveLeg(L.up, L.low, L.foot, target);
+        solveLeg(L.up, L.low, L.foot, target, L.bendState);
         setWorldQuat(L.foot, qFoot);              // 脚掌朝向保持原样，鞋底不歪
         L.foot.updateWorldMatrix(false, true);
-      }
+      } else if (L.bendState) L.bendState.valid = false;
       for (const nd of L.bones) {
         const q = nd.quaternion;
         q4[0] = q.x; q4[1] = q.y; q4[2] = q.z; q4[3] = q.w;
@@ -343,13 +357,13 @@ export function cleanFootSkate(clip, rig) {
     if (at >= 0) clip.tracks[at] = track;
     else clip.tracks.push(track);
   }
-  return { contacts, frames: n, maxPull };
+  return { contacts, frames: n, maxPull, kneeStability:stabilizeKnee ? legs.map(L=>L.bendState ? {fallbacks:L.bendState.fallbacks, flips:L.bendState.flips} : null) : undefined };
 }
 
 /* ═══════════ 对外主入口 ═══════════ */
 
 /** 冻住水平位移 + 竖直对齐统一地面线 + 锁脚；返回 { yShift, ik } */
-export function groundClip(clip, rig, refSole) {
+export function groundClip(clip, rig, refSole, options = {}) {
   const name = `${rig.hipsName}.position`;
   const limit = Y_LIMIT_R * (rig.hipHeight || 1);
 
@@ -379,6 +393,6 @@ export function groundClip(clip, rig, refSole) {
   }
 
   let ik = null;
-  try { ik = cleanFootSkate(clip, rig); } catch (e) { console.warn('锁脚失败', e); }
+  try { ik = cleanFootSkate(clip, rig, options); } catch (e) { console.warn('锁脚失败', e); }
   return { yShift, ik };
 }

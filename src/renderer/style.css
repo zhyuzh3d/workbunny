@@ -22,7 +22,8 @@
   --dock-bottom: calc(var(--task-bottom) + var(--status-h) + 6px);
   /* Renderer sets the 100% canvas width once per layout/scale change. */
   --ui-base-width: 57.14285714vw;
-  --ui-width: min(var(--ui-base-width), calc(100vw - 24px));
+  /* Narrow the visible control envelope to 80%, retaining the 8px side insets. */
+  --ui-width: min(calc((var(--ui-base-width) - 16px) * .8 + 16px), calc(100vw - 24px));
   --ui-gutter: calc((100vw - var(--ui-width)) / 2);
 }
 
@@ -425,7 +426,7 @@ html, body {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: min(calc(var(--ui-width) - 16px), 358px);
+  width: min(calc(var(--ui-width) - 16px), 286.4px);
   padding: 6px;
   border-radius: 19px;
   background: rgba(255, 253, 250, .96);

@@ -9,10 +9,15 @@ APPNAME="workbunny"
 BUNDLE_ID="cn.haminn.workbunny"
 VER=$(/usr/bin/python3 -c "import json;print(json.load(open('package.json'))['version'])")
 IDENTITY="${WORKBUNNY_SIGN_IDENTITY:-workbunny Dev}"
-security find-identity -p codesigning | grep -F "\"$IDENTITY\"" >/dev/null || { echo "缺少稳定签名身份：$IDENTITY。先运行 tools/make-signing-cert.sh；不会退回临时签名。"; exit 1; }
+# Local self-signed identities need not be trusted roots; require the existing key
+# pair, then let codesign and the strict bundle verification validate the result.
+security find-identity -p codesigning | grep -F "$IDENTITY" >/dev/null || { echo "缺少稳定签名身份：$IDENTITY。先运行 tools/make-signing-cert.sh；不会退回临时签名。"; exit 1; }
 DIST="$ROOT/dist"
 APP="$DIST/$APPNAME.app"
 node "$ROOT/tools/copy-release-resources.js" "$APP/Contents/Resources/app" "${1:-}" --check-only
+
+echo "▸ 从标准 SVG 生成品牌资源"
+env -u ELECTRON_RUN_AS_NODE "$ROOT/node_modules/.bin/electron" "$ROOT/tools/make-icons.cjs"
 
 # Ship the matching local TTS engine so downloading weights is sufficient.
 if [ ! -x "$ROOT/bin/asr" ] || [ "$ROOT/native/asr.swift" -nt "$ROOT/bin/asr" ] || [ "$ROOT/native/speaker-features.swift" -nt "$ROOT/bin/asr" ] || [ "$ROOT/native/wake-name.swift" -nt "$ROOT/bin/asr" ]; then
@@ -115,6 +120,7 @@ codesign --force --sign "$IDENTITY" "$APP"
 # 本地构建不该带隔离标记，否则 Gatekeeper 会拦自签名应用
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 codesign --verify --deep --strict "$APP"
+node "$ROOT/tools/verify-bundle.cjs" "$APP"
 
 codesign -dv --verbose=2 "$APP" 2>&1 | grep -E "Authority|Identifier|TeamIdentifier" | sed 's/^/  /'
 codesign -d -r- "$APP" 2>&1 | grep "designated" | sed 's/^/  /'
@@ -122,7 +128,7 @@ codesign -d -r- "$APP" 2>&1 | grep "designated" | sed 's/^/  /'
 # 重新打包后 LaunchServices 还记着旧 bundle，open 会"成功但没启动"。强制重注册。
 echo "▸ 注册到 LaunchServices"
 LSR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-[ -x "$LSR" ] && "$LSR" -f "$APP" 2>/dev/null || true
+[ "${WORKBUNNY_SKIP_REGISTER:-0}" = 1 ] || { [ -x "$LSR" ] && "$LSR" -f "$APP" 2>/dev/null || true; }
 
 echo "▸ 完成：$APP"
 du -sh "$APP"

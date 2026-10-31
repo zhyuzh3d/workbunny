@@ -1,0 +1,25 @@
+/* One SVG master, with transparent eyes; color follows the surrounding surface. */
+.bunny-logo,
+#selfEntryTitle::before {
+  content: "";
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 22px;
+  background-color: var(--bunny-logo-color, #111);
+  -webkit-mask: url("../../res/logo.svg") center / contain no-repeat;
+  mask: url("../../res/logo.svg") center / contain no-repeat;
+  vertical-align: -3px;
+}
+#selfEntryTitle::before { margin-right: 9px; }
+.brand-inverse { --bunny-logo-color: #fff; }
+.brand-titlebar {
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  height: 36px; padding: 0 80px; flex: 0 0 36px;
+  background: #fffdfa; border-bottom: 1px solid rgba(30,24,18,.08);
+  color: #30332f; font: 12px/1.2 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+  -webkit-app-region: drag; user-select: none;
+}
+.brand-titlebar .bunny-logo { width: 14px; height: 20px; }
+.brand-window-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.has-brand-title > .pane, .has-brand-title > .page, .has-brand-title > .self-window { height: calc(100% - 36px); }

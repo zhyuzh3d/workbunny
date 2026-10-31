@@ -4,12 +4,13 @@ import * as THREE from 'three';
 export function createBodyAvoidance(vrm) {
   const h=vrm.humanoid, chest=h?.getNormalizedBoneNode('upperChest')||h?.getNormalizedBoneNode('chest');
   if(!chest)return null;
-  const arms=['left','right'].map(side=>({upper:h.getNormalizedBoneNode(side+'UpperArm'),lower:h.getNormalizedBoneNode(side+'LowerArm'),hand:h.getNormalizedBoneNode(side+'Hand'),rawHand:h.getRawBoneNode(side+'Hand')})).filter(a=>a.upper&&a.lower&&a.hand);
+  const arms=['left','right'].map(side=>({side,upper:h.getNormalizedBoneNode(side+'UpperArm'),lower:h.getNormalizedBoneNode(side+'LowerArm'),hand:h.getNormalizedBoneNode(side+'Hand'),rawHand:h.getRawBoneNode(side+'Hand')})).filter(a=>a.upper&&a.lower&&a.hand);
   const original=new Map();let adjusted=0;
   const p0=new THREE.Vector3(),p1=new THREE.Vector3(),p2=new THREE.Vector3(),local=new THREE.Vector3(),target=new THREE.Vector3();
   const worldQ=new THREE.Quaternion(),parentQ=new THREE.Quaternion(),deltaQ=new THREE.Quaternion(),localQ=new THREE.Quaternion();
   const hip=h.getNormalizedBoneNode('hips');const scale=Math.max(.6,Math.min(1.5,Math.abs(hip?.position.y||1)));
   function update(node){node.updateWorldMatrix(true,false)}
+  function save(a){for(const bone of [a.upper,a.lower,a.hand])if(!original.has(bone))original.set(bone,bone.quaternion.clone())}
   function aim(joint,hand,goal,strength){
     update(joint);update(hand);joint.getWorldPosition(p0);hand.getWorldPosition(p1);
     p1.sub(p0);p2.copy(goal).sub(p0);if(p1.lengthSq()<1e-7||p2.lengthSq()<1e-7)return;
@@ -21,6 +22,23 @@ export function createBodyAvoidance(vrm) {
     restore(){for(const [bone,q] of original)bone.quaternion.copy(q);original.clear()},
     apply(){adjusted=0;update(chest);
       for(const a of arms){
+        // A lowered hand may enter the hip even when its rest pose is clear.
+        // Work in hip coordinates so bending or turning the torso follows it.
+        if(hip){
+          update(hip);update(a.hand);a.hand.getWorldPosition(local);hip.worldToLocal(local);
+          const sign=a.side==='left'?1:-1, x=sign*local.x/scale,y=local.y/scale,z=local.z/scale;
+          const height=THREE.MathUtils.smoothstep(y,-.30,-.22)*(1-THREE.MathUtils.smoothstep(y,.02,.08));
+          const depth=THREE.MathUtils.smoothstep(z,-.19,-.12)*(1-THREE.MathUtils.smoothstep(z,.15,.22));
+          const sameSide=THREE.MathUtils.smoothstep(x,.03,.10);
+          const strength=height*depth*sameSide, minSide=.255*scale;
+          if(strength>.01&&sign*local.x<minSide){
+            target.copy(local);target.x+=sign*(minSide-sign*local.x)*strength;hip.localToWorld(target);
+            save(a);update(a.hand);a.hand.getWorldQuaternion(worldQ);
+            for(let i=0;i<4;i++){aim(a.lower,a.hand,target,.8);aim(a.upper,a.hand,target,.8)}
+            if(a.hand.parent){a.hand.parent.getWorldQuaternion(parentQ);a.hand.quaternion.copy(parentQ.invert().multiply(worldQ))}
+            adjusted++;
+          }
+        }
         update(a.hand);a.hand.getWorldPosition(local);chest.worldToLocal(local);
         // Positive z is the front. Keep hands behind the body untouched.
         const x=Math.abs(local.x/scale),y=local.y/scale,z=local.z/scale;
@@ -33,7 +51,7 @@ export function createBodyAvoidance(vrm) {
         if(strength<.01||local.z>=minFront)continue;
         // Stay near the authored x/y and move the wrist toward the front.
         target.copy(local);target.z+=(minFront-local.z)*strength;chest.localToWorld(target);
-        for(const bone of [a.upper,a.lower,a.hand])original.set(bone,bone.quaternion.clone());
+        save(a);
         update(a.hand);a.hand.getWorldQuaternion(worldQ);
         for(let i=0;i<4;i++){aim(a.lower,a.hand,target,.8);aim(a.upper,a.hand,target,.8)}
         if(a.hand.parent){a.hand.parent.getWorldQuaternion(parentQ);a.hand.quaternion.copy(parentQ.invert().multiply(worldQ))}

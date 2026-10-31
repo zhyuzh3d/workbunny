@@ -26,7 +26,7 @@
 
 `embodiment.js` 以渲染层实际播放回执记录最近五次动作；`motion-library.js` 是分类、语义、启用、权重和个人导入的唯一目录。共享 `motion-core.js` 负责主进程与渲染层的同一加权算法。对话复用已有动作/情绪标签，明确指定动作不会被另一个动作冒充。`window-geometry.js` 保存逻辑画布和物理窗口的偏移，支持顶部越过菜单栏的拖拽效果。
 
-`avatars.js` 合并四个发行角色与用户显式导入的个人库。`asset-library.js` 校验并原子保存个人 VRM。公开模型和动作只来自 `resources-manifest.json`，不会扫描项目旁边的私人素材目录。Three.js 附加模块只保留运行所用的 GLTFLoader 及其 BufferGeometryUtils 依赖；编辑用插件不进入发行源码树。
+`avatars.js` 合并五个发行角色与用户显式导入的个人库。`asset-library.js` 校验并原子保存个人 VRM。公开模型和动作只来自 `resources-manifest.json`，不会扫描项目旁边的私人素材目录。Three.js 附加模块只保留运行所用的 GLTFLoader 及其 BufferGeometryUtils 依赖；编辑用插件不进入发行源码树。
 
 ## 任务与桌面
 

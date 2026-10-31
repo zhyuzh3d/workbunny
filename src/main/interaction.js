@@ -47,16 +47,17 @@ class InteractionAudio {
     if (!voiceProfile) return generate();
     const hash = crypto.createHash('sha256').update(JSON.stringify(['interaction-audio/v2', action, voiceProfile, text])).digest('hex');
     if (this.pending.has(hash)) return this.pending.get(hash);
-    const p = this.get(hash, generate); this.pending.set(hash, p);
+    const p = this.get(hash, generate, voiceProfile); this.pending.set(hash, p);
     try { return await p; } finally { this.pending.delete(hash); }
   }
-  async get(hash, generate) {
+  async get(hash, generate, voiceProfile) {
     const file = path.join(this.dir, hash + '.json');
+    const matches = r => r.engine === voiceProfile.engine && (!voiceProfile.voice || r.voice === voiceProfile.voice);
     try {
       const st = await fs.promises.lstat(file);
       if (st.isFile() && !st.isSymbolicLink() && st.size < 4 * 1024 * 1024) {
         const r = JSON.parse(await fs.promises.readFile(file, 'utf8')), buffer = Buffer.from(r.buffer, 'base64');
-        if (r.version === 2 && r.key === hash) {
+        if (r.version === 2 && r.key === hash && matches(r)) {
           validateWav(buffer);
           const now = new Date(); await fs.promises.utimes(file, now, now).catch(() => {});
           return { buffer, engine: r.engine, voice: r.voice, cached: true, ms: 0, streamed: false };
@@ -64,7 +65,7 @@ class InteractionAudio {
       }
     } catch {}
     const r = await generate();
-    if (!r.degraded && Buffer.isBuffer(r.buffer) && r.buffer.length < 2 * 1024 * 1024) {
+    if (!r.degraded && matches(r) && Buffer.isBuffer(r.buffer) && r.buffer.length < 2 * 1024 * 1024) {
       try {
         validateWav(r.buffer);
         atomicPrivate(file, JSON.stringify({ version: 2, key: hash, buffer: r.buffer.toString('base64'), engine: r.engine, voice: r.voice }));

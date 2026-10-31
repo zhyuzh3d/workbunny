@@ -7,6 +7,7 @@ DESTINATION="${WORKBUNNY_INSTALL_DIR:-$HOME/Applications}"
 DST="$DESTINATION/workbunny.app"
 [[ -d "$SRC" ]] || { echo '先运行 tools/package.sh'; exit 1; }
 codesign --verify --deep --strict "$SRC"
+node "$PWD/tools/verify-bundle.cjs" "$SRC"
 if [[ -f "$DST/Contents/MacOS/workbunny" ]] && lsof -t "$DST/Contents/MacOS/workbunny" >/dev/null 2>&1; then
   echo '请先正常退出 Bunny，再运行安装；不会强制中断资料库写入。'; exit 2
 fi
@@ -20,7 +21,7 @@ node - "$DST/Contents/Resources/app/src/renderer/assets/models" "${WORKBUNNY_DAT
 const fs = require('fs'), path = require('path'), library = require('./src/main/asset-library');
 const [source, home] = process.argv.slice(2); library.setRoot(home);
 if (fs.existsSync(source)) for (const name of fs.readdirSync(source)) {
-  if (/\.vrm$/i.test(name) && !/^AvatarSample_[DEFG]\.vrm$/i.test(name)) library.importModel(path.join(source,name));
+  if (/\.vrm$/i.test(name) && !library.STOCK_MODELS.has(name)) library.importModel(path.join(source,name));
 }
 JS
 BACKUP=""
@@ -36,4 +37,4 @@ LSR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.
 [[ ! -x "$LSR" ]] || "$LSR" -f "$DST"
 echo "已安装：$DST"
 [[ -z "$BACKUP" ]] || echo "旧应用保留：$BACKUP"
-open "$DST"
+[[ "${WORKBUNNY_SKIP_OPEN:-0}" = 1 ]] || open "$DST"

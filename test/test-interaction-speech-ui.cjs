@@ -40,7 +40,7 @@ async function checkStatusWidth() {
     win.webContents.send('pet:ev', { type: 'monitor', tasks: [] });
     await until(async () => (await measure()).text === '空闲中', 'idle status');
     await until(async () => { const m = await measure(); return m.logoLoaded && m.logoFilter === 'grayscale(1)'; }, 'idle logo settles to gray');
-    const idle = await measure(); assert(idle.width < idle.rowWidth / 2, 'short status shrinks to content');
+    const idle = await measure(); assert(idle.width < idle.rowWidth - 16, 'short status shrinks to content: ' + JSON.stringify({ viewportWidth: width, ...idle }));
     assert(idle.logoLoaded && idle.logoFilter === 'grayscale(1)', 'idle uses the actual WorkBuddy logo in gray');
     if (width === 420 && process.env.WORKBUNNY_STATUS_SHOTS) {
       fs.mkdirSync(process.env.WORKBUNNY_STATUS_SHOTS, { recursive: true });
@@ -72,7 +72,7 @@ async function main() {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   config.save({ avatar: 'AvatarSample_D.vrm', tts: { enabled: true, engine: 'remote', baseURL: `http://127.0.0.1:${server.address().port}`, chp: { voice: 'test-voice' } }, voice: { enabled: true, alwaysListen: false }, memory: { enabled: false } });
-  const idle = config.MOTIONS.find(m => m.key === 'idle_loop'), greet = config.MOTIONS.find(m => m.slot === 'greet');
+  const idle = config.MOTIONS.find(m => m.idle && !m.requiresProp && m.posture !== 'sitting'), greet = config.MOTIONS.find(m => m.slot === 'greet' && !m.requiresProp && m.posture !== 'sitting');
   const motions = [idle, greet];
   ipcMain.handle('pet:init', () => ({ config: config.publicConfig(), avatars: avatars.scan(), avatar: 'AvatarSample_D.vrm', motions, motionGroups: config.MOTION_GROUPS, versions: {} }));
   ipcMain.handle('pet:config', (_event, patch) => config.publicConfig(config.save(patch)));

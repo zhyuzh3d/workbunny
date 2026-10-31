@@ -165,18 +165,19 @@ async function qwenTTS(text, q, options) {
 async function prewarm(q) { require('./runtime-capabilities').requireQwen(); if (q?.dir && qwenDownload.qwenReady(q.dir)) await qwenRuntime.prewarm(q.dir); }
 
 /** Stable identity for persistent interaction audio, based on the active engine. */
-async function voiceIdentity(cfg) {
+async function voiceIdentity(cfg, { refresh = false } = {}) {
   const engine = cfg.engine || 'system';
   if (engine === 'doubao') return { engine, service: cfg.doubao?.url, model: cfg.doubao?.model, voice: cfg.doubao?.voice };
-  if (engine === 'http') return { engine, profile: require('./tts-http-profile').identity(cfg.http), voice: cfg.http?.params?.voice };
+  if (engine === 'http') return { engine, profile: require('./tts-http-profile').identity({ profile: cfg.http?.profile, params: cfg.http?.params }), voice: cfg.http?.params?.voice };
   if (engine === 'qwen') return { engine, model: QWEN_FILES.map(f => f.sha256), voice: cfg.qwen?.voice || 'serena' };
   if (engine === 'remote') {
-    const catalog = chp.cached(cfg) || await chp.discover(cfg).catch(() => null);
+    const catalog = refresh ? await chp.discover(cfg, { timeoutMs: 2000 }).catch(() => null) : chp.cached(cfg) || await chp.discover(cfg).catch(() => null);
     if (!catalog) return null; // Let ordinary synthesis handle its system fallback.
     return { engine, service: catalog.endpoint, model: [catalog.model, catalog.file, catalog.version], voice: cfg.chp?.voice || catalog.voices[0].id };
   }
   if (!cfg.voice) return null; // OS default can change without a Bunny setting change.
-  return { engine: 'system', model: 'macos-system', voice: pickSystemVoice(cfg.voice), rate: cfg.rate || 200 };
+  const voice = pickSystemVoice(cfg.voice);
+  return voice ? { engine: 'system', model: 'macos-system', voice, rate: cfg.rate || 200 } : null;
 }
 
 /* ═══════════ 合成入口 ═══════════ */
@@ -191,11 +192,12 @@ async function synthesize(text, cfg, options = {}) {
   if (!cfg || !cfg.enabled) throw new Error('发声已关闭');
 
   const engine = cfg.engine || 'system';
+  const remote = engine === 'remote' ? chp.cached(cfg) : null;
   const hash = crypto
     .createHash('sha1')
     .update([clean, engine, cfg.voice, cfg.rate,
       cfg.qwen && cfg.qwen.voice, cfg.qwen?.modelKind, cfg.qwen && cfg.qwen.dir,
-      cfg.model, cfg.instructions, cfg.seed, cfg.speed, cfg.language, cfg.baseURL, cfg.apiKey, cfg.chp?.voice, require('./tts-http-profile').identity(cfg.http), require('./tts-http-profile').identity(cfg.doubao)].join('\u0001'))
+      cfg.model, cfg.instructions, cfg.seed, cfg.speed, cfg.language, cfg.baseURL, cfg.apiKey, cfg.chp?.voice, JSON.stringify(remote && [remote.endpoint, remote.model, remote.file, remote.version]), require('./tts-http-profile').identity(cfg.http), require('./tts-http-profile').identity(cfg.doubao)].join('\u0001'))
     .digest('hex');
   if (cache.has(hash)) return { ...cache.get(hash), ms: 0, cached: true, streamed: false };
 
@@ -251,7 +253,7 @@ async function synthesize(text, cfg, options = {}) {
 
   if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
   const result = { buffer, ms: Date.now() - t0, cached: false, engine: used,
-    voice: used === 'qwen' ? cfg.qwen?.voice : stats?.chpVoice || stats?.httpVoice, streamed, ...(used === 'qwen' ? { stats } : {}) };
+    voice: used === 'qwen' ? cfg.qwen?.voice || 'serena' : stats?.chpVoice || stats?.httpVoice, streamed, ...(used === 'qwen' ? { stats } : {}) };
   cache.set(hash, result);
   return result;
 }

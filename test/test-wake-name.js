@@ -23,7 +23,7 @@ test('the actual utterance handler rejects unnamed speech before LLM, memory or 
 test('tray text input and visibility labels toggle with actual state; clicking the icon never hides the pet',()=>{
  const source=fs.readFileSync(path.resolve('src/main/index.js'),'utf8');let shown=0,hidden=0,focused=0,interactive=false,visible=true,icon;
  const ctx={config:{load:()=>({buddy:{name:'倩倩'},asr:{},voice:{enabled:true},monitor:{},window:{scale:1}})},
- win:{isVisible:()=>visible,focus:()=>focused++},textInputOpen:false,Menu:{buildFromTemplate:x=>x},avatars:{scan:()=>[]},clampScale:v=>v,SCALES:[1],SCALE_LABELS:{1:'100%'},scopePolicy:{LABELS:{life:'生活',work:'工作',private:'私聊'}},currentScene:()=> 'life',asrStatus:{speech:3,mic:true},
+ win:{isVisible:()=>visible,focus:()=>focused++},textInputOpen:false,Menu:{buildFromTemplate:x=>x},avatarList:()=>[],activeAvatarPack:()=>null,clampScale:v=>v,SCALES:[1],SCALE_LABELS:{1:'100%'},scopePolicy:{LABELS:{life:'生活',work:'工作',private:'私聊'}},currentScene:()=> 'life',asrStatus:{speech:3,mic:true},
  showWindow:()=>{shown++;visible=true;},hideWindow:()=>{hidden++;visible=false;},setInteractive:v=>interactive=v,send:(type,value)=>{assert.equal(type,'ask');ctx.textInputOpen=value.open;},tray:{on:(event,fn)=>{assert.equal(event,'click');icon=fn;}}};
  vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function buildTrayMenu()'),source.indexOf('function rebuildTray()')),ctx);
  const menu=ctx.buildTrayMenu();assert(!menu.some(m=>/按住说话|说句话/.test(m.label||'')));menu.find(m=>m.label==='打开文字输入').click();assert(interactive);assert.equal(focused,1);
