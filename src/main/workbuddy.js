@@ -7,8 +7,12 @@ const path = require('path');
 const net = require('net');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
-let readiness = () => true, disconnected = () => {};
-function configureConnection({ ready, onDisconnect }) { readiness = ready; disconnected = onDisconnect; }
+let readiness = () => true, disconnected = () => {}, recoverConnection = null, connectionVersion = () => 0;
+function configureConnection({ ready, onDisconnect, recover, version }) { readiness = ready; disconnected = onDisconnect; recoverConnection = recover || null; connectionVersion = version || (() => 0); }
+function isTransientConnectionError(error) {
+  return !/身份验证|登录状态已变化|重新登录/.test(error?.message || '') &&
+    (error?.code === 'E_UPSTREAM_TRANSIENT' || /连接|调用超时|ECONN|EPIPE|ETIMEDOUT/.test(String(error?.code || '') + ' ' + String(error?.message || '')));
+}
 
 function openApplication() {
   return new Promise((resolve, reject) => execFile('/usr/bin/open', ['-b', 'com.tencent.workbuddy.mac'], { timeout: 10000 }, error =>
@@ -43,6 +47,7 @@ function request(params, { signal, timeoutMs = 55000 } = {}) {
   return new Promise((resolve, reject) => {
     let d;
     try { d = discovery(); } catch (e) { reject(e); return; }
+    if (!readiness() && !(params.method === 'GET' && params.path === '/v2/enterprises/personal/models')) { reject(new Error('WorkBuddy 授权会话已变化，请重新确认连接')); return; }
     if (signal?.aborted) { reject(new Error('aborted')); return; }
     const clientNonce = crypto.randomBytes(16).toString('base64url');
     const socket = net.connect(d.endpoint);
@@ -53,7 +58,7 @@ function request(params, { signal, timeoutMs = 55000 } = {}) {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
       socket.destroy();
-      if (error && /登录|连接不到|连接已断开|身份验证|尚未就绪/.test(error.message)) disconnected();
+      if (error && (error.code === 'E_AUTH_SESSION' || /连接不到|连接已断开|身份验证|登录状态已变化|账号尚未就绪/.test(error.message))) disconnected();
       error ? reject(error) : resolve(value);
     };
     const abort = () => finish(new Error('aborted'));
@@ -105,6 +110,8 @@ function request(params, { signal, timeoutMs = 55000 } = {}) {
               // Do not surface raw upstream responses that may contain account data.
               const error = new Error(`WorkBuddy 账号接口返回 ${r.status}，请检查模型、账号额度或登录状态。`);
               Object.defineProperty(error, 'responseBody', { value: body });
+              error.statusCode = r.status;
+              error.code = [401, 403].includes(r.status) ? 'E_AUTH_SESSION' : [408, 429, 500, 502, 503, 504].includes(r.status) ? 'E_UPSTREAM_TRANSIENT' : 'E_UPSTREAM';
               if (require('./context-budget').isContextError(r.status, body)) error.code = 'E_CONTEXT_WINDOW';
               throw error;
             }
@@ -280,6 +287,29 @@ async function chatWithTransport(opts, transport) {
   return { ...parsed, text: parsed.clean.trim(), raw, model: usedModel, usage, provider: 'workbuddy' };
 }
 
-async function chat(opts) { return chatWithTransport(opts, request); }
+async function chat(opts) {
+  const deadline = Date.now() + (opts.timeoutMs || 55000);
+  const version = connectionVersion();
+  try { return await chatWithTransport(opts, request); }
+  catch (error) {
+    // Retry inference only; no GUI action, task or message is replayed.
+    if (!recoverConnection || opts.signal?.aborted || !isTransientConnectionError(error) || deadline - Date.now() < 1500) throw error;
+    const status = await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (failure, value) => {
+        if (settled) return; settled = true; clearTimeout(timer); opts.signal?.removeEventListener('abort', abort);
+        failure ? reject(failure) : resolve(value);
+      };
+      const abort = () => finish(Object.assign(new Error('aborted'), { code: 'ABORT_ERR' }));
+      const timer = setTimeout(() => finish(Object.assign(new Error('WorkBuddy 重新连接超时，任务已保留'), { code: 'E_CONNECTION_TIMEOUT' })), Math.max(1, deadline - Date.now()));
+      opts.signal?.addEventListener('abort', abort, { once: true });
+      if (opts.signal?.aborted) { abort(); return; }
+      Promise.resolve().then(recoverConnection).then(value => finish(null, value), failure => finish(failure));
+    });
+    if (version !== connectionVersion()) throw Object.assign(new Error('WorkBuddy 授权会话已变化，未向新会话重放原请求'), { code: 'E_AUTH_SESSION' });
+    if (!status?.ready || opts.signal?.aborted || deadline <= Date.now()) throw error;
+    return chatWithTransport({ ...opts, timeoutMs: deadline - Date.now() }, request);
+  }
+}
 
-module.exports = { configureConnection, chat, request, discovery, chatPayload, parseChatBody, openApplication, sanitizeUsage, chatWithTransport };
+module.exports = { configureConnection, chat, request, discovery, chatPayload, parseChatBody, openApplication, sanitizeUsage, chatWithTransport, isTransientConnectionError };

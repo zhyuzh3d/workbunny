@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { createDialogueOverlay } from './dialogue-overlay.mjs';
+import { modelContextHit } from './model-context-hit.mjs';
+import { dialogueTopForHead } from './dialogue-placement.mjs';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip, VRMLookAtQuaternionProxy } from '@pixiv/three-vrm-animation';
@@ -259,6 +262,16 @@ function panelInsetPx() {
  * 直接投影模型竖轴上的一段，量出来的是真实比例。 */
 const _pa = new THREE.Vector3();
 const _pb = new THREE.Vector3();
+let dialogueRestTop = null;
+function updateDialoguePlacement() {
+  if (!dialogueRestTop) return;
+  camera.updateMatrixWorld();
+  const p = new THREE.Vector3(dialogueRestTop.x, dialogueRestTop.y, dialogueRestTop.z).project(camera);
+  const headY = (-p.y * .5 + .5) * stageViewport.height + stageViewport.offsetY;
+  const top = dialogueTopForHead(headY, innerHeight, canvasScaleFactor());
+  document.documentElement.style.setProperty('--dialogue-top', `${top}px`);
+  dispatchEvent(new Event('dialogue-layout'));
+}
 function pxPerWorldY() {
   _pa.set(0, 0, 0).project(camera);
   _pb.set(0, 1, 0).project(camera);
@@ -275,6 +288,7 @@ function fitCamera(obj) {
   box.min.y -= obj.position.y; box.max.y -= obj.position.y;
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
+  if (dialogueRestTop?.root !== obj) dialogueRestTop = { root: obj, x: center.x, y: box.max.y, z: center.z };
   const fovR = (camera.fov * Math.PI) / 180;
   const bust = viewScale <= 0.51;
 
@@ -306,6 +320,7 @@ function fitCamera(obj) {
   camera.aspect = stageViewport.width / stageViewport.height;
   camera.updateProjectionMatrix();
   fitInfo = { dist, centerY: aimY, visibleH, modelH: size.y, bust };
+  updateDialoguePlacement();
   // 半身的时候脚在画面外，影子留在窗口下沿会像个浮空的黑块 —— 直接收掉
   groundEl.style.opacity = bust ? '0' : '1';
 }
@@ -325,6 +340,7 @@ function onResize() {
     else if (dataAvatar) fitDataAvatar();
   }
   Object.assign(renderer.domElement.style, { position: 'absolute', top: stageViewport.offsetY + 'px', width: w + 'px', height: h + 'px' });
+  updateDialoguePlacement();
 }
 addEventListener('resize', onResize);
 
@@ -460,6 +476,10 @@ function setExpr(name, v) {
   if (!em) return;
   try { em.setValue(name, v); } catch {}
 }
+function closeMouth() {
+  talkLevel = 0;
+  setExpr('aa', 0);
+}
 const EMO_LIST = ['happy', 'sad', 'angry', 'relaxed', 'surprised'];
 function clearEmo(except) {
   for (const n of EMO_LIST) if (n !== except) setExpr(n, 0);
@@ -496,7 +516,7 @@ function ensureAudio() {
   analyserData = new Uint8Array(analyser.fftSize);
   pcmPlayer = createPCMPlayer({ context: audioCtx, destination: analyser,
     onStart: () => { markReplyStarted(); pet.audioStarted(); },
-    onDone: id => { talkLevel = 0; pet.audioDone(true, id); },
+    onDone: id => { closeMouth(); pet.audioDone(true, id); },
     onUnderrun: () => pet.log('[tts] 流式播放缓冲不足'),
   });
   return audioCtx;
@@ -525,7 +545,7 @@ async function playWav(u8, id) {
   src.onended = () => {
     if (currentSource === src) {
       currentSource = null;
-      talkLevel = 0;
+      closeMouth();
       pet.audioDone(true, id);
     }
   };
@@ -541,7 +561,7 @@ function stopAudio(keepQuiet) {
     try { currentSource.onended = null; currentSource.stop(); } catch {}
     currentSource = null;
   }
-  talkLevel = 0;
+  closeMouth();
   if (!keepQuiet) pet.audioDone(false, activeAudioId);
 }
 
@@ -656,12 +676,14 @@ function fitDataAvatar() {
   if (!dataAvatar) return;
   const box = dataAvatar.restBounds || (dataAvatar.restBounds = new THREE.Box3().setFromObject(dataAvatar.visualRoot || dataAvatar.root));
   const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+  dialogueRestTop = { root: dataAvatar.root, x: center.x, y: box.max.y, z: center.z };
   const margin = (dataAvatar.visualRoot ? 1.65 : 1.4) / .70;
   const visibleH = Math.max(.1, size.y * margin, size.x * margin / Math.max(.1, camera.aspect));
   const dist = visibleH / (2 * Math.tan(camera.fov * Math.PI / 360));
   const bottomInset = Math.min(stageViewport.height * .03, 8) + 30, aimY = box.min.y + visibleH * (.5 - bottomInset / stageViewport.height);
   camera.position.set(center.x, aimY, center.z + dist); camera.lookAt(center.x, aimY, center.z); camera.updateProjectionMatrix();
   fitInfo = { dist, centerX: center.x, centerY: aimY, centerZ: center.z, visibleH, modelH: size.y, bust: false };
+  updateDialoguePlacement();
   groundEl.style.opacity = '0';
 }
 function clearDataAvatar() {
@@ -893,9 +915,9 @@ let lastHit = null;
 let interactiveState = false;
 function updateHit(e) {
   const overUi = !!(e.target && e.target.closest &&
-    e.target.closest('#ear, #dock, #bubble, #settings, #motions, #fab, #rec, #activity, button, input, textarea'));
+    e.target.closest('#dialogueOverlay, #ear, #dock, #bubble, #settings, #motions, #fab, #rec, #activity, button, input, textarea'));
   let inside = dragging || overUi;
-  if (!inside) {
+  if (!inside && cfg?.ui?.avatarHidden !== true) {
     const r = lastHit;
     if (r) inside = e.clientX >= r.x0 && e.clientX <= r.x1 && e.clientY >= r.y0 && e.clientY <= r.y1;
   }
@@ -909,10 +931,20 @@ function updateHit(e) {
 let dragging = false;
 let dragMoved = false;
 let downAt = null, dragPoint = null, dragFrame = 0;
+const dialogueAvatarHits = new WeakMap();
+function avatarThroughDialogue(event) {
+  if (cfg?.ui?.avatarHidden === true || !event.target.closest('#dialogueOverlay')) return false;
+  if (!dialogueAvatarHits.has(event)) dialogueAvatarHits.set(event,
+    modelContextHit(dataAvatar?.root || vrm?.scene, renderer, scene, camera, stageViewport, event.clientX, event.clientY));
+  return dialogueAvatarHits.get(event);
+}
 
-stage.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0) return;
-  stage.setPointerCapture(e.pointerId);
+document.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || e.target.closest('#statusRow, #dock, #bubble, #activity, button, input')) return;
+  const overDialogue = !!e.target.closest('#dialogueOverlay');
+  if (overDialogue && !avatarThroughDialogue(e)) return;
+  if (overDialogue) { e.preventDefault(); e.target.setPointerCapture?.(e.pointerId); }
+  if (e.target === stage || stage.contains(e.target)) stage.setPointerCapture(e.pointerId);
   dragging = true;
   dragMoved = false;
   downAt = { x: e.screenX, y: e.screenY };
@@ -955,7 +987,8 @@ stage.addEventListener('mouseleave', () => {
 /* ═══════════ 气泡 ═══════════ */
 const bubbleController = createBubbleController(document.getElementById('bubble'), document.getElementById('bubbleText'));
 
-function showBubble(text, holdMs) {
+function showBubble(text, holdMs, notice = false) {
+  document.getElementById('bubble').classList.toggle('notice', notice);
   bubbleController.show(text, holdMs);
 }
 
@@ -1126,6 +1159,8 @@ function paintLive(text) {
 function openDock() {
   hideBubble();
   dockMode = 'open';
+  document.body.classList.add('dialogue-input-open');
+  dispatchEvent(new Event('dialogue-layout'));
   pet.inputState?.(true);
   dock.classList.remove('hidden');
   hint.classList.add('hidden');
@@ -1141,6 +1176,8 @@ function closeDock() {
   pet.composing?.(false);
   if (document.activeElement === input) input.blur();
   dockMode = 'mini';
+  document.body.classList.remove('dialogue-input-open');
+  dispatchEvent(new Event('dialogue-layout'));
   pet.inputState?.(false);
   dock.classList.add('hidden');
 }
@@ -1212,7 +1249,7 @@ async function sendText() {
   paintEar();
   showBubble(v, 3200);
   const result = await pet.say(v);
-  if (result && !result.ok) { if (!input.value) input.value = v; showBubble(result.error || '这句话没有发送成功。'); }
+  if (result && !result.ok) { if (!input.value) input.value = v; showBubble(result.error || '这句话没有发送成功。', 7000, true); }
 }
 
 document.getElementById('sendBtn').addEventListener('click', sendText);
@@ -1224,7 +1261,21 @@ input.addEventListener('keydown', (e) => {
 /* 点击角色也能立即打断，不必等待语音识别。 */
 const stageEl = document.getElementById('stage');
 let lastInterruptedAt = -Infinity;
-stageEl.addEventListener('pointerdown', () => {
+document.addEventListener('contextmenu', event => {
+  const overlay = event.target.closest('#dialogueOverlay');
+  if (overlay && !overlay.hidden) {
+    event.preventDefault(); pet.contextMenu?.({ x: event.clientX, y: event.clientY });
+    return;
+  }
+  if (cfg?.ui?.avatarHidden === true) return;
+  if (event.target.closest('#statusRow, #dock, #bubble, #activity, button, input, textarea')) return;
+  if (modelContextHit(dataAvatar?.root || vrm?.scene, renderer, scene, camera, stageViewport, event.clientX, event.clientY)) {
+    event.preventDefault(); pet.contextMenu?.({ x: event.clientX, y: event.clientY });
+  }
+});
+document.addEventListener('pointerdown', event => {
+  if (event.button !== 0 || event.target.closest('#statusRow, #dock, #bubble, #activity, button, input') ||
+      (event.target.closest('#dialogueOverlay') && !avatarThroughDialogue(event))) return;
   if (!speakingNow && !thinkingNow) return;
   lastInterruptedAt = performance.now();
   pet.stopSpeak();
@@ -1417,7 +1468,7 @@ async function switchAvatar(k, { persist = true } = {}) {
   for (const b of btns) b.disabled = false;
   if (!ok) {
     if (revision === avatarSwitchRevision && previousKey && previousKey !== k) void pet.config({ avatar: previousKey }).catch(() => {});
-    showBubble('这个形象没加载起来。', 2200); paintAvatars(); return;
+    showBubble('这个形象没加载起来。', 2200, true); paintAvatars(); return;
   }
   if (avatarKey !== k || loading) return;
   paintAvatars();
@@ -1511,10 +1562,10 @@ function frame() {
       const target = Math.min(1, Math.pow(gated * 9.5, 0.85));
       talkLevel += (target - talkLevel) * Math.min(1, dt * (target > talkLevel ? 30 : 14));
       setExpr('aa', Math.min(1, talkLevel * 1.15));
-    } else if (talkLevel > 0.001) {
-      talkLevel *= Math.max(0, 1 - dt * 12);
-      if (talkLevel < 0.01) { talkLevel = 0; setExpr('aa', 0); }
-      else setExpr('aa', talkLevel);
+    } else {
+      // Audio callbacks can end between frames, and a motion can also write
+      // expression weights. Always clear the actual mouth expression at rest.
+      closeMouth();
     }
 
     // 表情淡出
@@ -1618,6 +1669,7 @@ function wire() {
         showBubble(ev.text);
         break;
       case 'chat':
+        document.getElementById('bubble').classList.remove('notice');
         if (ev.role === 'user') { clearWebSources(); noteMaster(); showBubble(ev.text, 3000); }
         else if (ev.role === 'assistant') bubbleController.finish(ev.text, 9000);
         break;
@@ -1625,6 +1677,7 @@ function wire() {
         paintRecallButton(ev.entries);
         break;
       case 'delta':
+        document.getElementById('bubble').classList.remove('notice');
         clearWebSources();
         bubbleController.appendDelta(ev.text);
         break;
@@ -1733,6 +1786,10 @@ function wire() {
       case 'desktop':
         paintDesktopActivity(ev);
         break;
+      case 'agent':
+        lastAgentEvent=ev;
+        paintActivity(lastWorkSnap || {tasks:[]});
+        break;
       case 'toast':
         paintActivityText(ev.text);
         break;
@@ -1771,10 +1828,10 @@ function wire() {
         paintPerm(ev);
         break;
       case 'asrError':
-        showBubble(ev.message, 7000);
+        showBubble(ev.message, 7000, true);
         break;
       case 'ttsError':
-        showBubble('嗓子哑了：' + ev.message, 6000);
+        showBubble('嗓子哑了：' + ev.message, 6000, true);
         break;
       case 'ask':
         if (ev.open === false) closeDock();
@@ -1792,6 +1849,7 @@ function wire() {
 let activityHideTimer = null;
 let lastWorkSnap = null;
 let lastDesktopEvent = null;
+let lastAgentEvent = null;
 let lastActivityAt = 0;
 let desktopRecentKey = '';
 let desktopRecentUntil = 0;
@@ -1849,6 +1907,11 @@ function activityLines(snap) {
     const recentTerminal = ['paused', 'stopped', 'accepted', 'failed'].includes(status) && Date.now() < desktopRecentUntil;
     const key = `desktop#${desktopTask.id || ''}#${status}`;
     if (text && !actSeen.has(key) && (active || (recentTerminal && running.length === 0))) return [{ key, text: characterText(text, cfg) }];
+  }
+  for(const task of lastAgentEvent?.tasks||[]){
+    const key='agent#'+task.id;if(actSeen.has(key)||['completed','stopped','expired'].includes(task.status))continue;
+    const lead=task.status==='needs_attention'?'需要核对 · ':task.status==='paused'?'已暂停 · ':task.queuedEvents?'有待处理事项 · ':'正在跟进 · ';
+    out.push({key,text:lead+task.goal});
   }
   running.forEach((t, i) => out.push({ key: actKey(t), text: actNode(t, i, running.length) }));
   for (const t of tasks) {
@@ -2033,9 +2096,11 @@ setInterval(() => {
 (function boot() {
   const run = async () => {
     const init = await pet.init();
+    if(init?.agent)lastAgentEvent=init.agent;
     if (init?.desktop) paintDesktopActivity(init.desktop);
     paintRecallButton(init?.currentRecall);
     cfg = init.config;
+    window.__dialogueOverlay = createDialogueOverlay(pet, cfg);
     if (init.viewport) { viewportManaged = true; stageViewport = init.viewport; onResize(); }
     const ver = document.getElementById('ver');
     if (ver) ver.textContent = 'v' + ((init.versions && init.versions.app) || '');
@@ -2071,7 +2136,7 @@ setInterval(() => {
 
 window.__pet = () => ({
   vrm: !!vrm, dataAvatar: !!dataAvatar, palette: dataAvatar?.paletteId || null, loading, mixer: !!mixer, clips: clips.size, currentMotion, bodyPosture, transition: activeTransition?.to || null, phase, speakingNow,
-  talkLevel: +talkLevel.toFixed(3), avatarKey, avatarDigest: dataAvatarDigest,
+  talkLevel: +talkLevel.toFixed(3), mouth: vrm?.expressionManager?.getValue('aa') ?? null, avatarKey, avatarDigest: dataAvatarDigest,
   audio: !!currentSource, emo: emoTimer > 0,
   hit: lastHit, dockOpen: dockMode === 'open',
   hiddenMeshes: [...new Set(hiddenAvatarMeshes)],

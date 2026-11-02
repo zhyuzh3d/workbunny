@@ -1,14 +1,14 @@
 {
   "name": "workbunny",
-  "productName": "workbunny",
-  "version": "0.14.11",
-  "description": "workbunny · 有长期记忆的桌面情感伙伴与工作小秘书",
+  "productName": "WorkBunny",
+  "version": "0.16.1",
+  "description": "WorkBunny · 有长期记忆的桌面情感伙伴与工作小秘书",
   "main": "src/main/entry.js",
   "private": true,
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "test": "node --test --test-concurrency=1 test/*.js test/*.mjs"
+    "test": "node tools/test.cjs"
   },
   "devDependencies": {
     "electron": "44.10.0"

@@ -13,7 +13,7 @@ const MESSAGE_KIND_LABEL = { image: '图片', voice: '语音', file: '文件', o
 
 // Match the end of the old visible conversation, rather than treating every
 // changed pixel, unread badge or newly revealed old bubble as a new message.
-function incomingDelta(previous, current, baselineReady = false) {
+function incomingDelta(previous, current, baselineReady = false, previousDirections = null) {
   if (!baselineReady) return { messages: [], baseline: true };
   if (!previous.length) return { messages: current.filter(m => m.direction === 'incoming'), baseline: false };
   for (let length = Math.min(previous.length, current.length); length > 0; length--) {
@@ -24,8 +24,21 @@ function incomingDelta(previous, current, baselineReady = false) {
     if (ends.length > 1) return { messages: [], uncertain: true };
     if (ends.length === 1) return { messages: current.slice(ends[0]).filter(m => m.direction === 'incoming') };
   }
+  // Only fall back to the last incoming bubble when every later old bubble is
+  // known to be outgoing. Otherwise an older anchor could replay old incoming
+  // messages. Require a unique occurrence on both screens.
+  if (Array.isArray(previousDirections) && previousDirections.length === previous.length &&
+      previousDirections.every(direction => ['incoming', 'outgoing', 'system'].includes(direction))) {
+    const anchor = previousDirections.lastIndexOf('incoming');
+    if (anchor >= 0 && anchor < previous.length - 1 && previousDirections.slice(anchor + 1).every(direction => direction === 'outgoing') &&
+        previous.filter(key => key === previous[anchor]).length === 1) {
+      const positions = current.flatMap((message, index) => message.direction === 'incoming' && message.key === previous[anchor] ? [index] : []);
+      if (positions.length === 1) return { messages: current.slice(positions[0] + 1).filter(message => message.direction === 'incoming') };
+    }
+  }
   return { messages: [], uncertain: true };
 }
+const normalizeVisible = text => String(text || '').normalize('NFC').replace(/\s+/gu, '');
 
 class WatchService {
   constructor({ journal, sensor, inspect, execute, propose, report, epoch, ready, getScene = () => 'life', canOperate = async () => true, emit = () => {}, clock = Date.now, autoSchedule = true }) {
@@ -33,8 +46,8 @@ class WatchService {
     this.items = new Map(); this.controllers = new Map(); this.runTokens = new Map();
     this.timer = null; this.checking = false; this.closed = false; this.restoreRevision = 0;
   }
-  list() { return [...this.items.values()].filter(w => canReadScope(this.getScene(), w)).map(w => ({ ...w, baseline: undefined, sources: undefined, privacyEpoch: undefined,
-    pendingSend: undefined, pendingEventIds: undefined, pendingReports: undefined })); }
+  list() { return [...this.items.values()].filter(w => canReadScope(this.getScene(), w)).map(w => ({ ...w, baseline: undefined, baselineDirections: undefined, sources: undefined, privacyEpoch: undefined,
+    pendingSend: undefined, pendingEventIds: undefined, pendingReports: undefined, pendingObservations: undefined, observationFailure: undefined })); }
   publish() { this.emit(this.list()); }
   owns(w, signal, token) {
     return !this.closed && !signal?.aborted && this.items.get(w.id) === w &&
@@ -48,6 +61,18 @@ class WatchService {
     if (Number.isInteger(saved?.visibilityFloor)) w.visibilityFloor = Math.max(w.visibilityFloor || 0, saved.visibilityFloor);
     if (!guard()) return false;
     this.publish(); return true;
+  }
+  async materializeObservations(w, guard) {
+    const observations = Array.isArray(w.pendingObservations) ? w.pendingObservations : [];
+    if (!observations.length) return true;
+    for (const event of observations) {
+      if (!guard()) return false;
+      if (!await this.journal.getEvent(event.id)) await this.journal.saveEvent(w, event);
+    }
+    if (!guard()) return false;
+    w.pendingEventIds = [...new Set([...(w.pendingEventIds || []), ...observations.map(event => event.id)])];
+    w.pendingObservations = [];
+    return this.save(w, guard);
   }
   async restore() {
     const revision = ++this.restoreRevision, epoch = this.epoch();
@@ -68,7 +93,7 @@ class WatchService {
       catch { skipped.push(listed.id); continue; }
       if (!value) { skipped.push(listed.id); continue; }
       if (this.closed || revision !== this.restoreRevision || epoch !== this.epoch() || !this.ready()) return;
-      const w = { ...value, privacyEpoch: epoch, baseline: [], baselineReady: false, bound: false,
+      const w = { ...value, privacyEpoch: epoch, baseline: [], baselineDirections: [], baselineReady: false, bound: false,
         pendingEventIds: Array.isArray(value.pendingEventIds) ? [...value.pendingEventIds] : [],
         pendingReports: Array.isArray(value.pendingReports) ? [...value.pendingReports] : [],
         status: value.userInterventionAt && ['stopped', 'paused'].includes(value.status) ? value.status
@@ -80,6 +105,7 @@ class WatchService {
           : ['stopped', 'expired'].includes(value.status) ? value.note : value.note || '应用已重启；恢复后重新建立基线，不自动回复离线期间的消息。' };
       this.items.set(w.id, w); this.runTokens.set(w.id, 0);
       try {
+        if (!await this.materializeObservations(w, () => this.owns(w, undefined, 0) && revision === this.restoreRevision)) return;
         if (w.pendingSend && !w.pendingSendReported && !w.userInterventionAt) {
           const event = await this.journal.getEvent(w.pendingSend);
           if (!this.owns(w, undefined, 0) || revision !== this.restoreRevision) return;
@@ -163,7 +189,7 @@ class WatchService {
       : action === 'stop' ? '已停止关注' : action === 'pause' ? '已暂停；不会查看或回复新消息' : '重新建立当前基线；不补发历史消息';
     w.userInterventionAt = this.clock();
     if (action === 'resume') delete w.userInterventionAt;
-    w.baseline = []; w.baselineReady = false; w.bound = false; w.nextCheckAt = this.clock();
+    w.baseline = []; w.baselineDirections = []; w.baselineReady = false; w.bound = false; w.nextCheckAt = this.clock();
     await this.sensor.forget(w).catch(() => {});
     if (!this.owns(w, undefined, controlToken)) return { ok: false, error: '持续关注状态已变化' };
     await this.save(w, () => this.owns(w, undefined, controlToken));
@@ -188,8 +214,8 @@ class WatchService {
     const token = (this.runTokens.get(w.id) || 0) + 1; this.runTokens.set(w.id, token);
     const controller = new AbortController(); this.controllers.set(w.id, controller); const signal = controller.signal;
     const owned = () => this.owns(w, signal, token), valid = () => this.current(w, signal, token);
-    let baselineBefore = [...(w.baseline || [])], baselineReadyBefore = !!w.baselineReady;
-    let baselineSaved = false, pendingSendEvent = null, activeEvent = null;
+    let baselineBefore = [...(w.baseline || [])], directionsBefore = Array.isArray(w.baselineDirections) ? [...w.baselineDirections] : null, baselineReadyBefore = !!w.baselineReady;
+    let baselineSaved = false, pendingSendEvent = null, activeEvent = null, observing = false;
     try {
       if (!valid()) return;
       if (w.pendingSend) {
@@ -200,7 +226,8 @@ class WatchService {
         if (event) await this.reportEvent(w, event, event.reportText || `${w.recipient} 的自动回复结果不确定，已暂停且不会重发，请先核对微信。`, signal, token);
         return;
       }
-      for (const eventId of [...(w.pendingReports || [])]) {
+      if (!await this.materializeObservations(w, valid) || !valid()) return;
+      for (const eventId of [...new Set([...(w.pendingReports || []), ...(w.pendingEventIds || [])])]) {
         if (!valid()) return;
         const event = await this.journal.getEvent(eventId);
         if (!valid()) return;
@@ -211,6 +238,12 @@ class WatchService {
           if (!valid()) return;
           continue;
         }
+        if (['send_pending', 'send_unknown'].includes(event.phase)) {
+          w.pendingSend = event.id; w.status = 'paused'; w.note = '自动回复结果不确定，已暂停且不会重发';
+          await this.save(w, owned);
+          if (owned()) await this.reportEvent(w, event, event.reportText || `${w.recipient} 的自动回复结果不确定，请先核对微信。`, signal, token);
+          return;
+        }
         const text = event.reportText || `${w.recipient} 有一条新消息；上次汇报未完成，请核对微信。`;
         await this.reportEvent(w, event, text, signal, token);
         if (!valid()) return;
@@ -218,6 +251,7 @@ class WatchService {
       if (w.expiresAt !== undefined && this.clock() >= w.expiresAt) {
         w.status = 'expired'; w.note = '已达到交办时长'; await this.save(w, owned); return;
       }
+      observing = 'sample';
       if (!w.bound) {
         const mayOperate = await this.canOperate();
         if (!valid()) return;
@@ -230,11 +264,16 @@ class WatchService {
       }
       const frame = await this.sensor.sample(w, { reset: !w.baselineReady, signal });
       if (!valid()) return;
+      observing = false;
+      if (w.observationFailure && w.observationFailure.stage !== 'inspect') {
+        delete w.observationFailure;
+        if (!await this.save(w, owned) || !valid()) return;
+      }
       w.lastCheckedAt = this.clock();
       if (frame.unstable) { w.status = 'active'; w.note = '画面仍在变化，稍后再检查'; this.publish(); return; }
       if (!frame.changed && !frame.baseline && !frame.geometryChanged && !frame.windowChanged) { w.status = 'active'; w.quietChecks = (w.quietChecks || 0) + 1; w.note = '画面未变；未调用识别或模型'; this.publish(); return; }
       if (frame.windowChanged || frame.geometryChanged) {
-        w.baseline = []; w.baselineReady = false;
+        w.baseline = []; w.baselineDirections = []; w.baselineReady = false;
         if (frame.windowChanged) { w.bound = false; w.status = 'waiting'; w.note = '目标窗口改变，重新绑定会话并建立基线'; }
         else { w.status = 'active'; w.note = '窗口布局改变，重新建立基线；本轮不判断新消息'; }
         await this.save(w, owned);
@@ -245,25 +284,32 @@ class WatchService {
       }
       w.note = w.baselineReady ? '画面发生变化，正在核对新消息' : '正在建立当前会话基线';
       w.visionChecks = (w.visionChecks || 0) + 1; this.publish();
+      observing = 'inspect';
       const view = await this.inspect(w, frame, signal);
       if (!valid()) return;
+      observing = false;
+      if (w.observationFailure) {
+        delete w.observationFailure;
+        if (!await this.save(w, owned) || !valid()) return;
+      }
       if (!view.headerMatched) {
         if (!valid()) return;
         await this.sensor.commit(w); // Sidebar changes are now consumed, not polled through the LLM again.
         if (!valid()) return;
         const mayOpenRecipient = view.recipientUnread ? await this.canOperate() : false;
         if (!valid()) return;
-        if (view.recipientUnread && mayOpenRecipient) { w.bound = false; w.note = '指定会话出现未读提示，等待打开核对'; }
+        if (view.recipientUnread) { w.bound = false; w.note = mayOpenRecipient ? '指定会话出现未读提示，等待打开核对' : '指定会话有未读消息，等你停止输入后打开核对'; }
         else { w.note = '观察会话列表；指定会话出现可见未读提示时再核对'; }
         w.status = 'active'; await this.save(w, owned); return;
       }
       const messages = [];
       for (const m of view.messages) {
         const kind = ['text', 'image', 'voice', 'file', 'other'].includes(m.kind) ? m.kind : 'text';
-        messages.push({ ...m, kind, key: this.journal.eventId(w.id, JSON.stringify([m.direction, kind, m.text, m.time || ''])) });
+        messages.push({ ...m, kind, key: this.journal.eventId(w.id, JSON.stringify([m.direction, kind, normalizeVisible(m.text), normalizeVisible(m.time)])) });
       }
-      const delta = incomingDelta(w.baseline || [], messages, !!w.baselineReady);
-      w.baseline = messages.map(m => m.key).slice(-16); w.baselineReady = true;
+      const delta = incomingDelta(w.baseline || [], messages, !!w.baselineReady, w.baselineDirections);
+      w.baseline = messages.map(m => m.key).slice(-16);
+      w.baselineDirections = messages.map(m => m.direction).slice(-16); w.baselineReady = true;
       w.status = 'active'; w.note = delta.baseline ? '已建立基线，只处理此后出现的新消息' : '正在关注新消息';
       if (delta.uncertain) {
         const identityString = JSON.stringify(['uncertain', w.baseline]);
@@ -288,32 +334,21 @@ class WatchService {
         if (!valid()) return;
         return;
       }
-      for (const m of delta.messages) {
-        if (!valid()) return;
-        const identityString = JSON.stringify(['incoming-message', m.key]);
-        const event = { id: this.journal.eventId(w.id, identityString), identityString, phase: 'observed',
-          message: m.text, messageTime: m.time || null, at: this.clock() };
-        let prior = await this.journal.getEvent(event.id);
-        if (!valid()) return;
-        if (prior) {
-          if (prior.reportStatus === 'pending' && prior.reportText) {
-            await this.reportEvent(w, { ...prior, identityString }, prior.reportText, signal, token);
-            if (!valid()) return;
-          } else if (['send_pending', 'send_unknown'].includes(prior.phase)) {
-            w.pendingSend = event.id; w.status = 'paused'; w.note = '已发现发送意图记录；结果不确定，暂停且不会重发';
-            await this.save(w, owned);
-            if (!owned()) return;
-            await this.reportEvent(w, prior, prior.reportText || `${w.recipient} 的自动回复结果不确定，已暂停且不会重发，请先核对微信。`, signal, token);
-            return;
-          }
-          continue;
-        }
-        activeEvent = event;
-        w.pendingEventIds = [...new Set([...(w.pendingEventIds || []), event.id])];
+      const batch = delta.messages.map(m => {
+        const seq = (w.observationSequence || 0) + 1; w.observationSequence = seq;
+        const identityString = JSON.stringify(['incoming-message-v2', seq, m.key]);
+        return { message: m, event: { id: this.journal.eventId(w.id, identityString), identityString, phase: 'observed',
+          message: m.text, messageTime: m.time || null, at: this.clock() } };
+      });
+      if (batch.length) {
+        w.pendingObservations = batch.map(item => item.event);
         if (!await this.save(w, owned) || !valid()) return;
         baselineSaved = true;
-        await this.journal.saveEvent(w, event);
+        if (!await this.materializeObservations(w, valid) || !valid()) return;
+      }
+      for (const { message: m, event } of batch) {
         if (!valid()) return;
+        activeEvent = event;
         w.eventCount++; w.lastEventAt = this.clock();
         if (m.kind !== 'text') {
           await this.reportEvent(w, event, `${w.recipient} 发来一条${MESSAGE_KIND_LABEL[m.kind] || '非文本'}消息；没有自动回复，请查看微信。`, signal, token);
@@ -411,7 +446,7 @@ class WatchService {
       if (!valid()) return;
     } catch (error) {
       if (owned() && w.status !== 'expired') {
-        if (!baselineSaved) { w.baseline = baselineBefore; w.baselineReady = baselineReadyBefore; }
+        if (!baselineSaved) { w.baseline = baselineBefore; w.baselineDirections = directionsBefore; w.baselineReady = baselineReadyBefore; }
         if (w.pendingSend) {
           w.status = 'paused'; w.note = '自动回复中断，结果不确定；已暂停且不会重发';
           if (pendingSendEvent) {
@@ -420,6 +455,10 @@ class WatchService {
           }
         } else {
           w.status = 'needs_window'; w.note = String(error.message || '窗口暂不可用').slice(0, 180);
+          if (observing && !activeEvent && !w.observationFailure) {
+            const identityString = JSON.stringify(['observation-unavailable', randomUUID()]);
+            w.observationFailure = { id: this.journal.eventId(w.id, identityString), identityString, at: this.clock(), stage: observing };
+          }
         }
         await this.save(w, owned).catch(() => {});
         if (owned() && w.pendingSend) {
@@ -429,6 +468,18 @@ class WatchService {
         } else if (owned() && activeEvent) {
           await this.reportEvent(w, activeEvent,
             `${w.recipient} 发来消息，但本次关注中断，没有自动回复；请核对微信。`, signal, token).catch(() => {});
+        } else if (owned() && w.observationFailure) {
+          const anchor = w.observationFailure;
+          let event = await this.journal.getEvent(anchor.id).catch(() => null);
+          if (owned() && !event) {
+            event = { ...anchor, phase: 'observed' };
+            await this.journal.saveEvent(w, event).catch(() => { event = null; });
+          }
+          if (owned() && event && event.reportStatus !== 'reported') {
+            event.identityString ||= anchor.identityString;
+            await this.reportEvent(w, event,
+              `${w.recipient} 的微信会话暂时无法观察，我会继续重试；请检查微信窗口和屏幕录制权限。`, signal, token).catch(() => {});
+          }
         }
       }
     } finally {

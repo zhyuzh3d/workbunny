@@ -113,6 +113,103 @@ async function testMultiMessageAndStableDedupe() {
   assert(h.journal.log.some(row => row[0] === 'commit'), 'baseline and durable event checkpoint precede sensor commit');
 }
 
+async function testRepeatedSameTextAfterDistinctAnchor() {
+  const repeated = incoming('unused', '好的', '');
+  const separator = { direction: 'outgoing', text: '收到', time: '' };
+  const h = makeHarness({ frames: [frame({ baseline: true }), frame(), frame(), frame()], views: [
+    { headerMatched: true, messages: [] },
+    { headerMatched: true, messages: [repeated] },
+    { headerMatched: true, messages: [repeated, separator] },
+    { headerMatched: true, messages: [repeated, separator, repeated] },
+  ] });
+  const w = await start(h);
+  for (let i = 0; i < 4; i++) await h.svc.tick(w.id);
+  assert.equal(h.reports.length, 2, 'a later identical message with an unambiguous intervening anchor is a separate event');
+  assert.notEqual(h.reports[0].eventId, h.reports[1].eventId);
+}
+
+async function testUnreadWhileBusyRetried() {
+  let idle = true;
+  const h = makeHarness({ canOperate: async () => idle, frames: [frame({ baseline: true }), frame()], views: [
+    { headerMatched: true, messages: [] }, { headerMatched: false, recipientUnread: true, messages: [] },
+  ] });
+  const w = await start(h); await h.svc.tick(w.id);
+  idle = false; await h.svc.tick(w.id);
+  assert.equal(w.bound, false, 'unread remains a pending open while the owner is busy');
+  const opens = h.executions.length;
+  await h.svc.tick(w.id); assert.equal(h.executions.length, opens);
+  idle = true; await h.svc.tick(w.id);
+  assert.equal(h.executions.length, opens + 1, 'reopens after idle even if no new pixels change');
+}
+
+async function testBatchRecoveryAfterPartialEventWrite() {
+  const h = makeHarness({ frames: [frame({ baseline: true }), frame()], views: [
+    { headerMatched: true, messages: [] },
+    { headerMatched: true, messages: [incoming('a', '第一条', ''), incoming('b', '第二条', '')] },
+  ] });
+  const w = await start(h); await h.svc.tick(w.id);
+  const save = h.journal.saveEvent.bind(h.journal); let fail = true;
+  h.journal.saveEvent = async (watch, event) => {
+    const result = await save(watch, event);
+    if (fail && event.phase === 'observed') { fail = false; throw new Error('interrupted after first event write'); }
+    return result;
+  };
+  await h.svc.tick(w.id);
+  const recovered = makeHarness();
+  recovered.journal.watches.set(w.id, structuredClone(h.journal.watches.get(w.id)));
+  for (const [id, event] of h.journal.events) recovered.journal.events.set(id, structuredClone(event));
+  await recovered.svc.restore();
+  assert.equal(recovered.reports.length, 2, 'both durably observed messages are reported after interruption');
+  assert.equal(recovered.executions.length, 0, 'recovery never sends replies');
+}
+
+async function testBatchRecoveryAfterFirstProposalFails() {
+  let calls = 0;
+  const h = makeHarness({ frames: [frame({ baseline: true }), frame()], views: [
+    { headerMatched: true, messages: [] },
+    { headerMatched: true, messages: [incoming('a', '第一条', ''), incoming('b', '第二条', '')] },
+  ], propose: async () => { calls++; throw new Error('planner interrupted'); } });
+  const w = await start(h); await h.svc.tick(w.id); await h.svc.tick(w.id);
+  await h.svc.tick(w.id);
+  assert.equal(h.reports.length, 2, 'first failed message and remaining batch both reach the owner');
+  assert.equal(calls, 1, 'recovered observations do not re-run reply generation');
+}
+
+async function testObservationFailureReportsOnceUntilRecovery() {
+  let available = false;
+  const h = makeHarness({ views: [{ headerMatched: true, messages: [] }] });
+  h.sensor.sample = async () => {
+    if (!available) { const error = new Error('截图不可用'); error.code = 'captureUnavailable'; throw error; }
+    return frame({ baseline: true });
+  };
+  const w = await start(h);
+  await h.svc.tick(w.id); await h.svc.tick(w.id);
+  assert.equal(h.reports.length, 1, 'one continuous failure produces one durable owner notification');
+  assert.equal(w.status, 'needs_window');
+  assert.equal(h.executions.filter(item => item.operation === 'send').length, 0);
+  const oldId = h.reports[0].eventId;
+  assert.equal(h.journal.events.get(oldId).reportStatus, 'reported');
+  available = true; await h.svc.tick(w.id);
+  assert.equal(w.observationFailure, undefined, 'a successful frame closes the old failure episode');
+  available = false; await h.svc.tick(w.id); await h.svc.tick(w.id);
+  assert.equal(h.reports.length, 2, 'a new outage after recovery is reported');
+  assert.notEqual(h.reports[1].eventId, oldId);
+}
+
+async function testInspectionFailureEpisodeSurvivesRetryAndRestart() {
+  const h = makeHarness({ frames: [frame({ baseline: true }), frame(), frame()] });
+  h.svc.inspect = async () => { throw new Error('观察模型暂不可用'); };
+  const w = await start(h); await h.svc.tick(w.id); await h.svc.tick(w.id);
+  assert.equal(h.reports.length, 1, 'repeated inspection failures after successful captures remain one episode');
+  const recovered = makeHarness({ frames: [frame({ baseline: true })] });
+  recovered.svc.inspect = async () => { throw new Error('观察模型暂不可用'); };
+  recovered.journal.watches.set(w.id, structuredClone(h.journal.watches.get(w.id)));
+  for (const [id, event] of h.journal.events) recovered.journal.events.set(id, structuredClone(event));
+  for (const [id, receipt] of h.journal.receipts) recovered.journal.receipts.set(id, structuredClone(receipt));
+  await recovered.svc.restore(); await recovered.svc.control('resume', { id: w.id }); await recovered.svc.tick(w.id);
+  assert.equal(recovered.reports.length, 0, 'restart does not report the same unresolved observation episode again');
+}
+
 async function testNotifyPolicyAndCompletion() {
   const h = makeHarness({ mode: 'notify', frames: [frame({ baseline: true }), frame(), frame()], views: [
     { headerMatched: true, messages: [] },
@@ -163,6 +260,36 @@ function testDeltaAmbiguity() {
   assert.equal(repeated.messages.length, 0);
   assert.deepEqual(incomingDelta(['a'], [incoming('a', 'a'), incoming('b', 'b'), incoming('c', 'c')], true).messages.map(m => m.key), ['b', 'c']);
   assert.equal(incomingDelta(['old'], [incoming('unrelated', 'text')], true).uncertain, true);
+  const snapshot = ['old-in', 'old-out'];
+  const newer = [incoming('old-in', '早上好'), { key: 'changed-out', direction: 'outgoing' }, incoming('new-in', 'A2')];
+  assert.deepEqual(incomingDelta(snapshot, newer, true, ['incoming', 'outgoing']).messages.map(m => m.key), ['new-in']);
+  assert.equal(incomingDelta(snapshot, newer, true).uncertain, true, 'legacy snapshots without direction metadata do not use a fallback');
+  assert.equal(incomingDelta(['old-in', 'another-in', 'old-out'], newer, true, ['incoming', 'incoming', 'outgoing']).uncertain, true,
+    'cannot fall back to an older incoming anchor and replay later old incoming messages');
+  assert.equal(incomingDelta(snapshot, [newer[0], newer[0], newer[2]], true, ['incoming', 'outgoing']).uncertain, true,
+    'a repeated incoming anchor is ambiguous');
+}
+
+async function testVisualWhitespaceAndOutgoingTranscriptionChanges() {
+  const original = [
+    { direction: 'incoming', text: '早上好。', time: '', incomingVerified: true },
+    { direction: 'outgoing', text: '你好，视觉验收开始。', time: '' },
+    { direction: 'outgoing', text: '中文\n English 😀 cafe\u0301', time: '' },
+  ];
+  const normalized = [original[0], original[1], { ...original[2], text: '中文 English 😀 café' }];
+  const changed = [original[0], original[1], { ...original[2], text: '中文 English 😀 不同文本' },
+    { direction: 'incoming', text: '收到请确认A2', time: '', incomingVerified: true }];
+  const h = makeHarness({ mode: 'reply', frames: [frame({ baseline: true }), frame(), frame(), frame()], views: [
+    { headerMatched: true, messages: original }, { headerMatched: true, messages: normalized },
+    { headerMatched: true, messages: changed }, { headerMatched: true, messages: changed },
+  ], propose: async () => ({ notify: true, reply: '已收到。' }) });
+  const w = await start(h, { mode: 'reply' });
+  await h.svc.tick(w.id); await h.svc.tick(w.id); await h.svc.tick(w.id); await h.svc.tick(w.id);
+  assert.equal(h.proposals.length, 1, 'new incoming is proposed once despite outgoing rendering variations');
+  assert.equal(h.proposals[0].message.text, '收到请确认A2');
+  assert.equal(h.executions.filter(item => item.operation === 'send').length, 1);
+  const stored = h.journal.watches.get(w.id);
+  assert.equal(stored.baseline.length, stored.baselineDirections.length, 'baseline keys and direction metadata are stored together');
 }
 
 async function testGeometryChangeIsNotMessage() {
@@ -474,9 +601,16 @@ async function testExpirationAndDeltaReports() {
 async function main() {
   await testEmptyBaselineAndNoChange();
   await testMultiMessageAndStableDedupe();
+  await testRepeatedSameTextAfterDistinctAnchor();
+  await testUnreadWhileBusyRetried();
+  await testBatchRecoveryAfterPartialEventWrite();
+  await testBatchRecoveryAfterFirstProposalFails();
+  await testObservationFailureReportsOnceUntilRecovery();
+  await testInspectionFailureEpisodeSurvivesRetryAndRestart();
   await testNotifyPolicyAndCompletion();
   await testCompletionOutboxRecovery();
   testDeltaAmbiguity();
+  await testVisualWhitespaceAndOutgoingTranscriptionChanges();
   await testGeometryChangeIsNotMessage();
   await testUnstableFrameAndNonTextMessages();
   await testPersistedEventPreventsReproposal();

@@ -16,3 +16,11 @@ test('an unsuccessful atomic replacement leaves both persisted and live settings
  try{assert.throws(()=>config.save({buddy:{name:'不能写入'}}),/设置保存失败/);}finally{fs.renameSync=rename;}
  assert.deepEqual(fs.readFileSync(file),before);assert.equal(config.load().buddy.name,'原名');assert.equal(config.load().settingsRevision,revision);assert.equal(fs.readdirSync(path.dirname(file)).filter(n=>n.endsWith('.tmp')).length,0);
 });
+test('display modes survive restart and cannot hide both character and dialogue',t=>{
+ const file=fixture(t);
+ config.save({ui:{dialogueVisible:true,dialogueBehind:false,avatarHidden:true}});config.setPath(file);
+ assert.equal(config.load().ui.avatarHidden,true);
+ config.save({ui:{dialogueVisible:false}});assert.equal(config.load().ui.avatarHidden,false);
+ config.setPath(file);assert.equal(config.load().ui.avatarHidden,false);
+ assert.throws(()=>config.save({ui:{avatarHidden:'yes'}}),/开关无效/);
+});

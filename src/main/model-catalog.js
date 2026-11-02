@@ -82,7 +82,8 @@ function normalize(provider, items) {
     const label = name === id ? id : `${name} · ${id}`;
     const maxOutputTokens = Number(item.max_output_tokens || item.maxOutputTokens);
     const maxInputTokens = Number(item.max_input_tokens || item.maxInputTokens);
-    const contextWindow = Number(item.context_window || item.contextWindow || item.context_length || item.contextLength || maxInputTokens || documentedLimits(provider,id).contextWindow);
+    const rawContext = item.context_window || item.contextWindow || item.context_length || item.contextLength;
+    const contextWindow = Number((rawContext && typeof rawContext === 'object' ? rawContext.defaultLength : rawContext) || maxInputTokens || documentedLimits(provider,id).contextWindow);
     models.push({ id, label, thinking, ...(Number.isSafeInteger(contextWindow) && contextWindow > 0 ? { contextWindow } : {}), ...(Number.isSafeInteger(maxInputTokens) && maxInputTokens > 0 ? { maxInputTokens } : {}), ...(Number.isSafeInteger(maxOutputTokens) && maxOutputTokens > 0 ? { maxOutputTokens } : {}) });
     seen.add(id);
   }

@@ -1,0 +1,8 @@
+.about-page { padding: 24px 28px; overflow: auto; height: calc(100vh - 36px); }
+.product-name { margin: 8px 0; color: var(--ink); font-size: 20px; font-weight: 600; letter-spacing: -.3px; }
+.product-facts { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 10px 14px; margin: 22px 0; font-size: 12px; line-height: 1.5; }
+.product-facts dt { color: var(--muted); }
+.product-facts dd { margin: 0; overflow-wrap: anywhere; user-select: text; }
+.product-license { margin-top: 18px; line-height: 1.8; }
+#productInfo { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); }
+.about-page #productInfo { margin: 0; padding: 0; border: 0; }

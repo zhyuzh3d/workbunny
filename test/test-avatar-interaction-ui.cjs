@@ -9,7 +9,7 @@ const { Interactions } = require('../src/main/interaction');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bunny-avatar-ui-'));
 app.setPath('userData', path.join(root, 'electron')); config.setPath(path.join(root, 'config.json'));
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-let win, now = 0; const errors = [], requests = [], queue = [], hits = [];
+let win, now = 0; const errors = [], requests = [], queue = [], hits = [], drags = [], menus = [];
 async function evaluate(source) { return win.webContents.executeJavaScript(source, true); }
 async function wait(expression, label = expression) {
   for (let i = 0; i < 150; i++) {
@@ -35,7 +35,10 @@ async function main() {
   ipcMain.handle('pet:config', (_event, patch) => config.publicConfig(config.save(patch)));
   ipcMain.handle('pet:scale', (_event, { scale }) => ({ scale }));
   ipcMain.handle('pet:asr-status', () => ({ speech: 0, mic: false }));
+  ipcMain.handle('pet:dialogue-history', () => ({ scene: config.load().memory.scene, rows: [], more: false }));
   ipcMain.on('pet:hit', (_event, value) => hits.push(value));
+  ipcMain.on('pet:drag', (_event, value) => drags.push(value));
+  ipcMain.on('pet:context-menu', (_event, value) => menus.push(value));
   win = new BrowserWindow({ show: false, width: 420, height: 660, backgroundColor: '#f7f3ec', webPreferences: {
     preload: path.resolve('src/preload.js'), contextIsolation: true, sandbox: false, backgroundThrottling: false,
   } });
@@ -73,6 +76,8 @@ async function main() {
       win.webContents.send('pet:ev', { type: 'scene' }); await delay(50);
       await evaluate('window.__freeze(true)');
       const frame = await evaluate('window.__frame()');
+      const dialogueTop = await evaluate('parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--dialogue-top"))');
+      assert(Number.isFinite(dialogueTop) && Math.abs(dialogueTop-frame.top)<100, `dialogue begins near standing head at scale ${scale}: ${JSON.stringify({dialogueTop,top:frame.top})}`);
       const x = frame.head.x, y = Math.round(frame.head.y - 28 * frame.h / 660 * (frame.bust ? 1.7 : 1));
       const hit = (await evaluate('window.__pet()')).hit;
       assert(y < frame.head.y - 16, 'click is above the old head-bone padding');
@@ -94,6 +99,54 @@ async function main() {
       assert(!config.MOTIONS.find(m => m.key === expected)?.loop, 'head click plays a gesture instead of another idle: ' + JSON.stringify({ expected, available: requests.at(-1).motions }));
     }
     await evaluate('window.__scale(1)'); win.setContentSize(420, 660); await delay(100);
+    await evaluate("window.__freeze(false); window.__play('idle_loop')"); await delay(600);
+    for (const behind of [false, true]) {
+      config.save({ui:{dialogueVisible:true,dialogueBehind:behind,avatarHidden:false}});
+      win.webContents.send('pet:ev', {type:'config',config:config.publicConfig()});
+      await wait("!document.getElementById('dialogueOverlay').hidden", 'overlay visible');
+      await evaluate('window.__freeze(true)');
+      const { head } = await evaluate('window.__frame()');
+      assert(await evaluate(`!!document.elementFromPoint(${head.x},${head.y})?.closest('#dialogueOverlay')`), 'overlay sits above the face for input');
+      const beforeOverlay = requests.length;
+      win.webContents.sendInputEvent({type:'mouseMove',x:head.x,y:head.y});
+      win.webContents.sendInputEvent({type:'mouseDown',x:head.x,y:head.y,button:'left',clickCount:1});
+      win.webContents.sendInputEvent({type:'mouseUp',x:head.x,y:head.y,button:'left',clickCount:1});
+      for(let i=0;i<50&&requests.length===beforeOverlay;i++)await delay(20);
+      assert.equal(requests.length,beforeOverlay+1,`character under ${behind?'behind':'front'} dialogue receives click`);
+      assert.equal(requests.at(-1).region,'head');
+      const dragStart=drags.length,clickStart=requests.length;
+      // Chromium's hidden-window sendInputEvent reports screenX/Y as zero on macOS;
+      // supply actual screen coordinates so the production drag threshold is exercised.
+      await evaluate(`(async()=>{const el=document.elementFromPoint(${head.x},${head.y});el.setPointerCapture=()=>{};
+        const p={bubbles:true,button:0,pointerId:1,clientX:${head.x},clientY:${head.y},screenX:200,screenY:200};
+        el.dispatchEvent(new PointerEvent('pointerdown',p));
+        window.dispatchEvent(new PointerEvent('pointermove',{...p,clientX:p.clientX+24,clientY:p.clientY+12,screenX:224,screenY:212}));
+        await new Promise(r=>setTimeout(r,50));
+        window.dispatchEvent(new PointerEvent('pointerup',{...p,clientX:p.clientX+24,clientY:p.clientY+12,screenX:224,screenY:212}));})()`);
+      await delay(100);
+      assert(drags.slice(dragStart).some(d=>d.type==='start') && drags.slice(dragStart).some(d=>d.type==='end'), 'character can be dragged through dialogue: '+JSON.stringify({drags:drags.slice(dragStart),head,behind}));
+      assert.equal(requests.length,clickStart,'dragging does not trigger a character click');
+      const blank=await evaluate(`(()=>{let r=document.getElementById('dialogueOverlay').getBoundingClientRect();return {x:Math.ceil(r.left+2),y:Math.ceil(r.top+10)}})()`);
+      const beforeBlank=requests.length;
+      win.webContents.sendInputEvent({type:'mouseMove',x:blank.x,y:blank.y});await delay(50);
+      win.webContents.sendInputEvent({type:'mouseDown',x:blank.x,y:blank.y,button:'left',clickCount:1});
+      win.webContents.sendInputEvent({type:'mouseUp',x:blank.x,y:blank.y,button:'left',clickCount:1});await delay(100);
+      assert.equal(requests.length,beforeBlank,'dialogue-only space does not interact with character');
+      assert.equal(hits.at(-1),true,'dialogue-only space still captures mouse instead of passing it to other applications');
+      const menuStart=menus.length;
+      win.webContents.sendInputEvent({type:'mouseDown',x:blank.x,y:blank.y,button:'right',clickCount:1});
+      win.webContents.sendInputEvent({type:'mouseUp',x:blank.x,y:blank.y,button:'right',clickCount:1});await delay(100);
+      assert.equal(menus.length,menuStart+1,'dialogue retains its right-click menu');
+      assert.deepEqual(menus.at(-1),{x:blank.x,y:blank.y});
+    }
+    config.save({ui:{dialogueVisible:true,dialogueBehind:false,avatarHidden:true}});
+    win.webContents.send('pet:ev',{type:'config',config:config.publicConfig()});await delay(100);
+    const hiddenHead=await evaluate('window.__frame().head'),beforeHidden=requests.length;
+    win.webContents.sendInputEvent({type:'mouseDown',x:hiddenHead.x,y:hiddenHead.y,button:'left',clickCount:1});
+    win.webContents.sendInputEvent({type:'mouseUp',x:hiddenHead.x,y:hiddenHead.y,button:'left',clickCount:1});await delay(100);
+    assert.equal(requests.length,beforeHidden,'text-only mode cannot click an invisible character');
+    config.save({ui:{dialogueVisible:false,avatarHidden:false}});win.webContents.send('pet:ev',{type:'config',config:config.publicConfig()});
+
     console.log(info.label + ': light=' + info.light + ', crown clicks animate in all 3 sizes');
   }
   assert(hits.includes(true)); assert.equal(errors.length, 0, errors.join('; '));

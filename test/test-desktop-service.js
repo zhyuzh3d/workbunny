@@ -48,7 +48,8 @@ class FakeNative {
     if (op === 'capture') {
       const desktopRect = { ...this.rect };
       if (this.moveAfterCapture) this.rect = { ...this.rect, x: this.rect.x + 5 };
-      return { pngBase64: this.capturePNG.toString('base64'), desktopRect };
+      return { pngBase64: this.capturePNG.toString('base64'), desktopRect, width: desktopRect.width, height: desktopRect.height,
+        ...(payload.captureMode === 'displayStream' ? { backend: 'CGDisplayStream', capturedAt: Date.now() } : {}) };
     }
     if (op === 'recognize') {
       if (typeof this.recognizedTexts === 'function') return { texts: this.recognizedTexts(this.calls.filter(call => call.op === 'recognize').length - 1) };
@@ -89,7 +90,7 @@ class FakeNative {
 function service(native, planner, events = [], options = {}) {
   return new DesktopService({ native, planner, emit: value => events.push({ type: 'emit', status: value.task?.status }),
     persist: async task => events.push({ type: 'persist', status: task.status, steps: task.steps.map(x => ({ ...x })) }),
-    imageResize: data => data, ...options });
+    imageResize: data => data, imageCrop: data => data, ...options });
 }
 
 async function testStartRaceAndStopDuringPermission() {
@@ -933,7 +934,13 @@ async function testInsertBackendDelayAndJournal() {
   const svc = service(native, async () => ({}), events);
   const realTimeout = global.setTimeout, delays = [];
   global.setTimeout = (fn, ms, ...args) => { delays.push(ms); return realTimeout(fn, ms === 3000 ? 0 : ms, ...args); };
-  try { assert.equal((await svc.insert('ordinary text')).ok, true); }
+  try {
+    assert.equal((await svc.insert('ordinary text')).ok, true);
+    const wechatNative = new FakeNative({ bundleId: 'com.tencent.xinWeChat' });
+    const blocked = await service(wechatNative, async () => ({})).insert('unsafe focus-only text');
+    assert.equal(blocked.ok, false); assert.match(blocked.error, /视觉核对/);
+    assert(!wechatNative.calls.some(call => call.op === 'type'), 'generic focus typing cannot bypass WeChat recipient and screenshot checks');
+  }
   finally { global.setTimeout = realTimeout; }
   assert(delays.includes(3000), 'the backend owns the required three-second delay');
   const typeIndex = events.findIndex(x => x.type === 'native' && x.op === 'type');
@@ -1021,7 +1028,7 @@ async function testContactDirectoryAndWechatOperations() {
   const actions = [
     { action: 'type', text: 'planner must be replaced', purpose: 'task', focus: { x: 0.5, y: 0.9 } },
     { action: 'key', key: 'enter', modifiers: [], purpose: 'submit' },
-    { action: 'done', completed: true, evidence: '目标联系人中出现完整已发送消息' },
+    { action: 'done', completed: true, evidence: '目标联系人中出现完整已发送消息', receipt: { outgoing: true, composerEmpty: true, newBubble: true, text: body, bubble: { x: .6, y: .5, width: .3, height: .1 }, composer: { x: .24, y: .7, width: .7, height: .28 } } },
   ];
   const svc = service(native, async () => actions.shift(), events, serviceOpts);
   assert((await svc.start({ goal: '发送指定原文', target: 'wechat', origin: 'watch', operation: 'send',

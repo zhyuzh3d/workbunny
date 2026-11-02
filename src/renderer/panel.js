@@ -1,4 +1,5 @@
 import '../shared/motion-core.js';
+import { mountProductInfo } from './product-info-ui.mjs';
 import { mountPortability } from './portability-ui.js';
 import { autoGrow } from './auto-grow.js';
 import { createSelfSettings } from './self-settings.js';
@@ -17,7 +18,7 @@ import { paintCredential } from './credential-input.js';
  */
 const which = new URLSearchParams(location.search).get('p') === 'motions' ? 'motions' : 'settings';
 document.body.dataset.p = which;
-document.title = which === 'motions' ? 'Workbunny-动作库' : 'Workbunny-设置';
+document.title = which === 'motions' ? 'WorkBunny-动作库' : 'WorkBunny-设置';
 
 let cfg = null;
 let AVATAR_LIST = [];
@@ -90,11 +91,7 @@ function paintSceneProfile(source = cfg) {
   const configured = source?.memory?.scene;
   let scene = pendingValue('memory.scene', configured || 'life');
   if (!Object.hasOwn(SCENE_SCOPE_TEXT, scene)) scene = 'life';
-  for (const button of $('panelScene').querySelectorAll('[data-scene]')) {
-    const active = button.dataset.scene === scene;
-    button.classList.toggle('on', active);
-    button.setAttribute('aria-pressed', String(active));
-  }
+  $('panelScene').value = scene;
   $('panelSceneScope').textContent = SCENE_SCOPE_TEXT[scene];
   const path = 'memory.scene';
   const status = $('panelSceneProfileStatus');
@@ -182,9 +179,10 @@ function avatarButton(info) {
   button.title = [info.label || info.key, info.author].filter(Boolean).join(' · ');
   const name = document.createElement('span'); name.className = 'avatarName'; name.textContent = info.label || info.key;
   const state = document.createElement('span'); state.className = 'avatarUse'; state.textContent = info.key === avatarKey ? '使用中' : '点击使用';
-  button.append(name, state);
+  const arrow = document.createElement('span'); arrow.className = 'avatarChevron'; arrow.setAttribute('aria-hidden', 'true');
+  button.append(name, arrow, state);
   button.classList.toggle('on', info.key === avatarKey);
-  button.onclick = event => { event.preventDefault(); event.stopPropagation(); pickAvatar(info.key).catch(error => { $('avatarImportStatus').textContent = error.message; }); };
+  button.onclick = event => { event.preventDefault(); event.stopPropagation(); if (event.target.closest('.avatarChevron')) { const card = button.closest('details'); card.open = !card.open; return; } pickAvatar(info.key).catch(error => { $('avatarImportStatus').textContent = error.message; }); };
   return button;
 }
 function paintAvatars() {
@@ -454,21 +452,25 @@ function paintTts() {
   const eng = t.engine || 'system';
   const row = $('ttsEngine');
   if (!row.childElementCount) {
-    for (const e of TTSI.engines.filter(e => !e.legacy || cfg.tts.http?.profile?.url)) {
-      const b = document.createElement('button');
-      b.dataset.e = e.id;
-      b.textContent = e.label;
-      b.addEventListener('click', async () => {
-        edit('tts.engine', e.id); ttsDraft.engine = e.id; paintTts();
-        if (e.id === 'http' && !cfg.tts.http?.profile?.url) { $('sfNote').textContent = '请先填写接口，点击“保存并使用”后生效。'; return; }
-        try { await persist(e.id === 'doubao' ? { tts: { engine: e.id, doubao: doubaoPatch() } } : { tts: { engine: e.id } }); }
-        catch (err) { $('sfNote').textContent = '切换失败：' + err.message; }
-      });
-      row.appendChild(b);
+    const labels = { system: '系统语音', remote: '局域网 CHP', qwen: '本地 Qwen', doubao: '豆包语音', http: '已有接口' };
+    for (const id of ['system', 'remote', 'qwen', 'doubao', 'http']) {
+      const engine = TTSI.engines.find(e => e.id === id);
+      if (!engine || (engine.legacy && !cfg.tts.http?.profile?.url)) continue;
+      const option = document.createElement('option'); option.value = id; option.textContent = labels[id];
+      if (id === 'qwen') { option.disabled = TTSI.qwen?.available === false; option.title = TTSI.qwen?.reason || ''; }
+      row.append(option);
     }
+    row.onchange = async () => {
+      const id = row.value;
+      edit('tts.engine', id); const revision = edits.get('tts.engine').revision; ttsDraft.engine = id; paintTts();
+      try { await persist(id === 'doubao' ? { tts: { engine: id, doubao: doubaoPatch() } } : { tts: { engine: id } }); }
+      catch (err) {
+        if (edits.get('tts.engine')?.revision === revision) { edits.delete('tts.engine'); ttsDraft.engine = cfg.tts.engine; paintTts(); }
+        $('sfNote').textContent = '切换失败：' + err.message;
+      }
+    };
   }
-  for (const b of row.children) b.classList.toggle('on', b.dataset.e === ttsDraft.engine);
-  for (const b of row.children) if (b.dataset.e === 'qwen') { b.disabled = TTSI.qwen?.available === false; b.title = TTSI.qwen?.reason || ''; }
+  row.value = ttsDraft.engine;
   $('ttsHint').textContent = ENGINE_HINT[ttsDraft.engine] || '';
   $('ttsCurrent').textContent = cfg.tts.enabled ? ({ system: '系统语音', qwen: 'Qwen 本地', remote: 'CHP', http: '已有接口', doubao: '豆包语音' }[ttsDraft.engine] || '系统语音') : '语音已关闭';
   $('ttsSystem').classList.toggle('on', ttsDraft.engine === 'system');
@@ -624,6 +626,7 @@ function syncTts(c, acknowledged = []) {
     initBrainDraft(); paintBrain();
   }
   paintTts();
+  if ($('dialogueBehind')) $('dialogueBehind').checked = c.ui?.dialogueBehind === true;
   selfSettings.paint();
   if (c.tts.engine === 'system' && c.tts.lastFallback?.at && c.tts.lastFallback.at !== previousFallback)
     $('sfNote').textContent = '已切换到系统默认语音：' + c.tts.lastFallback.reason;
@@ -796,6 +799,12 @@ function buildMotionList() {
 
   if (which === 'settings') {
     await mountPortability(window.pet);
+    void mountProductInfo($('productInfo'), window.pet);
+    $('dialogueBehind').checked = cfg.ui?.dialogueBehind === true;
+    $('dialogueBehind').onchange = async () => {
+      try { await persist({ ui: { dialogueBehind: $('dialogueBehind').checked } }); $('dialogueLayerStatus').textContent = ''; }
+      catch (error) { $('dialogueBehind').checked = cfg.ui?.dialogueBehind === true; $('dialogueLayerStatus').textContent = error.message; }
+    };
     $('avatarSelect').onchange = () => pickAvatar($('avatarSelect').value).catch(error => { $('avatarImportStatus').textContent = error.message; });
     $('importAvatar').onclick = async () => {
       try { const r = await window.pet.avatarImport(); if (r.cancelled) return; AVATAR_LIST = r.avatars; paintAvatars(); await pickAvatar(r.key); $('avatarImportStatus').textContent = '已导入个人模型，仅本机使用。'; }
@@ -870,10 +879,7 @@ function buildMotionList() {
     $('brainKeyInput').addEventListener('input', connectionEdited);
     $('brainThinking').addEventListener('change', () => { edit('brain', true); paintBrainHint(); });
     $('brainURL').addEventListener('input', connectionEdited);
-    $('panelScene').addEventListener('click', event => {
-      const button = event.target.closest('button[data-scene]');
-      if (button) changePanelScene(button.dataset.scene);
-    });
+    $('panelScene').addEventListener('change', () => changePanelScene($('panelScene').value));
     for (const [id, path] of [['setName', 'buddy.name'], ['setOwnerName', 'buddy.ownerName']])
       $(id).addEventListener('input', () => edit(path, $(id).value));
     $('setAlways').addEventListener('change', () => edit('voice.alwaysListen', $('setAlways').checked));

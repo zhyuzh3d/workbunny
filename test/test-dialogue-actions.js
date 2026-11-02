@@ -39,7 +39,13 @@ for (const invalid of [
   { action: 'start', target: 'workbuddy', goal: '任务', criteria: '完成', extra: true },
 ]) assert.throws(() => validateIntent(invalid));
 for (const sample of ['"kind":"chat"', '"kind":"action"', '"kind":"skip"']) assert.match(RULE, new RegExp(sample));
-assert.match(RULE, /继续原任务，不生成新start/);
+assert.match(RULE, /"action":"agent"/);
+assert.match(RULE, /统一任务解释器/);
+assert.deepEqual(validateIntent({action:'agent'}),{action:'agent'});
+const unified = { schema:'bunny.task/v1',id:'agent-1',status:'paused' };
+assert.equal(taskControl('继续讲刚才的故事',unified),null);
+assert.equal(taskControl('继续原任务',unified).request.id,'agent-1');
+assert.equal(validateIntent({action:'agent',request:{kind:'task',task:{skill:'work.delegate',goal:'生成测试报告',subjects:[{application:'workbuddy'}]}}}).request.task.skill,'work.delegate');
 
 // XML remains a compatibility path, while ordinary prose containing a control
 // marker is still ordinary prose because controls are recognized only at start.

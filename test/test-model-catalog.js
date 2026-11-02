@@ -7,6 +7,12 @@ const wb=[{id:'hy3',name:'Hy3',onlyReasoning:true,supportsReasoning:true,reasoni
 {id:'space-bunny',name:'Space-Bunny',onlyReasoning:true,supportsReasoning:true,reasoning:{supportedEfforts:['low','medium','high','xhigh','max'],canDisableThinking:false},apiKey:'never-persist'},
 {id:'switchable',supportsReasoning:true,reasoning:{supportedEfforts:['low','high'],canDisableThinking:true}},
 {id:'image',tags:['text-to-image']},{id:'disabled',disabled:true}];
+test('WorkBuddy object context metadata preserves its default window for screenshot planning',()=>{
+ const [m]=normalize('workbuddy',[{id:'flash-fixture',contextWindow:{defaultLength:300000,supportedLengths:[300000,1000000]},maxInputTokens:1000000,maxOutputTokens:128000}]);
+ assert.equal(m.contextWindow,300000);assert.equal(m.maxInputTokens,1000000);
+ const fit=require('../src/main/context-budget').fitRequest({provider:'workbuddy',model:m.id,contextWindow:m.contextWindow,maxTokens:2048,messages:[{role:'system',content:'视觉操作规则'.repeat(1500)},{role:'user',content:[{type:'text',text:'识别当前输入框'}, {type:'image_url',image_url:{url:'data:image/png;base64,fixture'}}]}]});
+ assert(fit.contextBudget.estimate<fit.contextBudget.inputBudget);
+});
 function fixture(t,overrides={}){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'workbunny-models-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));const catalog=createCatalog(overrides);catalog.setPath(path.join(dir,'models.json'));return{dir,catalog};}
 test('WorkBuddy filters incompatible models, reads per-model levels, and persists only safe metadata',async t=>{
  const f=fixture(t,{workbuddyRequest:async p=>{assert.equal(p.path,'/v2/enterprises/personal/models');return{body:JSON.stringify({code:0,data:{models:wb}})}}});

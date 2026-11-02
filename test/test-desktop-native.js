@@ -33,6 +33,16 @@ test('JSONL client correlates concurrent requests and resolves native responses'
   assert.deepEqual(await second, { pid: 11 });
   assert.deepEqual(await first, { accessibilityTrusted: false });
 });
+test('capture clients share one serialized display bridge, and closing one leaves the other usable',async()=>{
+ const a=fixture({sharedDisplay:true}),b=fixture({sharedDisplay:true});
+ const first=a.client.request('capture'),second=b.client.request('visualSample');await new Promise(r=>setImmediate(r));
+ assert.equal(a.children.length,1);assert.equal(b.children.length,0);const child=a.children[0];
+ let message=JSON.parse(child.lines[0]);child.stdout.write(JSON.stringify({id:message.id,ok:true,result:{frame:1}})+'\n');assert.deepEqual(await first,{frame:1});
+ await new Promise(r=>setImmediate(r));message=JSON.parse(child.lines[1]);child.stdout.write(JSON.stringify({id:message.id,ok:true,result:{frame:2}})+'\n');assert.deepEqual(await second,{frame:2});
+ await a.client.close();const third=b.client.request('visualCommit');await new Promise(r=>setImmediate(r));
+ message=JSON.parse(child.lines[2]);child.stdout.write(JSON.stringify({id:message.id,ok:true,result:{committed:true}})+'\n');assert((await third).committed);
+ child.kill=()=>{queueMicrotask(()=>child.emit('close',0));};await b.client.close();
+});
 
 test('native failures reject and invalid timeout is refused before spawning', async () => {
   const { client, children } = fixture();
@@ -81,7 +91,7 @@ test('locked-session guard covers capture, activate, and all input actions; perm
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   assert.match(source, /session\["CGSSessionScreenIsLocked"\]/);
   assert.match(source, /"sessionLocked": sessionLocked\(\)/);
-  assert.equal((source.match(/guard !sessionLocked\(\) else \{ throw DesktopError\(message: "电脑已锁屏，请解锁后重试"\) \}/g) || []).length, 6);
+  assert.equal((source.match(/guard !sessionLocked\(\) else \{ throw DesktopError\(message: "电脑已锁屏，请解锁后重试"\) \}/g) || []).length, 7);
   assert.match(source, /DispatchQueue\.global\(qos: \.userInitiated\)\.async/);
   assert.match(source, /RunLoop\.main\.run\(mode: \.default, before: Date\(timeIntervalSinceNow: 0\.1\)\)/);
 });
@@ -180,7 +190,7 @@ test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bo
   assert.match(source, /workBuddyTextMatches\(controls\.draft, expected: text\)/);
   assert.match(source, /raw == workBuddyRTEEmptyValue && sendButtonCount == 1 && !sendEnabled/);
   assert.match(source, /workBuddyDraftPlan\(current: workBuddyRTEEmptyValue, requested: "task text", sendButtonCount: 1, sendEnabled: false\)/);
-  assert.match(source, /draftMatchesRequest = available && workBuddyTargetReady\(mode: mode, homeReady: controls\.homeReady, conversationMarkerPresent: controls\.associationMarkerPresent\) && controls\.selectedModel == workBuddyUIModel/);
+  assert.match(source, /draftMatchesRequest = available && workBuddyTargetReady\(mode: mode, homeReady: controls\.homeReady, conversationMarkerPresent: controls\.associationMarkerPresent\) && workBuddyModelLabelAllowed\(controls\.selectedModel\)/);
   assert.match(source, /components\(separatedBy: "\\n"\)/);
   assert.match(source, /expectedLine\.isEmpty && actualLine == "\\u\{FEFF\}"/);
   const textMatch = source.slice(source.indexOf('func workBuddyTextMatches('), source.indexOf('func workBuddyDraftPlan('));
@@ -193,7 +203,16 @@ test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bo
   assert.match(source, /kAXFocusedUIElementAttribute/);
   assert.match(source, /waitDeadline = DispatchTime\.now\(\)\.uptimeNanoseconds \+ 800_000_000/);
   assert.doesNotMatch(source, /AXUIElementSetAttributeValue\(editor, kAXValueAttribute[^\n]*text/);
-  assert.match(source, /AXUIElementPerformAction\(button, kAXPressAction as CFString\)/);
+  const send = source.slice(source.indexOf('func workBuddySend('), source.indexOf('func unicodeChunks('));
+  assert.doesNotMatch(send, /AXUIElementPerformAction/);
+  assert.match(send, /workBuddySendPoint\(buttonRect: buttonRect, windowRect: context\.rect\)/);
+  assert.match(send, /rectsMatch\(buttonRect, currentButtonRect\)/);
+  assert.match(send, /kAXFocusedWindowAttribute/);
+  assert.match(send, /rectsMatch\(focusedRect, context\.rect\)/);
+  assert.match(send, /CGPreflightPostEventAccess\(\)/);
+  assert.match(send, /workBuddyTextMatches\(axAttribute\(editor/);
+  assert.match(send, /mouseDown\.post\(tap: \.cghidEventTap\)\s*mouseUp\.post\(tap: \.cghidEventTap\)/);
+  assert.equal((send.match(/mouseDown\.post/g) || []).length, 1);
   assert.match(source, /case "workbuddyInspect"/);
   assert.match(source, /case "workbuddyFill"/);
   assert.match(source, /case "workbuddySend"/);
@@ -257,4 +276,57 @@ test('stdin errors reject pending requests and response lines have a byte limit'
   const tooLarge = other.client.request('permissions');
   other.children[0].stdout.write(Buffer.from('123456789'));
   await assert.rejects(tooLarge, /超过 64 MiB/);
+});
+
+test('capture timeout reaps bridge and retries once; input is never replayed', async () => {
+  const { client, children } = fixture();
+  const result = client.request('capture', { windowId: 7 }, 1000);
+  const first = children[0];
+  first.kill = () => { process.nextTick(() => first.emit('close', null, 'SIGTERM')); return true; };
+  const firstRequest = JSON.parse(first.lines[0]);
+  first.stdout.write(JSON.stringify({ id: firstRequest.id, ok: false, error: '截图请求超时：图像采集' }) + '\n');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(children.length, 2);
+  const second = children[1];
+  const secondRequest = JSON.parse(second.lines[0]);
+  assert.equal(secondRequest.op, 'capture');
+  assert.equal(secondRequest.captureMode, 'displayCrop');
+  second.stdout.write(JSON.stringify({ id: secondRequest.id, ok: true, result: { width: 20 } }) + '\n');
+  assert.deepEqual(await result, { width: 20 });
+  const write = client.request('type', { text: 'x' }, 1000);
+  const writeRequest = JSON.parse(second.lines.at(-1));
+  second.stdout.write(JSON.stringify({ id: writeRequest.id, ok: false, error: '截图请求超时：图像采集' }) + '\n');
+  await assert.rejects(write, /截图请求超时/);
+  assert.equal(children.length, 2);
+  second.kill = () => { process.nextTick(() => second.emit('close', null, 'SIGTERM')); return true; };
+  await client.close();
+});
+
+test('second capture timeout reaps bridge without a third attempt', async () => {
+  const { client, children } = fixture();
+  const result = client.request('capture', { windowId: 7 }, 1000);
+  const fail = child => {
+    child.kill = () => { process.nextTick(() => child.emit('close', null, 'SIGTERM')); return true; };
+    const request = JSON.parse(child.lines[0]);
+    child.stdout.write(JSON.stringify({ id: request.id, ok: false, error: '截图请求超时：窗口枚举' }) + '\n');
+  };
+  fail(children[0]);
+  await new Promise(resolve => setImmediate(resolve));
+  fail(children[1]);
+  await assert.rejects(result, /窗口枚举/);
+  assert.equal(children.length, 2);
+  assert.equal(client.proc, null);
+});
+
+test('captureUnavailable is propagated and does not retry or emit input', async () => {
+  const { client, children } = fixture();
+  const pending = client.request('capture', { windowId: 7 }, 1000);
+  const child = children[0];
+  const request = JSON.parse(child.lines[0]);
+  child.stdout.write(JSON.stringify({ id: request.id, ok: false, code: 'captureUnavailable', error: '当前窗口截图不可用或受到系统截图限制；已停止视觉操作' }) + '\n');
+  await assert.rejects(pending, error => error.code === 'captureUnavailable' && /截图不可用/.test(error.message));
+  assert.equal(children.length, 1);
+  assert.equal(child.lines.length, 1);
+  child.kill = () => { process.nextTick(() => child.emit('close', null, 'SIGTERM')); return true; };
+  await client.close();
 });

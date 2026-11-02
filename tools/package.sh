@@ -71,8 +71,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>$APPNAME</string>
-  <key>CFBundleDisplayName</key><string>$APPNAME</string>
+  <key>CFBundleName</key><string>WorkBunny</string>
+  <key>CFBundleDisplayName</key><string>WorkBunny</string>
   <key>CFBundleExecutable</key><string>$APPNAME</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleVersion</key><string>$VER</string>
@@ -84,13 +84,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>workbunny 需要麦克风，才能听见你说话。</string>
+  <string>WorkBunny 需要麦克风，才能听见你说话。</string>
   <key>NSSpeechRecognitionUsageDescription</key>
-  <string>workbunny 需要语音识别，才能把你说的话变成文字。</string>
+  <string>WorkBunny 需要语音识别，才能把你说的话变成文字。</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>workbunny 需要唤起 WorkBuddy 窗口。</string>
+  <string>WorkBunny 需要唤起 WorkBuddy 窗口。</string>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>workbunny 要把你说的话送到局域网里的语音合成设备，才能用那个声音回答你。</string>
+  <string>WorkBunny 要把你说的话送到局域网里的语音合成设备，才能用那个声音回答你。</string>
 </dict>
 </plist>
 PLIST

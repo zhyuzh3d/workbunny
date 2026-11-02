@@ -231,6 +231,51 @@ async function testPausedAndFailedTasksAreReported() {
   }
 }
 
+async function testPauseThenAcceptedStagesSurviveRestartAndConcurrentCallbacks() {
+  const desktop = new FakeDesktop(), reports = [], gate = deferred();
+  const secretary = new Secretary({ desktop, report: async item => reports.push(item),
+    verify: async () => ({ verdict: 'pass', report: '最终交付已核对' }) });
+  await secretary.dispatch(intent(), { requestId: 'stage-turn', userText: '整理项目' });
+  Object.assign(desktop.task, { status: 'paused', note: '等待确认', resumeCount: 0 });
+  const journal = desktop.journal.bind(desktop); let waiting = true;
+  desktop.journal = async () => { if (waiting) { waiting = false; await gate.promise; } await journal(); };
+  secretary.onStatus(desktop.publicStatus()); secretary.onStatus(desktop.publicStatus());
+  gate.resolve(); await waitFor(() => reports.length === 1);
+  assert.equal(reports[0].status, 'paused');
+  const pausedEvent = reports[0].eventId;
+  await review(secretary, desktop, { monitorTaskId: 'new-result' });
+  assert.equal(desktop.task.status, 'accepted'); assert.equal(reports.length, 2);
+  assert.equal(reports[1].status, 'accepted'); assert.notEqual(reports[1].eventId, pausedEvent);
+  secretary.onStatus({ task: { ...desktop.task, status: 'paused', note: '过期暂停回调' } });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(reports.length, 2, 'late pause callbacks cannot consume the accepted phase');
+  const saved = structuredClone(desktop.task); secretary.close();
+
+  const restoredDesktop = new FakeDesktop(); restoredDesktop.task = saved;
+  const restoredReports = [];
+  const restored = new Secretary({ desktop: restoredDesktop, report: async item => restoredReports.push(item) });
+  restored.taskEpochs.set(saved.id, 0);
+  await restored._announce(saved.id, '重复完成');
+  assert.equal(restoredReports.length, 0, 'persisted completion phase is not repeated after restart');
+  saved.status = 'paused'; saved.resumeCount = 1;
+  await Promise.all([restored._announce(saved.id, '再次暂停'), restored._announce(saved.id, '再次暂停')]);
+  assert.equal(restoredReports.length, 1, 'a new recovery cycle is a distinct phase but concurrent callbacks deduplicate');
+  assert.notEqual(restoredReports[0].eventId, pausedEvent);
+  restored.close();
+}
+
+async function testLegacyPauseTimestampDoesNotSuppressCompletion() {
+  const desktop = new FakeDesktop(), reports = [];
+  desktop.task = { id: 'legacy-task', origin: 'dialogue', status: 'accepted', scene: 'life', domain: 'work', visibilityFloor: 1,
+    reportedAt: 100, acceptedAt: 200, report: '此前暂停', resumeCount: 1 };
+  const secretary = new Secretary({ desktop, report: async item => reports.push(item) });
+  secretary.taskEpochs.set('legacy-task', 0);
+  await secretary._announce('legacy-task', '办好了。最终结果');
+  await secretary._announce('legacy-task', '办好了。最终结果');
+  assert.equal(reports.length, 1); assert.equal(reports[0].status, 'accepted');
+  secretary.close();
+}
+
 async function testExplicitResumePreservesTaskAndPrivacy() {
   const desktop = new FakeDesktop(), reports = [];
   const original = { id: 'old-task', origin: 'dialogue', status: 'paused', goal: '原任务', scene: 'life', domain: 'work', visibilityFloor: 1,
@@ -314,6 +359,16 @@ async function testReviewDoesNotSpinOrLeaveFailedAcceptanceRunning() {
 }
 
 async function main() {
+  const commands=[];
+  const unified=new Secretary({desktop:new FakeDesktop(),agent:{context:()=>({text:'统一任务状态：Alice等待动态，每60秒',sourceIds:['active']}),command:async(text,actor)=>{commands.push({text,actor});return {ok:true,text:'真实状态'};}}});
+  assert(!unified.contextSnapshot().text.includes('当前没有'));
+  const original='查询Alice当前任务，只查询，不修改';
+  await unified.dispatch({action:'agent'},{requestId:'unified-status',userText:original,requestSourceId:'owner-current'});
+  assert.equal(commands[0].text,original);assert.deepEqual(commands[0].actor.sources,['owner-current']);unified.close();
+  let localControl;
+  const localUnified=new Secretary({desktop:new FakeDesktop(),agent:{currentTask:()=>({id:'ongoing',schema:'bunny.task/v1',status:'waiting'}),command:async()=>{throw Error('offline');},dispatch:async request=>{localControl=request;return {ok:true};}}});
+  await localUnified.dispatch({action:'agent'},{requestId:'local-pause',userText:'暂停当前任务',requestSourceId:'owner-pause'});
+  assert.equal(localControl.operation,'pause');assert.equal(localControl.id,'ongoing');localUnified.close();
   await testRequestDedupAndTurnIsolation();
   await testRunningTaskIsNeverOverwritten();
   await testIndependentPassAcceptsAndReportsOnce();
@@ -324,6 +379,8 @@ async function main() {
   await testEpochChangeInvalidatesLateDeliveryCheck();
   await testInternalAndRestartedTasksAreNotReplayed();
   await testPausedAndFailedTasksAreReported();
+  await testPauseThenAcceptedStagesSurviveRestartAndConcurrentCallbacks();
+  await testLegacyPauseTimestampDoesNotSuppressCompletion();
   await testExplicitResumePreservesTaskAndPrivacy();
   await testSceneHidesAndBlocksResumeOfHigherFloorTask();
   await testReviewDoesNotSpinOrLeaveFailedAcceptanceRunning();

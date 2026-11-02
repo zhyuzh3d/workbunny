@@ -13,7 +13,7 @@ test('native pinyin matching follows custom names and aliases without a model re
 test('the actual utterance handler rejects unnamed speech before LLM, memory or quiet-reply effects',async()=>{
   const file=path.resolve('src/main/index.js'),source=fs.readFileSync(file,'utf8'),requests=[],events=[];
   const ctx={require:require('node:module').createRequire(file),asr:{wakeHit:text=>text.startsWith('芊芊')},config:{load:()=>({buddy:{name:'倩倩'},asr:{wakeOnly:true,judge:true}})},
-    inputAdmission:{containsSecret:()=>false},worthJudging:()=>true,recentEcho:()=>false,speaking:false,Date,send:(...args)=>events.push(args),log(){},lastHeardAt:0,turnT0:0,autonomy:null,QUIET_WORDS:/安静/,nameHit:null,
+    inputAdmission:{containsSecret:()=>false},worthJudging:()=>true,recentEcho:()=>false,speaking:false,Date,send:(...args)=>events.push(args),log(){},lastHeardAt:0,turnT0:0,autonomy:null,taskNotifications:null,QUIET_WORDS:/安静/,nameHit:null,
     think:async opts=>{requests.push(opts);return{text:'你好'};}};
   vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function nameHit('),source.indexOf('/** 每听到一句')),ctx);
   vm.runInContext(source.slice(source.indexOf('async function handleUtterance('),source.indexOf('/** 主动要权限')),ctx);

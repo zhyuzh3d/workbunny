@@ -9,14 +9,14 @@ const FLASH = 'deepseek-v4.1-flash';
 async function requestVerification({ messages, signal, vision = false }, { chat = wb.chat, selectFree = freeModel } = {}) {
   const invoke = async (model, maxTokens) => {
     if (signal?.aborted) throw new Error('交付检查已取消');
-    const response = await chat({ model, thinking: 'low', maxTokens, signal, messages,
+    const response = await chat({ model, thinking: 'low', maxTokens, signal, messages, timeoutMs:25000,
       extraBody: { reasoning_effort: 'low', response_format: { type: 'json_object' } } });
     if (response.model && response.model !== model) throw new Error('验收模型与所选模型不符');
     return response;
   };
-  try { return { response: await invoke(FLASH, 2048), model: FLASH }; }
+  try { return { response: await invoke(FLASH, vision ? 4096 : 2048), model: FLASH }; }
   catch (error) {
-    if (signal?.aborted || !['E_PAYLOAD_TOO_LARGE', 'E_EMPTY_RESPONSE'].includes(error.code)) throw error;
+    if (signal?.aborted || !['E_PAYLOAD_TOO_LARGE', 'E_EMPTY_RESPONSE', 'E_OUTPUT_LIMIT'].includes(error.code)) throw error;
     const model = await selectFree({ vision, signal });
     if (signal?.aborted) throw new Error('交付检查已取消');
     if (model !== 'hy3') throw new Error('当前目录未确认免费 Hy3，保留结果等待核对，没有切换付费模型。');

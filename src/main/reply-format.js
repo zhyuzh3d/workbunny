@@ -9,6 +9,7 @@ const intent = { anyOf: [
   ...['remember', 'learn_experience'].map(action => object({ action: { const: action }, content: string(1200), quotes: { type: 'array', minItems: 1, maxItems: 4, items: string(500) } }, ['action', 'content', 'quotes'])),
   ...['watch_pause', 'watch_resume', 'watch_stop', 'watch_status'].map(action => object({ action: { const: action }, recipient: string(100), id: string(100) }, ['action'])),
   object({ action: { const: 'contact_alias' }, recipient: string(100), alias: string(100) }, ['action', 'recipient', 'alias']),
+  object({ action: { const: 'task_notifications' }, enabled: { type: 'boolean' }, recipient: string(100) }, ['action', 'enabled']),
   object({ action: { const: 'start' }, target: { enum: ['workbuddy', 'wechat'] }, goal: string(3000), criteria: string(1200), recipient: string(100),
     operation: { enum: ['send', 'read', 'draft', 'open', 'general'] }, message: string(3000),
     watch: object({ completion: { enum: ['manual', 'first_match'] }, mode: { enum: ['notify', 'reply'] }, policy: string(1200), intervalSeconds: { type: 'integer', minimum: 10, maximum: 300 },
@@ -46,8 +47,29 @@ function validateReply(raw, { allowActions = true, cognitive = false } = {}) {
   const parsed = require('./dialogue-actions').parseStrictJson(raw);
   return { text, ...(parsed.kind === 'chat' && parsed.text !== text ? { taggedText: parsed.text } : {}), intent: gate.intent, skipped: gate.skipped };
 }
+
+// Cognition is optional metadata. If only that metadata is invalid, a strictly
+// validated, unambiguous chat can still be delivered. Never recover actions or
+// skip decisions from an invalid envelope.
+function recoverCognitiveChat(raw) {
+  let value;
+  try { value = require('./dialogue-actions').parseStrictJson(raw); } catch { return null; }
+  let inner = value;
+  if (value && value.protocol === 'dialogue-v2' && Array.isArray(value.stages) &&
+      value.stages.length === 3 && Object.keys(value).every(k => ['protocol', 'stages'].includes(k))) {
+    const replies = value.stages.filter(x => x && typeof x === 'object' && !Array.isArray(x) && x.stage === 'reply');
+    if (replies.length !== 1 || Object.keys(replies[0]).some(k => !['stage', 'reply'].includes(k))) return null;
+    inner = replies[0].reply;
+  }
+  if (!inner || inner.kind !== 'chat') return null;
+  const innerRaw = JSON.stringify(inner);
+  try {
+    const validated = validateReply(innerRaw, { allowActions: false });
+    return validated.text && !validated.intent && !validated.skipped ? { ...validated, innerRaw } : null;
+  } catch { return null; }
+}
 function dialogueHistory(messages) {
   return messages.map(message => ({ ...message, ...require('./message-identity').wire(message) }));
 }
 
-module.exports = { responseFormat, validateReply, dialogueHistory, schema, CAPABILITIES };
+module.exports = { responseFormat, validateReply, recoverCognitiveChat, dialogueHistory, schema, CAPABILITIES };

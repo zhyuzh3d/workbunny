@@ -26,9 +26,6 @@ const { responseFormat, dialogueHistory } = require('./reply-format');
 const { requestReply } = require('./reply-request');
 const { conversationText, presentConversation: rawPresentation } = require('./conversation-text');
 const { Secretary, verifyDelivery } = require('./secretary');
-const { WatchService } = require('./watch-service');
-const { WeChatObserver } = require('./wechat-observer');
-const { createWatchJournal } = require('./watch-journal');
 const { ContactDirectory } = require('./contact-directory');
 const { GuiLease } = require('./gui-lease');
 const scopePolicy = require('./memory-scope');
@@ -201,8 +198,9 @@ let memory = null;
 let recoverTaskViews = async () => {};
 let maintenance = null, maintenanceTimer = null;
 let desktop = null;
-let watchDesktop = null, watches = null, contacts = null;
+let watchDesktop = null, contacts = null, agent = null;
 let secretary = null, autonomy = null;
+let taskNotifications = null, alertDesktop = null, notificationTimer = null;
 let delegationMonitor = null;
 let currentRecall = [];
 const taskReports = [];
@@ -321,6 +319,7 @@ function publishWebSources(sources = []) {
 function queueTaskReport(report) {
   if (report.epoch !== memory?.generation) return;
   if (!visibleHere(report)) return;
+  taskNotifications?.enqueue(report).catch(() => log('[notifications] 异常提醒未入队，保留本地汇报'));
   memory?.observeTaskReport(report).catch(() => log('[affect] 未纳入缺少验证来源的任务状态'));
   if (taskReports.some(item => (item.eventId || item.taskId) === (report.eventId || report.taskId))) return;
   taskReports.push(report);
@@ -520,11 +519,12 @@ function createWindow() {
 const panels = new Map();
 const LIBRARY_PANEL_WIDTH = 580;
 const PANEL_SIZE = {
-  settings: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'Workbunny-设置' },
-  motions: { w: LIBRARY_PANEL_WIDTH, h: 800, title: 'Workbunny-动作库' },
-  memory: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'Workbunny-记忆' },
-  desktop: { w: 560, h: 760, title: 'Workbunny-工作与日常' },
-  self: { w: LIBRARY_PANEL_WIDTH, h:760, title:'Workbunny-自我理解' },
+  settings: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'WorkBunny-设置' },
+  motions: { w: LIBRARY_PANEL_WIDTH, h: 800, title: 'WorkBunny-动作库' },
+  memory: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'WorkBunny-记忆' },
+  desktop: { w: 560, h: 760, title: 'WorkBunny-工作与日常' },
+  about: { w: 460, h: 520, title: '关于 WorkBunny' },
+  self: { w: LIBRARY_PANEL_WIDTH, h:760, title:'WorkBunny-自我理解' },
 };
 
 function openPanel(kind) {
@@ -566,7 +566,7 @@ function openPanel(kind) {
     log(`[panel:${kind}:${tag}] ${msg}  (${String(sourceId || '').split('/').pop()}:${line})`);
   });
   w.webContents.on('did-fail-load', (_e, code, desc) => log(`[panel:${kind}] did-fail-load ${code} ${desc}`));
-  w.loadFile(path.join(__dirname, '..', 'renderer', kind === 'self' ? 'self.html' : ['memory', 'desktop'].includes(kind) ? 'companion.html' : 'panel.html'), { query: { p: kind } });
+  w.loadFile(path.join(__dirname, '..', 'renderer', kind === 'about' ? 'about.html' : kind === 'self' ? 'self.html' : ['memory', 'desktop'].includes(kind) ? 'companion.html' : 'panel.html'), { query: { p: kind } });
   w.once('ready-to-show', () => w.show());
   w.on('closed', () => panels.delete(kind));
   panels.set(kind, w);
@@ -674,7 +674,7 @@ function bargeInReady(text) {
 
 let activeAudioId = null, playbackTest = null;
 let composing = false, lastInterruption = null;
-function stopSpeaking(reason) {
+function stopSpeaking(reason, { keepThought = false } = {}) {
   if (speaking) lastSpokeAt = Date.now();
   if (['voice', 'typing', 'text', 'click', 'user'].includes(reason)) {
     const ids = new Set([activeSpeechReplyId, ...speechQueue.map(item => item.messageId)].filter(Boolean));
@@ -687,7 +687,7 @@ function stopSpeaking(reason) {
   if (activeSpeechReplyId) presentedReplies.delete(activeSpeechReplyId);
   for (const item of speechQueue) if (item.messageId) presentedReplies.delete(item.messageId);
   activeSpeechReplyId = null;
-  activeThought?.abort();
+  if (!keepThought) activeThought?.abort();
   tts.cancel();
   synthCache.clear();
   speechGen++;
@@ -965,12 +965,13 @@ function dialogueReady() {
 }
 
 async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn, userMessage }) {
-  if (storageBusy || storageError || !dialogueReady()) { voiceTurn?.skip(); send('toast', { text: storageError || connection.status().note }); return null; }
+  const localTaskControl = internal ? null : dialogueActions.taskControl(userText, agent ? agent.currentTask() : desktop?.task);
+  if (storageBusy || storageError || !localTaskControl && !dialogueReady()) { voiceTurn?.skip(); send('toast', { text: storageError || connection.status().note }); return null; }
   if (!internal && inputAdmission.containsSecret(userText)) { voiceTurn?.skip(); send('toast', { text: inputAdmission.NOTICE }); return null; }
   const c = config.load(), scene = currentScene();
   let requestEpoch = contextEpoch;
   if (screenLocked || (c.memory.enabled && !memory?.ready)) { send('toast', { text: '请先解锁电脑与记忆，再继续对话。' }); return null; }
-  const L = config.resolveLLM(c), taskControl = internal ? null : dialogueActions.taskControl(userText, desktop?.task);
+  const L = config.resolveLLM(c), taskControl = localTaskControl;
   if (!taskControl && L.transport !== 'workbuddy' && !L.apiKey) { send('toast', { text: '请先在设置中配置智力。' }); return null; }
   activeThought?.abort();
   const controller = new AbortController(); activeThought = controller; busy = true;
@@ -982,6 +983,10 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     const memoryContext = memory ? await memory.context(userText, { internal, recent: history, scene, budget: 20000 }) : { text: nowLine(), messages: history.slice(-12), sourceIds: [] };
     const workContext = monitor ? await scopedWork(monitor.view) : { text: '', sourceIds: [] };
     const secretaryContext = secretary?.contextSnapshot() || { text: '', sourceIds: [] };
+    if (typeof taskNotifications !== 'undefined' && taskNotifications && memory?.ready) {
+      const alerts = await taskNotifications.context(scene);
+      secretaryContext.text += '\n' + alerts.text; secretaryContext.sourceIds.push(...alerts.sourceIds);
+    }
     const rows = c.memory.enabled && memory?.ready && !internal ? (await memory.query('message', 100, { scene, sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse() : [];
     const dialogueId = 'owner:' + scene;
     const dc = require('./dialogue-cognition');
@@ -1030,6 +1035,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     if (!current()) return null;
     if (recallSession && !await recallSession.verify()) throw new Error('本轮回忆依据已变化，请重试');
     log(`[brain] 完成 ${Date.now() - started}ms（${r.attempts || 1}次请求 · ${L.provider}/${r.model || L.model}）`);
+    if (r.cognitionDegraded) log('[brain] 对话协议降级为已校验普通回复' + (['json', 'envelope', 'review', 'reply', 'prediction'].includes(r.cognitionFailureStage) ? '（阶段：' + r.cognitionFailureStage + '）' : ''));
     const reply = internal ? { text: r.text } : r.reply;
     if (reply?.skipped) { voiceTurn?.skip(); send('heard', { text: userText, replied: false }); return { ...r, text: '<skip>' }; }
     if (voiceTurn) {
@@ -1113,8 +1119,11 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
   } catch (error) {
     if (!current()) return null;
     log('[brain] 请求未完成：' + (error.code || error.name || 'error'));
+    if (error.code === 'E_REPLY_PROTOCOL' && ['json', 'envelope', 'review', 'reply', 'prediction'].includes(error.protocolStage)) log('[brain] 格式校验阶段：' + error.protocolStage);
     if (error.code === 'E_CONTEXT_BUDGET' && error.budget) log('[brain] 输入预算', error.budget);
-    send('chat', { role: 'assistant', text: error.code === 'E_REPLY_PROTOCOL' ? '这次没能正常生成回复，请再试一次。' : '暂时没能回复：' + error.message });
+    const failureText = error.code === 'E_REPLY_PROTOCOL' ? '这次没能正常生成回复，请再试一次。' : '暂时没能回复：' + error.message;
+    send('chat', { role: 'assistant', text: failureText });
+    if (allowSpeech && error.code === 'E_REPLY_PROTOCOL') speak(failureText);
     return null;
   } finally {
     if (activeThought === controller) { activeThought = null; busy = false; send('think', { on: false }); memory?.scheduleExtraction(); }
@@ -1159,7 +1168,7 @@ function proactiveAllowed() {
 }
 
 async function refreshSupervision() {
-  if (supervisionBusy || !monitor || storageBusy || screenLocked || !memory?.ready || !connection.status().ready || !config.load().monitor.enabled) return;
+  if (supervisionBusy || !monitor || storageBusy || screenLocked || !memory?.ready || !config.load().monitor.enabled) return;
   supervisionBusy = true;
   try {
     const epoch = memory.generation, scene = currentScene(), sources = [monitor, delegationMonitor].filter(Boolean);
@@ -1167,6 +1176,18 @@ async function refreshSupervision() {
     for (const source of sources) { const scoped = await scopedWork(source.view); all.push(...(scoped.view.running || []), ...(scoped.view.done || [])); }
     if (epoch !== memory.generation || scene !== currentScene()) return;
     const unique = [...new Map(all.map(row => [taskSupervision.key(row), row])).values()]; taskSupervision.observe(unique);
+    if (typeof taskNotifications !== 'undefined' && taskNotifications) {
+      for (const row of unique) {
+        if (row.task?.status === 'ok' || row.task?.status === 'running' && Date.now() - row.lastEventAt < 20000 && !row.task.waitingForUser && !(row.task.consecutiveFailures >= 3)) {
+          await taskNotifications.enqueue({ target: 'workbuddy', taskId: row.task.bunnyTaskId || taskSupervision.key(row), status: 'resolved', scene, epoch });
+        }
+      }
+      for (const event of taskSupervision.pending) {
+        const row = taskSupervision.tasks.get(event.key)?.snapshot;
+        await taskNotifications.enqueue({ target: 'workbuddy', taskId: row?.task?.bunnyTaskId || event.key, eventId: event.id, status: event.kind, scene, epoch,
+          sources: row?.task?.bunnyTaskId ? [row.task.bunnyTaskId] : [] });
+      }
+    }
     if (!proactiveAllowed() || speaking || composing) return;
     const configNow = config.load();
     const event = taskSupervision.peek(e =>
@@ -1238,7 +1259,7 @@ async function scopedWork(input) {
   return scopedMonitorContext(view, { scene, taskScopes, bootAt: BOOT_AT, ready: epoch === contextEpoch });
 }
 function startMonitor() {
-  if (!connection.status().ready || storageBusy) return;
+  if (storageBusy) return;
   const c = config.load();
   if (monitor) monitor.stop();
   monitor = new Monitor();
@@ -1440,12 +1461,49 @@ function buildTrayMenu() {
     },
     { label: '打开数据目录', click: () => shell.openPath(USER_DIR) },
     { type: 'separator' },
+    { label: '关于 WorkBunny', click: () => openPanel('about') },
+    { type: 'separator' },
     { label: '退出', click: () => { quitting = true; app.quit(); } },
   ]);
 }
 
+function buildCharacterMenu() {
+  const c = config.load();
+  const save = patch => applySettings(patch).catch(() => send('toast', { text: '设置未保存，请重试。' }));
+  const sizes = SCALES.filter(k => !activeAvatarPack() || k !== 1);
+  const selectedScale = activeAvatarPack() && clampScale(c.window.scale) === 1 ? .5 : clampScale(c.window.scale);
+  return Menu.buildFromTemplate([
+    { label: '设置…', click: () => openPanel('settings') },
+    { label: '显示对话内容', type: 'checkbox', checked: c.ui.dialogueVisible, click: item => save({ ui: { dialogueVisible: item.checked } }) },
+    { label: '显示文字输入', type: 'checkbox', checked: textInputOpen, click: item => {
+      if (item.checked) { setInteractive(true); win?.focus(); }
+      send('ask', { open: item.checked, focus: item.checked });
+    } },
+    { label: '静音不说话', type: 'checkbox', checked: !c.voice.enabled, click: item => {
+      if (item.checked && (speaking || speechQueue.length)) stopSpeaking('user', { keepThought: true });
+      save({ voice: { enabled: !item.checked } });
+    } },
+    { label: '关闭耳朵', type: 'checkbox', checked: !c.voice.alwaysListen, click: async item => {
+      try {
+        await applySettings({ voice: { alwaysListen: !item.checked } });
+        if (!item.checked && systemPreferences.getMediaAccessStatus('microphone') !== 'granted') {
+          await requestAsrPermission(); startListen('permission');
+        }
+      } catch { send('toast', { text: '耳朵设置未保存，请重试。' }); }
+    } },
+    { type: 'separator' },
+    { label: '对话场景', submenu: ['private', 'life', 'work'].map(scene => ({ label: scopePolicy.LABELS[scene], type: 'radio', checked: scene === currentScene(), click: () => save({ memory: { scene } }) })) },
+    { label: '形象', submenu: avatarList().map(a => ({ label: a.label, type: 'radio', checked: c.avatar === a.key, click: () => save({ avatar: a.key }) })) },
+    { label: '外观大小', submenu: sizes.map(scale => ({ label: activeAvatarPack() ? ({ .25: '50%', .5: '100%', 1.5: '150%', 2: '200%' })[scale] : SCALE_LABELS[scale], type: 'radio', checked: scale === selectedScale,
+      click: () => save({ window: { scale } }) })) },
+    { type: 'separator' },
+    { label: '记忆与关系…', click: () => openPanel('memory') },
+    { label: '工作与日常…', click: () => openPanel('desktop') },
+    { label: '关于 WorkBunny', click: () => openPanel('about') },
+  ]);
+}
 function rebuildTray() {
-  if (tray) { tray.setContextMenu(buildTrayMenu()); tray.setToolTip('workbunny · ' + scopePolicy.LABELS[currentScene()]); }
+  if (tray) { tray.setContextMenu(buildTrayMenu()); tray.setToolTip('WorkBunny · ' + scopePolicy.LABELS[currentScene()]); }
 }
 
 function showWindow() {
@@ -1577,6 +1635,7 @@ async function handleUtterance(text, voiceTurn) {
   turnT0 = voiceTurn?.heardAt || Date.now();
   lastHeardAt = Date.now();
   autonomy?.pause();
+  taskNotifications?.invalidate();
   send('heard', { text: t });
   if (voiceTurn) log(`[listen] 预请求：停顿 ${Date.now() - voiceTurn.heardAt}ms`);
   log(`[listen] heard ${t.length} 字`);
@@ -1621,6 +1680,14 @@ async function requestAsrPermission() {
 }
 
 /* ── IPC ── */
+ipcMain.on('pet:context-menu', (event, position) => {
+  if (event.sender !== win?.webContents || screenLocked) return;
+  if (!Number.isFinite(position?.x) || !Number.isFinite(position?.y)) return;
+  const [width, height] = win.getContentSize();
+  if (position.x < 0 || position.y < 0 || position.x >= width || position.y >= height) return;
+  setInteractive(true);
+  buildCharacterMenu().popup({ window: win, x: Math.min(width - 1, Math.round(position.x)), y: Math.min(height - 1, Math.round(position.y)) });
+});
 function trustedCompanion(event, kind) {
   if (storageBusy) throw new Error('数据库正在迁移，请等待重启');
   const allowed = kind ? panels.get(kind) : null;
@@ -1629,6 +1696,7 @@ function trustedCompanion(event, kind) {
   throw new Error('此窗口无权执行该操作');
 }
 function invalidateMemoryContext() {
+  send('dialogue-reset', {});
   lastDialogueAt = 0;
   autonomy?.pause();
   presentedReplies.clear();
@@ -1637,8 +1705,9 @@ function invalidateMemoryContext() {
   voiceTurns.reset(); stopSpeaking(); history = []; publishRecall(); taskReports.length = 0;
   tts.clearSpeechCache?.();
   secretary?.invalidate();
+  taskNotifications?.invalidate(); alertDesktop?.stop('记忆内容已变更，异常提醒已暂停').catch(() => {});
   contacts?.invalidate();
-  watches?.invalidate(); watchDesktop?.stop('记忆内容已变更，持续关注已暂停').catch(() => {});
+  void agent?.invalidate('记忆资料已变化，任务已暂停'); watchDesktop?.stop('记忆内容已变更，持续关注已暂停').catch(() => {});
   if (desktop?.task && ['starting', 'running', 'monitoring', 'awaiting', 'verifying', 'review'].includes(desktop.task.status)) {
     desktop.stop('记忆内容已变更，代理已暂停').catch(() => {});
   }
@@ -1665,7 +1734,7 @@ ipcMain.handle('pet:autonomy-directory', async e => {
   selfAccess(e);
   const name = [...String(config.load().buddy.name || '伙伴')];
   const label = name.length > 6 ? name.slice(0, 6).join('') + '…' : name.join('');
-  const selected = await dialog.showOpenDialog({ title: 'Workbunny-自主目录', message:`选择作品存放位置，将建立${label}的专用子目录`, properties: ['openDirectory', 'createDirectory'] });
+  const selected = await dialog.showOpenDialog({ title: 'WorkBunny-自主目录', message:`选择作品存放位置，将建立${label}的专用子目录`, properties: ['openDirectory', 'createDirectory'] });
   if (selected.canceled) return null;
   const directory = path.join(fs.realpathSync(selected.filePaths[0]), 'Bunny-Creations');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -1687,6 +1756,21 @@ ipcMain.handle('pet:self-reflect', async e => {
   selfAccess(e);
   if (!maintenance) return { ok: false, error: '理解与更新服务暂未就绪' };
   return maintenance.updateSelfNow({ name: config.load().buddy.name });
+});
+ipcMain.handle('pet:product-info', event => {
+  trustedCompanion(event); return require('./product-info').productInfo(app.getVersion());
+});
+ipcMain.handle('pet:open-repository', async event => {
+  trustedCompanion(event); await shell.openExternal(require('./product-info').REPOSITORY); return { ok: true };
+});
+ipcMain.handle('pet:dialogue-history', async (event, options = {}) => {
+  if (event.sender !== win?.webContents) throw new Error('此窗口无权读取对话');
+  const scene = currentScene(), epoch = contextEpoch;
+  if (screenLocked || storageBusy || !memory?.ready || !config.load().memory.enabled)
+    return { scene, rows: [], more: false, note: screenLocked ? '电脑已锁定' : !config.load().memory.enabled ? '启用记忆后可浏览历史对话' : '请先在记忆与关系中解锁资料库' };
+  const result = await require('./dialogue-history').dialoguePage(memory, options, scene);
+  if (epoch !== contextEpoch || scene !== currentScene() || screenLocked || !memory?.ready) return { scene: currentScene(), rows: [], more: false };
+  return result;
 });
 ipcMain.handle('pet:memory-stats', e => { trustedCompanion(e); return memory?.stats() || { ready: false }; });
 ipcMain.handle('pet:open-web-source', async (e, value) => {
@@ -1734,7 +1818,7 @@ ipcMain.handle('pet:memory-resolve-doubt', async (e, options = {}) => {
 });
 ipcMain.handle('pet:memory-remove', async (e, id) => {
   trustedCompanion(e, 'memory');
-  const r = await dialog.showMessageBox(panels.get('memory'), { title:'Workbunny-遗忘记忆', type: 'warning', buttons: ['取消', '删除'], defaultId: 0, cancelId: 0,
+  const r = await dialog.showMessageBox(panels.get('memory'), { title:'WorkBunny-遗忘记忆', type: 'warning', buttons: ['取消', '删除'], defaultId: 0, cancelId: 0,
     message: '删除这条记忆？', detail: '关联的原始对话和派生摘要也会移除，避免以后重新想起。已导出的备份需另行管理。' });
   if (r.response !== 1) return { removed: 0, canceled: true };
   invalidateMemoryContext();
@@ -1744,22 +1828,22 @@ ipcMain.handle('pet:memory-remove', async (e, id) => {
 });
 ipcMain.handle('pet:memory-clear', async e => {
   trustedCompanion(e, 'memory');
-  const r = await dialog.showMessageBox(panels.get('memory'), { title:'Workbunny-清空记忆', type: 'warning', buttons: ['取消', '清空记忆'], defaultId: 0, cancelId: 0,
+  const r = await dialog.showMessageBox(panels.get('memory'), { title:'WorkBunny-清空记忆', type: 'warning', buttons: ['取消', '清空记忆'], defaultId: 0, cancelId: 0,
     message: '清空全部聊天和长期记忆？', detail: '也会清除自我理解、简短身份与行为输入、锁、摘要及任务记录。模型和音色保留。请先导出加密备份。' });
   if (r.response !== 1) return { ok: false, canceled: true };
   await desktop.stop('清空本地记忆'); invalidateMemoryContext();
-  const result = await memory.clear(); contacts?.invalidate(); watches?.invalidate(); clearTaskView(); return result;
+  const result = await memory.clear(); contacts?.invalidate(); void agent?.invalidate('资料或账号状态发生变化，任务已暂停'); clearTaskView(); return result;
 });
 ipcMain.handle('pet:memory-export', async (e, passphrase) => {
   trustedCompanion(e, 'memory');
   const data = await memory.export(passphrase);
-  const r = await dialog.showSaveDialog(panels.get('memory'), { title:'Workbunny-导出备份', defaultPath: `workbunny-${new Date().toISOString().slice(0, 10)}.bunnyvault`, filters: [{ name: 'workbunny 加密备份', extensions: ['bunnyvault'] }] });
+  const r = await dialog.showSaveDialog(panels.get('memory'), { title:'WorkBunny-导出备份', defaultPath: `workbunny-${new Date().toISOString().slice(0, 10)}.bunnyvault`, filters: [{ name: 'WorkBunny 加密备份', extensions: ['bunnyvault'] }] });
   if (r.canceled || !r.filePath) return { ok: false, canceled: true };
   require('./vault-crypto').atomicPrivate(r.filePath, data); return { ok: true };
 });
 ipcMain.handle('pet:memory-restore', async (e, passphrase) => {
   trustedCompanion(e, 'memory');
-  const r = await dialog.showOpenDialog(panels.get('memory'), { title:'Workbunny-恢复备份', properties: ['openFile'], filters: [{ name: 'workbunny 加密备份', extensions: ['bunnyvault'] }] });
+  const r = await dialog.showOpenDialog(panels.get('memory'), { title:'WorkBunny-恢复备份', properties: ['openFile'], filters: [{ name: 'WorkBunny 加密备份', extensions: ['bunnyvault'] }] });
   if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
   const file = r.filePaths[0]; if (fs.statSync(file).size > 256 * 1024 * 1024) throw new Error('备份过大，请使用分段迁移');
   invalidateMemoryContext();
@@ -1774,22 +1858,40 @@ ipcMain.handle('pet:memory-restore', async (e, passphrase) => {
   await recoverTaskViews();
   return result;
 });
-ipcMain.handle('pet:task-status', e => { trustedCompanion(e, 'desktop'); return desktop.status(); });
+ipcMain.handle('pet:task-status', async e => { trustedCompanion(e, 'desktop'); const status = await desktop.status();
+  return { ...status, notificationNote: memory?.ready && taskNotifications ? (await taskNotifications.context()).display : '解锁记忆后读取异常通知设置' }; });
 ipcMain.handle('pet:desktop-permission', async e => { trustedCompanion(e, 'desktop'); const status = await desktop.requestPermission(); return status.permissions; });
 ipcMain.handle('pet:task-start', async (e, v) => {
   trustedCompanion(e, 'desktop');
   if (!memory?.ready) return { ok: false, error: '请先在“记忆与关系”中解锁本地资料库，再启动桌面任务。' };
   if (secretary?.verifying) return { ok: false, error: '正在核对上一件事的交付，请先暂停或等待结果。' };
-  try { voiceTurns.reset(); stopSpeaking(); memory?.cancelExtraction(); return await desktop.start(v); } catch (error) { return { ok: false, error: error.message }; }
+  try {
+    voiceTurns.reset(); stopSpeaking(); memory?.cancelExtraction();
+    const source=await memory.addMessage('user',String(v?.goal||''),{scene:currentScene(),characterId:'owner',channel:'dialogue',inputSource:'text'});
+    return await agent.command(String(v?.goal||''),{role:'owner',verified:true,channel:'dialogue',sources:[source.id],scene:currentScene()});
+  } catch (error) { return { ok: false, error: error.message }; }
 });
-ipcMain.handle('pet:task-cancel', async e => { trustedCompanion(e, 'desktop'); return desktop.cancel(); });
-ipcMain.handle('pet:task-stop', e => { trustedCompanion(e, 'desktop'); return desktop.stop(); });
-ipcMain.handle('pet:task-accept', e => { trustedCompanion(e, 'desktop'); return desktop.accept(); });
-ipcMain.handle('watch:list', e => { trustedCompanion(e, 'desktop'); return watches?.list() || []; });
-for (const action of ['pause', 'resume', 'stop']) ipcMain.handle('watch:' + action, (e, id) => {
-  trustedCompanion(e, 'desktop'); return watches?.control(action, { id }) || { ok: false, error: '持续关注尚未就绪' };
+ipcMain.handle('pet:task-cancel', async e => { trustedCompanion(e, 'desktop'); const id = desktop.task?.id; return (await Promise.all([desktop.cancel(), taskNotifications?.cancelTask(id)]))[0]; });
+ipcMain.handle('pet:task-stop', async e => { trustedCompanion(e, 'desktop'); const id = desktop.task?.id; return (await Promise.all([desktop.stop(), taskNotifications?.cancelTask(id)]))[0]; });
+ipcMain.handle('pet:task-accept', async e => { trustedCompanion(e, 'desktop'); const id = desktop.task?.id; return (await Promise.all([desktop.accept(), taskNotifications?.cancelTask(id)]))[0]; });
+ipcMain.handle('pet:agent-status', e => { trustedCompanion(e, 'desktop'); return agent?.status() || { tasks: [], skills: [] }; });
+ipcMain.handle('pet:agent-command', async (e, request) => {
+  trustedCompanion(e, 'desktop');
+  if (!agent || !memory?.ready) return { ok: false, text: '请先解锁本地资料，再交办任务。' };
+  const text = typeof request === 'string' ? request.trim() : '';
+  if (!text || text.length > 12000) return { ok: false, text: '请写明要交办的事情。' };
+  const source = await memory.addMessage('user', text, { scene: currentScene(), characterId: 'owner', channel: 'dialogue', inputSource: 'text' });
+  try { return await agent.command(text, { role: 'owner', verified: true, channel: 'dialogue', sources: [source.id], scene: currentScene() }); }
+  catch (error) { return { ok: false, text: error.message }; }
 });
-ipcMain.handle('watch:check', (e, id) => { trustedCompanion(e, 'desktop'); return watches?.tick(id) || { ok: false, error: '持续关注尚未就绪' }; });
+ipcMain.handle('pet:agent-control', async (e, value) => {
+  trustedCompanion(e, 'desktop');
+  if (!agent || !memory?.ready) return { ok: false, error: '任务服务尚未就绪' };
+  if (value?.operation === 'reconnect') return agent.scene.reconnect();
+  if (value?.operation === 'pauseAll') return agent.runtime.controlAll('pause');
+  if (value?.operation === 'check') return agent.reconcile(value.id);
+  return agent.runtime.control(value?.operation, value?.id);
+});
 ipcMain.handle('pet:desktop-insert', (e, text) => { trustedCompanion(e, 'desktop'); return desktop.insert(text); });
 ipcMain.handle('pet:interact', async (e, request) => {
   if (e.sender !== win?.webContents) return null;
@@ -1850,7 +1952,7 @@ ipcMain.handle('pet:init', async () => {
     avatars: list, viewport: windowLayout?.viewport,
     monitor: snapshotForUi(monitorScoped.view),
     desktop: desktop?.publicStatus() || null,
-    watches: watches?.list() || [],
+    agent: agent?.status() || { tasks: [], skills: [] },
     currentRecall,
     asrAvailable: hasAsr,
     versions: { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome },
@@ -1910,7 +2012,7 @@ ipcMain.handle('pet:avatar-import', async (e, options = {}) => {
   trustedCompanion(e);
   const targetKey = options?.targetKey;
   if (targetKey && !avatarPacks.has(targetKey)) throw Error('只能替换已有形象包');
-  const choice = await dialog.showOpenDialog(panels.get('settings') || win, { title: 'Workbunny-导入形象', properties: ['openFile'],
+  const choice = await dialog.showOpenDialog(panels.get('settings') || win, { title: 'WorkBunny-导入形象', properties: ['openFile'],
     filters: targetKey ? [{ name: 'WorkBunny形象包', extensions: ['wbavatar'] }] : [{ name: '形象文件', extensions: ['vrm', 'wbavatar'] }] });
   if (choice.canceled) return { cancelled: true };
   const file = choice.filePaths[0];
@@ -2037,7 +2139,7 @@ ipcMain.handle('pet:motion-edit', async (e, change) => {
 });
 ipcMain.handle('pet:motion-import', async (e, options) => {
   trustedCompanion(e, 'motions');
-  const choice = await dialog.showOpenDialog(panels.get('motions') || win, { title:'Workbunny-导入动作', properties: ['openFile', 'multiSelections'], filters: [{ name: 'VRMA', extensions: ['vrma'] }] });
+  const choice = await dialog.showOpenDialog(panels.get('motions') || win, { title:'WorkBunny-导入动作', properties: ['openFile', 'multiSelections'], filters: [{ name: 'VRMA', extensions: ['vrma'] }] });
   if (choice.canceled) return { cancelled: true };
   const imported = [], errors = [];
   for (const file of choice.filePaths.slice(0, 32)) {
@@ -2065,7 +2167,7 @@ ipcMain.on('pet:stop-speak', () => {
 ipcMain.on('pet:composing', (event, value) => {
   if (event.sender !== win?.webContents) return;
   composing = value?.active === true;
-  if (composing) { stopSpeaking('typing'); voiceTurns.reset(); lastHeardAt = Date.now(); autonomy?.pause(); }
+  if (composing) { stopSpeaking('typing'); voiceTurns.reset(); lastHeardAt = Date.now(); autonomy?.pause(); taskNotifications?.invalidate(); }
 });
 
 ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
@@ -2073,7 +2175,8 @@ ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
   if (inputAdmission.containsSecret(t)) return { ok: false, error: inputAdmission.NOTICE };
   if (!t) return { ok: false };
   if (storageBusy || storageError) return { ok: false, error: storageError || '数据库正在迁移' };
-  if (!dialogueReady()) return { ok: false, error: config.load().brain.source === 'apikey' ? '请在智力设置中填写 API Key' : connection.status().note };
+  const localControl=dialogueActions.taskControl(t,agent?agent.currentTask():desktop?.task);
+  if (!dialogueReady()&&!localControl) return { ok: false, error: config.load().brain.source === 'apikey' ? '请在智力设置中填写 API Key' : connection.status().note };
   if (screenLocked || (config.load().memory.enabled && !memory?.ready)) return { ok: false, error: '记忆尚未解锁，请在“记忆与关系”中解锁后继续。' };
   try { require('./message-identity').validateText(t); } catch (e) { return { ok: false, error: e.message }; }
   composing = false; stopSpeaking('text');
@@ -2106,6 +2209,10 @@ async function applySettings(patch) {
   if (patch?.asr?.ownerOnly && !speakerFilter.status().ready) throw Error('请先朗读录入主人声音');
   if (patch?.window && Object.hasOwn(patch.window, 'scale')) patch = { ...patch, window: { ...patch.window, scale: clampScale(patch.window.scale) } };
   const c = config.save(patch || {});
+  if (c.memory.scene !== previous.memory.scene || c.memory.enabled !== previous.memory.enabled ||
+      patch?.brain && JSON.stringify(c.brain) !== JSON.stringify(previous.brain)) {
+    taskNotifications?.invalidate(); await alertDesktop?.stop('对话场景或设置已变化，异常微信提醒已暂停').catch(() => {});
+  }
   speakerFilter.enabled = c.asr.ownerOnly === true;
   if (patch?.brain && JSON.stringify(c.brain) !== JSON.stringify(previous.brain)) {
     contextEpoch++; activeThought?.abort(); voiceTurns.reset(); stopSpeaking(); busy = false;
@@ -2130,7 +2237,7 @@ async function applySettings(patch) {
     for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'monitor', ...emptyMonitor });
     await memory?.changeScene(c.memory.scene).catch(() => { send('toast', { text: '场景已切换，当前记忆读取异常；未使用旧场景资料。' }); });
     contacts?.invalidate();
-    await watches?.sceneChanged?.().catch(() => log('[watch] 场景暂停保存失败，运行令牌已取消'));
+    await agent?.invalidate('切换了对话场景，任务已暂停');
     if (desktop?.task && !visibleHere(desktop.task)) await desktop.stop('切换了对话场景，原任务已暂停').catch(() => log('[desktop] 场景暂停未完成'));
     if (resumeListening) startListen('scene');
     for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'memory-changed' });
@@ -2257,6 +2364,7 @@ ipcMain.on('pet:vis', (_e, v) => (v ? showWindow() : hideWindow()));
 ipcMain.on('pet:quit', () => { quitting = true; app.quit(); });
 ipcMain.on('pet:open', (_e, what) => {
   if (what === 'settings') openPanel('settings');
+  else if (what === 'about') openPanel('about');
   else if (what === 'self') openPanel('self');
   else if (what === 'motions') openPanel('motions');
   else if (what === 'memory' || what === 'desktop') openPanel(what);
@@ -2303,13 +2411,14 @@ ipcMain.handle('pet:tts-http-catalog', async (e, kind) => {
 ipcMain.handle('pet:storage-migrate', async e => {
   trustedCompanion(e);
   if (screenLocked || !memory?.ready || storageBusy) return { ok: false, error: '请先解锁资料库并等待当前迁移完成' };
-  const choice = await dialog.showOpenDialog(panels.get('settings') || win, { title:'Workbunny-迁移数据库', message:'选择目的父目录，将在其中建立 vault', properties: ['openDirectory', 'createDirectory'] });
+  const choice = await dialog.showOpenDialog(panels.get('settings') || win, { title:'WorkBunny-迁移数据库', message:'选择目的父目录，将在其中建立 vault', properties: ['openDirectory', 'createDirectory'] });
   if (choice.canceled) return { ok: false, cancelled: true };
   let closed = false;
   try {
     const result = await storage.migrate(choice.filePaths[0], { quiesce: async () => {
       storageBusy = true; contextEpoch++; activeThought?.abort(); voiceTurns.reset(); stopListen(); stopSpeaking();
-      autonomy?.pause(); maintenance?.cancel(); monitor?.stop(); delegationMonitor?.stop(); watches?.invalidate();
+      autonomy?.pause(); maintenance?.cancel(); monitor?.stop(); delegationMonitor?.stop(); void agent?.invalidate('资料或账号状态发生变化，任务已暂停');
+      taskNotifications?.invalidate(); await alertDesktop?.stop('迁移资料库，异常微信提醒已暂停');
       await desktop?.stop('迁移资料库，代办已暂停且不会重发');
       await watchDesktop?.stop('迁移资料库');
       await memory.tail; await memory.db.request('checkpoint');
@@ -2325,7 +2434,7 @@ ipcMain.handle('pet:storage-migrate', async e => {
 ipcMain.handle('pet:storage-reconnect', async e => {
   trustedCompanion(e);
   if (screenLocked || storageBusy || memory?.ready) return { ok: false, error: '此操作仅用于原磁盘不可用时恢复连接；正常更换路径请使用迁移' };
-  const choice = await dialog.showOpenDialog({ title:'Workbunny-连接资料库', properties: ['openDirectory'] });
+  const choice = await dialog.showOpenDialog({ title:'WorkBunny-连接资料库', properties: ['openDirectory'] });
   if (choice.canceled) return { ok: false, cancelled: true };
   try {
     const dir = fs.realpathSync(choice.filePaths[0]);
@@ -2439,7 +2548,7 @@ ipcMain.handle('pet:tts-dl-state', () => tts.downloadState());
 ipcMain.on('pet:tts-cancel', () => tts.cancelDownload());
 ipcMain.handle('pet:tts-delete', async () => {
   const result = await dialog.showMessageBox(panels.get('settings') || win, {
-    title:'Workbunny-删除语音模型', type: 'warning', message: '删除本地语音模型？',
+    title:'WorkBunny-删除语音模型', type: 'warning', message: '删除本地语音模型？',
     detail: '将删除约 1.33GB 的 CustomVoice 模型文件，并停止正在进行的下载。再次使用本地语音需要重新下载。原有用户文件会保留。',
     buttons: ['取消', '删除模型'], defaultId: 0, cancelId: 0, noLink: true,
   });
@@ -2650,24 +2759,39 @@ function runMicProbeAll(sec) {
 /* ── 启动 ── */
 require('./workbuddy').configureConnection({ ready: () => {
   if (storageBusy || !connection.status().ready) return false;
-  try { if (connection.identity() !== connection.identityValue) { connection.invalidate('WorkBuddy 登录状态已变化，请重新连接'); return false; } }
+  try { if (connection.identity() !== connection.identityValue) { connection.invalidate('WorkBuddy 登录状态已变化，请重新连接', { identityChanged: true }); return false; } }
   catch { connection.invalidate(); return false; }
   return true;
 },
-  onDisconnect: () => connection.invalidate() });
-let connectionWasReady = false;
+  onDisconnect: () => connection.invalidate(), recover: () => connection.connect(), version: () => connection.status().generation });
+let connectionWasReady = false, connectionGeneration = 0, connectionHadFailure = false, activeConnectionAlertKey = 'workbuddy-connection';
 connection.on('change', status => {
   send('workbuddy-connection', status);
   for (const p of panels.values()) if (!p.isDestroyed()) p.webContents.send('pet:ev', { type: 'workbuddy-connection', ...status });
-  if (connectionWasReady && !status.ready) {
+  const identityChanged = status.generation !== connectionGeneration;
+  connectionGeneration = status.generation;
+  if (identityChanged) {
     require('./workbuddy-free').invalidateCatalog();
     try { require('./model-catalog').invalidate('workbuddy'); } catch { log('[workbuddy] 旧目录缓存清理失败，连接保持暂停'); }
     contextEpoch++; activeThought?.abort(); memory?.cancelExtraction(); maintenance?.cancel(); autonomy?.pause();
+    taskNotifications?.invalidate(); void alertDesktop?.stop('WorkBuddy 授权会话已变化，异常提醒已暂停').catch(() => {});
     monitor?.stop(); delegationMonitor?.stop(); monitorScoped = scopedMonitorContext(null, { scene: currentScene() });
     void desktop?.stop('WorkBuddy 连接变化，已暂停，未重发任务').catch(() => {});
-    watches?.invalidate(); send('monitor', snapshotForUi(monitorScoped.view));
+    void agent?.invalidate('资料或账号状态发生变化，任务已暂停'); send('monitor', snapshotForUi(monitorScoped.view));
+  } else if (connectionWasReady && !status.ready) {
+    // Local observation survives a temporary model-broker failure.
+    maintenance?.cancel(); autonomy?.pause(); connectionHadFailure = true;
+    activeConnectionAlertKey = 'workbuddy-connection:' + Date.now();
+    if (memory?.ready) queueTaskReport({ eventId: 'connection-lost:' + Date.now(), target: 'workbuddy', taskId: activeConnectionAlertKey,
+      text: 'WorkBuddy 暂时连接不上，我会自动重连并保留任务，不会重复提交。', status: 'paused', epoch: memory.generation, scene: currentScene(), domain: 'work', visibilityFloor: scopePolicy.rank(currentScene()), sources: [] });
   }
-  if (!connectionWasReady && status.ready && win) startMonitor();
+  if (status.ready && win && !monitor?.enabled) startMonitor();
+  if (status.ready && connectionHadFailure && memory?.ready) {
+    connectionHadFailure = false;
+    queueTaskReport({ eventId: 'connection-restored:' + Date.now(), target: 'workbuddy', taskId: activeConnectionAlertKey,
+      text: 'WorkBuddy 连接已恢复，可以继续核对保留的任务状态了。', status: 'resolved', epoch: memory.generation, scene: currentScene(), domain: 'work', visibilityFloor: scopePolicy.rank(currentScene()), sources: [] });
+  }
+  if (status.ready) void secretary?.recoverConnection().catch(() => log('[recovery] 原任务暂未恢复，保留已保存状态'));
   connectionWasReady = status.ready;
 });
 const lock = app.requestSingleInstanceLock();
@@ -2678,6 +2802,17 @@ if (!lock) {
   app.on('second-instance', () => showWindow());
 
   app.whenReady().then(async () => {
+    // The internal app name also locates existing data; brand only the public menu.
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { label: 'WorkBunny', submenu: [
+        { label: '关于 WorkBunny', click: () => openPanel('about') },
+        { type: 'separator' }, { label: '设置…', accelerator: 'CmdOrCtrl+,', click: () => openPanel('settings') },
+        { type: 'separator' }, { role: 'services' },
+        { type: 'separator' }, { role: 'hide', label: '隐藏 WorkBunny' }, { role: 'hideOthers' }, { role: 'unhide' },
+        { type: 'separator' }, { role: 'quit', label: '退出 WorkBunny' },
+      ] },
+      { role: 'editMenu' }, { role: 'windowMenu' },
+    ]));
     connection.start();
     memory = new MemoryService({ dir: vaultDir,
       bin: app.isPackaged ? path.join(process.resourcesPath, 'bin', 'vault') : path.join(__dirname, '../../bin/vault'), safeStorage,
@@ -2696,21 +2831,23 @@ if (!lock) {
       getSettings: () => { const m = config.load().memory; return { ...m, extract: m.extract && !screenLocked && !busy && !speaking && !desktop?.running }; },
       getPersona: () => config.load().buddy,
       extract: require('./workbuddy-free').extractMemories,
-      onStatus: st => log('[memory] ' + (st.ready ? '已解锁加密资料库' : '锁定：' + st.error)),
+      onStatus: st => { log('[memory] ' + (st.ready ? '已解锁加密资料库' : '锁定：' + st.error)); send('dialogue-reset', {}); },
       onChange: event => {
+        send('memory-changed', {});
         for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', event);
       },
     });
     memory.selfRevisionChanged = () => { autonomy?.pause(); contextEpoch++; if (!selfMutationOwner) { activeThought?.abort(); voiceTurns.reset(); stopSpeaking(); } };
     const guiLease = new GuiLease();
     const imageResize = png => prepareVisionPreview(nativeImage.createFromBuffer(png));
+    const imageCrop = (png, rect) => nativeImage.createFromBuffer(png).crop(rect).toPNG();
     desktop = new DesktopService({ lease: guiLease, owner: 'primary', getScene: currentScene, emit: status => {
       if (status.running) setInteractive(false);
       send('desktop', status);
       secretary?.onStatus(status);
       if (['accepted', 'paused', 'stopped', 'cancelled'].includes(status.task?.status)) { delegationMonitor?.stop(); delegationMonitor = null; }
       for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'desktop', ...status });
-    }, imageResize, observeWorkBuddy: task => {
+    }, imageResize, imageCrop, observeWorkBuddy: task => {
       let source = monitor?.enabled ? monitor : delegationMonitor;
       if (!source) {
         source = delegationMonitor = new Monitor();
@@ -2718,7 +2855,9 @@ if (!lock) {
       }
       return observeWorkBuddy(source, task);
     }, persist: createTaskJournal(memory) });
-    const readyForTasks = () => !quitting && !storageBusy && connection.status().ready && connection.status().tasks?.status !== 'unavailable' && !screenLocked && !!memory?.ready;
+    const readyForOwner = () => !quitting && !storageBusy && !screenLocked && !!memory?.ready;
+    const readyForTasks = () => readyForOwner() && connection.status().ready && connection.status().tasks?.status !== 'unavailable';
+    desktop.strategies = new (require('./interaction-strategy').InteractionStrategy)(memory, currentScene);
     contacts = new ContactDirectory({ read: ({ scene }) => memory.serial(async () => {
       const entries = [], legacyEntries = []; let cursor = {};
       for (;;) {
@@ -2742,43 +2881,64 @@ if (!lock) {
       }
     }) });
     desktop.contactDirectory = contacts;
-    const observer = new WeChatObserver({ imageResize });
-    watchDesktop = new DesktopService({ lease: guiLease, owner: 'watch', getScene: currentScene, contactDirectory: contacts, imageResize,
-      persist: task => createTaskJournal(memory)({ ...task, taskType: 'watch-operation' }) });
+    watchDesktop = new DesktopService({ lease: guiLease, owner: 'agent-conversation', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop,
+      persist: task => createTaskJournal(memory)({ ...task, taskType: 'agent-operation' }) });
+    const agentNative = new (require('./desktop-native').DesktopNative)();
     const canOperate = async () => {
-      if (!readyForTasks() || busy || speaking || !guiLease.isFree() || secretary?.verifying) return false;
-      const idle = await observer.native.request('inputIdle', {}, 5000);
+      if (!readyForOwner() || busy || speaking || composing || !guiLease.isFree() || secretary?.verifying) return false;
+      const idle = await agentNative.request('inputIdle', {}, 5000);
       return typeof idle.hidIdleMs === 'number' && idle.hidIdleMs >= 8000;
     };
-    const executeWatch = async (watch, { operation, message, signal }) => {
-      const stop = () => { void watchDesktop.stop('持续关注已暂停').catch(() => {}); };
-      signal?.addEventListener('abort', stop, { once: true });
-      try {
-        if (signal?.aborted || !readyForTasks()) return { ok: false, error: '关注已暂停' };
-        const goal = operation === 'send' ? `只给「${watch.recipient}」发送这段完整原文一次：${message}` : `打开微信会话「${watch.recipient}」，确认顶部标题匹配。不输入、发送或修改草稿，不向上翻历史。`;
-        const started = await watchDesktop.start({ target: 'wechat', recipient: watch.recipient, recipientAliases: watch.recipientAliases,
-          operation, message, goal, criteria: operation === 'send' ? '指定会话中出现完整已发送气泡；不能只是草稿。' : '指定会话标题可见。',
-          origin: 'watch', inputSource: 'text', scene: watch.scene, visibilityFloor: watch.visibilityFloor, sources: [watch.id], privacyEpoch: memory.generation });
-        if (!started.ok) return started;
-        const deadline = Date.now() + 150000;
-        while (watchDesktop.running && Date.now() < deadline && !signal?.aborted) await new Promise(resolve => setTimeout(resolve, 250));
-        if (signal?.aborted) return { ok: false, error: '关注已暂停' };
-        if (watchDesktop.running) { await watchDesktop.stop('微信操作超时，保留实际结果'); return { ok: false, error: '微信操作超时' }; }
-        const task = watchDesktop.task;
-        if (task?.status !== 'review') return { ok: false, error: task?.note || '未完成微信操作' };
-        if (operation === 'send') {
-          const verified = await verifyDelivery({ task, screenshot: watchDesktop.publicStatus().screenshot, signal });
-          if (verified.verdict !== 'pass') return { ok: false, error: verified.report };
-          await watchDesktop.accept({ automatic: true, report: verified.report });
-        }
-        return { ok: true, windowId: task.scope?.windowId };
-      } finally { signal?.removeEventListener('abort', stop); }
-    };
-    watches = new WatchService({ journal: createWatchJournal(memory), sensor: observer, getScene: currentScene,
-      inspect: (w, frame, signal) => observer.inspect(w, frame, signal), propose: (w, message, signal) => observer.propose(w, message, signal),
-      execute: executeWatch, canOperate, report: queueTaskReport, epoch: () => memory.generation, ready: readyForTasks,
-      emit: rows => { send('watches', { watches: rows }); for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'watches', watches: rows }); } });
-    secretary = new Secretary({ desktop, watches, contacts, memory, getScene: currentScene, ready: readyForTasks,
+    agent = new (require('./agent-service').AgentService)({ desktop, conversationDesktop: watchDesktop, memory, contacts,
+      native: agentNative, imageResize, bitmap: png => { const picture = nativeImage.createFromBuffer(png); return { data: picture.toBitmap(), ...picture.getSize() }; },
+      getScene: currentScene, ready: readyForOwner, epoch: () => memory.generation, canOperate, report: queueTaskReport,
+      emit: status => { send('agent', status); for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'agent', ...status }); } });
+    alertDesktop = new DesktopService({ lease: guiLease, owner: 'task-alert', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop,
+      persist: task => createTaskJournal(memory)({ ...task, taskType: 'notification-operation' }),
+      modelRequest: options => {
+        const L = config.resolveLLM(config.load());
+        return L.transport === 'apikey' && L.apiKey
+          ? llm.chat({ ...L, messages: options.messages, signal: options.signal, maxTokens: options.maxTokens || 2300, timeoutMs: 20000,
+              extraBody: { ...L.extraBody, response_format: { type: 'json_object' } } })
+          : require('./workbuddy').chat({ ...options, thinking: 'low', maxTokens: options.maxTokens || 2300, timeoutMs: 20000,
+              extraBody: { reasoning_effort: 'low', response_format: { type: 'json_object' } } });
+      } });
+    taskNotifications = new (require('./task-notifications').TaskNotifications)({ memory, getScene: currentScene,
+      ready: () => readyForOwner() && config.load().memory.enabled,
+      canOperate: async () => {
+        if (!readyForOwner() || busy || speaking || composing || secretary?.verifying || !guiLease.isFree() || Date.now() < quietUntil) return false;
+        const idle = await alertDesktop.native.request('inputIdle', {}, 5000);
+        return Number.isFinite(idle.hidIdleMs) && idle.hidIdleMs >= 8000;
+      },
+      deliver: async (event, signal) => {
+        const stop = () => { void alertDesktop.stop('异常提醒被暂停').catch(() => {}); };
+        signal.addEventListener('abort', stop, { once: true });
+        try {
+          if (signal.aborted || !readyForOwner()) return { state: 'skipped' };
+          const started = await alertDesktop.start({ target: 'wechat', recipient: event.recipient, operation: 'send', message: event.text,
+            goal: `仅向微信会话「${event.recipient}」发送一次任务异常提醒。未登录仅尝试明确的一键登录，否则忽略微信。`,
+            criteria: '指定会话中出现完整已发送气泡；不能是输入草稿。', origin: 'notification', inputSource: 'text',
+            scene: event.scene, sources: [event.id], privacyEpoch: memory.generation });
+          if (!started.ok) return { state: alertDesktop.task?.submitAttemptedAt ? 'unknown' : 'skipped' };
+          const deadline = Date.now() + 125000;
+          while (alertDesktop.running && !signal.aborted && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 200));
+          if (alertDesktop.running || signal.aborted) { await alertDesktop.stop('异常微信提醒达到时间上限'); return { state: alertDesktop.task?.submitAttemptedAt ? 'unknown' : 'skipped' }; }
+          if (alertDesktop.task?.status === 'review' && alertDesktop.task?.sendState === 'confirmed') {
+            await alertDesktop.accept({ automatic: true, report: '截图确认指定微信会话中的异常提醒已发送' });
+            return { state: 'sent' };
+          }
+          return { state: alertDesktop.task?.submitAttemptedAt ? 'unknown' : 'skipped' };
+        } finally { signal.removeEventListener('abort', stop); }
+      } });
+    let lastNotificationNote = '';
+    notificationTimer = setInterval(() => {
+      void taskNotifications.tick();
+      if (readyForOwner()) taskNotifications.context().then(status => {
+        if (status.display === lastNotificationNote) return; lastNotificationNote = status.display;
+        const panel = panels.get('desktop'); if (panel && !panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'taskNotifications', note: status.display });
+      }).catch(() => {});
+    }, 3000); notificationTimer.unref?.();
+    secretary = new Secretary({ desktop, agent, contacts, notifications: taskNotifications, memory, getScene: currentScene, ready: readyForOwner, canRecover: readyForTasks,
       epoch: () => memory?.generation, report: queueTaskReport });
     autonomy = new (require('./companion-autonomy').CompanionAutonomy)({ memory, secretary,
       defaultDirectory: path.join(USER_DIR, 'creations'), propose: require('./workbuddy-free').proposeActivity, getScene: currentScene, report: queueTaskReport,
@@ -2805,31 +2965,9 @@ if (!lock) {
       if (!maintenance.activeMode) autonomy?.tick().catch(() => {});
     }, 15000);
     maintenanceTimer.unref?.();
-    async function restoreTask() {
-    if (memory.ready && desktop) {
-      let lastTask = null, cursor = {};
-      for (let page = 0; page < 50 && !lastTask; page++) {
-        const rows = await memory.query('task', 100, cursor);
-        const row = rows.find(row => !row.value.taskType && typeof row.value.goal === 'string' && row.value.target);
-        if (row) lastTask = { ...row.value, ...scopePolicy.scopeOf(row), scene: row.value.scene ?? 'private' };
-        if (rows.length < 100) break;
-        const tail = rows.at(-1); cursor = { before: tail.ts, beforeId: tail.id };
-      }
-      if (lastTask) {
-        desktop.task = lastTask;
-        if (lastTask.privacyEpoch !== undefined) lastTask.privacyEpoch = memory.generation;
-        if (['starting', 'running', 'monitoring', 'awaiting', 'verifying', 'review'].includes(lastTask.status)) {
-          desktop.task = { ...lastTask, status: 'paused', note: '应用已重启；未重复发送输入，请先查看原窗口的结果。', updatedAt: Date.now() };
-          await desktop.journal();
-        }
-        send('desktop', desktop.publicStatus());
-      }
-    }
-    }
     recoverTaskViews = async () => {
-      contacts.invalidate(); watches.invalidate(); clearTaskView();
-      await restoreTask().catch(() => log('[desktop] 部分旧代办暂未恢复，保留原始资料'));
-      await watches.restore().catch(() => log('[watch] 部分关注暂未恢复，保留原始资料'));
+      contacts.invalidate(); void agent.invalidate('记忆资料已变化，任务已暂停'); clearTaskView();
+      await agent.restore().catch(() => log('[agent] 部分任务暂未恢复，保留原始资料'));
     };
     let vaultOpening = null;
     unlockMemory = () => {
@@ -2850,6 +2988,7 @@ if (!lock) {
         const bodyState = (await memory.db.request('get', { ids: ['runtime:embodiment'] })).rows[0];
         if (bodyState) embodiment.restore([...(memory.decode(bodyState).value.recentActions || []), ...embodiment.recent].sort((a,b) => a.at-b.at));
         await recoverTaskViews();
+        if (!monitor && win) startMonitor();
         if (config.load().memory.extract) {
           maintenance.request('doze', { automatic: true }); maintenance.checkDue().catch(() => {});
           const indexState = (await require('./memory-evidence').readRecords(memory, ['maintenance:references-v2']))[0];
@@ -2865,13 +3004,14 @@ if (!lock) {
       onLocked: () => {
         publishRecall();
         tts.clearSpeechCache?.();
-        screenLocked = true; speakerFilter.cancel(); publishWebSources(); vaultKeyAbort?.abort(); stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.stop('电脑锁屏').catch(() => {});
-        watches.invalidate(); watchDesktop.stop('电脑锁屏').catch(() => {});
+        screenLocked = true; send('dialogue-reset', {}); speakerFilter.cancel(); publishWebSources(); vaultKeyAbort?.abort(); stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.stop('电脑锁屏').catch(() => {});
+        void agent.invalidate('电脑锁屏，任务已暂停'); watchDesktop.stop('电脑锁屏').catch(() => {});
+        taskNotifications?.invalidate(); alertDesktop?.stop('电脑锁屏').catch(() => {});
         asrStatus = { ...asrStatus, captureReady: false, note: 'locked' }; send('asrStatus', asrStatus);
         if (!memory.ready) { memory.waitingForUnlock = true; memory.error = '电脑已锁屏，解锁后自动载入记忆'; log('[memory] 屏幕锁定，延后钥匙串读取'); }
       },
       onUnlocked: () => {
-        screenLocked = false;
+        screenLocked = false; send('dialogue-reset', {});
         // The helper may be waiting for an OS password dialog. Keep the UI, stop
         // shortcut, and lock polling alive while it waits; never open a blank vault.
         unlockMemory().then(() => { if (!quitting && !screenLocked) startListen('unlock'); }).catch(() => log('[memory] 解锁未完成，请在记忆面板重试'));
@@ -2891,7 +3031,7 @@ if (!lock) {
     app.on('gpu-process-crashed', () => log('[gpu] 进程崩了（会自己恢复，只是画面会顿一下）'));
     try {
       tray = new Tray(trayImage());
-      tray.setToolTip('workbunny · ' + scopePolicy.LABELS[currentScene()]);
+      tray.setToolTip('WorkBunny · ' + scopePolicy.LABELS[currentScene()]);
       tray.setContextMenu(buildTrayMenu());
       tray.on('click', () => { if (win && !win.isVisible()) showWindow(); });
     } catch (e) {
@@ -3068,7 +3208,7 @@ if (!lock) {
         const wait = Math.min(60000, 4000 * asrFailStreak);
         log(`[listen] 连续失败 ${asrFailStreak} 次，${Math.round(wait / 1000)} 秒后再试`);
         if (asrFailStreak === 3) {
-          send('asrError', { message: '我听不见了（麦克风可能被系统关掉），去「系统设置 → 隐私与安全性 → 麦克风」把 workbunny 勾上。' });
+          send('asrError', { message: '我听不见了（麦克风可能被系统关掉），去「系统设置 → 隐私与安全性 → 麦克风」把 WorkBunny 勾上。' });
         }
         scheduleListenRestart(wait);
       } else {
@@ -3143,9 +3283,9 @@ let shutdownStarted = false, shutdownFlushed = false;
 app.on('before-quit', event => {
   connection.close(); speakerFilter.cancel(); embodiment.close();
   for (const controller of avatarDescriptionPending.values()) controller.abort();
-  clearInterval(maintenanceTimer); clearInterval(supervisionTimer); clearTimeout(positionSaveTimer);
+  clearInterval(maintenanceTimer); clearInterval(supervisionTimer); clearInterval(notificationTimer); clearTimeout(positionSaveTimer);
   quitting = true;
-  autonomy?.pause(); secretary?.close(); clearTimeout(taskReportTimer); delegationMonitor?.stop();
+  autonomy?.pause(); secretary?.close(); void taskNotifications?.close(); clearTimeout(taskReportTimer); delegationMonitor?.stop();
   vaultKeyAbort?.abort();
   sessionGate?.close();
   markCleanExit();
@@ -3160,7 +3300,7 @@ app.on('before-quit', event => {
     if (!shutdownStarted) {
       shutdownStarted = true;
       Promise.resolve(desktop?.stop('应用退出')).catch(() => {}).then(async () => {
-        await autonomy?.close(); await watches?.close(); await watchDesktop?.close(); await desktop?.close(); return memory.close();
+        await autonomy?.close(); await agent?.close(); await watchDesktop?.close(); await alertDesktop?.close(); await taskNotifications?.close(); await desktop?.close(); return memory.close();
       }).catch(() => log('[memory] 退出时写入未完成，保留已提交数据')).finally(() => { shutdownFlushed = true; app.quit(); });
     }
   } else desktop?.close();

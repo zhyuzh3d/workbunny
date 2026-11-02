@@ -244,13 +244,14 @@ body[data-tab="mouth"] #testBtn { background:#a94b32; color:white; border-color:
 .avatarCard > summary::-webkit-details-marker { display:none; }
 .avatarCard > summary:hover { background:#f1ede6; }
 .avatarFold { flex:none; font-size:10px; color:var(--muted); padding-right:6px; }
-.avatarFold::after { content:' ▸'; }
-.avatarCard[open] .avatarFold::after { content:' ▾'; }
+.avatarChevron::after { content:'▸'; }
+.avatarChevron { flex:none; color:var(--muted); padding:2px 5px; }
+.avatarCard[open] .avatarChevron::after { content:'▾'; }
 .avatarPick { display:flex; align-items:center; gap:12px; width:100%; min-width:0; padding:8px 0; border:0; background:transparent; text-align:left; font:12px var(--font); color:var(--ink-soft); }
 .avatarPick:hover { background:transparent; }
 .avatarPick.on { color:var(--ink); }
-.avatarName { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.avatarUse { flex:none; font-size:10px; color:var(--muted); }
+.avatarName { flex:0 1 auto; max-width:calc(100% - 85px); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.avatarUse { margin-left:auto; flex:none; font-size:10px; color:var(--muted); }
 .avatarPick.on .avatarUse { color:#4c7253; }
 .avatarEmpty { padding:16px 12px; border:1px dashed #d7d0c4; border-radius:10px; color:var(--muted); line-height:1.6; }
 .avatarEditor { padding:8px 0 12px; }

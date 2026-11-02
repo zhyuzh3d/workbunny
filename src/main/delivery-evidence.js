@@ -134,7 +134,7 @@ function collectAuthorizedPathReferences(value) {
   const lexical = collectPathReferences(sanitized);
   const actionPattern = /只读|读取|核对|检查|审查|查看|验证|确认|审阅|分析|打开|列出|比对|创建|新建|写入|保存|生成|输出|编辑|修改|删除|移除|复制|移动|\bread\b|\binspect\b|\bcheck\b|\breview\b|\bverify\b|\bopen\b|\blist\b|\bcreate\b|\bwrite\b|\bsave\b|\bgenerate\b|\boutput\b|\bedit\b|\bmodify\b|\bdelete\b|\bremove\b|\bcopy\b|\bmove\b/giu;
   const negation = /(?:不要|不得|不许|禁止|无需|不必|勿|不能|不需要|别|不|\bdo\s+not\b|\bdon't\b|\bnever\b|\bnot\b)\s*$/iu;
-  const bridgeWord = /^(?:\s|[：:,，、;；和以及及与/“”「」『』‘’"'`]|目录|文本|文件|路径|文档|代码|内容|结果|以下|这些|指定|这个|该|源|输出|交付|列表|中的|里的|中|里|的|到|为|with|the|following|these|this|source|output|delivery|file|files|directory|folder|path|document|code)*$/iu;
+  const bridgeWord = /^(?:\s|[：:,，、;；和以及及与/“”「」『』‘’"'`]|目录|文本|文件|路径|文档|代码|内容|结果|以下|这些|指定|这个|该|源|输出|交付|列表|中的|里的|中|里|的|到|为|with|the|a|an|at|to|into|new|text|utf-?8|encoded|encoding|named|called|following|these|this|source|output|delivery|file|files|directory|folder|path|document|code)*$/iu;
   const out = new Map();
   let priorAuthorizedEnd = -1;
   let priorRequiredOutput = false;
@@ -245,6 +245,27 @@ function excerptFor(text, line, maxBytes) {
   const start = line ? Math.max(0, Math.min(lines.length - 1, line - 6)) : 0;
   const result = withinLineBudget(lines, start, Math.min(maxBytes, 4096), line ? 11 : 9);
   return result.excerpt ? { ...result, requestedLine: line || null } : null;
+}
+
+// For explicitly named files without line references, give verification the
+// whole file when it fits. For larger files distribute the budget across the
+// beginning, a visible body/heading, and the end, keeping original line numbers.
+function defaultFileExcerpts(text, maxBytes) {
+  if (!text || maxBytes <= 0) return [];
+  const lines = text.split(/\r\n|[\n\r]/u);
+  if (lines.at(-1) === '') lines.pop();
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) {
+    return [{ requestedLine: null, startLine: 1, endLine: lines.length, excerpt: text }];
+  }
+  const bodyIndex = lines.findIndex(line => /<body(?:\s|>)|^\s*#{1,3}\s|\b(?:main|summary|results?)\b|(?:正文|结论|结果|清单)/iu.test(line));
+  const requests = [null, bodyIndex >= 0 ? bodyIndex + 1 : Math.max(1, Math.ceil(lines.length / 2)), Math.max(1, lines.length - 5)];
+  const perExcerpt = Math.floor(maxBytes / MAX_EXCERPTS_PER_FILE);
+  const excerpts = [];
+  for (const line of requests) {
+    const excerpt = excerptFor(text, line, perExcerpt);
+    if (excerpt && !excerpts.some(item => item.startLine === excerpt.startLine && item.endLine === excerpt.endLine)) excerpts.push(excerpt);
+  }
+  return excerpts;
 }
 
 /** Read bounded local evidence only under absolute file/directory paths in task.userRequest. */
@@ -374,13 +395,12 @@ async function collectDeliveryEvidence(task) {
     record.textLines = textLines.length;
     record.status = 'text-metadata';
     const requestedLines = [...new Set(candidate.lines || [])].slice(0, MAX_EXCERPTS_PER_FILE);
-    const excerptRequests = requestedLines.length ? requestedLines :
-      (candidate.explicit && candidate.root.kind === 'file' ? [null] : []);
+    const excerpts = requestedLines.length ? requestedLines.map(line => excerptFor(text, line, remainingExcerptBytes)).filter(Boolean) :
+      (candidate.explicit && candidate.root.kind === 'file' ? defaultFileExcerpts(text, remainingExcerptBytes) : []);
     record.excerpts = [];
-    for (const requestedLine of excerptRequests) {
+    for (const excerpt of excerpts) {
       if (remainingExcerptBytes <= 0) break;
-      const excerpt = excerptFor(text, requestedLine, remainingExcerptBytes);
-      if (!excerpt) continue;
+      if (Buffer.byteLength(excerpt.excerpt, 'utf8') > remainingExcerptBytes) break;
       const duplicate = record.excerpts.some(item => item.startLine === excerpt.startLine && item.endLine === excerpt.endLine);
       if (duplicate) continue;
       const excerptRecord = { requestedLine: excerpt.requestedLine, startLine: excerpt.startLine,

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'" />
-  <title>Workbunny-记忆</title>
+  <title>WorkBunny-记忆</title>
   <link rel="stylesheet" href="./companion.css" />
   <link rel="stylesheet" href="./form-controls.css" />
 
@@ -15,7 +15,7 @@
 <body>
   <main id="memoryPage" class="page" hidden>
     <header class="head">
-      <div><div class="eyebrow">WORKBUNNY</div><h1>记忆</h1></div>
+      <div><div class="eyebrow">WorkBunny</div><h1>记忆</h1></div>
       <span id="memoryStatus" class="status-pill">正在读取</span>
     </header>
     <section class="main memory-main">
@@ -90,19 +90,32 @@
 
   <main id="desktopPage" class="page" hidden>
     <header class="head">
-      <div><div class="eyebrow">WORKBUNNY</div><h1>工作与日常</h1></div>
+      <div><div class="eyebrow">WorkBunny</div><h1>工作与日常</h1></div>
       <span id="desktopStatus" class="status-pill">尚未读取</span>
     </header>
     <nav id="desktopTabs" class="tabs desktop-tabs" role="tablist" aria-label="工作与日常">
-      <button class="tab active" role="tab" aria-selected="true" data-desktop-tab="current">当前任务</button>
-      <button class="tab" role="tab" aria-selected="false" data-desktop-tab="watches">持续关注</button>
+      <button class="tab active" role="tab" aria-selected="true" data-desktop-tab="current">任务</button>
+      <button class="tab" role="tab" aria-selected="false" data-desktop-tab="skills">技能</button>
       <button class="tab" role="tab" aria-selected="false" data-desktop-tab="workbuddy">WorkBuddy</button>
       <button class="tab" role="tab" aria-selected="false" data-desktop-tab="autonomy">自主生活</button>
       <button class="tab" role="tab" aria-selected="false" data-desktop-tab="permissions">系统权限</button>
     </nav>
     <section class="main desktop-main">
       <section data-desktop-page="current" role="tabpanel">
-        <div class="button-row task-toolbar"><button id="taskSetup" class="button primary">设定任务</button><button id="desktopRefresh" class="button quiet">刷新</button></div>
+      <section class="card agent-command-card">
+        <div class="section-heading"><div><h2>交给 Bunny</h2><p>说清目标，她会选择技能、执行并跟进。</p></div><button id="agentRefresh" class="button quiet">刷新</button></div>
+        <label class="field-label" for="agentCommand">你希望她做什么？</label>
+        <textarea id="agentCommand" rows="3" placeholder="例如：帮我照看 Alice 的消息，结合前文回复，广告忽略。"></textarea>
+        <div class="button-row"><button id="agentSubmit" class="button primary">交办</button><button id="agentPauseAll" class="button quiet">全部暂停</button></div>
+        <p id="agentCommandNote" class="inline-note" role="status"></p>
+      </section>
+      <section class="card"><div class="section-heading"><div><h2>正在跟进</h2><p>任务等待新动态时会继续保留进展。</p></div></div>
+        <div id="agentCircuit" class="inline-note bad-text" hidden></div><button id="agentReconnect" class="button quiet" hidden>重新核对微信</button>
+        <div id="agentTaskList" class="watch-list" aria-live="polite"></div>
+      </section>
+      <details class="card"><summary>最近的界面操作与核验截图</summary>
+
+        <div class="button-row task-toolbar"><button id="taskSetup" class="button primary" hidden>设定任务</button><button id="desktopRefresh" class="button quiet">刷新</button></div>
       <div id="taskStateCard" class="card task-state-card">
         <div class="section-heading"><div><h2 data-character-text="Bunny 当前操作">她 当前操作</h2><p id="taskStateNote">没有进行中的代理操作</p></div></div>
         <p id="taskPauseNote" class="inline-note task-pause-note" hidden></p>
@@ -120,14 +133,13 @@
 
         <div id="desktopActions" class="button-row" hidden><button id="taskResume" class="button primary" hidden>继续处理</button><button id="taskStop" class="button" hidden>暂停</button><button id="taskCancel" class="button danger" hidden>取消任务</button><button id="taskAccept" class="button quiet" hidden>确认结果</button></div>
         <p id="desktopActionNote" class="inline-note" role="status"></p>
+        <p id="desktopNotificationNote" class="inline-note" role="status">异常微信提醒默认发给文件传输助手，可通过对话指定收件人或关闭。</p>
+      </details>
       </section>
-      <section data-desktop-page="watches" role="tabpanel" hidden>
-      <section id="watchCard" class="card watch-card" aria-label="持续关注">
-        <div class="section-heading"><div><h2>持续关注</h2><p>与当前桌面操作分开运行</p></div><button id="watchRefresh" class="button quiet">刷新</button></div>
-        <div id="watchList" class="watch-list" aria-live="polite"><div class="inline-note">正在读取关注事项…</div></div>
-      </section>
-
-      </section>
+      <section data-desktop-page="skills" role="tabpanel" hidden><section class="card">
+        <div class="section-heading"><div><h2>已安装技能</h2><p>任务按需使用技能，只有真实核验后才确认完成。</p></div></div>
+        <div id="agentSkillList" class="watch-list"></div>
+      </section></section>
       <section data-desktop-page="workbuddy" role="tabpanel" hidden>
         <div class="button-row"><button id="workbuddyOpen" class="button quiet">打开 WorkBuddy</button></div>
       <div id="workbuddyMonitorCard" class="card monitor-card">

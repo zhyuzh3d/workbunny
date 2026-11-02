@@ -17,7 +17,7 @@ const ctx = { storageBusy: false, storageError: '', connection: { status: () => 
   inputAdmission: localRequire('./conversation-input'), scopePolicy: localRequire('./memory-scope'),
   config: { load: () => ({ memory: settings, brain: { source: 'workbuddy' } }), resolveLLM: () => ({ transport: 'workbuddy', provider: 'synthetic', model: 'test' }), buildSystemPrompt: () => '合成角色与操作规则' },
   memory: m, currentScene: () => settings.scene, contextEpoch: 0, screenLocked: false, activeThought: null, busy: false,
-  desktop: null, monitor: null, secretary: null, history: [], presentedReplies: new Set(), lastDialogueAt: 0,
+  desktop: null, agent: null, monitor: null, secretary: null, history: [], presentedReplies: new Set(), lastDialogueAt: 0,
   embodiment: { context: () => ({ appearance: { name: '可可', description: '短发' }, recentActions: [] }), perform: async () => ({ ok: true }) },
   motionLibrary: { prompt: () => [] }, activeAvatarPack: () => null, avatarCatalog: { prompt: () => [] }, taskSupervision: { context: () => '' }, lastInterruption: null,
   dialogueActions: localRequire('./dialogue-actions'), SELF_RULE: localRequire('./dialogue-cognition').SELF_RULE, JUDGE_RULE: '',
@@ -82,6 +82,23 @@ async function run() {
   assert(ctx.dialogueReady()); assert(await ctx.think({userText:'直接接口仍可对话',allowSpeech:false}));
   ctx.config.resolveLLM = () => ({transport:'apikey',apiKey:''});assert(!ctx.dialogueReady());
   ctx.config.load=load;ctx.config.resolveLLM=resolve;ctx.connection.status=status;
+  settings.enabled = false;
+  const spoken = []; ctx.speak = text => spoken.push(text);
+  ctx.llm.chat = async () => { const v = JSON.parse(reply()); v.stages[0].grade = 'invalid'; return { raw: JSON.stringify(v) }; };
+  const recovered = await ctx.think({ userText: '你好', allowSpeech: true });
+  assert.equal(recovered.cognitionDegraded, true);
+  assert.equal(spoken.pop(), '我听着，你继续说。', 'valid speech survives broken cognitive metadata');
+  ctx.llm.chat = async () => ({ raw: 'not JSON' });
+  assert.equal(await ctx.think({ userText: '再试一次', allowSpeech: true }), null);
+  assert.equal(spoken.pop(), '这次没能正常生成回复，请再试一次。', 'unrecoverable errors are spoken as well as shown');
+  settings.enabled = true;
+  const oldStatus = ctx.connection.status;
+  ctx.connection.status = () => ({ ready: false, note: 'WorkBuddy offline' });
+  ctx.desktop = { task: { id: 'offline-task', status: 'running' } };
+  let localStops = 0;
+  ctx.secretary = { contextSnapshot: () => ({ text: '', sourceIds: [] }), dispatch: async intent => { assert.equal(intent.action, 'stop'); localStops++; return { text: '已经暂停。' }; } };
+  assert(await ctx.think({ userText: '暂停当前任务', allowSpeech: false })); assert.equal(localStops, 1, 'local stop works without an LLM connection');
+  ctx.connection.status = oldStatus; ctx.desktop = null; ctx.secretary = null;
   // The actual periodic callback must not create an idle-activity promise
   // while maintenance is entering its own asynchronous permission checks.
   const { MemoryMaintenance } = localRequire('./memory-maintenance');

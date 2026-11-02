@@ -214,6 +214,8 @@ class MemoryService {
       ...scope, ...(restoreSequence ? { ingestionSeq: record.ingestionSeq } : {}), body: vc.seal(this.key, { ...record.value, _scopeV1: scope }, record.id + ':' + record.kind),
       tokens: vc.tokenKeys(this.key, references.tokens(record.value).join(' ') + ' ' +
         (record.kind === 'task' && record.value.taskType === 'contact' ? 'bunny_contact_anchor ' : '') + knowledge.markersOf(record).join(' ') + ' ' +
+        (record.kind === 'task' && record.value.schema === 'task-notification/v1' ? 'bunny_task_notification_anchor ' : '') +
+        (record.kind === 'task' && record.value.schema === 'interaction-strategy/v1' && record.value.outcome === 'failed' ? 'bunny_interaction_failed_anchor ' : '') +
         (record.kind === 'message' && !actors.isOwner(record.value) && !actors.isBunny(record.value) ? 'bunny_external_message ' : '') +
         (record.kind === 'state' && record.value.origin === 'message-block-v1' ? 'bunny_message_block ' : '') +
         (record.kind === 'state' && record.value.schema === 'growth-entry/v1' ? `bunny_growth_entry ${record.value.entryId} ` : '') +

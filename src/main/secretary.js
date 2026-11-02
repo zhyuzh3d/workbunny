@@ -16,6 +16,16 @@ const TERMINAL = new Set(['paused', 'stopped', 'failed', 'accepted', 'cancelled'
 const LABEL = { starting: '正在准备', running: '正在操作', monitoring: '正在等待 WorkBuddy 执行',
   verifying: '正在核对交付', review: '已有结果，正在检查', accepted: '已完成验收', paused: '需要处理', failed: '未完成', stopped: '代理已暂停' };
 const reviewKeyOf = task => `${task.id}:${task.monitorMessageKey || task.monitorTaskId || task.followUpRound || 0}`;
+const reportStageOf = task => `${task.status}:${Number.isSafeInteger(task.resumeCount) ? task.resumeCount : 0}:${Number.isSafeInteger(task.followUpRound) ? task.followUpRound : 0}`;
+function reportedStage(task, stage) {
+  if (Array.isArray(task.reportedStages)) return task.reportedStages.includes(stage);
+  if (!task.reportedAt) return false;
+  // Old records have one timestamp for the whole task. A timestamp preceding
+  // acceptance describes an earlier pause and must not suppress completion.
+  if (task.status === 'accepted') return Number.isFinite(task.acceptedAt)
+    ? task.reportedAt >= task.acceptedAt : /^办好了/u.test(String(task.report || ''));
+  return ['paused', 'stopped', 'failed'].includes(task.status);
+}
 
 function compactReport(value, limit = 4200) {
   const text = String(value || '');
@@ -88,8 +98,8 @@ async function verifyDelivery({ task, screenshot, signal }) {
 }
 
 class Secretary {
-  constructor({ desktop, watches, contacts, memory, report, verify = verifyDelivery, ready = () => true, epoch = () => 0, getScene = () => 'life', clock = Date.now, maxFollowUps = 2 } = {}) {
-    Object.assign(this, { desktop, watches, contacts, memory, report, verify, ready, epoch, getScene, clock, maxFollowUps });
+  constructor({ desktop, watches, agent, contacts, notifications, memory, report, verify = verifyDelivery, ready = () => true, canRecover = ready, epoch = () => 0, getScene = () => 'life', clock = Date.now, maxFollowUps = 2 } = {}) {
+    Object.assign(this, { desktop, watches, agent, contacts, notifications, memory, report, verify, ready, canRecover, epoch, getScene, clock, maxFollowUps });
     this.requests = new Map(); this.taskEpochs = new Map(); this.suppressed = new Set();
     this.verifying = null; this.controller = null; this.handled = new Set(); this.closed = false;
   }
@@ -128,11 +138,12 @@ class Secretary {
     return this.contextSnapshot().text;
   }
   contextSnapshot() {
-    const task = canReadScope(this.getScene(), this.desktop?.task) ? this.desktop?.task : null;
+    const task = this.desktop?.task?.origin !== 'agent' && canReadScope(this.getScene(), this.desktop?.task) ? this.desktop?.task : null;
+    const agentContext = this.agent?.context();
     const watching = this.watches?.list().filter(w => !['stopped', 'expired'].includes(w.status)).map(w => ({ id: w.id, recipient: w.recipient, mode: w.mode, status: w.status, policy: w.policy })) || [];
-    const prefix = watching.length ? '持续关注（独立于当前代办）:' + JSON.stringify(watching) + '\n' : '';
-    const sourceIds = watching.map(watch => watch.id);
-    if (!task) return { text: prefix + '当前没有由 Bunny 发起的代办。', sourceIds };
+    const prefix = (agentContext ? agentContext.text + '\n' : '') + (watching.length ? '持续关注（独立于当前代办）:' + JSON.stringify(watching) + '\n' : '');
+    const sourceIds = [...(agentContext?.sourceIds || []), ...watching.map(watch => watch.id)];
+    if (!task) return { text: prefix + (this.agent ? '' : '当前没有由 Bunny 发起的代办。'), sourceIds };
     if (task.privacyEpoch !== undefined && task.privacyEpoch !== this.epoch()) return { text: prefix + '旧代办引用的记忆已经变更，不再引用其旧内容；需要用户重新交代。', sourceIds };
     return { text: prefix + JSON.stringify({ goal: task.goal, target: task.target, status: LABEL[task.status] || task.status, statusCode: task.status,
       canResume: ['paused', 'stopped', 'review'].includes(task.status),
@@ -156,6 +167,22 @@ class Secretary {
     return operation;
   }
   async _dispatch(intent, { source, isCurrent, userText, signal, sources, requestSourceId }) {
+    if(this.agent&&(['agent','start','stop','resume','status'].includes(intent.action)||intent.action.startsWith('watch_'))){
+      const actor={role:'owner',verified:true,channel:'dialogue',sources:[...new Set([...sources,requestSourceId].filter(Boolean))],scene:this.getScene()};
+      // Only exact whole-string host commands can bypass model interpretation.
+      // This keeps the local pause/stop path available when the model is offline.
+      const local=require('./dialogue-actions').taskControl(userText,this.agent.currentTask?.());
+      if(local?.action==='agent')return this.agent.dispatch(local.request,actor,{signal,ownerRequest:userText});
+      return this.agent.command(userText,actor,{signal});
+    }
+    if (intent.action === 'agent') {
+      return { text:'统一任务服务尚未就绪。' };
+    }
+    if (intent.action === 'task_notifications') {
+      if (!this.notifications) return { text: '通知服务尚未就绪。' };
+      try { return { text: await this.notifications.configure(intent, { sourceId: requestSourceId, scene: this.getScene() }) }; }
+      catch (error) { return { text: error.message }; }
+    }
     if (intent.action === 'contact_alias') {
       if (!this.contacts) return { text: '本地联系人资料尚未就绪。' };
       try { await this.contacts.remember(intent.recipient, [intent.alias], { source: ('用户明确纠正：' + userText).slice(0, 80), sources,
@@ -187,7 +214,7 @@ class Secretary {
       const sent = this.desktop.task?.handoffSent;
       const id = this.desktop.task?.id;
       this.suppressed.add(id);
-      try { await this.desktop.stop('用户要求暂停代理操作'); } finally { this.suppressed.delete(id); }
+      try { await Promise.all([this.desktop.stop('用户要求暂停代理操作'), this.notifications?.cancelTask(id)]); } finally { this.suppressed.delete(id); }
       return { text: sent ? '我已暂停代理操作。已交给 WorkBuddy 的任务可能仍在继续，我不会重复发送。' : '好，代理操作已暂停。' };
     }
     if (intent.action === 'status') return { text: this.statusText() };
@@ -276,7 +303,12 @@ class Secretary {
     if (signal?.aborted) abortStart();
     let response;
     try { response = await starting; } finally { signal?.removeEventListener('abort', abortStart); }
-    if (!response?.ok) return { text: `这次还没有开始：${response?.error || '操作入口不可用'}。` };
+    if (!response?.ok) {
+      if (startingTask?.target === 'workbuddy' && this.desktop.task?.id === startingTask.id) {
+        await this.notifications?.enqueue({ target: 'workbuddy', taskId: startingTask.id, status: 'failed', epoch, scene, sources: [startingTask.id] });
+      }
+      return { text: `这次还没有开始：${response?.error || '操作入口不可用'}。` };
+    }
     if (epoch !== this.epoch() || !this.ready() || signal?.aborted) {
       if (this.desktop.task === startingTask) await this.desktop.stop('请求已失效');
       return { text: '这次请求已失效，没有继续操作。' };
@@ -296,11 +328,30 @@ class Secretary {
     if (task.privacyEpoch !== undefined && task.privacyEpoch !== this.epoch()) return '该代办的记忆来源已经变更，请重新交代。';
     return `${LABEL[task.status] || '当前状态'}：${task.report || task.note || task.goal}`;
   }
+  async recoverConnection() {
+    const task = this.desktop?.task;
+    if (this.closed || this.recovering || !this.ready() || !this.canRecover() || this.verifying || this.desktop.running ||
+        !task || task.target !== 'workbuddy' || task.origin !== 'dialogue' || task.status !== 'paused' || task.pauseCause !== 'connection' ||
+        !canReadScope(this.getScene(), task) || task.privacyEpoch !== this.epoch() ||
+        (task.connectionRecoveries || 0) >= 3 || this.clock() - (task.lastConnectionRecovery || 0) < 30000) return;
+    this.recovering = true;
+    const desktopGeneration = this.desktop.generation;
+    try {
+      task.connectionRecoveries = (task.connectionRecoveries || 0) + 1; task.lastConnectionRecovery = this.clock();
+      this.taskEpochs.set(task.id, this.epoch());
+      await this.desktop.journal();
+      if (this.desktop.task !== task || this.desktop.generation !== desktopGeneration || !this.ready() || !this.canRecover() || task.privacyEpoch !== this.epoch() || task.status !== 'paused') return;
+      const result = await this.desktop.resume({ privacyEpoch: this.epoch(), sources: task.sources, scene: this.getScene() });
+      if (result.ok) this.onStatus(this.desktop.publicStatus());
+    } finally { this.recovering = false; }
+  }
   onStatus(status) {
+    if (status?.task?.origin === 'agent') return;
     if (this.closed) return;
     const task = status?.task;
     if (!task || !canReadScope(this.getScene(), task) || this.desktop.task?.id !== task.id || task.origin !== 'dialogue' || this.suppressed.has(task.id) ||
         !this.taskEpochs.has(task.id) || this.taskEpochs.get(task.id) !== this.epoch()) return;
+    if (reportStageOf(task) !== reportStageOf(this.desktop.task)) return;
     if (TERMINAL.has(task.status)) this.controller?.abort();
     if (task.status === 'review' && !this.verifying && this.ready() && !this.handled.has(reviewKeyOf(task))) {
       // Defer until DesktopService has persisted its observation.
@@ -311,7 +362,7 @@ class Secretary {
         const next = this.desktop.task;
         if (next?.status === 'review' && this.ready() && !this.handled.has(reviewKeyOf(next))) this.onStatus(this.desktop.publicStatus());
       });
-    } else if (['paused', 'stopped', 'failed'].includes(task.status) && !task.reportedAt) {
+    } else if (['paused', 'stopped', 'failed'].includes(task.status) && !reportedStage(task, reportStageOf(task))) {
       void this._announce(task.id, `这件事已暂停：${String(task.note || '需要进一步确认').replace(/[。.!！?？]+$/u, '')}。${task.handoffSent ? '已保留 WorkBuddy 原会话，不会重复发送。' : ''}`).catch(() => {});
     }
   }
@@ -359,19 +410,27 @@ class Secretary {
   }
   async _pause(id, note) {
     if (this.desktop.task?.id !== id) return;
+    const task = this.desktop.task;
     this.desktop.update({ status: 'paused', note, updatedAt: this.clock() });
     await this.desktop.journal();
+    if (this.desktop.task !== task || task.status !== 'paused') return;
     await this._announce(id, note);
   }
   async _announce(id, text) {
-    if (this.closed || this.desktop.task?.id !== id || !canReadScope(this.getScene(), this.desktop.task) || this.desktop.task.reportedAt ||
+    const task = this.desktop.task;
+    if (this.closed || task?.id !== id || !canReadScope(this.getScene(), task) ||
         !this.taskEpochs.has(id) || this.taskEpochs.get(id) !== this.epoch()) return;
-    this.desktop.task.report = text;
-    this.desktop.task.reportedAt = this.clock();
-    await this.desktop.journal();
-    if (!this.closed && this.desktop.task?.id === id && canReadScope(this.getScene(), this.desktop.task) && this.taskEpochs.get(id) === this.epoch()) {
-      await this.report({ text, taskId: id, status: this.desktop.task.status, epoch: this.taskEpochs.get(id), sources: [id],
-        scene: this.desktop.task.scene, domain: this.desktop.task.domain, visibilityFloor: this.desktop.task.visibilityFloor });
+    const stage = reportStageOf(task);
+    if (reportedStage(task, stage)) return;
+    const priorStages = Array.isArray(task.reportedStages) ? task.reportedStages : [];
+    task.reportedStages = [...priorStages, stage].slice(-32);
+    task.report = text; task.reportedAt = this.clock();
+    const event = { text, taskId: id, eventId: `secretary-report:${id}:${stage}`, status: task.status, epoch: this.taskEpochs.get(id), sources: [id],
+      target: task.target, scene: task.scene, domain: task.domain, visibilityFloor: task.visibilityFloor };
+    try { await this.desktop.journal(); }
+    catch (error) { if (this.desktop.task === task) task.reportedStages = (task.reportedStages || []).filter(value => value !== stage); throw error; }
+    if (!this.closed && this.desktop.task === task && canReadScope(this.getScene(), task) && this.taskEpochs.get(id) === this.epoch()) {
+      await this.report(event);
     }
   }
   close() { this.closed = true; this.controller?.abort(); }

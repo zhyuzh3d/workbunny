@@ -6,18 +6,20 @@ const GRADES = ['match', 'direction_match', 'branch_miss', 'opposite', 'miss', '
 const GRASP = ['steady', 'adjust', 'rebuild', 'insufficient'];
 const PACE = ['listen', 'clarify', 'explore', 'advance', 'close'];
 const basis = x => x === undefined || Array.isArray(x) && x.length <= 3 && x.every(id => typeof id === 'string' && id.length > 0 && id.length <= 256);
-const fail = () => { throw Object.assign(new Error('模型认知回复协议不正确'), { code: 'E_REPLY_PROTOCOL' }); };
+const fail = stage => { throw Object.assign(new Error('模型认知回复协议不正确'), { code: 'E_REPLY_PROTOCOL', protocolStage: stage }); };
 function keys(x, fields) { return x && typeof x === 'object' && !Array.isArray(x) && Object.keys(x).every(k => fields.includes(k)); }
 function short(text, max) { return typeof text === 'string' && text.length <= max && !containsSecret(text) && !/<\/?(?:m|e|bunny_action)>/iu.test(text); }
 function decode(raw, validateInner) {
-  let v; try { v = parseStrictJson(raw); } catch { return fail(); }
-  if (!keys(v, ['protocol', 'stages']) || v.protocol !== 'dialogue-v2' || !Array.isArray(v.stages) || v.stages.length !== 3) return fail();
+  let v; try { v = parseStrictJson(raw); } catch { return fail('json'); }
+  if (!keys(v, ['protocol', 'stages']) || v.protocol !== 'dialogue-v2' || !Array.isArray(v.stages) || v.stages.length !== 3) return fail('envelope');
   const [review, reply, prediction] = v.stages;
   if (!keys(review, ['stage', 'grade', 'note', 'grasp', 'pace']) || review.stage !== 'review' || !GRADES.includes(review.grade) ||
-      !GRASP.includes(review.grasp) || !PACE.includes(review.pace) || !short(review.note, 300)) return fail();
-  if (!keys(reply, ['stage', 'reply']) || reply.stage !== 'reply') return fail();
-  if (!keys(prediction, ['stage', 'expect', 'basis']) || prediction.stage !== 'prediction' || prediction.expect !== null && !short(prediction.expect, 400) || !basis(prediction.basis)) return fail();
-  const innerRaw = JSON.stringify(reply.reply), validated = validateInner(innerRaw);
+      !GRASP.includes(review.grasp) || !PACE.includes(review.pace) || !short(review.note, 300)) return fail('review');
+  if (!keys(reply, ['stage', 'reply']) || reply.stage !== 'reply') return fail('reply');
+  if (!keys(prediction, ['stage', 'expect', 'basis']) || prediction.stage !== 'prediction' || prediction.expect !== null && !short(prediction.expect, 400) || !basis(prediction.basis)) return fail('prediction');
+  const innerRaw = JSON.stringify(reply.reply);
+  let validated;
+  try { validated = validateInner(innerRaw); } catch (error) { if (error?.code === 'E_REPLY_PROTOCOL') return fail('reply'); throw error; }
   return { ...validated, innerRaw, cognition: { schema: 'dialogue-cognition/v1', review: { grade: review.grade, note: review.note, grasp: review.grasp, pace: review.pace },
     prediction: validated.intent || validated.skipped ? null : prediction.expect || null,
     ...(prediction.basis ? { basis: [...new Set(prediction.basis)] } : {}) } };

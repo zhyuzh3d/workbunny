@@ -54,7 +54,7 @@ async function testViewportAndScaleBounds() {
   }
   assert.match(appJs, /#ear, #dock, #bubble/u, 'bubble remains part of the interactive hit-test so scroll events reach it');
   assert.match(appJs, /pet\.hit\(inside\)/u, 'leaving the bubble returns the window to click-through behavior');
-  assert.match(appJs, /stage\.addEventListener\('mousedown'/u, 'only character-stage presses initiate drag/click handling');
+  assert.match(appJs, /document\.addEventListener\('pointerdown'[\s\S]{0,180}#bubble[\s\S]{0,160}return/u, 'bubble presses do not initiate character dragging');
   assert.equal(await evaluate("document.getElementById('stage').contains(document.getElementById('bubble'))"), false,
     'bubble scroll input is outside the character click/drag surface');
   assert.match(indexHtml, /id="bubble"[^>]*tabindex="0"/u, 'production bubble can receive keyboard scrolling');
@@ -125,8 +125,8 @@ async function testWebSourcesStayLocalAndOpenOnlyValidatedTitles() {
   const sourcePainter = appJs.match(/function clearWebSources\(\) \{[\s\S]*?(?=\nfunction hideBubble\(\))/u)?.[0];
   assert(sourcePainter, 'the production source painter can be isolated from the WebGL controller');
   assert.match(appJs, /case 'webSources':\s*paintWebSources\(ev\)/u, 'the backend reference event is consumed');
-  assert.match(appJs, /case 'chat':[\s\S]{0,100}clearWebSources\(\)/u, 'a new user turn clears prior references');
-  assert.match(appJs, /case 'delta':[\s\S]{0,80}clearWebSources\(\)/u, 'a new streamed reply clears prior references');
+  assert.match(appJs, /case 'chat':[\s\S]{0,200}clearWebSources\(\)/u, 'a new user turn clears prior references');
+  assert.match(appJs, /case 'delta':[\s\S]{0,180}clearWebSources\(\)/u, 'a new streamed reply clears prior references');
   assert.match(sourcePainter, /button\.textContent = source\.title/u);
   assert.match(sourcePainter, /pet\.openWebSource\(source\.url\)/u);
   assert.doesNotMatch(sourcePainter, /innerHTML|textContent\s*=\s*source\.url/u, 'URLs are neither rendered nor injected as markup');

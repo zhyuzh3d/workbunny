@@ -1,6 +1,6 @@
 'use strict';
 
-const { responseFormat, validateReply } = require('./reply-format');
+const { responseFormat, validateReply, recoverCognitiveChat } = require('./reply-format');
 const { makeSentenceSplitter } = require('./llm');
 
 const MAX_REPAIRS = 1;
@@ -14,9 +14,10 @@ const REPAIR_REMINDER = [
   '必须严格使用 {"kind":"chat","text":"..."}、{ "kind":"action","intent":{...} } 或 {"kind":"skip"} 之一；不要复述格式说明，不要代码围栏。',
 ].join('\n');
 
-function protocolError() {
+function protocolError(stage) {
   const error = new Error('模型回复未通过对话协议校验，请重试。');
   error.code = 'E_REPLY_PROTOCOL';
+  if (['json', 'envelope', 'review', 'reply', 'prediction'].includes(stage)) error.protocolStage = stage;
   return error;
 }
 
@@ -72,6 +73,24 @@ function makeChatOptions(request, messages) {
   return options;
 }
 
+function safeChatFallbackOptions(request) {
+  // Remove the conflicting higher-level protocol instructions from the
+  // original system prompt. A fallback cannot perform or claim an action.
+  const cognition = require('./dialogue-cognition');
+  const actionRule = require('./dialogue-actions').RULE;
+  const messages = request.messages.map(message => message.role === 'system' && typeof message.content === 'string'
+    ? { ...message, content: message.content.replace(actionRule, '').replace(cognition.SELF_RULE, '').replace(cognition.RULE, '') }
+    : { ...message });
+  const rule = '本次是普通对话恢复。只返回一个 JSON 对象 {"kind":"chat","text":"给用户的自然回复"}，不要外层协议或额外字段。此轮无法执行任何操作，不得声称已执行；用户要求操作时明确说明暂时无法执行。不要泄露思考或内部格式。';
+  const system = messages.find(message => message.role === 'system' && typeof message.content === 'string');
+  if (system) system.content += '\n' + rule;
+  else messages.unshift({ role: 'system', content: rule });
+  const options = makeChatOptions({ ...request, cognitive: false, extraBody: { ...request.extraBody, response_format: { type: 'json_object' } } }, messages);
+  delete options.extraBody.tools; delete options.extraBody.tool_choice;
+  delete options.recallSession; delete options.searchCache; options.webSearch = false;
+  return options;
+}
+
 /**
  * Request and locally validate one complete outer reply envelope before any
  * UI, TTS, or action-facing callback sees model output. JSON mode is a prompt /
@@ -110,13 +129,34 @@ async function requestReply({ chat, request, maxRepairs = MAX_REPAIRS, allowActi
     if (!active(request)) throwAborted();
     if (deadline - clock() <= 0) throw timeoutError();
     const raw = typeof result?.raw === 'string' ? result.raw : (typeof result?.text === 'string' ? result.text : '');
-    let validated;
+    let validated, cognitionDegraded = false, cognitionFailureStage, fallbackUsed = false;
     try {
       validated = validateReply(raw, { allowActions, cognitive: request.cognitive === true });
     } catch (error) {
       if (error?.code !== 'E_REPLY_PROTOCOL') throw error;
-      if (formatRepairs < repairs && active(request)) { formatRepairs++; repaired = true; continue; }
-      throw protocolError();
+      cognitionFailureStage = error.protocolStage;
+      validated = request.cognitive ? recoverCognitiveChat(raw) : null;
+      if (validated) cognitionDegraded = true;
+      else {
+        if (formatRepairs < repairs && active(request)) { formatRepairs++; repaired = true; continue; }
+        if (!request.cognitive || !repairs) throw protocolError(error.protocolStage);
+        if (!active(request)) throwAborted();
+        const remaining = deadline - clock();
+        if (remaining <= 0) throw timeoutError();
+        const fallback = safeChatFallbackOptions(request);
+        fallback.timeoutMs = remaining;
+        result = await chat(fallback);
+        if (!active(request)) throwAborted();
+        if (deadline - clock() <= 0) throw timeoutError();
+        const fallbackRaw = typeof result?.raw === 'string' ? result.raw : (typeof result?.text === 'string' ? result.text : '');
+        try { validated = validateReply(fallbackRaw, { allowActions: false }); }
+        catch (fallbackError) { if (fallbackError?.code === 'E_REPLY_PROTOCOL') throw protocolError(error.protocolStage); throw fallbackError; }
+        if (!validated.text || validated.intent || validated.skipped) throw protocolError(error.protocolStage);
+        validated.innerRaw = fallbackRaw;
+        cognitionDegraded = true;
+        repaired = true;
+        fallbackUsed = true;
+      }
     }
     if (!active(request)) throwAborted();
 
@@ -129,7 +169,8 @@ async function requestReply({ chat, request, maxRepairs = MAX_REPAIRS, allowActi
     }
     const tags = require('./llm').extractTags(validated.taggedText || validated.text || '');
     return { ...result, raw: visibleRaw, text: tags.clean, motions: tags.motions, emos: tags.emos, cognition: validated.cognition,
-      attempts: attempt + 1, protocolVerified: true, reply: validated, repaired, ...(contextRetried ? { contextRetried: true } : {}) };
+      attempts: attempt + 1 + (fallbackUsed ? 1 : 0), protocolVerified: !cognitionDegraded, reply: validated, repaired,
+      ...(cognitionDegraded ? { cognitionDegraded: true, ...(cognitionFailureStage ? { cognitionFailureStage } : {}) } : {}), ...(contextRetried ? { contextRetried: true } : {}) };
   }
   throw protocolError();
 }

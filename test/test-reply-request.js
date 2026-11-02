@@ -167,6 +167,48 @@ async function testOneSharedTimeoutBudgetAcrossRepair() {
   assert.equal(emitted, 0, 'late successful output is not committed to callbacks');
 }
 
+async function testCognitionFailureKeepsOnlyUnambiguousValidatedChat() {
+  const request = { ...requestBase(), cognitive: true };
+  const candidate = { protocol: 'dialogue-v2', stages: [
+    { stage: 'review', grade: 'unknown', note: 'private thought', grasp: 'steady', pace: 'listen' },
+    { stage: 'reply', reply: { kind: 'chat', text: '我在听。' } },
+    { stage: 'prediction', expect: null },
+  ] };
+  const delivered = []; request.onDelta = raw => delivered.push(raw);
+  const answer = await requestReply({ chat: async () => ({ raw: JSON.stringify(candidate) }), request });
+  assert.equal(answer.reply.text, '我在听。');
+  assert.equal(answer.cognition, undefined);
+  assert.equal(answer.cognitionDegraded, true);
+  assert.equal(answer.protocolVerified, false);
+  assert.deepEqual(delivered, [envelope('我在听。')], 'private evaluation is never exposed');
+  const direct = await requestReply({ chat: async () => ({ raw: envelope('你好。') }), request });
+  assert.equal(direct.reply.text, '你好。');
+  assert.equal(direct.cognitionDegraded, true);
+
+  for (const bad of [
+    { ...candidate, stages: [candidate.stages[0], { stage: 'reply', reply: { kind: 'action', intent: { action: 'stop' } } }, candidate.stages[2]] },
+    { ...candidate, stages: [candidate.stages[0], candidate.stages[1], candidate.stages[1]] },
+    { ...candidate, stages: [candidate.stages[0], { stage: 'reply', reply: { kind: 'chat', text: '好', extra: true } }, candidate.stages[2]] },
+    { ...candidate, extra: true },
+  ]) {
+    let calls = 0, emitted = 0;
+    await assert.rejects(requestReply({ chat: async () => { calls++; return { raw: JSON.stringify(bad) }; },
+      request: { ...request, onDelta: () => emitted++ } }), { code: 'E_REPLY_PROTOCOL' });
+    assert.equal(calls, 3); assert.equal(emitted, 0);
+  }
+  let calls = 0;
+  const fallback = await requestReply({ chat: async opts => {
+    calls++;
+    if (calls < 3) return { raw: 'invalid' };
+    assert.equal(opts.cognitive, false); assert.equal(opts.recallSession, undefined);
+    assert.equal(opts.webSearch, false); assert(opts.messages.some(message => message.role === 'system' && message.content.includes('无法执行任何操作')));
+    assert.deepEqual(opts.extraBody.response_format, { type: 'json_object' });
+    return { raw: envelope('我在这里。') };
+  }, request: { ...request, recallSession: { tools: [] }, webSearch: true } });
+  assert.equal(fallback.reply.text, '我在这里。'); assert.equal(fallback.attempts, 3);
+  assert.equal(fallback.cognitionDegraded, true); assert.equal(fallback.cognitionFailureStage, 'json');
+}
+
 (async () => {
   await testInvalidRepliesRepairOnceWithoutLeakingCallbacksOrHistory();
   await testValidImmediateCommitAndAllowActions();
@@ -174,5 +216,6 @@ async function testOneSharedTimeoutBudgetAcrossRepair() {
   await testAbortAndNetworkErrorsDoNotRetry();
   await testOriginalContentArrayAndHardRepairLimit();
   await testOneSharedTimeoutBudgetAcrossRepair();
+  await testCognitionFailureKeepsOnlyUnambiguousValidatedChat();
   console.log('reply request tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

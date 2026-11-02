@@ -3,6 +3,8 @@
 const path = require('path');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
+const displayBridges=new Map();
+const DISPLAY_OPS=new Set(['capture','visualSample','visualCommit','visualForget']);
 
 function defaultBinary() {
   return process.resourcesPath
@@ -16,6 +18,8 @@ class DesktopNative extends EventEmitter {
     super();
     this.binaryPath = binaryPath;
     this.spawnProcess = options.spawn || spawn;
+    this.shareDisplay=options.sharedDisplay??!options.spawn;
+    this.displayBridge=null;
     this.maxResponseLineBytes = options.maxResponseLineBytes || 64 * 1024 * 1024;
     this.proc = null;
     this.buffer = Buffer.alloc(0);
@@ -24,6 +28,7 @@ class DesktopNative extends EventEmitter {
     this.closed = false;
     this.terminal = false;
     this.stopPromise = null;
+    this.recoveryGeneration = 0;
   }
 
   _start() {
@@ -77,7 +82,7 @@ class DesktopNative extends EventEmitter {
       clearTimeout(pending.timer);
       this.pending.delete(response.id);
       if (response.ok) pending.resolve(response.result);
-      else pending.reject(new Error(response.error || '桌面原生请求失败'));
+      else { const error = new Error(response.error || '桌面原生请求失败'); if (typeof response.code === 'string') error.code = response.code; pending.reject(error); }
     }
     if (this.buffer.length > this.maxResponseLineBytes) this._protocolOverflow();
   }
@@ -96,7 +101,39 @@ class DesktopNative extends EventEmitter {
     this.pending.clear();
   }
 
-  request(op, payload = {}, timeoutMs = 12000) {
+  async request(op, payload = {}, timeoutMs = 12000) {
+    if(this.shareDisplay&&DISPLAY_OPS.has(op)){
+      if(this.terminal)throw new Error('桌面原生客户端已关闭');
+      if(!this.displayBridge){
+        const key=path.resolve(this.binaryPath);let bridge=displayBridges.get(key);
+        if(!bridge){bridge={native:new DesktopNative(this.binaryPath,{sharedDisplay:false,spawn:this.spawnProcess,maxResponseLineBytes:this.maxResponseLineBytes}),clients:new Set(),tail:Promise.resolve(),key};displayBridges.set(key,bridge);}
+        bridge.clients.add(this);this.displayBridge=bridge;
+      }
+      const bridge=this.displayBridge,generation=this.recoveryGeneration;
+      // A single system display connection owns all capture state. In this macOS
+      // session, a second live helper's CGDisplayStream initializer hangs. GUI
+      // clients keep independent input bridges; stopping one cannot kill capture
+      // or replay another client's input.
+      const execute=()=>{if(this.terminal||generation!==this.recoveryGeneration)throw new Error('截图请求已取消');return bridge.native.request(op,payload,timeoutMs);};
+      const result=bridge.tail.then(execute);bridge.tail=result.catch(()=>{});
+      const value=await result;if(this.terminal||generation!==this.recoveryGeneration)throw new Error('截图请求已取消');return value;
+    }
+    const generation = this.recoveryGeneration;
+    for (let attempt = 0; ; attempt++) {
+      try { return await this._requestOnce(op, attempt && op === 'capture' && payload.windowId ? { ...payload, captureMode: 'displayCrop' } : payload, timeoutMs); }
+      catch (error) {
+        const captureTimeout = (op === 'capture' || op === 'visualSample') &&
+          (/^截图请求超时/.test(error.message) || error.message === `桌面原生请求超时：${op}`);
+        if (!captureTimeout || generation !== this.recoveryGeneration || this.terminal) throw error;
+        // A stuck SCK call can outlive its response; reap the whole bridge before
+        // accepting another capture. In-flight writes are rejected, never replayed.
+        await this._stop('截图超时恢复');
+        if (op !== 'capture' || attempt !== 0 || generation !== this.recoveryGeneration || this.terminal) throw error;
+      }
+    }
+  }
+
+  _requestOnce(op, payload = {}, timeoutMs = 12000) {
     if (typeof op !== 'string' || !op || !payload || typeof payload !== 'object' || Array.isArray(payload)) {
       return Promise.reject(new TypeError('op 和对象 payload 为必填项'));
     }
@@ -136,7 +173,7 @@ class DesktopNative extends EventEmitter {
     this._failAll(new Error(`桌面原生请求已取消：${reason}`));
     if (!child) return;
     this.stopPromise = (async () => {
-      let onClose;
+      let onClose, didExit = false;
       const exited = new Promise(resolve => { onClose = resolve; child.once('close', resolve); });
       let killTimer, exitTimer;
       try {
@@ -146,11 +183,12 @@ class DesktopNative extends EventEmitter {
         }, 500);
         const exitTimeout = new Promise((_, reject) => { exitTimer = setTimeout(() => reject(new Error('桌面原生模块未能退出')), 3000); });
         await Promise.race([exited, exitTimeout]);
+        didExit = true;
       } finally {
         if (killTimer) clearTimeout(killTimer);
         if (exitTimer) clearTimeout(exitTimer);
         child.removeListener('close', onClose);
-        if (this.proc === child) this.proc = null;
+        if (this.proc === child && didExit) this.proc = null;
         this.closed = true;
         this.stopPromise = null;
       }
@@ -158,12 +196,17 @@ class DesktopNative extends EventEmitter {
     return this.stopPromise;
   }
 
-  close() {
+  async close() {
+    this.recoveryGeneration++;
     this.terminal = true;
-    return this._stop('close');
+    await this._stop('close');
+    if(this.displayBridge){const bridge=this.displayBridge;this.displayBridge=null;bridge.clients.delete(this);
+      if(!bridge.clients.size){displayBridges.delete(bridge.key);await bridge.native.close();}
+    }
   }
 
   cancel() {
+    this.recoveryGeneration++;
     return this._stop('cancel');
   }
 }

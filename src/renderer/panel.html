@@ -3,9 +3,10 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Workbunny-设置</title>
+<title>WorkBunny-设置</title>
 <link rel="stylesheet" href="./panel.css" />
 <link rel="stylesheet" href="./form-controls.css" />
+<link rel="stylesheet" href="./product-info.css" />
 
 <link rel="icon" type="image/svg+xml" href="../../res/logo.svg">
 <link rel="stylesheet" href="./brand.css">
@@ -22,7 +23,7 @@
     <button data-t="ear">听力</button>
     <button data-t="brain">智力</button>
     <button data-t="mouth">语音</button>
-    <button data-t="data">数据</button>
+    <button data-t="data">系统</button>
   </div>
 
   <!-- 用户给与的设定与 Bunny 自我理解分开编辑。 -->
@@ -38,11 +39,7 @@
 
   <div class="pb" data-page="scene">
     <div class="group">对话场景</div>
-    <div class="segRow" id="panelScene" role="group" aria-label="对话场景">
-      <button data-scene="private" aria-pressed="false">私聊</button>
-      <button data-scene="life" aria-pressed="false">生活</button>
-      <button data-scene="work" aria-pressed="false">工作</button>
-    </div>
+    <label class="row"><span>当前场景</span><select id="panelScene" aria-label="对话场景"><option value="private">私聊</option><option value="life">生活</option><option value="work">工作</option></select></label>
     <div class="note scene-scope" id="panelSceneScope">生活：可参考生活与工作资料。</div>
     <div class="note">切换后立即生效，自我理解始终共用。</div>
     <div class="scene-profile-status" id="panelSceneProfileStatus" role="status"></div>
@@ -145,15 +142,21 @@
   </div>
 
   <div class="pb" data-page="data">
+    <div class="group">对话显示</div>
+    <label class="row"><span>对话文字显示在角色背后</span><input id="dialogueBehind" type="checkbox" role="switch"></label>
+    <div class="note">关闭时显示在角色上方；打开后角色会遮挡背后的文字。</div>
+    <div id="dialogueLayerStatus" class="permTip" role="status"></div>
     <div class="group">数据库位置</div><p class="note" id="storagePath"></p>
     <div class="note">迁移聊天、记忆和设定，完成后自动重启。模型和作品保留原位。</div>
     <div class="permBtns"><button class="mini" id="storageMove">迁移并重启</button><button class="mini" id="storageReconnect">连接已有数据库</button></div>
     <div class="permTip" id="storageStatus" role="status"></div>
+    <section id="productInfo" aria-label="关于 WorkBunny"></section>
   </div>
   <!-- 语音 -->
   <div class="pb" data-page="mouth">
     <div class="voiceHeading"><div><div class="group">语音引擎</div><p>选择后立即生效</p></div><span id="ttsCurrent" class="pill">—</span></div>
-    <div class="segRow" id="ttsEngine"></div>
+    <label class="row"><span>引擎</span><select id="ttsEngine" aria-label="语音引擎"></select></label>
+    <div class="note">可以使用局域网 CHP、本地 Qwen 大模型、豆包语音。</div>
     <div class="note" id="ttsHint"></div>
 
     <!-- 系统语音 -->

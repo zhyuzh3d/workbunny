@@ -1,0 +1,187 @@
+{
+  "schema": "bunny.acceptance/v1",
+  "date": "2026-11-02",
+  "version": "0.16.0",
+  "release": "local installed development build, not published",
+  "regression": {
+    "files": 127,
+    "failed": 0
+  },
+  "realTests": [
+    {
+      "name": "continuous-conversation",
+      "passed": true,
+      "checks": [
+        {
+          "name": "first-real-reply",
+          "passed": true
+        },
+        {
+          "name": "real-context-follow-up",
+          "passed": true
+        },
+        {
+          "name": "real-advertisement-ignored",
+          "passed": true
+        },
+        {
+          "name": "real-message-busy-queue",
+          "passed": true
+        }
+      ],
+      "actualMacWeChat": true,
+      "actualAlicePhone": true
+    },
+    {
+      "name": "proactive-inquiry",
+      "passed": true,
+      "checks": [
+        {
+          "name": "real-proactive-inquiry-and-report",
+          "passed": true
+        }
+      ],
+      "actualMacWeChat": true,
+      "actualAlicePhone": true
+    },
+    {
+      "name": "owner-to-workbuddy",
+      "passed": true,
+      "checks": [
+        {
+          "name": "real-owner-channel-workbuddy-artifact-and-return",
+          "passed": true
+        }
+      ],
+      "actualMacWeChat": true,
+      "actualAlicePhone": true
+    },
+    {
+      "name": "installed-client-dialogue-and-soak",
+      "passed": true,
+      "checks": [
+        {
+          "name": "installed-skill-teaching",
+          "passed": true
+        },
+        {
+          "name": "installed-real-dialogue-A1",
+          "passed": true
+        },
+        {
+          "name": "installed-real-dialogue-A2",
+          "passed": true
+        },
+        {
+          "name": "installed-low-frequency-soak",
+          "passed": true,
+          "seconds": 1200,
+          "visionDelta": {
+            "samples": 20,
+            "recognitions": 1,
+            "modelInspections": 1,
+            "quietSamples": 19,
+            "lastPixelArea": 0
+          }
+        }
+      ],
+      "actualMacWeChat": true,
+      "actualAlicePhone": true
+    },
+    {
+      "name": "installed-main-chat-natural-controls",
+      "passed": true,
+      "checks": [
+        "main-dialogue-admission-and-expiry",
+        "main-dialogue-read-only-status",
+        "natural-pause",
+        "natural-resume"
+      ],
+      "note": "Create, read-only status, pause and resume passed before the later network reset."
+    },
+    {
+      "name": "installed-local-controls-and-normal-restart",
+      "passed": true,
+      "checks": [
+        "TaskUI-admission-and-expiry",
+        "main-dialogue-read-only-status",
+        "local-natural-pause",
+        "local-natural-resume",
+        "normal-restart-retains-task-cursor-and-expiry",
+        "local-natural-stop-without-model"
+      ],
+      "freshScreenReadAfterRestart": true,
+      "allTestTasksStopped": true
+    }
+  ],
+  "learnedKnowledge": {
+    "skill": "conversation.manage",
+    "status": "validated",
+    "revision": 3,
+    "distinctVerifiedTaskProofs": 2
+  },
+  "resourceSampling": {
+    "seconds": 872,
+    "components": [
+      {
+        "component": "MacOS/workbunny",
+        "samples": 30,
+        "firstRssMiB": 205.7,
+        "lastRssMiB": 204.2,
+        "peakRssMiB": 205.7
+      },
+      {
+        "component": "Resources/bin/desktop",
+        "samples": 30,
+        "firstRssMiB": 11.1,
+        "lastRssMiB": 11.1,
+        "peakRssMiB": 11.1
+      },
+      {
+        "component": "Resources/bin/desktop",
+        "samples": 30,
+        "firstRssMiB": 119.2,
+        "lastRssMiB": 107.0,
+        "peakRssMiB": 119.2
+      },
+      {
+        "component": "Resources/bin/desktop",
+        "samples": 30,
+        "firstRssMiB": 45.5,
+        "lastRssMiB": 58.6,
+        "peakRssMiB": 58.6
+      },
+      {
+        "component": "Resources/bin/desktop",
+        "samples": 30,
+        "firstRssMiB": 115.8,
+        "lastRssMiB": 78.0,
+        "peakRssMiB": 115.8
+      }
+    ]
+  },
+  "limits": [
+    "The 20-minute observation soak is not hours-long unattended certification.",
+    "Earlier WeChat exit cause remains unproven; no WeChat restart/login was performed in this upgrade.",
+    "Only visible desktop pixels and simulated generic input are used for WeChat; no WeChat interface, AX tree, database or plugin.",
+    "Finder, Chrome and Codex have generic screen observation targets; complete application operation adapters are future work."
+  ],
+  "remaining": [],
+  "observedFailures": [
+    {
+      "case": "free-form stop after restart and next ordinary-chat task admission",
+      "cause": "Configured primary chat API returned ECONNRESET twice; underlying endpoint failure was not changed or claimed fixed.",
+      "result": "No operation was falsely reported as complete. Local test cleanup stopped the task.",
+      "mitigationVerified": "Explicit local controls bypass model readiness, and the task panel uses the unified interpreter independently."
+    }
+  ],
+  "cleanup": {
+    "activeTestTasks": 0,
+    "wechatProcessUnchanged": true,
+    "wechatRelaunchPerformed": false,
+    "phoneStayAwakeRestoredTo": 0,
+    "temporaryDebugPortClosed": true,
+    "normalInstalledAppReopened": true,
+    "productionOwnerBindingChanged": false
+  }
+}

@@ -1,0 +1,25 @@
+/* A crisp, translucent dark edge keeps white text readable over the desktop. */
+#dialogueOverlay { position: fixed; top: var(--dialogue-top, 10px); bottom: calc(var(--status-h) + 8px); left: calc(var(--ui-gutter) + 8px); right: calc(var(--ui-gutter) + 8px); z-index: 16; min-height: 60px; background: transparent; color: #fff; overflow: hidden; }
+body:has(#activity:not(.hidden)):not(.dialogue-input-open) #dialogueOverlay { bottom: calc(var(--task-bottom) + var(--status-h) + 6px); }
+body.dialogue-input-open #dialogueOverlay { bottom: calc(var(--dock-bottom) + 42px); }
+#dialogueOverlay[hidden] { display: none; }
+#dialogueScroll { height: 100%; padding: 12px 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; scrollbar-width: thin; scrollbar-color: rgba(70,64,56,.30) transparent; user-select: text; cursor: auto; mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 8px), transparent); }
+#dialogueMessages { contain: layout style; }
+.dialogue-date, .dialogue-message, #dialogueOlder, #dialogueEmpty { -webkit-text-stroke: .4px rgba(0,0,0,.65); paint-order: stroke fill; text-shadow: 1px 1px 0 rgba(0,0,0,.7), -1px 1px 0 rgba(0,0,0,.48), 1px -1px 0 rgba(0,0,0,.48), -1px -1px 0 rgba(0,0,0,.38); }
+.dialogue-date { margin: 14px 0 15px; text-align: center; color: rgba(255,255,255,.9); font-size: 10px; letter-spacing: .04em; line-height: 1.5; }
+.dialogue-message { width: fit-content; max-width: 88%; margin: 0 0 13px; font-size: 13px; font-weight: 500; line-height: 1.65; letter-spacing: .01em; overflow-wrap: anywhere; }
+.dialogue-message.user { width: calc(100% - 36px); max-width: none; margin-left: 36px; text-align: left; }
+.dialogue-speaker { color: rgba(255,255,255,.92); font-size: 10px; font-weight: 600; margin-bottom: 2px; }
+.dialogue-message.user .dialogue-speaker { text-align: right; }
+.dialogue-text { white-space: pre-wrap; }
+.dialogue-message.user .dialogue-text { width: fit-content; max-width: 100%; margin-left: auto; text-align: left; }
+#dialogueOlder { display: block; margin: 0 auto 12px; padding: 4px 8px; border: 0; background: transparent; color: #fff; font: 10px var(--font); }
+#dialogueEmpty { text-align: center; padding: 18px 0; font-size: 12px; color: #fff; }
+#dialogueLatest { position: absolute; bottom: 9px; right: 10px; display: flex; align-items: center; gap: 5px; border: 1px solid rgba(55,49,42,.15); border-radius: 20px; padding: 5px 9px; background: rgba(255,253,250,.94); box-shadow: 0 2px 8px #0002; color: #5e554c; font: 11px var(--font); }
+#dialogueLatest[hidden], #dialogueOlder[hidden], #dialogueEmpty[hidden] { display: none; }
+#dialogueBtn[data-mode]:not([data-mode="avatar"]) { color: var(--accent); background: var(--accent-soft); }
+#dialogueBtn .dialogue-mode-icon { width: 16px; height: 16px; }
+body.dialogue-behind #dialogueOverlay { z-index: 0; }
+body.dialogue-open.dialogue-behind #stage { pointer-events: none; }
+body.dialogue-avatar-hidden #stage, body.dialogue-avatar-hidden #ground, body.dialogue-avatar-hidden #loading { visibility: hidden; pointer-events: none; }
+#dialogueBtn:focus-visible, #dialogueLatest:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

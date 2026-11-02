@@ -1,0 +1,20 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');
+const {AgentLearning}=require('../src/main/agent-learning');
+test('learned instructions are scoped, versioned and require two verified task proofs without a source cycle',async()=>{
+ const records=new Map([['teaching',{id:'teaching',state:'active',value:{}}]]);
+ const memory={ready:true,query:async()=>[...records.values()],write:async rows=>{for(const row of rows){for(const id of row.value.sources)assert(records.has(id));records.set(row.id,{...row,state:'active'});}}};
+ const learning=new AgentLearning({memory,skills:{get:id=>{assert.equal(id,'conversation.manage');}}});
+ const taught=await learning.teach({skill:'conversation.manage',instructions:'Wait at least half a second between logical inputs.'},{task:{id:'teaching',scene:'life',visibilityFloor:1}});
+ const task={id:'first',skill:'conversation.manage',scene:'life',visibilityFloor:1,sources:['owner-turn'],state:{},operations:{write:{effect:'write',status:'confirmed'}}};
+ await learning.prepare(task);assert.equal(task.state.operatingKnowledge[0].sourceId,taught.knowledgeId);assert(task.sources.includes(taught.knowledgeId));
+ records.set(task.id,{id:task.id,state:'active',value:structuredClone(task)});await learning.completed(task);
+ let latest=learning.latest(await learning.rows())[0];assert.equal(latest.value.status,'candidate');assert.deepEqual(latest.value.proofs,['first']);
+ const second={...structuredClone(task),id:'second',sources:['owner-turn'],state:{}};await learning.prepare(second);
+ assert.equal(second.state.operatingKnowledge[0].sourceId,latest.id);records.set(second.id,{id:second.id,state:'active',value:structuredClone(second)});await learning.completed(second);
+ latest=learning.latest(await learning.rows())[0];assert.equal(latest.value.status,'validated');assert.deepEqual(latest.value.proofs,['first','second']);
+ await learning.completed(second);assert.equal(learning.latest(await learning.rows())[0].id,latest.id,'same proof is idempotent');
+ const other={...structuredClone(task),scene:'work',state:{},sources:['owner-turn']};await learning.prepare(other);assert.equal(other.state.operatingKnowledge.length,0);
+ const visit=(id,path=[])=>{assert(!path.includes(id),'source graph must remain acyclic');for(const parent of records.get(id)?.value.sources||[])visit(parent,[...path,id]);};visit(latest.id);
+ const before=(await learning.rows()).length;await learning.completed({...task,id:'unverified',operations:{}});assert.equal((await learning.rows()).length,before);
+});

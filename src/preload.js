@@ -36,6 +36,10 @@ contextBridge.exposeInMainWorld('pet', {
   open: (what) => ipcRenderer.send('pet:open', what),
   openWebSource: url => ipcRenderer.invoke('pet:open-web-source', url),
   // 独立窗口（设置 / 动作列表）用：拿初始数据、把动作转给角色窗口演
+  productInfo: () => ipcRenderer.invoke('pet:product-info'),
+  openRepository: () => ipcRenderer.invoke('pet:open-repository'),
+  dialogueHistory: options => ipcRenderer.invoke('pet:dialogue-history', options || {}),
+  contextMenu: position => ipcRenderer.send('pet:context-menu', position),
   panelInit: () => ipcRenderer.invoke('pet:panel-init'),
   panelMotion: (key) => ipcRenderer.send('pet:panel-motion', key),
   motionStarted: event => ipcRenderer.send('pet:motion-started', event),
@@ -96,11 +100,9 @@ contextBridge.exposeInMainWorld('pet', {
   taskAccept: () => ipcRenderer.invoke('pet:task-accept'),
   desktopPermission: () => ipcRenderer.invoke('pet:desktop-permission'),
   desktopInsert: (text) => ipcRenderer.invoke('pet:desktop-insert', text),
-  watchList: () => ipcRenderer.invoke('watch:list'),
-  watchPause: (id) => ipcRenderer.invoke('watch:pause', id),
-  watchResume: (id) => ipcRenderer.invoke('watch:resume', id),
-  watchStop: (id) => ipcRenderer.invoke('watch:stop', id),
-  watchCheck: (id) => ipcRenderer.invoke('watch:check', id),
+  agentStatus: () => ipcRenderer.invoke('pet:agent-status'),
+  agentCommand: (text) => ipcRenderer.invoke('pet:agent-command', text),
+  agentControl: (operation, id) => ipcRenderer.invoke('pet:agent-control', { operation, id }),
   on: (cb) => {
     ipcRenderer.on('pet:ev', (_e, d) => cb(d));
   },

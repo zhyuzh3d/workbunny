@@ -25,7 +25,7 @@ function wav() {
   b.write('RIFF'); b.writeUInt32LE(b.length - 8, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16);
   b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(24000, 24); b.writeUInt32LE(48000, 28);
   b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(bytes, 40);
-  for (let i = 0; i < bytes / 2; i++) b.writeInt16LE(Math.round(800 * Math.sin(2 * Math.PI * 220 * i / 24000)), 44 + i * 2);
+  for (let i = 0; i < bytes / 2; i++) b.writeInt16LE(Math.round(4000 * Math.sin(2 * Math.PI * 220 * i / 24000)), 44 + i * 2);
   return b;
 }
 async function checkStatusWidth() {
@@ -71,10 +71,10 @@ async function main() {
         abilities: [{ name: 'fixture-tts', ready: true, files: { engine: 'fixture.gguf' }, voices: [{ id: 'test-voice' }], audio: { sample_rate: 24000, channels: 1, formats: ['wav'] } }] } }));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  config.save({ avatar: 'AvatarSample_D.vrm', tts: { enabled: true, engine: 'remote', baseURL: `http://127.0.0.1:${server.address().port}`, chp: { voice: 'test-voice' } }, voice: { enabled: true, alwaysListen: false }, memory: { enabled: false } });
+  config.save({ avatar: 'Bani.vrm', tts: { enabled: true, engine: 'remote', baseURL: `http://127.0.0.1:${server.address().port}`, chp: { voice: 'test-voice' } }, voice: { enabled: true, alwaysListen: false }, memory: { enabled: false } });
   const idle = config.MOTIONS.find(m => m.idle && !m.requiresProp && m.posture !== 'sitting'), greet = config.MOTIONS.find(m => m.slot === 'greet' && !m.requiresProp && m.posture !== 'sitting');
   const motions = [idle, greet];
-  ipcMain.handle('pet:init', () => ({ config: config.publicConfig(), avatars: avatars.scan(), avatar: 'AvatarSample_D.vrm', motions, motionGroups: config.MOTION_GROUPS, versions: {} }));
+  ipcMain.handle('pet:init', () => ({ config: config.publicConfig(), avatars: avatars.scan(), avatar: 'Bani.vrm', motions, motionGroups: config.MOTION_GROUPS, versions: {} }));
   ipcMain.handle('pet:config', (_event, patch) => config.publicConfig(config.save(patch)));
   ipcMain.handle('pet:scale', (_event, { scale }) => ({ scale }));
   ipcMain.handle('pet:asr-status', () => ({ speech: 0, mic: false }));
@@ -86,7 +86,7 @@ async function main() {
     Date: class extends Date { static now() { return now; } }, Map, Set,
     activeAudioId: null, playbackTest: null,
     voiceFor: (_emotion, base) => base, MODELS_DIR: '', sendConfig() {}, log() {}, asr: null, muteAsr() {}, unmuteAsr() {},
-    memory: { scheduleExtraction() {} }, composing:false,lastInterruption:null,activeThought:null,voiceTurns:{reset(){}},autonomy:null,lastHeardAt:0, presentedReplies: new Map(), busy: false, desktop: null, quietUntil: 0,
+    memory: { scheduleExtraction() {} }, composing:false,lastInterruption:null,activeThought:null,voiceTurns:{reset(){}},autonomy:null,taskNotifications:null,lastHeardAt:0, presentedReplies: new Map(), busy: false, desktop: null, quietUntil: 0,
     interactions: new Interactions({ clock: () => now, random: () => 0 }), speakerFilter: { enrollment: null }, publishWebSources() {}, ipcMain,
     interactionAudio: { async audio(...args) { const result = await audio.audio(...args); if (result.cached) cacheHits++; return result; } },
     send(type, data) { events.push({ type, ...data }); win.webContents.send('pet:ev', { type, ...data }); },
@@ -111,7 +111,9 @@ async function main() {
     const reaction = await evaluate(`window.pet.interact({region:'head',motions:${JSON.stringify(motions.map(m => m.key))}})`);
     assert(reaction, 'click is accepted after the prior playback completes');
     await until(() => started === n, `click ${n} starts WebAudio`);
+    await until(async () => (await evaluate('window.__pet().mouth')) > 0.05, `click ${n} opens Bani's mouth`);
     await until(() => finished === n && !vm.runInContext('speaking', context), `click ${n} finishes playback`);
+    await until(async () => (await evaluate('window.__pet().mouth')) === 0, `click ${n} closes Bani's mouth`);
     assert.equal(events.filter(event => event.type === 'say').length, n);
     assert.equal(events.filter(event => event.type === 'audio' && event.buffer).length, n);
   }
@@ -120,11 +122,24 @@ async function main() {
   now += 2000;
   await evaluate(`window.pet.interact({region:'head',motions:${JSON.stringify(motions.map(m => m.key))}})`);
   await until(() => started === 5, 'fifth playback starts before typing');
+  await until(async () => (await evaluate('window.__pet().mouth')) > 0.05, 'mouth opens before interruption');
   const before = Date.now();
   await evaluate("(()=>{const el=document.getElementById('input');el.value='请等一下';el.dispatchEvent(new Event('input'));})()");
   await until(async () => !vm.runInContext('speaking', context) && !(await evaluate('window.__pet().audio')), 'typing stops real playback');
+  await until(async () => (await evaluate('window.__pet().mouth')) === 0, 'interruption closes mouth');
   assert(Date.now() - before < 500, 'typing interrupts the main process and WebAudio promptly');
   assert(events.some(event => event.type === 'audio' && event.stop));
+  const pcm = wav().subarray(44);
+  win.webContents.send('pet:ev', { type: 'audio', stream: { start: true, id: 'pcm-test' } });
+  win.webContents.send('pet:ev', { type: 'audio', stream: { pcm, id: 'pcm-test' } });
+  win.webContents.send('pet:ev', { type: 'audio', stream: { end: true, id: 'pcm-test' } });
+  await until(async () => (await evaluate('window.__pet().mouth')) > 0.05, 'PCM opens mouth');
+  await until(async () => (await evaluate('window.__pet().mouth')) === 0, 'PCM completion closes mouth');
+  win.webContents.send('pet:ev', { type: 'audio', stream: { start: true, id: 'pcm-stop' } });
+  win.webContents.send('pet:ev', { type: 'audio', stream: { pcm, id: 'pcm-stop' } });
+  await until(async () => (await evaluate('window.__pet().mouth')) > 0.05, 'PCM opens mouth before stop');
+  win.webContents.send('pet:ev', { type: 'audio', stream: { stop: true, id: 'pcm-stop' } });
+  await until(async () => (await evaluate('window.__pet().mouth')) === 0, 'PCM stop closes mouth');
   await checkStatusWidth();
   assert.equal(errors.length, 0, errors.join('; '));
   console.log('Actual speech pipeline passed: 4 accepted clicks within 4.5s -> 4 bubbles, 4 WebAudio starts/completions, 1 synthesis + 3 disk-cache hits. Typing interrupts real playback within 500ms. Status width adapts at 340/420/630px; logo is gray when idle and colored when busy.');

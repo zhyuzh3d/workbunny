@@ -34,7 +34,7 @@ function wire(message) {
 function limits(options) {
   let capability = {};
   try { capability = require('./model-catalog').get(options.provider || (options.transport === 'workbuddy' ? 'workbuddy' : '')).models.find(m => m.id === options.model) || {}; } catch {}
-  const context = Number(options.contextWindow || capability.contextWindow || 32768);
+  const context = Number(options.contextWindow || capability.contextWindow || capability.maxInputTokens || 32768);
   const input = Number(options.maxInputTokens || capability.maxInputTokens || context);
   const output = Math.max(256, Math.min(Number(options.maxTokens || 4096), Number(capability.maxOutputTokens || 128000)));
   const available = Math.floor(Math.min(input, context - output) * .85) - 1024;

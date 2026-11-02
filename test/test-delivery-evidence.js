@@ -37,6 +37,25 @@ async function main() {
   });
 
   await withTempDir(async root => {
+    const small = path.join(root, 'small.html');
+    const body = '<body><h1>物资清单</h1><p>铅笔12 橡皮8 尺子5 合计25</p></body>';
+    const html = '<html><style>\n' + '/* style */\n'.repeat(100) + '</style>\n' + body + '\n</html>';
+    await fs.writeFile(small, html);
+    const result = await collectDeliveryEvidence({ userRequest: `创建 ${small}` });
+    assert.equal(result.files[0].excerpts[0].text, html, 'small explicit files include their full content');
+    assert.equal(result.files[0].excerpts[0].endLine, 104);
+    assert.match(result.files[0].sha256, /^[a-f0-9]{64}$/);
+    const large = path.join(root, 'large.html');
+    const largeHtml = '<html><style>\n' + '/* long style */\n'.repeat(2000) + '</style>\n' + body + '\n<footer>END</footer>\n</html>';
+    await fs.writeFile(large, largeHtml);
+    const resultLarge = await collectDeliveryEvidence({ userRequest: `创建 ${large}` });
+    const excerpts = resultLarge.files[0].excerpts;
+    assert(excerpts.length <= 3 && excerpts.some(x => x.text.includes('物资清单')) && excerpts.some(x => x.text.includes('END')));
+    assert(excerpts.some(x => x.startLine > 1900), 'body and tail retain original line numbers');
+    assert(resultLarge.excerptBytes <= 12 * 1024);
+  });
+
+  await withTempDir(async root => {
     const source = path.join(root, '源文件.js'), output = path.join(root, '结果.md');
     await fs.writeFile(source, 'function genuineSource() {}'); await fs.writeFile(output, '# actual output');
     const result = await collectDeliveryEvidence({ userRequest: `请只读 ${source}，然后生成 ${output}。不要修改其他文件。` });
@@ -251,6 +270,11 @@ async function main() {
     assert.equal(result.files[0].sha256, undefined);
   });
 
+  await withTempDir(async root=>{
+    const file=path.join(root,'owner-result.txt');await fs.writeFile(file,'Test passed.');
+    const evidence=await collectDeliveryEvidence({userRequest:`Create a UTF-8 file at ${file} containing exactly the quoted text: "Test passed."`,monitorSummary:'Done.'});
+    assert.deepEqual(evidence.requiredOutputs,[file]);assert.equal(evidence.files[0].exists,true);assert(evidence.files[0].sha256);assert.equal(evidence.files[0].bytes,12);
+  });
   console.log('delivery evidence safety checks passed');
 }
 

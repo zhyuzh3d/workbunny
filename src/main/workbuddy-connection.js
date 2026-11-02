@@ -17,9 +17,9 @@ function ticketIdentity() {
 class WorkBuddyConnection extends EventEmitter {
   constructor({ open = () => require('./workbuddy').openApplication(),
     catalog = () => require('./model-catalog').refresh('workbuddy'), getModel, saveModel,
-    tasks = taskStatus, identity = ticketIdentity } = {}) {
+    tasks = taskStatus, identity = ticketIdentity, timeoutMs = 25000, clock = Date.now } = {}) {
     super();
-    Object.assign(this, { open, catalog, getModel, saveModel, identity, tasks });
+    Object.assign(this, { open, catalog, getModel, saveModel, identity, tasks, timeoutMs, clock });
     this.state = { status: 'checking', ready: false, generation: 0, note: '正在检查 WorkBuddy' };
     this.closed = false;
   }
@@ -28,10 +28,18 @@ class WorkBuddyConnection extends EventEmitter {
     if (this.closed) return;
     Object.assign(this.state, patch); this.emit('change', this.status());
   }
-  invalidate(note = 'WorkBuddy 连接已断开，请重新连接') {
-    this.publish({ status: 'unavailable', ready: false, generation: this.state.generation + 1, note });
+  invalidate(note = 'WorkBuddy 暂时断开，正在自动重新连接', { identityChanged = false } = {}) {
+    this.publish({ status: 'reconnecting', ready: false, generation: this.state.generation + (identityChanged ? 1 : 0), note });
+    this.schedule(2000);
+  }
+  schedule(ms) {
+    if (!this.started || this.closed) return;
+    clearTimeout(this.timer);
+    this.publish({ nextRetryAt: this.clock() + ms });
+    this.timer = setTimeout(() => void this.connect(), ms); this.timer.unref?.();
   }
   async connect({ launch = false } = {}) {
+    if (this.closed) return this.status();
     if (this.pending) { if (launch) await this.open().catch(() => {}); return this.pending; }
     let generation = this.state.generation;
     this.pending = (async () => {
@@ -40,31 +48,38 @@ class WorkBuddyConnection extends EventEmitter {
         if (launch) await this.open();
         const identity = this.identity();
         if (this.identityValue && identity !== this.identityValue) {
-          this.invalidate('WorkBuddy 登录状态变化，正在重新连接'); generation = this.state.generation;
+          this.invalidate('WorkBuddy 登录状态变化，正在重新连接', { identityChanged: true }); generation = this.state.generation;
         }
         this.identityValue = identity;
-        const catalog = await this.catalog();
+        let timer;
+        const catalog = await Promise.race([this.catalog(), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('WorkBuddy 连接检查超时，稍后自动重试')), this.timeoutMs);
+        })]).finally(() => clearTimeout(timer));
         if (this.closed || this.state.generation !== generation) return this.status();
         if (!catalog.models?.length) throw new Error('当前账号没有可用的文本模型');
         if (!catalog.models.some(m => m.id === this.getModel?.())) {
           await this.saveModel?.(catalog.models.find(m => m.id === 'hy3')?.id || catalog.models[0].id);
         }
         const tasks = this.tasks();
-        this.publish({ status: 'ready', ready: true, tasks, note: '账号模型已连接；' + tasks.note, checkedAt: Date.now() });
+        this.failures = 0;
+        this.publish({ status: 'ready', ready: true, tasks, note: '账号模型已连接；' + tasks.note, checkedAt: this.clock(), nextRetryAt: null });
       } catch (e) {
         if (!this.closed && this.state.generation === generation) {
-          this.publish({ status: /未找到/.test(e.message) ? 'missing' : /不支持|版本|E_METHOD_NOT_FOUND|E_PIPE_NOT_FOUND/.test(e.message) ? 'incompatible' : 'sign_in_required', ready: false,
-            note: /未找到/.test(e.message) ? '请先安装 WorkBuddy，再登录自己的账号' : e.message, checkedAt: Date.now() });
+          this.failures = (this.failures || 0) + 1;
+          const status = /未找到/.test(e.message) ? 'missing' : /不支持|版本|E_METHOD_NOT_FOUND|E_PIPE_NOT_FOUND/.test(e.message) ? 'incompatible' : /登录|身份验证/.test(e.message) ? 'sign_in_required' : 'reconnecting';
+          this.publish({ status, ready: false, failures: this.failures,
+            note: status === 'missing' ? '请先安装 WorkBuddy，再登录自己的账号' : status === 'reconnecting' ? 'WorkBuddy 连接暂不可用，任务已保留，正在自动重连' : e.message, checkedAt: this.clock() });
         }
       }
       return this.status();
-    })().finally(() => { this.pending = null; });
+    })().finally(() => { this.pending = null; this.schedule(this.state.ready ? 30000 : [2000, 5000, 10000, 30000, 60000][Math.min(4, Math.max(0, (this.failures || 1) - 1))]); });
     return this.pending;
   }
   start() {
+    if (this.started || this.closed) return;
+    this.started = true;
     void this.connect();
-    this.timer = setInterval(() => void this.connect(), 30000); this.timer.unref?.();
   }
-  close() { this.closed = true; clearInterval(this.timer); }
+  close() { this.closed = true; clearTimeout(this.timer); }
 }
 module.exports = { WorkBuddyConnection, taskStatus };

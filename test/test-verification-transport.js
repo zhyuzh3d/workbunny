@@ -11,7 +11,7 @@ const failure = code => Object.assign(new Error('controlled response failure'), 
   assert.equal(primary.model, FLASH);
   assert.equal(calls[0].maxTokens, 2048);
   assert.equal(calls[0].extraBody.reasoning_effort, 'low');
-  for (const code of ['E_PAYLOAD_TOO_LARGE', 'E_EMPTY_RESPONSE']) {
+  for (const code of ['E_PAYLOAD_TOO_LARGE', 'E_EMPTY_RESPONSE', 'E_OUTPUT_LIMIT']) {
     const attempts = [], lookups = [];
     const result = await requestVerification({ messages, vision: true }, {
       chat: async options => { attempts.push(options); if (attempts.length === 1) throw failure(code); return { model: options.model, text: 'fallback' }; },

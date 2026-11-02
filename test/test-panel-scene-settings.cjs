@@ -57,6 +57,7 @@ fs.writeFileSync(preload, `
   const api = (name, ...args) => ipcRenderer.invoke('panel-fixture:api', name, ...args);
   contextBridge.exposeInMainWorld('pet', {
     log: () => {}, selfView: () => api('selfView'), selfSettings: value => api('selfSettings', value), portability: () => api('portability'), ttsHTTPTemplate: kind => api('ttsHTTPTemplate', kind),
+    productInfo: () => api('productInfo'), openRepository: () => api('openRepository'),
     panelInit: (...a) => api('panelInit', ...a), brainInfo: (...a) => api('brainInfo', ...a), ttsInfo: (...a) => api('ttsInfo', ...a),
     brainModels: (...a) => api('brainModels', ...a),
     config: (...a) => api('config', ...a), on: cb => ipcRenderer.on('panel-fixture:event', (_e, value) => cb(value)),
@@ -97,6 +98,8 @@ ipcMain.handle('panel-fixture:control', (_event, action, patch) => {
 });
 
 ipcMain.handle('panel-fixture:api', async (_event, name, ...args) => {
+  if (name === 'productInfo') return require('../src/main/product-info').productInfo('0.16.1');
+  if (name === 'openRepository') { calls.push({openRepository:true}); return {ok:true}; }
   if (name === 'selfView') return { revision: settings.settingsRevision, settings: { identity: settings.buddy.profile, behavior: '' } };
   if (name === 'selfSettings') { settings.buddy.profile = args[0].identity; return { revision: settings.settingsRevision, settings: args[0] }; }
   if (name === 'portability') return { connection: { ready: true, note: '已连接' }, storage: { ok: true, dir: '/fixture/vault' }, asrMode: 'continuous', capabilities: {} };
@@ -110,7 +113,7 @@ ipcMain.handle('panel-fixture:api', async (_event, name, ...args) => {
     try { await modelCatalog.refresh(provider, profile.apiKey, profile.baseURL); return {ok:true,catalog:modelCatalog.forConnection(provider,profile.apiKey,profile.baseURL)}; }
     catch(error) { return {ok:false,error:error.message}; }
   }
-  if (name === 'ttsInfo') return { engines: [{ id: 'system', label: '系统语音' }, { id: 'qwen', label: 'Qwen' }, { id: 'remote', label: 'CHP' }],
+  if (name === 'ttsInfo') return { engines: [{ id: 'system', label: '系统语音' }, { id: 'qwen', label: 'Qwen' }, { id: 'remote', label: 'CHP' }, { id: 'doubao', label: '豆包语音' }],
     systemVoices: [{ id: 'Tingting', lang: 'zh-CN' }], qwen: { ready: false, downloaded: false, hasRuntime: true, hasFiles: false, voices: [] }, dl: {}, chp: null };
   if (name === 'config') {
     const patch = args[0] || {};
@@ -181,8 +184,20 @@ async function main() {
   await chooseAvatar('fixture-avatar');
   await waitFor(()=>Promise.resolve(settings.avatar==='fixture-avatar'),'restore initial fixture selection');
 
-  const scene = () => evalIn(win, "document.querySelector('#panelScene [aria-pressed=true]')?.dataset.scene");
-  const select = name => evalIn(win, `document.querySelector('#panelScene [data-scene=${name}]').click()`);
+  assert.equal(await evalIn(win, 'document.querySelector("[data-t=data]").textContent'), '系统');
+  assert.equal(await evalIn(win, 'document.getElementById("panelScene").tagName'), 'SELECT');
+  assert.deepEqual(await evalIn(win, '[...document.getElementById("ttsEngine").options].map(o=>o.value)'), ['system','remote','qwen','doubao']);
+  await evalIn(win, 'document.querySelector("[data-t=data]").click()');
+  await waitFor(() => evalIn(win, 'document.getElementById("productInfo").textContent.includes("MIT License")'), 'shared product info');
+  await evalIn(win, 'document.querySelector(".product-repository").click()');
+  await waitFor(() => Promise.resolve(calls.some(c=>c.openRepository)), 'repository external action');
+  await evalIn(win, 'document.getElementById("dialogueBehind").checked=true;document.getElementById("dialogueBehind").dispatchEvent(new Event("change"))');
+  await waitFor(() => Promise.resolve(settings.ui?.dialogueBehind===true), 'dialogue layer persisted');
+  await evalIn(win, 'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+  fs.writeFileSync(path.resolve('.cache/avatar-select-update/system.png'), (await win.webContents.capturePage()).toPNG());
+  await evalIn(win, 'document.querySelector("[data-t=scene]").click()');
+  const scene = () => evalIn(win, "document.getElementById('panelScene').value");
+  const select = name => evalIn(win, `document.getElementById('panelScene').value='${name}';document.getElementById('panelScene').dispatchEvent(new Event('change'))`);
   assert.equal(await scene(), 'life');
   assert.equal(await evalIn(win, "document.getElementById('setProfile').rows"), 3);
   await evalIn(win, "document.getElementById('setAlways').checked=false; document.getElementById('setAlways').dispatchEvent(new Event('change',{bubbles:true}))");
