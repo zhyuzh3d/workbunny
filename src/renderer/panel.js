@@ -1,4 +1,5 @@
 import '../shared/motion-core.js';
+import { mountSoftwarePermissions } from './software-permissions.mjs';
 import { mountProductInfo } from './product-info-ui.mjs';
 import { mountPortability } from './portability-ui.js';
 import { autoGrow } from './auto-grow.js';
@@ -798,6 +799,8 @@ function buildMotionList() {
   viewScale = (cfg.window && cfg.window.scale) || 0.5;
 
   if (which === 'settings') {
+    const software=mountSoftwarePermissions($('softwarePermissions'),window.pet,{config:cfg,save:patch=>persist(patch),onOpen:()=>showTab('data')});
+    software?.paint(init.taskPermission);
     await mountPortability(window.pet);
     void mountProductInfo($('productInfo'), window.pet);
     $('dialogueBehind').checked = cfg.ui?.dialogueBehind === true;
@@ -857,7 +860,7 @@ function buildMotionList() {
       }
     });
     paintPerm(init.asr || null);
-    showTab(init.storage?.ok === false ? 'data' : init.connection?.ready === false && cfg.brain.source !== 'apikey' ? 'brain' : 'look');
+    showTab(init.taskPermission || init.storage?.ok === false ? 'data' : init.connection?.ready === false && cfg.brain.source !== 'apikey' ? 'brain' : 'look');
 
     $('sizeRow').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-k]');

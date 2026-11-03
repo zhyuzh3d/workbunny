@@ -169,6 +169,7 @@ const DEFAULTS = {
   version: 2,
   ui: { dialogueVisible: false, dialogueBehind: false, avatarHidden: false },
   memory: { enabled: true, extract: true, scene: 'life', recentRounds: 8, recentMessages: 20 },
+  software: { systemConfiguration: false, terminal: false, wechatAccountOwnership:'owner' },
   motions: { disabled: [] },
   avatar: 'builtin_soft_bunny',
   avatarDescriptions: {},
@@ -357,6 +358,7 @@ function save(patch, { replaceAvatarDescriptions = false } = {}) {
       if (profile?.apiKey && /[\r\n]/.test(profile.apiKey)) throw new Error('API Key 不能包含换行');
     }
   }
+  if(patch?.software)for(const key of Object.keys(patch.software)){if(key==='wechatAccountOwnership'){if(!['owner','bunny'].includes(patch.software[key]))throw Error('微信归属无效');}else if(!['systemConfiguration','terminal'].includes(key)||typeof patch.software[key]!=='boolean')throw Error('软件操作授权只接受明确开关');}
   if (patch?.tts?.doubao) next.tts.doubao = require('./doubao-tts').normalize(next.tts.doubao);
   if (patch?.tts?.http) next.tts.http = require('./tts-http-profile').normalize(next.tts.http, load().tts.http);
   if (next.tts?.engine === 'http') require('./tts-http-profile').validate(next.tts.http?.profile);

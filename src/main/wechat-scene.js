@@ -1,6 +1,8 @@
 'use strict';
 const {WeChatObserver}=require('./wechat-observer');
+const {randomUUID}=require('node:crypto');
 const {DesktopNative}=require('./desktop-native');
+const {wechatAuthReason}=require('./wechat-auth-state');
 const BUNDLE='com.tencent.xinWeChat';
 const normalized=s=>String(s||'').normalize('NFKC').replace(/\s/gu,'').toLowerCase();
 // One shared visual scene serves all conversation tasks. No WeChat interface,
@@ -17,7 +19,18 @@ class WeChatScene{
     const front=await this.native.request('frontmost');
     const windows=front.windows.filter(w=>w.bundleId===BUNDLE&&w.layer===0&&w.rect.width>300&&w.rect.height>250);
     const window=windows.find(w=>w.windowId===this.knownWindow?.windowId)||windows.sort((a,b)=>b.rect.width*b.rect.height-a.rect.width*a.rect.height)[0];
-    if(!window){await this.trip('微信主窗口不可见，可能已退出、登出或最小化；未尝试重开');throw Object.assign(new Error(this.circuit.reason),{code:'E_APP_CIRCUIT',dispatched:false});}
+    if(!window){
+      // Missing OS metadata is not enough to conclude that screenshot capture
+      // failed. Try the external whole display once, without touching the app.
+      let detail='全屏核对未能取得可操作的窗口定位';
+      try{
+        const frame=await this.native.request('capture',{captureMode:'displayStream'},12000);
+        if(!frame.pngBase64)throw Error('全屏截图没有图像');
+        const ocr=(await this.native.request('recognize',{pngBase64:frame.pngBase64},10000)).texts||[];
+        detail=wechatAuthReason(ocr)||'已取得全屏画面，但系统仍未提供可操作的微信窗口定位';
+      }catch(error){detail='全屏回退也未完成：'+error.message;}
+      await this.trip('微信主窗口暂不可见；'+detail+'。未尝试重开微信');throw Object.assign(new Error(this.circuit.reason),{code:'E_APP_CIRCUIT',dispatched:false});
+    }
     if(this.knownWindow&&(window.pid!==this.knownWindow.pid||window.windowId!==this.knownWindow.windowId)){
       await this.trip('微信窗口或进程身份改变，停止自动操作等待核对');throw Object.assign(new Error(this.circuit.reason),{code:'E_APP_CIRCUIT',dispatched:false});
     }
@@ -43,13 +56,13 @@ class WeChatScene{
       if(red>=4)return true;
     }return false;
   }
-  async capture(force=false){
+  async capture(force=false,repairProfile){
     if(this.circuit)return {unavailable:true,reason:this.circuit.reason};
     if(!force&&this.last&&this.clock()-this.lastAt<500)return this.last;
     if(this.inflight)return this.inflight;
-    this.inflight=this.captureOwned(force).finally(()=>{this.inflight=null;});return this.inflight;
+    this.inflight=this.captureOwned(force,repairProfile).finally(()=>{this.inflight=null;});return this.inflight;
   }
-  async captureOwned(force){
+  async captureOwned(force,repairProfile){
     try{
       await this.assertHealthy();
       const frame=await this.observer.sample(this.binding,{reset:force||!this.last});this.metrics.samples++;
@@ -60,14 +73,14 @@ class WeChatScene{
       }
       if(!frame.pngBase64)throw new Error('变化画面没有像素证据');
       const ocr=(await this.native.request('recognize',{pngBase64:frame.pngBase64})).texts||[];this.metrics.recognitions++;
-      if(ocr.some(r=>r.confidence>=.6&&/(?:扫码登录|扫描二维码登录|在手机上确认登录|登录微信|Log in to WeChat)/iu.test(r.text)))return this.trip('画面显示登录界面，已停止操作；未尝试重新登录');
+      const authReason=wechatAuthReason(ocr);if(authReason)return this.trip(authReason);
       const allowed=[...new Set(this.subjects().filter(s=>s.application==='wechat').map(s=>s.recipient))];
       const header=allowed.find(name=>ocr.some(r=>r.confidence>=.6&&r.x>.3&&r.y<.15&&normalized(r.text)===normalized(name)));
       const unread={};for(const name of allowed)unread[name]=this.unreadFor(name,ocr,frame.pngBase64);
       let view={headerMatched:false,messages:[],draft:''};
-      if(header){view=await this.observer.inspect({recipient:header},{...frame,ocr});this.metrics.modelInspections++;}
+      if(header){view=await this.observer.inspect({recipient:header},{...frame,ocr},undefined,repairProfile);this.metrics.modelInspections++;}
       await this.observer.commit(this.binding);
-      this.lastAt=this.clock();this.last={...view,header,unread,latestPending:view.latestPending===true||ocr.some(r=>r.x>.65&&r.y>.55&&/(?:条新消息|new messages?)/iu.test(r.text)),changed:true,at:this.lastAt};return this.last;
+      this.lastAt=this.clock();this.last={...view,header,unread,latestPending:view.latestPending===true||ocr.some(r=>r.x>.65&&r.y>.55&&/(?:条新消息|new messages?)/iu.test(r.text)),changed:true,revision:randomUUID(),at:this.lastAt};return this.last;
     }catch(error){
       if(this.circuit)return {unavailable:true,reason:this.circuit.reason};
       if(/微信主窗口不可见|窗口或进程身份改变|没有屏幕录制|缺少屏幕录制|截图.*超时|请求超时.*(?:capture|visualSample)/u.test(error.message))return this.trip(error.message);
@@ -75,13 +88,13 @@ class WeChatScene{
       throw error;
     }
   }
-  async observe(subject,{force=false,relocate=false}={}){
+  async observe(subject,{force=false,relocate=false,repairProfile}={}){
     if(relocate){this.binding.windowId=undefined;this.invalidate();}
-    const scene=await this.capture(force);
+    const scene=await this.capture(force,repairProfile);
     if(scene.unavailable)return scene;
     if(scene.unstable)return {headerMatched:false,unstable:true,changed:false,unread:!!scene.unread?.[subject.recipient]};
     return {headerMatched:scene.header===subject.recipient&&scene.headerMatched,unread:!!scene.unread?.[subject.recipient],
-      changed:scene.changed,latestPending:!!scene.latestPending,messages:scene.header===subject.recipient?scene.messages:[],draft:scene.header===subject.recipient?scene.draft:'',at:scene.at};
+      changed:scene.changed,revision:scene.revision,latestPending:!!scene.latestPending,messages:scene.header===subject.recipient?scene.messages:[],draft:scene.header===subject.recipient?scene.draft:'',at:scene.at};
   }
   invalidate(){this.last=null;this.lastAt=0;}
   async reconnect(){

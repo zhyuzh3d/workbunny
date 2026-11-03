@@ -198,7 +198,9 @@ let memory = null;
 let recoverTaskViews = async () => {};
 let maintenance = null, maintenanceTimer = null;
 let desktop = null;
+let workBuddyStopper = null;
 let watchDesktop = null, contacts = null, agent = null;
+let pendingTaskPermission = null;
 let secretary = null, autonomy = null;
 let taskNotifications = null, alertDesktop = null, notificationTimer = null;
 let delegationMonitor = null;
@@ -326,7 +328,7 @@ function queueTaskReport(report) {
   if (taskReports.length > 8) taskReports.shift();
   flushTaskReports();
 }
-function flushTaskReports() {
+async function flushTaskReports() {
   if (quitting || !taskReports.length) return;
   clearTimeout(taskReportTimer);
   if (screenLocked || !memory?.ready || busy || speaking || composing || Date.now() - lastHeardAt < 3000) {
@@ -339,6 +341,7 @@ function flushTaskReports() {
     history.push({ role: 'assistant', content: report.text, ...scopePolicy.scopeOf(report) }); history = history.slice(-24);
   } else pushHistory('assistant', report.text, { delivery: 'task-receipt', taskId: report.taskId, sources: report.sources || [], ...scopePolicy.scopeOf(report), scene: report.scene });
   presentedReplies.clear();
+  await agent?.acknowledgeReport(report.eventId);
   send('chat', { role: 'assistant', text: report.text, final: true });
   speak(report.text, { silent: Date.now() < quietUntil });
   if (win && !win.isVisible()) notify(report.status === 'accepted' ? '这件事办好了' : '代办有进展', report.text.slice(0, 100));
@@ -371,7 +374,7 @@ function clampScale(v) {
 // 0.25 keeps the 100% bust framing in a half-size canvas; UI stays at its base size.
 const winFactor = (k) => clampScale(k) === 0.25 ? 0.5 : Math.max(1, clampScale(k));
 
-let windowLayout = null, positionSaveTimer = null;
+let windowLayout = null, positionSaveTimer = null, activityPanelOpen=false;
 function windowSizeFor(k) {
   const c = config.load(), f = winFactor(k);
   return { w: Math.round(c.window.w * f * 1.6), h: Math.round(c.window.h * f) };
@@ -379,7 +382,8 @@ function windowSizeFor(k) {
 function placeWindow(rect) {
   const display = screen.getDisplayNearestPoint({ x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height - 80) });
   const area = require('./window-geometry').canvasArea(display);
-  const next = require('./window-geometry').layoutWindow(rect, area);
+  const base = require('./window-geometry').layoutWindow(rect, area);
+  const next = activityPanelOpen?require('./window-geometry').expandTaskWindow(base,area):base;
   const changed = JSON.stringify(windowLayout?.viewport) !== JSON.stringify(next.viewport);
   windowLayout = next;
   if (win && !win.isDestroyed()) { win.setBounds(next.bounds, false); if (changed) send('viewport', next.viewport); }
@@ -450,16 +454,7 @@ function createWindow() {
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
   // 渲染层日志接到主进程（打包版只记 warn/error，dev 全记）
-  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
-    const tag = ['log', 'warn', 'error', 'debug'][level] || 'log';
-    const msg = String(message);
-    if (msg.includes('DevTools')) return;
-    // three-vrm 对每个没写 specVersion 的 VRMA 都会喊一句。素材是第三方导的，
-    // 改不动；让它在日志里刷 92 遍只会把真正的报错埋掉。
-    if (msg.includes('specVersion of the VRMA')) return;
-    if (!IS_DEV && level < 2) return;
-    log(`[renderer:${tag}] ${msg}  (${String(sourceId || '').split('/').pop()}:${line})`);
-  });
+  win.webContents.on('console-message', entry => {const line=require('./renderer-console').rendererConsole(entry,'renderer',{development:IS_DEV});if(line)log(line);});
   win.webContents.on('did-fail-load', (_e, code, desc, url) => {
     log('[renderer] did-fail-load ' + [code, desc, url].join(' '));
   });
@@ -522,7 +517,7 @@ const PANEL_SIZE = {
   settings: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'WorkBunny-设置' },
   motions: { w: LIBRARY_PANEL_WIDTH, h: 800, title: 'WorkBunny-动作库' },
   memory: { w: LIBRARY_PANEL_WIDTH, h: 760, title: 'WorkBunny-记忆' },
-  desktop: { w: 560, h: 760, title: 'WorkBunny-工作与日常' },
+  desktop: { w: 560, h: 760, title: 'WorkBunny-任务与工作' },
   about: { w: 460, h: 520, title: '关于 WorkBunny' },
   self: { w: LIBRARY_PANEL_WIDTH, h:760, title:'WorkBunny-自我理解' },
 };
@@ -558,13 +553,7 @@ function openPanel(kind) {
   w.setMenuBarVisibility(false);
   w.on('page-title-updated', event => { event.preventDefault(); w.setTitle(spec.title); });
   // 面板的报错也得进日志：新窗口一旦白屏，日志里没字就等于无从查起
-  w.webContents.on('console-message', (_e, level, message, line, sourceId) => {
-    const tag = ['log', 'warn', 'error', 'debug'][level] || 'log';
-    const msg = String(message);
-    if (msg.includes('DevTools')) return;
-    if (!IS_DEV && level < 2) return;
-    log(`[panel:${kind}:${tag}] ${msg}  (${String(sourceId || '').split('/').pop()}:${line})`);
-  });
+  w.webContents.on('console-message', entry => {const line=require('./renderer-console').rendererConsole(entry,'panel:'+kind,{development:IS_DEV});if(line)log(line);});
   w.webContents.on('did-fail-load', (_e, code, desc) => log(`[panel:${kind}] did-fail-load ${code} ${desc}`));
   w.loadFile(path.join(__dirname, '..', 'renderer', kind === 'about' ? 'about.html' : kind === 'self' ? 'self.html' : ['memory', 'desktop'].includes(kind) ? 'companion.html' : 'panel.html'), { query: { p: kind } });
   w.once('ready-to-show', () => w.show());
@@ -579,11 +568,11 @@ function closePanels() {
 }
 
 /* ── 鼠标穿透开关 ── */
-let interactive = false;
+let interactive = false, taskUiInteractive=false;
 function setInteractive(v) {
   // A window-only screenshot cannot show the transparent pet overlay. Keep it from
   // swallowing visual-task clicks that are meant for the locked target underneath.
-  if (desktop?.running) v = false;
+  if (desktop?.guiLeaseHeld&&!taskUiInteractive) v = false;
   if (!win || v === interactive) return;
   interactive = v;
   win.setIgnoreMouseEvents(!v, { forward: true });
@@ -1028,7 +1017,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     const started = Date.now();
     const r = taskControl ? { raw: JSON.stringify({ kind: 'action', intent: taskControl }), reply: { intent: taskControl }, motions: [], emos: [] }
       : internal ? await llm.chat({ ...L, messages, signal: controller.signal, maxTokens: L.maxTokens || 4096 })
-      : await requestReply({ chat: llm.chat, request: { ...L, cognitive: true, deferPresentation: true, messages,
+      : await requestReply({ chat: llm.chat, selfRepair: true, request: { ...L, cognitive: true, deferPresentation: true, messages,
         webSearch: L.transport === 'workbuddy' && require('./conversation-search').mayUseWebSearch(userText), searchCache: new Map(),
         recallSession,
         maxTokens: L.maxTokens || 4096, signal: controller.signal, isCurrent: current } });
@@ -1070,7 +1059,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
         if (result.ok && result.id) sources.push(result.id);
       } else {
         result = await secretary.dispatch(intent, { requestId: userRecord?.value.turnId || randomUUID(), userText, requestSourceId: userRecord?.id,
-          source: voiceTurn ? 'voice' : 'text', voiceTurn, signal: controller.signal, sources, scene, isCurrent: current });
+          source: voiceTurn ? 'voice' : 'text', voiceTurn, signal: controller.signal, context: require('./work-order').encodeContext(memoryContext.messages || []), sources, scene, isCurrent: current });
         for (const id of [result.taskId, result.watchId]) if (id && !sources.includes(id)) sources.push(id);
       }
       text = result.text;
@@ -1194,6 +1183,16 @@ async function refreshSupervision() {
       ['done', 'failed'].includes(e.kind) ? configNow.monitor.speakOnDone :
       e.kind === 'overdue' ? configNow.monitor.speakOnLong : configNow.monitor.speakOnStall);
     if (!event) return;
+    if(event.kind==='done'){
+      const physicalId=event.snapshot?.task?.bunnyTaskId;
+      if(physicalId&&agent?.runtime.list().some(t=>agent.runtime.tasks.get(t.id)?.state.workOperationId===physicalId)){
+        taskSupervision.acknowledge(event);return;
+      }
+      const text=await require('./work-result-summary').summarizeWorkResult(event.snapshot.task);
+      if(epoch!==memory.generation||scene!==currentScene())return;
+      queueTaskReport({taskId:event.key,eventId:event.id,text,status:'completed',target:'workbuddy',scene,domain:scene,visibilityFloor:scopePolicy.rank(scene),epoch,sources:[]});
+      taskSupervision.acknowledge(event);return;
+    }
     if (inputAdmission.containsSecret(event.text)) {
       event.text = ({
         done: 'WorkBuddy有一项任务已给出答复，请查看结果。',
@@ -1347,9 +1346,10 @@ function snapshotForUi(v) {
     : { primary: v, running: v.task && v.task.status === 'running' ? [v] : [], done: v.task && v.task.status !== 'running' ? [v] : [], count: 0 };
   const one = (s) => ({
     sessionId: s.sessionId,
-    taskId: s.task ? s.task.id : 0,     // 界面「✓ 这条看过了」靠它认人
+    bunnyTaskId:s.task?.bunnyTaskId||null,taskId: s.task ? s.task.id : 0,     // 界面「✓ 这条看过了」靠它认人
     title: s.sessionTitle || (s.task && s.task.title) || '',
     name: s.task ? taskName(s.task) : '',
+    userText:String(s.task?.userText||'').slice(0,500),summary:String(s.task?.summary||'').slice(0,6000),
     status: s.task ? s.task.status : 'idle',
     startedAt: s.task ? s.task.startedAt : 0,
     endedAt: s.task ? s.task.endedAt : 0,
@@ -1413,7 +1413,7 @@ function buildTrayMenu() {
     { type: 'separator' },
     { label: '动作列表…', click: () => { showWindow(); openPanel('motions'); } },
     { label: '记忆与关系…', click: () => openPanel('memory') },
-    { label: '工作与日常…', click: () => openPanel('desktop') },
+    { label: '任务与工作…', click: () => openPanel('desktop') },
     { label: '停止桌面操作  ⌘⇧Esc', click: () => desktop?.stop() },
     {
       label: '形象',
@@ -1498,7 +1498,7 @@ function buildCharacterMenu() {
       click: () => save({ window: { scale } }) })) },
     { type: 'separator' },
     { label: '记忆与关系…', click: () => openPanel('memory') },
-    { label: '工作与日常…', click: () => openPanel('desktop') },
+    { label: '任务与工作…', click: () => openPanel('desktop') },
     { label: '关于 WorkBunny', click: () => openPanel('about') },
   ]);
 }
@@ -1872,7 +1872,7 @@ ipcMain.handle('pet:task-start', async (e, v) => {
   } catch (error) { return { ok: false, error: error.message }; }
 });
 ipcMain.handle('pet:task-cancel', async e => { trustedCompanion(e, 'desktop'); const id = desktop.task?.id; return (await Promise.all([desktop.cancel(), taskNotifications?.cancelTask(id)]))[0]; });
-ipcMain.handle('pet:task-stop', async e => { trustedCompanion(e, 'desktop'); const id = desktop.task?.id; return (await Promise.all([desktop.stop(), taskNotifications?.cancelTask(id)]))[0]; });
+ipcMain.handle('pet:task-stop', async e => { trustedCompanion(e, 'desktop');try{return await stopDesktopActivity(desktop.task?.id);}catch(error){return {ok:false,error:error.message};} });
 ipcMain.handle('pet:task-accept', async e => { trustedCompanion(e, 'desktop'); const id = desktop.task?.id; return (await Promise.all([desktop.accept(), taskNotifications?.cancelTask(id)]))[0]; });
 ipcMain.handle('pet:agent-status', e => { trustedCompanion(e, 'desktop'); return agent?.status() || { tasks: [], skills: [] }; });
 ipcMain.handle('pet:agent-command', async (e, request) => {
@@ -1881,17 +1881,69 @@ ipcMain.handle('pet:agent-command', async (e, request) => {
   const text = typeof request === 'string' ? request.trim() : '';
   if (!text || text.length > 12000) return { ok: false, text: '请写明要交办的事情。' };
   const source = await memory.addMessage('user', text, { scene: currentScene(), characterId: 'owner', channel: 'dialogue', inputSource: 'text' });
-  try { return await agent.command(text, { role: 'owner', verified: true, channel: 'dialogue', sources: [source.id], scene: currentScene() }); }
+  try { return await agent.command(text, { role: 'owner', verified: true, channel: 'dialogue',originSourceId:source.id, sources: [source.id], scene: currentScene() }); }
   catch (error) { return { ok: false, text: error.message }; }
 });
+ipcMain.handle('pet:agent-artifact',async(e,{id,index}={})=>{trustedCompanion(e);if(e.sender!==win?.webContents&&e.sender!==panels.get('desktop')?.webContents)throw Error('此窗口无权读取成果');const file=await agent?.revealArtifact(id,index);if(!file)throw Error('成果暂不可用');shell.showItemInFolder(file);return {ok:true};});
 ipcMain.handle('pet:agent-control', async (e, value) => {
   trustedCompanion(e, 'desktop');
   if (!agent || !memory?.ready) return { ok: false, error: '任务服务尚未就绪' };
-  if (value?.operation === 'reconnect') return agent.scene.reconnect();
+  if (value?.operation === 'reconnect') return agent.reconnectWeChat();
   if (value?.operation === 'pauseAll') return agent.runtime.controlAll('pause');
   if (value?.operation === 'check') return agent.reconcile(value.id);
-  return agent.runtime.control(value?.operation, value?.id);
+  if (value?.operation === 'resolve') return agent.resolveAttention(value.id);
+  return agent.control(value?.operation, value?.id);
 });
+ipcMain.handle('pet:activity-control',async(e,{operation,ref}={})=>{
+  trustedCompanion(e);
+  if(e.sender!==win?.webContents&&e.sender!==panels.get('desktop')?.webContents)throw Error('此窗口无权停止任务');
+  if(!memory?.ready||!agent)return {ok:false,error:'任务服务尚未就绪'};
+  try{
+    if(ref?.source==='agent'){
+      if(operation==='reissue'){
+        const task=agent.runtime.list().find(t=>t.id===ref.id);if(!task)throw Error('这项交办已不可用');const panel=openPanel('desktop');const show=()=>panel.webContents.send('pet:ev',{type:'task-edit-request',text:task.goal});if(panel.webContents.isLoading())panel.webContents.once('did-finish-load',show);else show();return {ok:true};
+      }
+      if(operation==='resolve')return await agent.resolveAttention(ref.id);
+      if(operation==='check')return await agent.reconcile(ref.id);
+      if(!['pause','resume','stop'].includes(operation))throw Error('任务操作不支持');
+      return await agent.control(operation,ref.id);
+    }
+    if(operation!=='stop')throw Error('这项外部工作只支持停止');
+    if(ref?.source==='desktop'){
+      return await stopDesktopActivity(ref.id);
+    }
+    if(ref?.source==='workbuddy'){
+      const visible=snapshotForUi(monitorScoped.view)?.tasks?.find(t=>t.sessionId===ref.sessionId&&t.taskId===ref.taskId);
+      if(!visible)throw Error('原任务已不在当前任务列表中');
+      const owner=agent.runtime.list().find(t=>visible.bunnyTaskId&&t.workJobId===visible.bunnyTaskId&&!['completed','stopped','expired'].includes(t.status));
+      if(owner)return await agent.control('stop',owner.id);
+      return await workBuddyStopper.stop({sessionId:ref.sessionId,taskId:ref.taskId});
+    }
+    throw Error('无法识别要停止的任务');
+  }catch(error){return {ok:false,error:error.message};}
+});
+ipcMain.handle('pet:activity-expanded',(e,open)=>{
+  if(e.sender!==win?.webContents)throw Error('此窗口无权展开任务');activityPanelOpen=open===true;if(windowLayout)placeWindow(windowLayout.logical);return {ok:true};
+});
+async function stopDesktopActivity(id){
+  if(!id||desktop.task?.id!==id)throw Error('当前操作已经变化');
+  const owner=agent?.runtime.list().find(t=>t.workJobId===id||desktop.task.sources?.includes(t.id));
+  if(owner&&!['completed','stopped','expired'].includes(owner.status))return agent.control('stop',owner.id);
+  const physical=desktop.task;await desktop.stop();
+  try{if(physical.target==='workbuddy'&&(physical.handoffSent||physical.submitAttemptedAt))await stopWorkBuddy(physical);}
+  catch(error){desktop.update({status:'paused',note:'Bunny 已停止输入；WorkBuddy 停止尚未确认：'+error.message});await desktop.journal();throw error;}
+  await taskNotifications?.cancelTask(id);return {ok:true};
+}
+async function stopWorkBuddy(physical){
+  const sources=[monitor,delegationMonitor].filter(Boolean);
+  const matches=sources.flatMap(source=>[...source.sessions.values()].map(e=>e.snap)).filter(s=>s.task?.bunnyTaskId===physical.id&&(!physical.monitorSessionId||s.sessionId===physical.monitorSessionId));
+  const unique=[...new Map(matches.map(s=>[s.sessionId,s])).values()];
+  if(unique.length!==1){
+    if(['accepted','review'].includes(physical.status))return {ok:true,verified:true,alreadyEnded:true};
+    throw Error('尚未绑定唯一 WorkBuddy 执行轮次，请稍后再次停止核对');
+  }
+  const snap=unique[0];return workBuddyStopper.stop({sessionId:snap.sessionId,taskId:snap.task.id,messageKey:snap.task.messageKey,bunnyTaskId:physical.id});
+}
 ipcMain.handle('pet:desktop-insert', (e, text) => { trustedCompanion(e, 'desktop'); return desktop.insert(text); });
 ipcMain.handle('pet:interact', async (e, request) => {
   if (e.sender !== win?.webContents) return null;
@@ -2209,6 +2261,7 @@ async function applySettings(patch) {
   if (patch?.asr?.ownerOnly && !speakerFilter.status().ready) throw Error('请先朗读录入主人声音');
   if (patch?.window && Object.hasOwn(patch.window, 'scale')) patch = { ...patch, window: { ...patch.window, scale: clampScale(patch.window.scale) } };
   const c = config.save(patch || {});
+  if(patch?.software&&['terminal','systemConfiguration'].some(k=>k in patch.software)){pendingTaskPermission=null;await agent?.authorizationChanged();}
   if (c.memory.scene !== previous.memory.scene || c.memory.enabled !== previous.memory.enabled ||
       patch?.brain && JSON.stringify(c.brain) !== JSON.stringify(previous.brain)) {
     taskNotifications?.invalidate(); await alertDesktop?.stop('对话场景或设置已变化，异常微信提醒已暂停').catch(() => {});
@@ -2295,7 +2348,7 @@ ipcMain.handle('pet:probe', async () => {
   return out;
 });
 
-ipcMain.on('pet:hit', (_e, v) => setInteractive(!!v));
+ipcMain.on('pet:hit', (e, v) => {if(e.sender!==win?.webContents)return;taskUiInteractive=typeof v==='object'&&v.taskUi===true;setInteractive(typeof v==='object'?v.inside===true:!!v);});
 ipcMain.on('pet:input-state', (event, open) => {
   if (event.sender !== win?.webContents || textInputOpen === (open === true)) return;
   textInputOpen = open === true; rebuildTray();
@@ -2375,6 +2428,11 @@ ipcMain.on('pet:open', (_e, what) => {
 
 /* 独立面板的初始数据。和 pet:init 分开：那边还要带监控快照、ASR 就绪状态，
  * 面板只要配置和动作表就够了，别把一堆无关的东西塞进一个新窗口。 */
+ipcMain.handle('pet:software-permission', async(e,kind)=>{
+  trustedCompanion(e,'settings');if(!['screen','accessibility','input'].includes(kind))throw Error('权限类型不合法');
+  const permissions=await desktop.native.request('requestPermission',{kind},8000);
+  await agent?.refreshPermissions();return permissions;
+});
 ipcMain.handle('pet:panel-init', async () => {
   const c = config.load();
   const list = avatarList();
@@ -2384,6 +2442,7 @@ ipcMain.handle('pet:panel-init', async () => {
     motions: config.MOTIONS,
     motionGroups: config.MOTION_GROUPS,
     avatar: avatars.resolve(c.avatar, list), body: embodiment.snapshot(),
+    taskPermission: pendingTaskPermission,
     asr: { ...asrStatus, mode: asrMode }, capabilities: runtimeCaps, connection: connection.status(), storage: storage.status(),
   };
 });
@@ -2841,8 +2900,8 @@ if (!lock) {
     const guiLease = new GuiLease();
     const imageResize = png => prepareVisionPreview(nativeImage.createFromBuffer(png));
     const imageCrop = (png, rect) => nativeImage.createFromBuffer(png).crop(rect).toPNG();
-    desktop = new DesktopService({ lease: guiLease, owner: 'primary', getScene: currentScene, emit: status => {
-      if (status.running) setInteractive(false);
+    desktop = new DesktopService({ beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'primary', getScene: currentScene, emit: status => {
+      if (status.running&&!taskUiInteractive) setInteractive(false);
       send('desktop', status);
       secretary?.onStatus(status);
       if (['accepted', 'paused', 'stopped', 'cancelled'].includes(status.task?.status)) { delegationMonitor?.stop(); delegationMonitor = null; }
@@ -2856,6 +2915,9 @@ if (!lock) {
       return observeWorkBuddy(source, task);
     }, persist: createTaskJournal(memory) });
     const readyForOwner = () => !quitting && !storageBusy && !screenLocked && !!memory?.ready;
+    workBuddyStopper=new (require('./workbuddy-stop').WorkBuddyStopper)({native:desktop.native,lease:guiLease,
+      lookup:target=>[monitor,delegationMonitor].filter(Boolean).flatMap(m=>[...m.sessions.values()].map(e=>e.snap)).find(s=>s.sessionId===target.sessionId&&s.task?.id===target.taskId),
+      confirmed:target=>{for(const m of [monitor,delegationMonitor].filter(Boolean))if([...m.sessions.values()].some(e=>e.snap.sessionId===target.sessionId&&e.snap.task?.id===target.taskId))m.confirmStopped(target.sessionId,target.taskId,target.messageKey);}});
     const readyForTasks = () => readyForOwner() && connection.status().ready && connection.status().tasks?.status !== 'unavailable';
     desktop.strategies = new (require('./interaction-strategy').InteractionStrategy)(memory, currentScene);
     contacts = new ContactDirectory({ read: ({ scene }) => memory.serial(async () => {
@@ -2881,19 +2943,27 @@ if (!lock) {
       }
     }) });
     desktop.contactDirectory = contacts;
-    watchDesktop = new DesktopService({ lease: guiLease, owner: 'agent-conversation', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop,
+    watchDesktop = new DesktopService({ beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'agent-conversation', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop,
       persist: task => createTaskJournal(memory)({ ...task, taskType: 'agent-operation' }) });
     const agentNative = new (require('./desktop-native').DesktopNative)();
     const canOperate = async () => {
       if (!readyForOwner() || busy || speaking || composing || !guiLease.isFree() || secretary?.verifying) return false;
       const idle = await agentNative.request('inputIdle', {}, 5000);
-      return typeof idle.hidIdleMs === 'number' && idle.hidIdleMs >= 8000;
+      return typeof idle.hidIdleMs === 'number' && idle.hidIdleMs >= 2000;
     };
+    const authorization=new (require('./authorization-service').AuthorizationService)({settings:()=>config.load().software,
+      permissions:()=>agentNative.request('permissions',{},8000),onResolved:async id=>{if(pendingTaskPermission?.taskId===id){pendingTaskPermission=null;send('task-permission',{resolved:true});}},onMissing:async request=>{
+        pendingTaskPermission=request;send('task-permission',request);
+        const panel=openPanel('settings');const show=()=>{if(!panel.isDestroyed())panel.webContents.send('pet:ev',{type:'task-permission',...request});};
+        if(panel.webContents.isLoading())panel.webContents.once('did-finish-load',show);else show();
+      }});
+    setInterval(()=>{if(!quitting&&readyForOwner())void agent?.refreshPermissions().then(()=>agent?.recoverPending()).catch(()=>{});},3000).unref();
     agent = new (require('./agent-service').AgentService)({ desktop, conversationDesktop: watchDesktop, memory, contacts,
+      authorization,taskDirectory:path.join(USER_DIR,'workspaces'),deliveryDirectory:path.join(USER_DIR,'deliveries'),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,setWeChatOwnership:ownership=>applySettings({software:{wechatAccountOwnership:ownership}}),
       native: agentNative, imageResize, bitmap: png => { const picture = nativeImage.createFromBuffer(png); return { data: picture.toBitmap(), ...picture.getSize() }; },
-      getScene: currentScene, ready: readyForOwner, epoch: () => memory.generation, canOperate, report: queueTaskReport,
+      getScene: currentScene, ready: readyForOwner, epoch: () => memory.generation, canOperate, report: queueTaskReport,stopWork:stopWorkBuddy,
       emit: status => { send('agent', status); for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'agent', ...status }); } });
-    alertDesktop = new DesktopService({ lease: guiLease, owner: 'task-alert', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop,
+    alertDesktop = new DesktopService({ beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'task-alert', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop,
       persist: task => createTaskJournal(memory)({ ...task, taskType: 'notification-operation' }),
       modelRequest: options => {
         const L = config.resolveLLM(config.load());
@@ -2907,6 +2977,8 @@ if (!lock) {
       ready: () => readyForOwner() && config.load().memory.enabled,
       canOperate: async () => {
         if (!readyForOwner() || busy || speaking || composing || secretary?.verifying || !guiLease.isFree() || Date.now() < quietUntil) return false;
+        if(!agent||agent.scene.circuit)return false;
+        try{await agent.scene.assertHealthy();}catch{return false;}
         const idle = await alertDesktop.native.request('inputIdle', {}, 5000);
         return Number.isFinite(idle.hidIdleMs) && idle.hidIdleMs >= 8000;
       },
@@ -2916,7 +2988,7 @@ if (!lock) {
         try {
           if (signal.aborted || !readyForOwner()) return { state: 'skipped' };
           const started = await alertDesktop.start({ target: 'wechat', recipient: event.recipient, operation: 'send', message: event.text,
-            goal: `仅向微信会话「${event.recipient}」发送一次任务异常提醒。未登录仅尝试明确的一键登录，否则忽略微信。`,
+            goal: `仅向微信会话「${event.recipient}」发送一次任务异常提醒。未登录就保留待发送提醒，不启动、不重新登录微信。`,
             criteria: '指定会话中出现完整已发送气泡；不能是输入草稿。', origin: 'notification', inputSource: 'text',
             scene: event.scene, sources: [event.id], privacyEpoch: memory.generation });
           if (!started.ok) return { state: alertDesktop.task?.submitAttemptedAt ? 'unknown' : 'skipped' };

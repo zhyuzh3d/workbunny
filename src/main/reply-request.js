@@ -96,7 +96,7 @@ function safeChatFallbackOptions(request) {
  * UI, TTS, or action-facing callback sees model output. JSON mode is a prompt /
  * transport hint, not an authorization boundary or a protocol guarantee.
  */
-async function requestReply({ chat, request, maxRepairs = MAX_REPAIRS, allowActions = true, clock = Date.now } = {}) {
+async function requestReplyOnce({ chat, request, maxRepairs = MAX_REPAIRS, allowActions = true, clock = Date.now } = {}) {
   if (typeof chat !== 'function' || !request || typeof request !== 'object') throw new TypeError('chat and request are required');
   const repairs = Math.min(MAX_REPAIRS, Math.max(0, Number.isFinite(maxRepairs) ? Math.floor(maxRepairs) : MAX_REPAIRS));
   const requestedTimeout = Number(request.timeoutMs || 55000);
@@ -175,4 +175,24 @@ async function requestReply({ chat, request, maxRepairs = MAX_REPAIRS, allowActi
   throw protocolError();
 }
 
+async function requestReply(options={}) {
+  if(!options.selfRepair)return requestReplyOnce(options);
+  const {request,chat,clock=Date.now}=options,started=clock(),timeout=Number(request.timeoutMs||55000);
+  try{return await requestReplyOnce(options);}catch(error){
+    const repair=require('./self-repair'),kind=repair.category(error);
+    if(!kind||!active(request)||clock()-started>=timeout)throw error;
+    const diagnostic=async({messages,signal})=>{
+      const remaining=timeout-(clock()-started);if(remaining<=0)throw timeoutError();
+      const safe={...request,messages,signal,timeoutMs:Math.min(remaining,12000),webSearch:false,extraBody:{response_format:{type:'json_object'}}};
+      for(const key of Object.keys(safe))if(/^on[A-Z]/.test(key)||['recallSession','searchCache','isCurrent'].includes(key))delete safe[key];
+      const result=await chat(safe);return {response:{text:result.text||result.raw||''}};
+    };
+    const advice=await repair.advise({kind,skill:'dialogue',code:error.code||'E_STEP',attempt:1,signal:request.signal,timeoutMs:Math.min(12000,Math.max(1,timeout-(clock()-started))),request:diagnostic});
+    if(!active(request)||clock()-started>=timeout||advice.action==='defer')throw error;
+    const profile=repair.applyAction({},advice.action,{code:error.code}),next=repair.applyProfile(request,profile);
+    next.timeoutMs=Math.max(1,timeout-(clock()-started));
+    const result=await requestReplyOnce({...options,request:next,selfRepair:false});
+    return {...result,selfRepaired:true};
+  }
+}
 module.exports = { requestReply };

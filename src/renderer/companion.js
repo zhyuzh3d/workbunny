@@ -1,8 +1,9 @@
+import { taskCard } from './task-card.mjs';
 import { setupAutonomy } from './autonomy-ui.js';
 import { characterName, characterText, paintCharacterNames } from './character-name.mjs';
 const $ = (id) => document.getElementById(id);
 const page = new URLSearchParams(location.search).get('p') === 'desktop' ? 'desktop' : 'memory';
-document.title = page === 'desktop' ? 'WorkBunny-工作与日常' : 'WorkBunny-记忆';
+document.title = page === 'desktop' ? 'WorkBunny-任务与工作' : 'WorkBunny-记忆';
 $(page === 'desktop' ? 'desktopPage' : 'memoryPage').hidden = false;
 if (page === 'desktop') setupAutonomy(window.pet);
 let characterConfig = {};
@@ -684,7 +685,7 @@ let desktopStatus = null, paintedTaskId = null;
 let resumePendingId = null, resumePreviousStatus = null, resumeTimer = null;
 let workBuddyMonitorSnapshot = null;
 let agentSnapshot = { tasks: [], skills: [] };
-const agentActionsPending = new Set();
+const agentActionsPending = new Set(),agentActionMessages=new Map();
 const PERMISSION_NAMES = { accessibilityTrusted: '辅助功能', screenCaptureAllowed: '屏幕录制', postEventAllowed: '输入控制', accessibility: '辅助功能', screenRecording: '屏幕录制', automation: '自动化', inputMonitoring: '输入监控' };
 const TASK_STATUS_LABELS = { starting: '正在准备', running: '代理操作中', awaiting: '等待 WorkBuddy 开始处理', monitoring: '观察 WorkBuddy', verifying: '核对结果', paused: '代理已暂停', stopped: '代理已暂停', cancelled: '已取消', review: '待你确认', accepted: '你已确认', failed: '代理未完成' };
 function taskStatusLabel(status) { return TASK_STATUS_LABELS[status] || labelStatus(status); }
@@ -831,11 +832,15 @@ function paintWorkBuddyMonitor(snapshot) {
     target.append(node('div', 'task-detail', `${task.name || task.title || 'WorkBuddy 任务'} · ${status}`));
   }
 }
-const AGENT_STATUS = { ready:'等待执行', running:'正在处理', waiting:'等待动态', paused:'已暂停', needs_attention:'需要核对', completed:'已完成', stopped:'已停止', expired:'已到期' };
+const AGENT_STATUS = { ready:'等待执行', running:'正在处理', waiting:'等待动态', waiting_permission:'等待授权', paused:'已暂停', needs_attention:'需要核对', completed:'已完成', stopped:'已停止', expired:'已到期' };
 function paintAgentSummary(){
   const active=(agentSnapshot?.tasks||[]).filter(t=>!['completed','stopped','expired'].includes(t.status));
-  if(agentSnapshot?.circuit||active.some(t=>t.status==='needs_attention'))setPill('desktopStatus','需要核对','bad');
-  else if(active.some(t=>['ready','running','waiting'].includes(t.status)))setPill('desktopStatus',`正在跟进 ${active.length} 项`,'warn');
+  if(agentSnapshot?.restoring){setPill('desktopStatus','正在恢复任务','warn');return;}
+  const blocked=active.filter(t=>['needs_attention','waiting_permission'].includes(t.status)&&!t.presentation?.guidance?.working);
+  if(blocked.length)setPill('desktopStatus',blocked.length===1?blocked[0].presentation?.guidance?.title||'有任务待确认':blocked.length+'项任务待确认','bad');
+  else if(active.some(t=>t.presentation?.guidance?.working)){const pending=active.filter(t=>t.presentation?.guidance?.working);setPill('desktopStatus',pending.length===1?pending[0].presentation.guidance.title:'Bunny正在跟进 '+pending.length+' 项核对','warn');}
+  else if(agentSnapshot?.capacity?.active)setPill('desktopStatus',`运行 ${agentSnapshot.capacity.active}/${agentSnapshot.capacity.limit} 项${agentSnapshot.capacity.queued?' · 待启动 '+agentSnapshot.capacity.queued+' 项':''}`,'warn');
+  else if(active.some(t=>t.status==='queued'))setPill('desktopStatus','有任务待启动','warn');
   else if(active.length)setPill('desktopStatus','任务已暂停','warn');
   else if(!desktopStatus?.running)setPill('desktopStatus','空闲','ok');
 }
@@ -844,28 +849,23 @@ function paintAgent(snapshot) {
   paintAgentSummary();
   const list = $('agentTaskList'); if (!list) return;
   list.replaceChildren();
+  const capacity=agentSnapshot.capacity;if(capacity)list.append(node('div','watch-item-note',`已启动 ${capacity.active}/${capacity.limit} 项${capacity.queued?' · '+capacity.queued+' 项待启动':''}。待启动任务需点击启动，不会自动补位。`));
   const rows = agentSnapshot.tasks || [], active = rows.filter(t => !['completed','stopped','expired'].includes(t.status));
   const render = task => {
-    const item = node('article','watch-item'); item.dataset.taskId = task.id;
-    const head = node('div','watch-item-head'); head.append(node('span','watch-item-name',task.goal),node('span','watch-item-status',task.skill==='conversation.manage'&&!task.observationReady&&['ready','running','waiting'].includes(task.status)?'建立观察位置':AGENT_STATUS[task.status] || task.status)); item.append(head);
-    item.append(node('div','watch-item-meta',(task.subjects || []).map(s => s.recipient || s.application).join(' · ')));
-    item.append(node('div','watch-item-note',task.note || '等待下一步'));
-    if (task.queuedEvents) item.append(node('div','watch-item-time',`待处理 ${task.queuedEvents} 项动态`));
-    if (task.schedule?.intervalSeconds && !['completed','stopped','expired'].includes(task.status)) item.append(node('div','watch-item-time',`每 ${task.schedule.intervalSeconds} 秒观察 · ${task.expiresAt ? '到期 '+formatTime(task.expiresAt) : '直到你停止'}`));
-    const controls = node('div','watch-item-actions');
-    const add = (label,operation) => { const button = node('button','button quiet',label); button.disabled = agentActionsPending.has(task.id); button.onclick = () => runAgentControl(operation,task.id); controls.append(button); };
-    if (['ready','running','waiting'].includes(task.status)) { add('暂停','pause'); add('现在检查','check'); }
-    if(task.status==='needs_attention')add('只读核对','check');
-    if (['paused','needs_attention'].includes(task.status)) add('继续','resume');
-    if (!['completed','stopped','expired'].includes(task.status)) add('停止','stop');
-    if (controls.childElementCount) item.append(controls); return item;
+    const item=taskCard(task,{pending:agentActionsPending.has(task.id),message:agentActionMessages.get(task.id)||'',onAction:operation=>{
+      if(operation==='details'){const details=item.querySelector('[data-details-key="reason"]');if(details)details.open=true;return;}
+      if(operation==='reissue'){$('agentCommand').value=task.goal;$('agentCommand').focus();$('agentCommand').scrollIntoView({block:'center',behavior:'smooth'});return;}
+      void runAgentControl(operation,task.id);
+    },onArtifact:(id,index)=>api('agentArtifact',id,index).catch(error=>{agentActionMessages.set(id,error.message);paintAgent(agentSnapshot);})});
+    item.classList.add('agent-task-row');return item;
   };
   if (!active.length) list.append(node('div','watch-empty','没有正在跟进的任务。可以在上方交办，或直接与 Bunny 对话。'));
   for (const task of active) list.append(render(task));
   const finished = rows.filter(t => ['completed','stopped','expired'].includes(t.status));
   if (finished.length) { const details = node('details','watch-inactive'); details.append(node('summary','',`最近结束的任务（${finished.length}）`)); for (const task of finished.slice(-20).reverse()) details.append(render(task)); list.append(details); }
   const skills = $('agentSkillList'); skills?.replaceChildren();
-  for (const skill of agentSnapshot.skills || []) { const item=node('article','watch-item'); item.append(node('div','watch-item-name',skill.title || '操作技能'),node('div','watch-item-note',skill.description)); skills?.append(item); }
+  for(const pack of agentSnapshot.softwarePackages||[]){const item=node('article','watch-item');item.append(node('div','watch-item-name',(pack.id==='wechat'?'微信':'WorkBuddy')+' · 基础套件 v'+pack.version),node('div','watch-item-note',pack.id==='wechat'?'外部画面与键鼠，区域失效时全屏重新定位':'专用控件优先，截图与键鼠兜底'));skills?.append(item);}
+  for (const skill of agentSnapshot.skills || []) { const item=node('article','watch-item'); item.append(node('div','watch-item-name',skill.title || '操作技能'),node('div','watch-item-note',skill.description)); const learned=(agentSnapshot.learnedSkills||[]).find(k=>k.skill===skill.id);if(learned)item.append(node('div','watch-item-time','操作经验 r'+learned.revision+' · '+({candidate:'候选',validated:'已核对',quarantined:'已停用'}[learned.status]||learned.status)+' · '+learned.proofs+' 次结果证明'));skills?.append(item); }
   $('agentCircuit').hidden = !agentSnapshot.circuit; $('agentReconnect').hidden = !agentSnapshot.circuit;
   if (agentSnapshot.circuit) $('agentCircuit').textContent = '微信操作已停止：'+agentSnapshot.circuit.reason+'。Bunny 不会自动重开或登录微信。';
 }
@@ -874,8 +874,8 @@ async function refreshAgent() {
 }
 async function runAgentControl(operation,id) {
   if (agentActionsPending.has(id)) return; agentActionsPending.add(id); paintAgent(agentSnapshot);
-  try { const result=await api('agentControl',operation,id); if (!result?.ok) throw new Error(result?.error || '任务状态未更新'); await refreshAgent(); }
-  catch(error) { $('agentCommandNote').textContent=error.message; }
+  try { agentActionMessages.delete(id);const result=await api('agentControl',operation,id); if (!result?.ok) throw new Error(result?.error || '任务状态未更新');if(result.message)agentActionMessages.set(id,result.message);await refreshAgent(); }
+  catch(error) {agentActionMessages.set(id,error.message);}
   finally { agentActionsPending.delete(id); paintAgent(agentSnapshot); }
 }
 async function submitAgentCommand() {
@@ -1001,5 +1001,6 @@ else {
     else if (event?.type === 'taskNotifications') $('desktopNotificationNote').textContent = event.note;
     else if (event?.type === 'monitor') paintWorkBuddyMonitor(event);
     else if (event?.type === 'agent') paintAgent(event);
+    else if(event?.type==='task-edit-request'){$('[data-desktop-tab=current]').click();$('agentCommand').value=event.text||'';$('agentCommand').focus();}
   });
 }

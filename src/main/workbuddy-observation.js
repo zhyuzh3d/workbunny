@@ -18,10 +18,10 @@ function observeWorkBuddy(monitor, task) {
           !Number.isFinite(row.startedAt) || row.startedAt < task.submittedAt - 2000) continue;
       if (task.monitorMessageKey ? row.messageKey !== task.monitorMessageKey : task.monitorTaskId && row.id !== task.monitorTaskId) continue;
       const status = row.endReason === 'superseded' ? 'abandoned' : row.status;
-      if (!['running', 'ok', 'failed', 'abandoned'].includes(status)) continue;
+      if (!['running', 'ok', 'failed', 'abandoned', 'stopped'].includes(status)) continue;
       found.push({ sessionId: snap.sessionId, taskId: row.id, status,
         ...(row.messageKey ? { messageKey: row.messageKey } : {}),
-        summary: String(row.summary || '').slice(0, 6000), startedAt: row.startedAt,
+        ...(snap.sessionTitle||row.title?{sessionTitle:snap.sessionTitle||row.title}:{}),summary: String(row.summary || '').slice(0, 6000), startedAt: row.startedAt,
         updatedAt: row.endedAt || snap.lastEventAt, model: row.model || null });
     }
   }

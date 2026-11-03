@@ -5,6 +5,7 @@ function fixture(){let now=1000,visible=true,login=false,changed=true;const call
  const native={request:async(op)=>{calls.push(op);
   if(op==='frontmost')return {application:{bundleId:'other.app'},windows:visible?[{bundleId:'com.tencent.xinWeChat',pid:77,windowId:9,layer:0,rect:{x:0,y:30,width:821,height:909}}]:[]};
   if(op==='visualSample')return {baseline:changed,changed:false,geometryChanged:false,width:821,height:909,...(changed?{pngBase64:Buffer.from('fixture').toString('base64')}:{})};
+  if(op==='capture')return {pngBase64:Buffer.from('full-display-fixture').toString('base64')};
   if(op==='recognize')return {texts:login?[{text:'扫码登录',confidence:1,x:.4,y:.2}]:[{text:'Alice',confidence:1,x:.4,y:.06}]};
   if(op==='visualCommit')return {committed:true};if(op==='visualForget')return {};throw Error(op);
  },close:async()=>{}};
@@ -21,6 +22,7 @@ test('shared unchanged scene does not repeatedly OCR or invoke a model for multi
 test('disappearance permanently latches the circuit without activating, launching or sending',async()=>{
  const h=fixture();await h.scene.observe({recipient:'Alice'});h.hide();h.advance();
  const result=await h.scene.observe({recipient:'Alice'});assert(result.unavailable);const count=h.calls.length;
+ assert.equal(h.calls.filter(c=>c==='capture').length,1);assert.match(result.reason,/已取得全屏画面/);
  await h.scene.observe({recipient:'Alice'});await assert.rejects(h.scene.assertHealthy(),e=>e.code==='E_APP_CIRCUIT'&&e.dispatched===false);
  assert.equal(h.calls.length,count);assert.equal(h.faults.length,1);assert(!h.calls.some(c=>['activate','click','key','type'].includes(c)));
 });

@@ -6,6 +6,7 @@
 <title>WorkBunny</title>
 <link rel="stylesheet" href="./style.css" />
 <link rel="stylesheet" href="./dialogue-overlay.css" />
+<link rel="stylesheet" href="./task-card.css" />
 <script src="../shared/motion-core.js"></script>
 <script type="importmap">
 {
@@ -51,7 +52,11 @@
 </div>
 
 <!-- 上方任务状态：按当前内容收缩，长内容限制在 UI 列宽内。 -->
-<div id="activity" class="hidden">
+<section id="activityDetails" hidden aria-label="当前任务详情">
+  <header class="activity-details-nav"><span id="activityTaskCount"></span><div><button id="activityPrevious" aria-label="上一个任务" title="上一个任务">◂</button><button id="activityNext" aria-label="下一个任务" title="下一个任务">▸</button><button id="activityCollapse" type="button" title="关闭任务详情" aria-label="关闭任务详情">×</button></div></header>
+  <div id="activityTaskCard"></div><button id="activityAllTasks" type="button">打开任务与工作</button>
+</section>
+<div id="activity" class="hidden" role="status" aria-label="Bunny正在进行的任务" aria-expanded="false" aria-controls="activityDetails">
   <!-- Official icon from the installed WorkBuddy application's resources. -->
   <img class="workbuddy-logo" src="./assets/icons/workbuddy-logo.png" alt="WorkBuddy" draggable="false" />
   <span class="actRoll"><span id="activityText">在干活</span></span>

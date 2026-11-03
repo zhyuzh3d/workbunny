@@ -42,7 +42,7 @@ for (const sample of ['"kind":"chat"', '"kind":"action"', '"kind":"skip"']) asse
 assert.match(RULE, /"action":"agent"/);
 assert.match(RULE, /统一任务解释器/);
 assert.deepEqual(validateIntent({action:'agent'}),{action:'agent'});
-const unified = { schema:'bunny.task/v1',id:'agent-1',status:'paused' };
+const unified = { schema:'bunny.task/v2',id:'agent-1',status:'paused' };
 assert.equal(taskControl('继续讲刚才的故事',unified),null);
 assert.equal(taskControl('继续原任务',unified).request.id,'agent-1');
 assert.equal(validateIntent({action:'agent',request:{kind:'task',task:{skill:'work.delegate',goal:'生成测试报告',subjects:[{application:'workbuddy'}]}}}).request.task.skill,'work.delegate');

@@ -1,0 +1,20 @@
+{
+  "schema": "bunny.software-skill/v1",
+  "id": "workbuddy",
+  "version": 2,
+  "skills": [
+    "work.delegate"
+  ],
+  "application": "workbuddy",
+  "methods": [
+    "workbuddy-ax",
+    "visual-keyboard-mouse"
+  ],
+  "resources": [
+    {
+      "path": "guide.md",
+      "sha256": "1920695f19b9471b7cdaa87b63bd813ad5e9317326d21e701ba601194d9b21de"
+    }
+  ],
+  "toolProtocol": "bunny.screen/v2"
+}

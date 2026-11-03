@@ -12,7 +12,7 @@ class SkillRegistry {
     return this;
   }
   get(id) { const skill = this.skills.get(id); if (!skill) throw new Error('尚未安装技能：' + id); return skill; }
-  catalog() { return [...this.skills.values()].map(({ id, title, version, description, capabilities, parameters }) => ({ id, title:title||id, version, description, capabilities, parameters: parameters || {} })); }
+  catalog() { return [...this.skills.values()].filter(s=>!s.internal).map(({ id, title, version, description, capabilities, parameters,subjectApplications }) => ({ id, title:title||id, version, description, capabilities, parameters: parameters || {},...(subjectApplications?{subjectApplications}: {}) })); }
   stage({ id, instructions, source, evidence = [] }) {
     const current = this.get(id);
     if (typeof instructions !== 'string' || !instructions.trim() || instructions.length > 12000 || !source) throw new Error('技能经验缺少内容或来源');

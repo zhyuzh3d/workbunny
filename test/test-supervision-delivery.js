@@ -4,24 +4,24 @@ const {TaskSupervision}=require('../src/main/task-supervision');
 const {Monitor}=require('../src/main/monitor');
 const {scopedMonitorContext}=require('../src/main/work-context');
 function fixture(){
- let now=100000,mode='normal',release,queued;const events=[],spoken=[],saved=new Map();
+ let now=100000,mode='normal',release,queued;const events=[],spoken=[],queuedResults=[],saved=new Map();
  const cfg={memory:{enabled:true},monitor:{enabled:true,speakOnDone:false,speakOnLong:true,speakOnStall:true,speakOnRest:false,minGapMs:40000}};
- const snap={sessionId:'fixture',lastEventAt:99000,task:{id:1,messageKey:'one',userText:'整理资料',startedAt:20000,endedAt:99000,status:'ok',endReason:'done'},history:[]};
- const ctx={Date:{now:()=>now},require,config:{load:()=>cfg},memory:{ready:true,generation:1,addMessageOnce:async(id,role,text)=>{if(mode==='defer')await new Promise(r=>{release=r;queued=true});const old=saved.get(id);if(old&&old!==text)throw Error('conflicting duplicate');saved.set(id,text);return{record:{id}};}},
+ const snap={sessionId:'fixture',lastEventAt:99000,task:{summary:'资料已整理为三组。',id:1,messageKey:'one',userText:'整理资料',startedAt:20000,endedAt:99000,status:'ok',endReason:'done'},history:[]};
+ const ctx={Date:{now:()=>now},require:id=>id.startsWith('./')?require('../src/main/'+id.slice(2)):require(id),config:{load:()=>cfg},memory:{ready:true,generation:1,addMessageOnce:async(id,role,text)=>{if(mode==='defer')await new Promise(r=>{release=r;queued=true});const old=saved.get(id);if(old&&old!==text)throw Error('conflicting duplicate');saved.set(id,text);return{record:{id}};}},
   monitor:{view:{running:[],done:[snap]}},delegationMonitor:null,storageBusy:false,screenLocked:false,connection:{status:()=>({ready:true})},supervisionBusy:false,currentScene:()=> 'private',
   scopedWork:async view=>({view}),taskSupervision:new TaskSupervision({clock:()=>now,bootAt:0}),busy:false,speaking:false,composing:false,speakerFilter:{enrollment:false},desktop:null,secretary:null,
-  quietUntil:0,lastHeardAt:0,BOOT_AT:0,lastProactiveAt:0,workSpanStart:0,restNoticedAt:0,presentedReplies:new Set(),history:[],scopePolicy:{rank:()=>2},inputAdmission:{containsSecret:t=>t.includes('fixture-secret')},win:null,
+  agent:null,queueTaskReport:r=>queuedResults.push(r),quietUntil:0,lastHeardAt:0,BOOT_AT:0,lastProactiveAt:0,workSpanStart:0,restNoticedAt:0,presentedReplies:new Set(),history:[],scopePolicy:{rank:()=>2},inputAdmission:{containsSecret:t=>t.includes('fixture-secret')},win:null,
   send:(name,data)=>events.push({name,...data}),speak:(text,opts)=>spoken.push({text,...opts}),log:()=>{}};
  const source=fs.readFileSync('src/main/index.js','utf8');vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function proactiveAllowed()'),source.indexOf('async function proactive()')),ctx);
- return{ctx,cfg,snap,events,spoken,saved,advance:ms=>now+=ms,defer:()=>{mode='defer'},isQueued:()=>queued,release:()=>{mode='normal';release()}};
+ return{ctx,cfg,snap,events,spoken,queuedResults,saved,advance:ms=>now+=ms,defer:()=>{mode='defer'},isQueued:()=>queued,release:()=>{mode='normal';release()}};
 }
-test('disabled completion stays pending, then is shown and spoken exactly once when enabled',async()=>{
- const f=fixture();await f.ctx.refreshSupervision();assert.equal(f.spoken.length,0);assert.equal(f.ctx.taskSupervision.pending.length,1);
- f.cfg.monitor.speakOnDone=true;await f.ctx.refreshSupervision();assert.equal(f.spoken.length,1);assert.equal(f.events.filter(e=>e.name==='chat').length,1);
- f.advance(50000);await f.ctx.refreshSupervision();assert.equal(f.spoken.length,1);assert.equal(f.saved.size,1);
+test('completion collects the actual answer through the common delivery queue exactly once',async()=>{
+ const f=fixture();await f.ctx.refreshSupervision();assert.equal(f.queuedResults.length,0);assert.equal(f.ctx.taskSupervision.pending.length,1);
+ f.cfg.monitor.speakOnDone=true;await f.ctx.refreshSupervision();assert.equal(f.queuedResults.length,1);assert.equal(f.queuedResults[0].text,'资料已整理为三组。');assert.equal(f.spoken.length,0);
+ f.advance(50000);await f.ctx.refreshSupervision();assert.equal(f.queuedResults.length,1);
 });
 test('speech starting while an alert is persisted defers delivery without losing or duplicating its record',async()=>{
- const f=fixture();f.cfg.monitor.speakOnDone=true;f.defer();const running=f.ctx.refreshSupervision();
+ const f=fixture();f.snap.task.status='failed';f.cfg.monitor.speakOnDone=true;f.defer();const running=f.ctx.refreshSupervision();
  while(!f.isQueued())await Promise.resolve();f.ctx.speaking=true;f.release();await running;
  assert.equal(f.spoken.length,0);assert.equal(f.ctx.taskSupervision.pending.length,1);
  f.ctx.speaking=false;await f.ctx.refreshSupervision();assert.equal(f.spoken.length,1);assert.equal(f.saved.size,1);

@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { TextDecoder } = require('util');
 
 const MAX_FILES = 4;
-const MAX_FILE_BYTES = 256 * 1024;
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_EXCERPT_BYTES = 12 * 1024;
 const MAX_USER_REQUEST_CHARS = 12_000;
 const MAX_REPORT_CHARS = 24_000;
@@ -151,6 +151,10 @@ function collectAuthorizedPathReferences(value) {
         if (negation.test(before.slice(-32))) continue;
         if (bridgeWord.test(after)) { action = candidate; break; }
       }
+      if(!action&&!/(?:不要|不得|不许|禁止|无需|不必|不能|不需要|别|\bdo\s+not\b|\bdon't\b)\s*(?:在|对|向|从|把|将)?\s*$/iu.test(prefix)){
+        const suffix=sanitized.slice(occurrence.end,occurrence.end+160),post=/^\s*(?:(?:目录|文件夹|文件|路径)?(?:下|里|中|内|上))?\s*(创建|新建|写入|保存|生成|输出|读取|核对|检查|审查|查看|验证|确认|审阅|分析|打开|编辑|修改|\bcreate\b|\bwrite\b|\bread\b|\bcheck\b|\bverify\b|\bgenerate\b)/iu.exec(suffix);
+        if(post)action=[post[1]];
+      }
       let output = false;
       if (action) output = /^(?:创建|新建|写入|保存|生成|输出|\bcreate\b|\bwrite\b|\bsave\b|\bgenerate\b|\boutput\b)/iu.test(action[0]);
       else if (priorAuthorizedEnd >= 0 && occurrence.start >= priorAuthorizedEnd && occurrence.start - priorAuthorizedEnd <= 48) {
@@ -162,7 +166,7 @@ function collectAuthorizedPathReferences(value) {
       } else continue;
       const previous = out.get(ref.path);
       out.set(ref.path, { path: ref.path, lines: [...new Set([...(previous?.lines || []), ...ref.lines])],
-        directoryHint: ref.directoryHint, requiredOutput: !!previous?.requiredOutput || (output && !ref.directoryHint) });
+        directoryHint: ref.directoryHint,producesArtifact:!!previous?.producesArtifact||output, requiredOutput: !!previous?.requiredOutput || (output && !ref.directoryHint) });
       priorAuthorizedEnd = occurrence.end;
       priorRequiredOutput = output;
   }
@@ -282,8 +286,10 @@ async function collectDeliveryEvidence(task) {
     return result;
   }
 
-  const explicitRefs = collectAuthorizedPathReferences(userRequest);
-  result.requiredOutputs = explicitRefs.filter(ref => ref.requiredOutput).map(ref => ref.path);
+  const goalPaths=collectPathReferences(task.goal||'').map(r=>r.path);
+  const currentRefs=collectAuthorizedPathReferences(userRequest),historicalRefs=collectAuthorizedPathReferences(String(task.authorizationContext||'').slice(0,12000)).filter(ref=>goalPaths.some(p=>p===ref.path||ref.directoryHint&&isWithin(ref.path,p)));
+  const explicitRefs=[...new Map([...historicalRefs,...currentRefs].map(ref=>[ref.path,ref])).values()];
+  result.requiredOutputs = explicitRefs.filter(ref=>ref.requiredOutput).map(ref=>ref.path);
   const roots = [];
   for (const ref of explicitRefs) {
     const blocked = protectedPath(ref.path);
@@ -291,7 +297,11 @@ async function collectDeliveryEvidence(task) {
     const checked = await inspectNoSymlinkPath(ref.path);
     if (checked.reason && checked.reason !== 'missing') { result.rejectedCount++; continue; }
     const kind = checked.stat?.isDirectory() || (!checked.exists && ref.directoryHint) ? 'directory' : 'file';
-    roots.push({ path: ref.path, real: checked.real || ref.path, kind });
+    roots.push({ path: ref.path, real: checked.real || ref.path, kind,producesArtifact:ref.producesArtifact });
+  }
+  if(task.workProductionOnly===true)for(const rootPath of task.authorizedArtifactRoots||[]){
+    if(typeof rootPath!=='string'||!path.isAbsolute(rootPath)||protectedPath(rootPath))continue;
+    const checked=await inspectNoSymlinkPath(rootPath);if(checked.exists&&!checked.reason&&checked.stat.isDirectory())roots.push({path:rootPath,real:checked.real||rootPath,kind:'directory',producesArtifact:true,authorizedBy:'task-output-directory'});
   }
   if (!roots.length) {
     result.note = '用户原始请求没有明确文件操作路径，未读取执行方报告提及的路径；如需本地核验，请明确说明要读取或检查的绝对路径。';
@@ -340,7 +350,7 @@ async function collectDeliveryEvidence(task) {
   result.omittedCount = Math.max(0, candidates.size - selected.length);
   let remainingExcerptBytes = MAX_TOTAL_EXCERPT_BYTES;
   for (const candidate of selected) {
-    const record = { path: candidate.path, authorizedBy: candidate.explicit ? 'user-explicit-file' : 'user-explicit-directory', exists: false };
+    const record = { path: candidate.path, authorizedBy: candidate.root.authorizedBy||(candidate.explicit ? 'user-explicit-file' : 'user-explicit-directory'), exists: false,role:candidate.root.producesArtifact?'artifact':'evidence' };
     const blocked = protectedPath(candidate.path);
     if (blocked) { result.rejectedCount++; record.status = blocked; result.files.push(record); continue; }
     if (!(candidate.explicit && candidate.root.kind === 'file') && !isWithin(candidate.root.real, candidate.path)) {
@@ -369,7 +379,7 @@ async function collectDeliveryEvidence(task) {
       }
       record.bytes = openedStat.size;
       record.mtimeMs = openedStat.mtimeMs;
-      const boundedRead = Buffer.alloc(MAX_FILE_BYTES + 1);
+      const boundedRead = Buffer.alloc(Math.min(openedStat.size+1,MAX_FILE_BYTES+1));
       const { bytesRead } = await handle.read(boundedRead, 0, boundedRead.length, 0);
       if (bytesRead > MAX_FILE_BYTES) {
         await handle.close(); handle = null;
@@ -380,6 +390,7 @@ async function collectDeliveryEvidence(task) {
     finally { if (handle) await handle.close().catch(() => {}); }
     record.sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
     if (record.kind !== 'text-candidate' || bytes.includes(0)) { record.status = 'metadata-only'; result.files.push(record); continue; }
+    if(bytes.length>256*1024){record.status='metadata-only-large-text';result.files.push(record);continue;}
     let text;
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
     catch { record.status = 'metadata-only-invalid-utf8'; result.files.push(record); continue; }

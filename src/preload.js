@@ -16,7 +16,7 @@ contextBridge.exposeInMainWorld('pet', {
   avatars: () => ipcRenderer.invoke('pet:avatars'),
   scale: (k) => ipcRenderer.invoke('pet:scale', { scale: k }),
   resize: (w, h) => ipcRenderer.invoke('pet:resize', { w, h }),
-  hit: (v) => ipcRenderer.send('pet:hit', v),
+  hit: (v, taskUi=false) => ipcRenderer.send('pet:hit', {inside:v===true,taskUi:taskUi===true}),
   audioDone: (success = true, id) => ipcRenderer.send('pet:audio-done', { success: success === true, id }),
   audioStarted: () => ipcRenderer.send('pet:audio-started'),
   listen: (v) => ipcRenderer.send('pet:listen', v),
@@ -100,9 +100,14 @@ contextBridge.exposeInMainWorld('pet', {
   taskAccept: () => ipcRenderer.invoke('pet:task-accept'),
   desktopPermission: () => ipcRenderer.invoke('pet:desktop-permission'),
   desktopInsert: (text) => ipcRenderer.invoke('pet:desktop-insert', text),
+  agentArtifact:(id,index)=>ipcRenderer.invoke('pet:agent-artifact',{id,index}),
   agentStatus: () => ipcRenderer.invoke('pet:agent-status'),
+  softwarePermission: kind => ipcRenderer.invoke('pet:software-permission',kind),
   agentCommand: (text) => ipcRenderer.invoke('pet:agent-command', text),
   agentControl: (operation, id) => ipcRenderer.invoke('pet:agent-control', { operation, id }),
+  activityStop: ref => ipcRenderer.invoke('pet:activity-control', {operation:'stop',ref}),
+  activityControl: (operation,ref) => ipcRenderer.invoke('pet:activity-control', {operation,ref}),
+  activityExpanded: open => ipcRenderer.invoke('pet:activity-expanded',open===true),
   on: (cb) => {
     ipcRenderer.on('pet:ev', (_e, d) => cb(d));
   },

@@ -234,7 +234,7 @@ async function main() {
     const dir = path.join(root, 'authorized');
     await fs.mkdir(dir);
     const tooLarge = path.join(dir, 'large.txt');
-    await fs.writeFile(tooLarge, Buffer.alloc(256 * 1024 + 1, 0x61));
+    await fs.writeFile(tooLarge, Buffer.alloc(20 * 1024 * 1024 + 1, 0x61));
     const binary = path.join(dir, 'image.bin');
     await fs.writeFile(binary, Buffer.from([0, 1, 2, 3]));
     const reportOnly = [tooLarge, binary].join('\n');

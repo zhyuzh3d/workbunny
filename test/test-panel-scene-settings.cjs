@@ -15,7 +15,7 @@ app.setPath('userData', path.join(tmp, 'userData'));
 fs.mkdirSync(app.getPath('userData'), { recursive: true });
 const preload = path.join(tmp, 'panel-fixture-preload.cjs');
 const panelHtml = path.resolve(__dirname, '../src/renderer/panel.html');
-const calls = [];
+const calls = [],softwarePermissionCalls=[];
 let listeners = [];
 let failNextConfig = false;
 let fixtureAvatars = [
@@ -60,7 +60,7 @@ fs.writeFileSync(preload, `
     productInfo: () => api('productInfo'), openRepository: () => api('openRepository'),
     panelInit: (...a) => api('panelInit', ...a), brainInfo: (...a) => api('brainInfo', ...a), ttsInfo: (...a) => api('ttsInfo', ...a),
     brainModels: (...a) => api('brainModels', ...a),
-    config: (...a) => api('config', ...a), on: cb => ipcRenderer.on('panel-fixture:event', (_e, value) => cb(value)),
+    softwarePermission:kind=>api('softwarePermission',kind),config: (...a) => api('config', ...a), on: cb => ipcRenderer.on('panel-fixture:event', (_e, value) => cb(value)),
     __fixture: { emitConfig: value => ipcRenderer.invoke('panel-fixture:control', 'emitConfig', value),
       emitAvatars: value => ipcRenderer.invoke('panel-fixture:control', 'emitAvatars', value),
       failNextConfig: () => ipcRenderer.invoke('panel-fixture:control', 'failNextConfig'), getCalls: () => ipcRenderer.invoke('panel-fixture:control', 'getCalls') }
@@ -115,6 +115,7 @@ ipcMain.handle('panel-fixture:api', async (_event, name, ...args) => {
   }
   if (name === 'ttsInfo') return { engines: [{ id: 'system', label: '系统语音' }, { id: 'qwen', label: 'Qwen' }, { id: 'remote', label: 'CHP' }, { id: 'doubao', label: '豆包语音' }],
     systemVoices: [{ id: 'Tingting', lang: 'zh-CN' }], qwen: { ready: false, downloaded: false, hasRuntime: true, hasFiles: false, voices: [] }, dl: {}, chp: null };
+  if(name==='softwarePermission'){softwarePermissionCalls.push(args[0]);return {screenCaptureAllowed:true};}
   if (name === 'config') {
     const patch = args[0] || {};
     calls.push(clone(patch));
@@ -144,6 +145,17 @@ async function main() {
   await win.loadFile(panelHtml, { query: { p: 'settings' } });
   await waitFor(() => evalIn(win, "document.getElementById('setProfile').value" ).then(value => value.includes('共通角色设定')), 'settings profile rendered');
 
+  assert.equal(await evalIn(win,"[...document.querySelectorAll('input[type=checkbox]')].every(e=>e.getAttribute('role')==='switch'&&getComputedStyle(e).width==='36px')"),true);
+  assert.equal(await evalIn(win,"getComputedStyle(document.querySelector('.permBox')).borderTopWidth"),'0px');
+  assert.equal(await evalIn(win,'document.querySelectorAll("[data-software-capability]").length'),2);
+  assert.equal(await evalIn(win,'[...document.querySelectorAll("[data-software-capability]")].every(e=>!e.checked)'),true);
+  await evalIn(win,'document.querySelector("[data-software-capability=terminal]").click()');
+  await waitFor(()=>Promise.resolve(settings.software?.terminal===true),'terminal toggle persisted');
+  await evalIn(win,'document.querySelector("[data-software-capability=terminal]").click()');await waitFor(()=>Promise.resolve(settings.software?.terminal===false),'terminal toggle restored off');
+  win.webContents.send('panel-fixture:event',{type:'task-permission',message:'测试任务等待系统授权',missing:['screenCaptureAllowed','accessibilityTrusted']});await delay(50);
+  assert.equal(await evalIn(win,'document.querySelectorAll("#softwarePermissions button").length'),1);
+  await evalIn(win,'document.querySelector("#softwarePermissions button").click()');await delay(50);assert.deepEqual(softwarePermissionCalls,['screen']);
+  win.webContents.send('panel-fixture:event',{type:'task-permission',resolved:true});
   const avatarSelected = () => evalIn(win, 'document.getElementById("avatarSelect").value');
   const chooseAvatar = key => evalIn(win, `document.getElementById('avatarSelect').value=${JSON.stringify(key)};document.getElementById('avatarSelect').dispatchEvent(new Event('change'))`);
   const activeCustom = () => evalIn(win, 'document.querySelector("#personalAvatars .avatarPick[aria-pressed=true]")?.dataset.key || null');

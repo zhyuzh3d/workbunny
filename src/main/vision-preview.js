@@ -48,7 +48,7 @@ function prepareVisionPreview(nativeImage, opts = {}) {
     for (const quality of JPEG_QUALITIES) {
       const preview = previewImage.toJPEG(quality);
       if (Buffer.isBuffer(preview) && preview.length > 0 && preview.length <= maxBytes) {
-        return { ocr, preview, mime: 'image/jpeg' };
+        return { ocr, preview, mime: 'image/jpeg', ...dimensionsForWidth(size,candidateWidth) };
       }
     }
   }

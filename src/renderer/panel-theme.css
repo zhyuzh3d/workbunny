@@ -1,0 +1,48 @@
+/* Shared visual language for every independent panel. Ordinary sections use
+   typography and spacing; surfaces are reserved for controls and overlays. */
+:root {
+  --ink:#282d33; --ink-soft:#515860; --soft:#515860; --muted:#858991;
+  --paper:#fffdfa; --panel-ground:#f7f3ec; --line:rgba(42,39,34,.10);
+  --accent:#a36144; --ok:#486e54; --warn:#8a6234; --danger:#a34e43;
+  --font:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;
+  --section-gap:26px; --control-radius:8px;
+}
+.panel-theme {font-family:var(--font);color:var(--ink);background:var(--panel-ground);}
+.panel-theme :is(.head,.pHead,.pFoot,.brand-titlebar,.self-dialog-head,.self-dialog-foot,.self-dialog-toolbar) {background:transparent;}
+.panel-theme :is(.card,.brainCard,.voiceCard,.engineCard,.speakerReading,.motionEditor,.record,.knowledge-card,.watch-item,.self-entry,.recall-entry,.knowledge-choice,.modelCard,.configCard,.permBox) {
+  background:transparent;border:0;border-radius:0;box-shadow:none;
+}
+.panel-theme :is(.card,.permBox) {padding:0;margin:0 0 var(--section-gap);}
+.panel-theme :is(.record,.knowledge-card,.watch-item,.self-entry,.recall-entry,.knowledge-choice) {padding:12px 0;}
+.panel-theme :is(.records,.watch-list,.recall-list) > * + * {border-top:1px solid var(--line);}
+.panel-theme :is(.watch-list,#agentTaskList,#agentSkillList) {max-height:none;overflow:visible;gap:0;}
+.panel-theme .agent-task-row {padding:15px 0;}
+.panel-theme .agent-task-row + .agent-task-row {border-top:1px solid var(--line);}
+.panel-theme .agent-task-row .task-card-goal {font-size:11px;}
+.panel-theme .section-heading {margin-bottom:12px;align-items:center;}
+.panel-theme .tracking-tools {display:flex;gap:8px;align-items:center;}
+.panel-theme .tracking-tools .button {min-height:29px;padding:4px 8px;}
+.panel-theme .workbuddy-open-row {margin-bottom:24px;}
+.panel-theme .agent-command-card textarea {width:100%;}
+.panel-theme .inline-note:empty {display:none;}
+.panel-theme :is(button,input,textarea,select) {font-family:var(--font);}
+.panel-theme button:focus-visible,.panel-theme summary:focus-visible {outline:2px solid #ae8569;outline-offset:2px;}
+.panel-theme .switch {width:36px;height:20px;flex:0 0 36px;display:inline-flex;align-items:center;}
+.panel-theme .switch span {display:none;}
+.panel-theme input[type="checkbox"] {
+  appearance:none;-webkit-appearance:none;position:relative;display:inline-block;
+  flex:0 0 36px;width:36px;height:20px;margin:0;padding:0;opacity:1;
+  border:1px solid #d2cec7;border-radius:99px;background:#d8d5cf;vertical-align:middle;
+  cursor:pointer;transition:background .15s,border-color .15s;outline:0;
+}
+.panel-theme input[type="checkbox"]::before {content:"";position:absolute;top:1px;left:1px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0002;transition:transform .15s;}
+.panel-theme input[type="checkbox"]:checked {background:var(--ok);border-color:var(--ok);}
+.panel-theme input[type="checkbox"]:checked::before {transform:translateX(16px);}
+.panel-theme input[type="checkbox"]:disabled {opacity:.4;cursor:default;}
+.panel-theme input[type="checkbox"]:focus-visible {box-shadow:0 0 0 3px #ae856933;}
+.panel-theme .task-card-guidance {background:rgba(163,97,68,.06);border:0;border-left:2px solid #b98b61;border-radius:0;}
+.panel-theme :is(.self-entry,.record,.knowledge-card) :is(.entry-actions,.record-actions) {margin-top:10px;}
+@media(prefers-reduced-motion:reduce) {.panel-theme input[type="checkbox"],.panel-theme input[type="checkbox"]::before {transition:none;}}
+
+.panel-theme #agentSkillList .watch-item-note {display:block;overflow:visible;-webkit-line-clamp:unset;}
+.panel-theme :is(.button.primary,button.wide.primary,button.modelAction) {background:var(--ink);border-color:var(--ink);color:var(--paper);}

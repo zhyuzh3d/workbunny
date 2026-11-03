@@ -36,8 +36,9 @@ const { collectDeliveryEvidence } = require('../src/main/delivery-evidence');
       assert.ok(Number.isSafeInteger(file.size));
       assert.ok(Number.isFinite(file.mtimeMs));
       assert.ok(Number.isFinite(file.checkedAt));
-      assert.deepEqual(Object.keys(file).sort(), ['checkedAt', 'mtimeMs', 'path', 'sha256', 'size']);
+      assert.deepEqual(Object.keys(file).sort(), ['checkedAt', 'mtimeMs', 'path','role', 'sha256', 'size']);
     }
+    assert.equal(accepted.artifactManifest.files.find(f=>f.path===source).role,'evidence');assert.equal(accepted.artifactManifest.files.find(f=>f.path===output).role,'artifact');
     assert.equal(calls, 1, 'a real stable file still reaches normal content verification');
     const persistedTask = { ...task, id: 'manifest-persist-test', origin: 'dialogue', status: 'review', scene: 'life', domain: 'work', visibilityFloor: 1,
       privacyEpoch: 0, followUpRound: 0, observationHistory: [], evidence: '' };

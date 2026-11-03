@@ -1,0 +1,9 @@
+'use strict';
+// Debug only: inspect Bunny's own persisted task through its memory panel IPC.
+const {connect}=require('./installed-agent-driver.cjs'),fs=require('fs'),path=require('path'),os=require('os');
+const id=process.argv[2];if(!/^agent-[a-f0-9-]{36}$/u.test(id))throw Error('Expected task UUID');
+(async()=>{const tabs=async()=>await(await fetch('http://127.0.0.1:9227/json')).json();let page=(await tabs()).find(t=>t.url.includes('companion.html')&&t.url.includes('memory'));
+ if(!page){const d=await connect((await tabs()).find(t=>t.url.includes('companion.html')&&t.url.includes('desktop')));await d.evaluate('pet.open("memory")');d.close();for(let i=0;i<40;i++){page=(await tabs()).find(t=>t.url.includes('companion.html')&&t.url.includes('memory'));if(page)break;await new Promise(r=>setTimeout(r,250));}}
+ const c=await connect(page);try{const [r]=await c.evaluate('pet.memorySources('+JSON.stringify([id])+')');const root=fs.mkdtempSync(path.join(os.tmpdir(),'bunny-task-inspection-'));fs.chmodSync(root,0o700);fs.writeFileSync(path.join(root,'record.json'),JSON.stringify(r),{mode:0o600});const preview=r.state.latestImage?.preview;if(preview){const match=preview.match(/^data:image\/(png|jpeg);base64,(.*)$/su);if(match)fs.writeFileSync(path.join(root,'latest.'+(match[1]==='jpeg'?'jpg':'png')),Buffer.from(match[2],'base64'),{mode:0o600});}
+ console.log(JSON.stringify({root,status:r.status,note:r.note,step:r.state.stepSequence,workRequest:r.workRequest,delivery:r.delivery,destinations:r.state.fileDestinations,attempts:r.state.attempts?.slice(-6).map(a=>({step:a.step,tool:a.tool,args:a.args,error:a.error,result:a.result?.receipt||a.result?.artifactManifest||a.result?.items||a.result?.text})),pending:r.state.pendingDecision}));
+ }finally{c.close();}})().catch(e=>{console.error(e.message);process.exitCode=1;});

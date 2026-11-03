@@ -1,6 +1,13 @@
 'use strict';
 const { test } = require('node:test'), assert = require('node:assert/strict');
 const { layoutWindow } = require('../src/main/window-geometry');
+test('expanding a task grows only upward and preserves the avatar canvas and bottom anchor',()=>{
+ const {expandTaskWindow}=require('../src/main/window-geometry'),area={x:0,y:30,width:1920,height:1050};
+ const base=layoutWindow({x:900,y:600,width:416,height:320},area),expanded=expandTaskWindow(base,area);
+ assert.equal(expanded.bounds.height,520);assert.equal(expanded.bounds.y,400);assert.equal(expanded.bounds.y+expanded.bounds.height,base.bounds.y+base.bounds.height);
+ assert.deepEqual(expanded.logical,base.logical);assert.equal(expanded.viewport.height,320);assert.equal(expanded.bounds.y+expanded.viewport.offsetY,base.bounds.y+base.viewport.offsetY);
+ const high=layoutWindow({x:900,y:50,width:416,height:320},area);assert.equal(expandTaskWindow(high,area).bounds.y,area.y);
+});
 test('actual drag IPC preserves a fast initial displacement and ignores other windows', () => {
   const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
   const source = fs.readFileSync(path.resolve('src/main/index.js'), 'utf8'), handlers = {};

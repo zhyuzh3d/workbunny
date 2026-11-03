@@ -11,6 +11,9 @@
 <link rel="icon" type="image/svg+xml" href="../../res/logo.svg">
 <link rel="stylesheet" href="./brand.css">
 <script type="module" src="./brand-window.mjs"></script>
+<link rel="stylesheet" href="./task-card.css">
+<link rel="stylesheet" href="./panel-theme.css">
+<script type="module" src="./panel-theme.mjs"></script>
 </head>
 <body>
   <main id="memoryPage" class="page" hidden>
@@ -90,26 +93,25 @@
 
   <main id="desktopPage" class="page" hidden>
     <header class="head">
-      <div><div class="eyebrow">WorkBunny</div><h1>工作与日常</h1></div>
+      <div><div class="eyebrow">WorkBunny</div><h1>任务与工作</h1></div>
       <span id="desktopStatus" class="status-pill">尚未读取</span>
     </header>
-    <nav id="desktopTabs" class="tabs desktop-tabs" role="tablist" aria-label="工作与日常">
+    <nav id="desktopTabs" class="tabs desktop-tabs" role="tablist" aria-label="任务与工作">
       <button class="tab active" role="tab" aria-selected="true" data-desktop-tab="current">任务</button>
       <button class="tab" role="tab" aria-selected="false" data-desktop-tab="skills">技能</button>
       <button class="tab" role="tab" aria-selected="false" data-desktop-tab="workbuddy">WorkBuddy</button>
-      <button class="tab" role="tab" aria-selected="false" data-desktop-tab="autonomy">自主生活</button>
+      <button class="tab" role="tab" aria-selected="false" data-desktop-tab="autonomy">自主工作</button>
       <button class="tab" role="tab" aria-selected="false" data-desktop-tab="permissions">系统权限</button>
     </nav>
     <section class="main desktop-main">
       <section data-desktop-page="current" role="tabpanel">
       <section class="card agent-command-card">
-        <div class="section-heading"><div><h2>交给 Bunny</h2><p>说清目标，她会选择技能、执行并跟进。</p></div><button id="agentRefresh" class="button quiet">刷新</button></div>
-        <label class="field-label" for="agentCommand">你希望她做什么？</label>
-        <textarea id="agentCommand" rows="3" placeholder="例如：帮我照看 Alice 的消息，结合前文回复，广告忽略。"></textarea>
-        <div class="button-row"><button id="agentSubmit" class="button primary">交办</button><button id="agentPauseAll" class="button quiet">全部暂停</button></div>
+        <div class="section-heading"><h2>交给 Bunny 新任务</h2></div>
+        <textarea id="agentCommand" aria-label="交给Bunny的新任务" rows="3" placeholder="例如：帮我照看 Alice 的消息，结合前文回复，广告忽略。"></textarea>
+        <div class="button-row"><button id="agentSubmit" class="button primary">交办</button></div>
         <p id="agentCommandNote" class="inline-note" role="status"></p>
       </section>
-      <section class="card"><div class="section-heading"><div><h2>正在跟进</h2><p>任务等待新动态时会继续保留进展。</p></div></div>
+      <section class="card"><div class="section-heading tracking-heading"><h2>正在跟进</h2><div class="tracking-tools"><button id="agentRefresh" class="button quiet">刷新</button><button id="agentPauseAll" class="button quiet">全部暂停</button></div></div>
         <div id="agentCircuit" class="inline-note bad-text" hidden></div><button id="agentReconnect" class="button quiet" hidden>重新核对微信</button>
         <div id="agentTaskList" class="watch-list" aria-live="polite"></div>
       </section>
@@ -141,7 +143,7 @@
         <div id="agentSkillList" class="watch-list"></div>
       </section></section>
       <section data-desktop-page="workbuddy" role="tabpanel" hidden>
-        <div class="button-row"><button id="workbuddyOpen" class="button quiet">打开 WorkBuddy</button></div>
+        <div class="button-row workbuddy-open-row"><button id="workbuddyOpen" class="button quiet">打开 WorkBuddy</button></div>
       <div id="workbuddyMonitorCard" class="card monitor-card">
         <div class="section-heading"><div><h2>WorkBuddy 实际进度</h2><p>来自现有会话监视</p></div></div>
         <div id="workbuddyMonitorTasks" class="task-details"></div>
@@ -150,7 +152,7 @@
       </section>
       <section data-desktop-page="autonomy" role="tabpanel" hidden>
         <div class="card" id="autonomyCard">
-          <div class="section-heading"><div><h2>自主生活</h2><p>空闲超过15分钟，自己找些事情做。</p></div><button id="autonomyRefresh" class="button quiet">刷新</button></div>
+          <div class="section-heading"><div><h2>自主工作</h2><p>空闲超过15分钟，自己找些事情做。</p></div><button id="autonomyRefresh" class="button quiet">刷新</button></div>
           <p id="autonomyStatus" class="inline-note" role="status"></p>
           <div class="button-row"><button id="autonomyPause" class="button">暂停</button><button id="autonomyResume" class="button" hidden>恢复</button><button id="autonomyCancel" class="button danger" hidden>取消这次任务</button></div>
           <details class="autonomy-directory"><summary>自主目录</summary><p id="autonomyPath" class="inline-note"></p><button id="autonomyDirectory" class="button quiet">修改目录</button></details>

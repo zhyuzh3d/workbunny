@@ -16,7 +16,7 @@ const settings = { scene: 'life', enabled: true, extract: false };
 function handle(name, fn) { ipcMain.handle('pet:' + name, (_e, ...args) => fn(...args)); }
 async function page(file, query) {
   const w = new BrowserWindow({ show: false, width: 560, height: 820, webPreferences: { preload: path.resolve('src/preload.js'), contextIsolation: true, sandbox: false } });
-  windows.push(w); w.webContents.on('console-message', (_e, level, text) => { if (level >= 3) errors.push(text); });
+  windows.push(w); w.webContents.on('console-message', entry => { if (entry.level==='error') errors.push(entry.message); });
   await w.loadFile(path.resolve('src/renderer/' + file), { query }); return w;
 }
 async function wait(w, expression) {
@@ -35,6 +35,7 @@ async function run() {
     ] };
   } });
   autonomy = new CompanionAutonomy({ memory: m, getScene: () => settings.scene, defaultDirectory: path.join(root, 'creations'), canRun: () => false, propose: async () => ({ kind: 'none' }) });
+  handle('product-info',()=>require('../src/main/product-info').productInfo('0.20.0'));
   handle('speaker-status', () => ({ ready: false, enabled: false, samples: 0 }));
   handle('panel-init', () => ({ config: config.publicConfig(), avatars: [], motions: [], asr: {} }));
   handle('portability', () => ({ connection: { ready: true, note: '已连接' }, storage: { ok: true, dir: '/fixture/vault' }, asrMode: 'continuous', capabilities: {} }));
@@ -57,13 +58,14 @@ async function run() {
   handle('autonomy-status', () => autonomy.status()); handle('autonomy-save', value => autonomy.save(value)); handle('autonomy-control', action => autonomy.control(action));
   handle('growth-dismiss', async id => { await m.growth.dismiss(id); return autonomy.status(); });
   const directory = fs.realpathSync(root); handle('autonomy-directory', () => autonomy.setDirectory(directory));
+  handle('agent-status',()=>({tasks:[],skills:[],capacity:{limit:5,active:0,queued:0}}));
   handle('task-status', () => ({ running: false, task: null, permissions: {} })); ipcMain.handle('watch:list', () => []);
   handle('init', () => ({ config: config.publicConfig(), watches: [] }));
   handle('memory-stats', () => m.stats()); handle('memory-list', () => ({ rows: [], hasMore: false }));
   handle('memory-maintenance-status', () => ({ status: 'idle' }));
   const panel = await page('panel.html', { p: 'settings' });
   await wait(panel, "document.getElementById('setProfile').value.length > 0");
-  assert.deepEqual(await exec(panel, "[...document.querySelectorAll('#tabs button')].map(b=>b.textContent)"), ['外观', '设定', '场景', '听力', '智力', '语音', '数据']);
+  assert.deepEqual(await exec(panel, "[...document.querySelectorAll('#tabs button')].map(b=>b.textContent)"), ['外观', '设定', '场景', '听力', '智力', '语音', '系统']);
   assert.equal(await exec(panel, "document.querySelectorAll('.self-entry').length"), 0, 'settings only show owner inputs');
   await exec(panel, `document.querySelector('[data-t=persona]').click(); document.getElementById('setName').value='露露'; document.getElementById('setName').dispatchEvent(new Event('input')); document.getElementById('setProfile').value='我好奇、有主见'; document.getElementById('setProfile').dispatchEvent(new Event('input')); document.getElementById('setBehavior').value='先听完，再问是否需要建议'; document.getElementById('setBehavior').dispatchEvent(new Event('input')); document.getElementById('saveBtn').click();`);
   await wait(panel, "document.getElementById('sfNote').textContent.includes('已保存')");
@@ -112,13 +114,13 @@ async function run() {
   await new Promise(r=>setTimeout(r,20)); assert.deepEqual(opened,['self','self']);
   await wait(selfWindow, "document.getElementById('selfDialog').tagName === 'MAIN'");
   assert.equal(await exec(selfWindow, "[...document.querySelectorAll('#selfDialog button')].filter(b=>/锁定条目|解锁条目/.test(b.textContent)).length"), 0, 'one global lock control');
-  await exec(panel, "document.querySelector('[data-t=scene]').click(); document.querySelector('#panelScene [data-scene=work]').click()");
-  await wait(panel, "document.querySelector('#panelScene [data-scene=work]').getAttribute('aria-pressed') === 'true' && document.getElementById('panelSceneProfileStatus').textContent === ''");
+  await exec(panel, "document.querySelector('[data-t=scene]').click(); document.getElementById('panelScene').value='work';document.getElementById('panelScene').dispatchEvent(new Event('change'))");
+  await wait(panel, "document.getElementById('panelScene').value === 'work' && document.getElementById('panelSceneProfileStatus').textContent === ''");
   assert.deepEqual(configWrites.at(-1), { memory: { scene: 'work' } });
   failSceneWrite = true;
-  await exec(panel, "document.querySelector('#panelScene [data-scene=private]').click()");
-  await wait(panel, "document.getElementById('panelSceneProfileStatus').textContent.includes('已恢复')");
-  assert.equal(await exec(panel, "document.querySelector('#panelScene [aria-pressed=true]').dataset.scene"), 'work');
+  await exec(panel, "document.getElementById('panelScene').value='private';document.getElementById('panelScene').dispatchEvent(new Event('change'))");
+  await wait(panel, "document.getElementById('panelSceneProfileStatus').textContent.includes('synthetic scene failure')");
+  assert.equal(await exec(panel, "document.getElementById('panelScene').value"), 'work');
   await exec(selfWindow, "document.getElementById('selfGlobalLock').click()");
   await wait(selfWindow, "document.getElementById('selfGlobalLock').textContent === '锁定自我理解' && !document.getElementById('selfGlobalLock').disabled");
   assert.equal(await exec(selfWindow, "document.querySelectorAll('dialog#selfDialog').length"),0);
@@ -134,7 +136,7 @@ async function run() {
   const desktop = await page('companion.html', { p: 'desktop' });
   await wait(desktop, "document.getElementById('autonomyStatus').textContent.length > 0");
   assert.equal((await autonomy.status()).grants.length, 3, 'local life starts without a setup form');
-  assert.deepEqual(await exec(desktop, "[...document.querySelectorAll('#desktopTabs button')].map(b=>b.textContent)"), ['当前任务','持续关注','WorkBuddy','自主生活','系统权限']);
+  assert.deepEqual(await exec(desktop, "[...document.querySelectorAll('#desktopTabs button')].map(b=>b.textContent)"), ['任务','技能','WorkBuddy','自主工作','系统权限']);
   await exec(desktop, "document.querySelector('[data-desktop-tab=autonomy]').click(); document.getElementById('autonomyPause').click()");
   await wait(desktop, "document.getElementById('autonomyResume').hidden === false");
   assert((await autonomy.status()).paused);
@@ -143,6 +145,12 @@ async function run() {
   await exec(desktop, "document.getElementById('autonomyDirectory').click()");
   await wait(desktop, `document.getElementById('autonomyPath').textContent === ${JSON.stringify(directory)}`);
   await wait(memory, "document.getElementById('memoryStatus').textContent.includes('已就绪')");
+  for(const w of windows)assert.equal(await exec(w,"document.body.classList.contains('panel-theme')"),true);
+  assert.equal(await exec(memory,"getComputedStyle(document.querySelector('.card')).backgroundColor"),'rgba(0, 0, 0, 0)');
+  assert.equal(await exec(selfWindow,"getComputedStyle(document.querySelector('.self-entry')).borderTopWidth"),'0px');
+  const about=await page('about.html',{});await wait(about,"document.querySelector('.product-name')!==null");
+  const motions=await page('panel.html',{p:'motions'});await wait(motions,"document.body.classList.contains('panel-theme')");
+  const evidence=fs.mkdtempSync(path.join(os.tmpdir(),'bunny-panel-theme-'));for(const [name,w]of [['settings',panel],['memory',memory],['self',selfWindow],['tasks',desktop],['about',about],['motions',motions]])fs.writeFileSync(path.join(evidence,name+'.png'),(await w.webContents.capturePage()).toPNG(),{mode:0o600});console.log(JSON.stringify({themeEvidence:evidence}));
   assert.equal(errors.length, 0, errors.join(';'));
   console.log('real renderer/preload UI passed: seven settings tabs, explicit understanding, independent self window, multiple entries per category, global lock/manual edits/history, scene button persistence/rollback, growth and authorization');
 }

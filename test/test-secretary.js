@@ -366,7 +366,7 @@ async function main() {
   await unified.dispatch({action:'agent'},{requestId:'unified-status',userText:original,requestSourceId:'owner-current'});
   assert.equal(commands[0].text,original);assert.deepEqual(commands[0].actor.sources,['owner-current']);unified.close();
   let localControl;
-  const localUnified=new Secretary({desktop:new FakeDesktop(),agent:{currentTask:()=>({id:'ongoing',schema:'bunny.task/v1',status:'waiting'}),command:async()=>{throw Error('offline');},dispatch:async request=>{localControl=request;return {ok:true};}}});
+  const localUnified=new Secretary({desktop:new FakeDesktop(),agent:{currentTask:()=>({id:'ongoing',schema:'bunny.task/v2',status:'waiting'}),command:async()=>{throw Error('offline');},dispatch:async request=>{localControl=request;return {ok:true};}}});
   await localUnified.dispatch({action:'agent'},{requestId:'local-pause',userText:'暂停当前任务',requestSourceId:'owner-pause'});
   assert.equal(localControl.operation,'pause');assert.equal(localControl.id,'ongoing');localUnified.close();
   await testRequestDedupAndTurnIsolation();

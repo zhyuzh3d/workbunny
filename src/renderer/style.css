@@ -245,6 +245,16 @@ html, body {
   backdrop-filter: blur(10px);
 }
 #activity.hidden { display: none; }
+#activityDetails[hidden] { display:none; }
+#activityDetails {position:fixed;left:var(--ui-gutter);bottom:calc(var(--task-bottom) + var(--status-h) + 6px);width:var(--ui-width);max-height:calc(100vh - var(--task-bottom) - var(--status-h) - 20px);display:flex;flex-direction:column;background:var(--paper);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);z-index:60;overflow:hidden;backdrop-filter:blur(12px);animation:task-card-open .16s ease-out;}
+.activity-details-nav {flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line);font-size:10px;color:var(--muted);}
+.activity-details-nav>div {display:flex;gap:5px;align-items:center;}
+.activity-details-nav button {min-width:24px;min-height:24px;border:0;background:transparent;color:var(--ink-soft);padding:3px 6px;border-radius:5px;font:inherit;font-size:14px;}
+.activity-details-nav button:disabled {opacity:.25;}
+.activity-details-nav button:hover:not(:disabled) {background:#eee9e1;}
+#activityTaskCard {flex:1 1 auto;min-height:0;overflow:auto;padding:13px 14px;scrollbar-width:thin;overscroll-behavior:contain;}
+#activityAllTasks {flex:none;align-self:flex-start;margin:0 14px 12px;padding:0;border:0;background:none;color:var(--muted);font-size:10px;}
+@keyframes task-card-open {from {opacity:0;transform:translateY(9px);}to {opacity:1;transform:translateY(0);}}
 #activity.desktop-openable { cursor: pointer; }
 #activity.desktop-openable:hover { border-color: rgba(60, 70, 80, .28); }
 #activityText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -269,6 +279,7 @@ html, body {
 }
 #activity #actDone:hover { background: var(--ink); color: #fff; }
 #activity #actDone:active { transform: scale(.9); }
+#activity #actDone[hidden] { display: none; }
 /* 空闲使用灰色标志，任务存在时恢复品牌原色。 */
 #activity.idle { color: var(--muted); }
 #activity.idle .workbuddy-logo { filter: grayscale(1); opacity: .55; }
@@ -749,3 +760,5 @@ html, body {
 
 /* 通用过渡 */
 .hidden { display: none !important; }
+
+#activityCollapse {font-size:18px;line-height:1;}

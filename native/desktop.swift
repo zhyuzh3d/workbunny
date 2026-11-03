@@ -1,6 +1,7 @@
 // Minimal, bounded desktop control bridge for workbunny.
 // Protocol: one JSON object per stdin line; one {id,ok,...} JSON per stdout line.
 import AppKit
+import CryptoKit
 import ApplicationServices
 import CoreGraphics
 import Darwin
@@ -231,20 +232,25 @@ struct WorkBuddyControls {
     let markerFrameOutsideTarget: Bool
     let childrenFetchErrors: Int
 }
-func validateWorkBuddyContext(_ request: [String: Any]) throws -> WorkBuddyContext {
+func validateWorkBuddyContext(_ request: [String: Any], requireFrontmost: Bool = true) throws -> WorkBuddyContext {
     guard let expected = request["expected"] as? [String: Any],
           let bundle = expected["bundleId"] as? String, workBuddyBundleAllowed(bundle),
           let pidValue = expected["pid"] as? Int, pidValue > 0 else {
         throw DesktopError(message: "WorkBuddy AX 操作仅允许目标应用 com.tencent.workbuddy.mac")
     }
     guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
-    guard let front = currentFrontmost(), workBuddyBundleAllowed(front.bundleIdentifier),
-          Int(front.processIdentifier) == pidValue else { throw DesktopError(message: "当前前台不是预期 WorkBuddy 窗口") }
-    let (windowID, rect) = try validateActionContext(request)
+    guard let app=NSRunningApplication(processIdentifier:pid_t(pidValue)),workBuddyBundleAllowed(app.bundleIdentifier) else { throw DesktopError(message:"WorkBuddy 进程身份已变化") }
+    if requireFrontmost {
+        guard let front = currentFrontmost(), workBuddyBundleAllowed(front.bundleIdentifier),
+              Int(front.processIdentifier) == pidValue else { throw DesktopError(message: "当前前台不是预期 WorkBuddy 窗口") }
+    }
+    let deadline=number(request["timeoutMs"]) ?? 3000
+    guard let began=number(request["sentAtMs"]),deadline>=1,deadline<=10000,Date().timeIntervalSince1970*1000-began<=deadline else { throw DesktopError(message:"动作请求已超时") }
+    let (windowID, rect) = try targetWindow(request)
     return WorkBuddyContext(pid: pid_t(pidValue), windowID: windowID, rect: rect)
 }
-func revalidateWorkBuddyContext(_ request: [String: Any], _ original: WorkBuddyContext) throws {
-    let current = try validateWorkBuddyContext(request)
+func revalidateWorkBuddyContext(_ request: [String: Any], _ original: WorkBuddyContext, requireFrontmost: Bool = true) throws {
+    let current = try validateWorkBuddyContext(request,requireFrontmost:requireFrontmost)
     guard current.pid == original.pid, current.windowID == original.windowID,
           abs(current.rect.minX - original.rect.minX) <= 1,
           abs(current.rect.minY - original.rect.minY) <= 1,
@@ -397,6 +403,67 @@ func workBuddyControls(_ request: [String: Any]) throws -> (WorkBuddyContext, Wo
                                              sendButtons: controls.sendButtons.count, scanComplete: controls.scanComplete)
     return (context, controls, available)
 }
+// WorkBuddy-only semantic navigation. No generic AX endpoint is exported.
+struct WorkBuddyNavigationNode {
+    let element: AXUIElement
+    let role: String
+    let label: String
+    let inMenu: Bool
+}
+func workBuddyNavigation(_ request: [String: Any]) throws -> [String: Any] {
+    let context = try validateWorkBuddyContext(request)
+    guard AXIsProcessTrusted() else { throw DesktopError(message: "缺少辅助功能权限") }
+    let app = AXUIElementCreateApplication(context.pid)
+    guard let window = workBuddyAXWindow(app: app, targetRect: context.rect) else { throw DesktopError(message: "WorkBuddy 主窗口已变化") }
+    var queue: [(AXUIElement, Int, Bool)] = [(window, 0, false)], nodes: [WorkBuddyNavigationNode] = []
+    var cursor = 0
+    let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+    while cursor < queue.count {
+        guard cursor < 2500, DispatchTime.now().uptimeNanoseconds < deadline else { throw DesktopError(message: "WorkBuddy 导航结构尚未完整读取") }
+        let (element, depth, parentMenu) = queue[cursor]; cursor += 1
+        AXUIElementSetMessagingTimeout(element, 0.15)
+        guard let role = axAttribute(element, kAXRoleAttribute as String) as? String else { continue }
+        if role == kAXTextAreaRole as String { continue }
+        let inMenu = parentMenu || role == kAXMenuRole as String
+        var label = (axAttribute(element, kAXTitleAttribute as String) as? String) ?? ""
+        if label.isEmpty { label = (axAttribute(element, kAXDescriptionAttribute as String) as? String) ?? "" }
+        if label.isEmpty && (role == kAXStaticTextRole as String || role == kAXHeadingRole as String) { label = (axAttribute(element, kAXValueAttribute as String) as? String) ?? "" }
+        if !label.isEmpty && label.utf16.count < 200 { nodes.append(WorkBuddyNavigationNode(element: element, role: role, label: label, inMenu: inMenu)) }
+        if depth < 48, let children = axAttribute(element, kAXChildrenAttribute as String) as? [AXUIElement] { queue.append(contentsOf: children.map { ($0, depth+1, inMenu) }) }
+    }
+    let pickers = nodes.filter { node in
+        guard node.role == kAXPopUpButtonRole as String, let rect = axWindowRect(node.element) else { return false }
+        return rect.midX > context.rect.minX + context.rect.width * 0.32 && rect.midY > context.rect.minY + context.rect.height * 0.3
+    }
+    let picker = pickers.count == 1 ? pickers[0] : nil
+    let menuItems = nodes.filter { $0.inMenu && $0.role == kAXMenuItemRole as String }
+    let conversationNodes = nodes.filter { node in
+        guard let rect = axWindowRect(node.element), node.role == kAXStaticTextRole as String else { return false }
+        return rect.midX < context.rect.minX + context.rect.width * 0.32 && rect.midY > context.rect.minY + 160
+    }
+    let operation = request["operation"] as? String ?? "inspect"
+    if operation == "inspect" {
+        return ["workspace": picker?.label ?? "", "pickerAvailable": picker != nil,
+                "menuOpen": !menuItems.isEmpty, "workspaces": menuItems.map { $0.label }.filter { !["新建工作空间", "打开本地文件夹", "不使用工作空间"].contains($0) },
+                "homeReady": nodes.contains { workBuddyHomeReady(title: $0.label) }, "conversations": conversationNodes.map { $0.label }]
+    }
+    var candidates: [WorkBuddyNavigationNode] = []
+    if operation == "newTask" { candidates = nodes.filter { $0.label == "新建任务" && $0.role != kAXStaticTextRole as String } }
+    else if operation == "selectConversation", let name = request["name"] as? String, !name.isEmpty, name.utf16.count <= 199 { candidates = conversationNodes.filter { $0.label == name } }
+    else if operation == "workspaceMenu", let picker { candidates = [picker] }
+    else if operation == "selectWorkspace", let name = request["name"] as? String, !name.isEmpty, name.utf16.count <= 160 { candidates = menuItems.filter { $0.label == name } }
+    else { throw DesktopError(message: "WorkBuddy 导航动作不支持或控件不可用") }
+    guard candidates.count == 1 else { throw DesktopError(message: "WorkBuddy 导航对象不唯一或不可见") }
+    let chosen = candidates[0]
+    try revalidateWorkBuddyContext(request, context)
+    let pressed = AXUIElementPerformAction(chosen.element, kAXPressAction as CFString)
+    if pressed != .success {
+        guard let frame = axWindowRect(chosen.element), context.rect.contains(CGPoint(x: frame.midX, y: frame.midY)) else { throw DesktopError(message: "WorkBuddy 导航需要视觉定位") }
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        try postMouse(.leftMouseDown, point); try postMouse(.leftMouseUp, point)
+    }
+    return ["performed": true, "operation": operation, "label": chosen.label]
+}
 func workBuddyInspect(_ request: [String: Any]) throws -> [String: Any] {
     let mode = request["mode"] as? String ?? "home"
     let (_, controls, available) = try workBuddyControls(request)
@@ -419,6 +486,52 @@ func workBuddyInspect(_ request: [String: Any]) throws -> [String: Any] {
             "markerTextFound": controls.markerTextFound, "markerFrameMissing": controls.markerFrameMissing,
             "markerFrameOutsideTarget": controls.markerFrameOutsideTarget,
             "childrenFetchErrors": controls.childrenFetchErrors]
+}
+// A bounded WorkBuddy-only cancellation surface. Message identity is checked
+// outside editors and the sidebar; a title alone never authorizes stopping.
+func workBuddyStop(_ request: [String: Any]) throws -> [String: Any] {
+    let context = try validateWorkBuddyContext(request,requireFrontmost:false)
+    guard AXIsProcessTrusted() else { throw DesktopError(message: "缺少辅助功能权限") }
+    let marker = request["marker"] as? String
+    let evidence = request["evidence"] as? String ?? ""
+    let title = request["conversationTitle"] as? String ?? ""
+    guard workBuddyMarkerAllowed(marker) || (!evidence.isEmpty && evidence.count <= 500 && !title.isEmpty && title.count <= 200) else { throw DesktopError(message: "缺少要停止的工作会话依据") }
+    let app = AXUIElementCreateApplication(context.pid)
+    guard let window = workBuddyAXWindow(app: app, targetRect: context.rect) else { throw DesktopError(message: "WorkBuddy 窗口已变化") }
+    let normalize: (String) -> String = { String($0.filter { !$0.isWhitespace && $0 != "\u{FEFF}" }) }
+    var queue: [(AXUIElement, Int)] = [(window,0)], cursor=0, bodyMatched=false, titleMatched=false
+    var buttons: [(AXUIElement,String)] = []
+    let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+    while cursor < queue.count {
+        guard cursor < 2500, DispatchTime.now().uptimeNanoseconds < deadline else { throw DesktopError(message: "WorkBuddy 停止控件尚未完整读取") }
+        let (element,depth)=queue[cursor];cursor += 1;AXUIElementSetMessagingTimeout(element,0.15)
+        guard let role=axAttribute(element,kAXRoleAttribute as String) as? String else { continue }
+        if role == kAXTextAreaRole as String { continue }
+        let values=[kAXValueAttribute as String,kAXTitleAttribute as String,kAXDescriptionAttribute as String].compactMap { axAttribute(element,$0) as? String }
+        if let rect=axWindowRect(element), rect.midX > context.rect.minX + context.rect.width * 0.32 {
+            if values.contains(where: { value in marker != nil ? value.contains(marker!) : normalize(value).contains(normalize(evidence)) }) { bodyMatched=true }
+        }
+        if let rect=axWindowRect(element), rect.minX > context.rect.minX + 200, rect.minY < context.rect.minY + 100, values.contains(title) { titleMatched=true }
+        if role == kAXButtonRole as String {
+            let label=values.joined(separator:" ").trimmingCharacters(in:.whitespacesAndNewlines)
+            if values.contains(where: { ["停止","停止生成","停止回答","停止响应","停止运行","Stop","Stop generating","Stop response"].contains($0) }),
+               (axAttribute(element,kAXEnabledAttribute as String) as? NSNumber)?.boolValue == true { buttons.append((element,label)) }
+        }
+        if depth < 48, let children=axAttribute(element,kAXChildrenAttribute as String) as? [AXUIElement] { queue.append(contentsOf:children.map { ($0,depth+1) }) }
+    }
+    try revalidateWorkBuddyContext(request,context,requireFrontmost:false)
+    let matched=bodyMatched && (marker != nil || titleMatched)
+    if request["inspect"] as? Bool == true { return ["matched":matched,"stopCount":buttons.count] }
+    guard matched else { throw DesktopError(message: "当前对话与要停止的任务不匹配，未操作其他会话") }
+    guard buttons.count == 1 else { throw DesktopError(message: "尚未找到唯一可用的 WorkBuddy 停止按钮") }
+    let button=buttons[0].0
+    try revalidateWorkBuddyContext(request,context,requireFrontmost:false)
+    if AXUIElementPerformAction(button,kAXPressAction as CFString) != .success {
+        try revalidateWorkBuddyContext(request,context)
+        guard let rect=axWindowRect(button), context.rect.contains(CGPoint(x:rect.midX,y:rect.midY)) else { throw DesktopError(message:"停止按钮需要重新视觉定位") }
+        try postMouse(.leftMouseDown,CGPoint(x:rect.midX,y:rect.midY));try postMouse(.leftMouseUp,CGPoint(x:rect.midX,y:rect.midY))
+    }
+    return ["performed":true]
 }
 func workBuddyPayload(_ request: [String: Any]) throws -> (String, String) {
     guard let text = request["text"] as? String, !text.isEmpty, workBuddyTextWithinLimit(text), workBuddyTextControlsAllowed(text),
@@ -1037,7 +1150,14 @@ func capture(_ request: [String: Any]) throws -> [String: Any] {
     var backend = "ScreenCaptureKit", capturedAt = Date()
     if external {
         if request["region"] != nil && rectFrom(request["region"]) == nil { throw DesktopError(message: "region 矩形无效") }
-        (image, desktopRect, backend, capturedAt) = try captureExternalDisplay(region: rectFrom(request["region"]))
+        let region = rectFrom(request["region"]), relocate = request["relocate"] as? Bool == true
+        let (displayImage, sourceRect, sourceBackend, sourceAt) = try captureExternalDisplay(region: relocate ? nil : region)
+        backend = sourceBackend; capturedAt = sourceAt
+        if relocate, let region {
+            guard let pixels = displayCropPixelRect(region, displayRect: sourceRect, imageWidth: displayImage.width, imageHeight: displayImage.height),
+                  let cropped = displayImage.cropping(to: pixels) else { throw DesktopError(message: "全屏中未能锁定软件窗口与菜单区域") }
+            image = cropped; desktopRect = region
+        } else { image = displayImage; desktopRect = sourceRect }
     }
     else { (image, desktopRect) = try boundedCaptureImage(windowId, preferDisplayCrop: request["captureMode"] as? String == "displayCrop") }
     traceDisplay("encoding \(image.width)x\(image.height)")
@@ -1402,10 +1522,12 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
         return ["accessibilityTrusted": AXIsProcessTrusted(), "screenCaptureAllowed": CGPreflightScreenCaptureAccess(),
                 "postEventAllowed": CGPreflightPostEventAccess(), "sessionLocked": sessionLocked()]
     case "requestPermission":
+        let kind = request["kind"] as? String ?? "all"
+        guard ["all", "screen", "accessibility", "input"].contains(kind) else { throw DesktopError(message: "权限请求类型无效") }
         let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
-        let ax = AXIsProcessTrustedWithOptions(options)
-        let capture = CGRequestScreenCaptureAccess()
-        let events = CGRequestPostEventAccess()
+        let ax = (kind == "all" || kind == "accessibility") ? AXIsProcessTrustedWithOptions(options) : AXIsProcessTrusted()
+        let capture = (kind == "all" || kind == "screen") ? CGRequestScreenCaptureAccess() : CGPreflightScreenCaptureAccess()
+        let events = (kind == "all" || kind == "input") ? CGRequestPostEventAccess() : CGPreflightPostEventAccess()
         return ["accessibilityTrusted": ax, "screenCaptureAllowed": capture, "postEventAllowed": events,
                 "note": "若系統設定要求，請手動允許並重新啟動 workbunny"]
     case "frontmost": return ["application": appIdentity(currentFrontmost()), "windows": windowEntries()]
@@ -1414,7 +1536,9 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
     case "visualSample": return try visualSample(request)
     case "visualCommit": return try visualCommit(request)
     case "visualForget": return try visualForget(request)
+    case "workbuddyNavigate": return try workBuddyNavigation(request)
     case "workbuddyInspect": return try workBuddyInspect(request)
+    case "workbuddyStop": return try workBuddyStop(request)
     case "workbuddyFill": return try workBuddyFill(request)
     case "workbuddySend": return try workBuddySend(request)
     case "capture":
@@ -1436,16 +1560,35 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
         NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in launched = app; launchError = error; semaphore.signal() }
         guard waitWithRunLoop(semaphore, seconds: 7), let app = launched, launchError == nil else { throw DesktopError(message: "目标应用启动或激活失败") }
         return ["activated": true, "application": appIdentity(app)]
-    case "click", "move", "scroll", "key", "type":
+    case "click", "move", "scroll", "key", "type", "pasteFile":
         guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
         _ = try validateActionContext(request)
         guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else { throw DesktopError(message: "缺少辅助功能/输入监控权限；请显式调用 requestPermission 后在系统设置中允许") }
         let (windowId, rect) = try targetWindow(request)
+        if op == "pasteFile" {
+            guard let file = request["filePath"] as? String, let expectedHash = request["sha256"] as? String,
+                  file.hasPrefix("/"), expectedHash.count == 64 else { throw DesktopError(message: "附件路径或指纹无效") }
+            let url = URL(fileURLWithPath: file), values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? Int.max) <= 20 * 1024 * 1024 else { throw DesktopError(message: "附件须为20MB以内普通文件") }
+            let data = try Data(contentsOf: url), actualHash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            guard actualHash == expectedHash else { throw DesktopError(message: "附件内容已改变，停止粘贴") }
+            _ = try validateActionContext(request)
+            NSPasteboard.general.clearContents()
+            guard NSPasteboard.general.writeObjects([url as NSURL]) else { throw DesktopError(message: "文件剪贴板准备失败") }
+            for down in [true, false] {
+                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: down) else { throw DesktopError(message: "无法模拟文件粘贴") }
+                event.flags = .maskCommand; event.post(tap: .cghidEventTap)
+            }
+            return ["performed": true, "windowId": windowId, "sha256": actualHash]
+        }
         if op == "click" || op == "move" {
             let p = try point(request, in: rect)
             if op == "move" { try postMouse(.mouseMoved, p) }
             else {
-                try postMouse(.leftMouseDown, p); try postMouse(.leftMouseUp, p)
+                let button = request["button"] as? String ?? "left"
+                guard ["left", "right"].contains(button) else { throw DesktopError(message: "鼠标按钮无效") }
+                if button == "right" { try postMouse(.rightMouseDown, p, .right); try postMouse(.rightMouseUp, p, .right) }
+                else { try postMouse(.leftMouseDown, p); try postMouse(.leftMouseUp, p) }
             }
             return ["performed": true, "windowId": windowId, "point": ["x": p.x, "y": p.y]]
         }

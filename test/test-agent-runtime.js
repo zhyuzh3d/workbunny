@@ -25,6 +25,16 @@ test('tasks require verified owner provenance and default to low-frequency obser
  assert.equal(taskSpec(spec).schedule.intervalSeconds,60);
  const started=await h.runtime.start(spec,owner);assert(started.ok);assert.equal(h.calls.length,0);
 });
+test('visual watching defaults to five-second pixels, while work supervision retains its low-frequency default',()=>{
+ const watch=taskSpec({...spec,skill:'conversation.manage'}),work=taskSpec({...spec,skill:'work.delegate'});
+ assert.equal(watch.schedule.intervalSeconds,5);assert.equal(watch.schedule.activeIntervalSeconds,3);assert.equal(work.schedule.intervalSeconds,60);
+ assert.equal(taskSpec({...spec,schedule:{intervalSeconds:3}}).schedule.intervalSeconds,3);assert.throws(()=>taskSpec({...spec,schedule:{intervalSeconds:2}}));
+});
+test('changing cadence retains the existing expiry, while explicit unlimited duration clears it',async()=>{
+ const h=setup(async()=>({status:'waiting'})),start=await h.runtime.start({...spec,schedule:{durationMinutes:30}},owner),task=h.runtime.tasks.get(start.id),expiry=task.expiresAt;
+ assert((await h.runtime.update(start.id,{schedule:{intervalSeconds:5}},owner)).ok);assert.equal(task.expiresAt,expiry);assert.equal(task.schedule.durationMinutes,30);
+ assert((await h.runtime.update(start.id,{schedule:{durationMinutes:null}},owner)).ok);assert.equal(task.expiresAt,undefined);assert.equal(task.schedule.durationMinutes,undefined);await h.runtime.close();
+});
 test('script validates every target before its first effect',async()=>{
  const h=setup(async({script})=>{await script({steps:[send,{...send,key:'wrong',args:{...send.args,recipient:'Bob'}}]});return {status:'completed'};});
  const {id}=await h.runtime.start(spec,owner);await h.runtime.tick(id);assert.equal(h.calls.length,0);
@@ -110,9 +120,52 @@ test('skill learning cannot expand capabilities, and only verified newer knowled
  assert.equal(h.skills.promote('test.task',{passed:true,checks:['fixture'],source:'test'}),2);
  assert.deepEqual(h.skills.get('test.task').capabilities,['screen.read','conversation.send']);
 });
+test('concurrent admissions retain all requests but only five business tasks can run; freeing a slot never auto-starts',async()=>{
+ let ran=0;const h=setup(async()=>{ran++;return {status:'waiting'};});
+ const starts=await Promise.all(Array.from({length:8},()=>h.runtime.start({...spec,schedule:{durationMinutes:1}},owner)));
+ assert(starts.every(r=>r.ok));assert.deepEqual(h.runtime.capacity(),{limit:5,active:5,queued:3});
+ await h.runtime.tick();assert.equal(ran,5);
+ const queued=h.runtime.tasks.get(starts[5].id);assert.equal(queued.status,'queued');assert.equal(queued.expiresAt,undefined);
+ assert.equal((await h.runtime.control('resume',queued.id)).ok,false);
+ await h.runtime.control('stop',starts[0].id);await h.runtime.tick();assert.equal(queued.status,'queued');
+ h.advance();assert((await h.runtime.control('resume',queued.id)).ok);assert.equal(queued.expiresAt,121000);assert.equal(h.runtime.capacity().active,5);
+ await h.runtime.close();
+});
+test('restoring preserves manual-start tasks and updates do not accidentally launch a queued task',async()=>{
+ const h=setup(async()=>({status:'waiting'}));const starts=await Promise.all(Array.from({length:6},()=>h.runtime.start(spec,owner)));
+ const id=starts.at(-1).id;assert((await h.runtime.update(id,{goal:'Revised queued task'},owner)).ok);assert.equal(h.runtime.tasks.get(id).status,'queued');
+ await h.runtime.close();const restored=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await restored.restore();assert.equal(restored.tasks.get(id).status,'queued');assert.equal(restored.capacity().active,5);await restored.close();
+});
+test('stop interrupts tools immediately but holds the slot until the external stop is verified',async()=>{
+ const h=setup(async()=>({status:'waiting'}));let release,stops=0;const gate=new Promise(r=>release=r);h.runtime.stopTask=async()=>{stops++;await gate;};
+ const {id}=await h.runtime.start(spec,owner),stopping=h.runtime.control('stop',id),again=h.runtime.control('stop',id);await new Promise(r=>setImmediate(r));
+ assert.equal(h.runtime.tasks.get(id).status,'stopping');assert.equal(h.runtime.capacity().active,1);await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).counters.wakes,0);
+ release();assert((await stopping).ok);assert((await again).ok);assert.equal(stops,1);assert.equal(h.runtime.capacity().active,0);
+});
+test('a failed external stop remains actionable and cannot be presented as stopped',async()=>{
+ const h=setup(async()=>({status:'waiting'}));h.runtime.stopTask=async()=>{throw Error('visible stop button unavailable');};const {id}=await h.runtime.start(spec,owner);
+ assert.equal((await h.runtime.control('stop',id)).ok,false);assert.equal(h.runtime.tasks.get(id).status,'needs_attention');assert.equal(h.runtime.capacity().active,1);
+});
+test('an amendment that cannot be persisted leaves the live task and provenance unchanged',async()=>{
+ const h=setup(async()=>({status:'waiting'}));const {id}=await h.runtime.start(spec,owner),before=structuredClone(h.runtime.tasks.get(id));
+ h.journal.put=async()=>{throw Error('invalid_source');};assert.equal((await h.runtime.update(id,{goal:'new goal'},{...owner,sources:[id,'descendant-report','new-owner-turn'],originSourceId:'new-owner-turn'})).ok,false);assert.deepEqual(h.runtime.tasks.get(id),before);
+});
 test('model JSON allows an exact fence, rejects duplicate keys and prose, and retries read-only formatting once',async()=>{
  assert.equal(modelJSON('```json\n{"ok":true}\n```').ok,true);
  assert.throws(()=>modelJSON('{"ok":true,"ok":false}'),/重复/);assert.throws(()=>modelJSON('I did it {"ok":true}'));
  let calls=0;const checked=await checkedJSON({messages:[]},v=>{assert.equal(v.ok,true);return v;},{request:async()=>({response:{text:++calls===1?'{"x":.4}':'{"ok":true}'}})});
  assert.equal(checked.attempts,2);assert.equal(calls,2);
+});
+test('changing only the task cadence does not abort or overwrite an in-flight action',async()=>{
+ let entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r),h=setup(async({call})=>{await call(send);return {status:'waiting'};});
+ const original=h.tools.get('conversation.send');h.tools.tools.set(original.name,{...original,execute:async(...args)=>{entered();await gate;return original.execute(...args);}});
+ const {id}=await h.runtime.start(spec,owner),running=h.runtime.tick(id);await at;assert((await h.runtime.update(id,{schedule:{intervalSeconds:5}},owner)).ok);assert.equal(h.runtime.controllers.get(id).signal.aborted,false);release();await running;
+ const task=h.runtime.tasks.get(id);assert.equal(task.schedule.intervalSeconds,5);assert.equal(h.calls.length,1);assert.equal(Object.values(task.operations).find(o=>o.tool==='conversation.send').status,'confirmed');await h.runtime.close();
+});
+test('restart retries only a proven pre-effect automatic reply, while protected drafts remain unresolved',async()=>{
+ const h=setup(async()=>({status:'waiting'})),{id}=await h.runtime.start(spec,owner),saved=h.records.get(id);
+ saved.status='running';saved.operations={early:{effect:'write',tool:'conversation.send',status:'intent',lifecycle:{policy:'newer-event',phase:'preparing'}}};h.records.set(id,saved);
+ const restored=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await restored.restore();assert.equal(restored.tasks.get(id).operations.early.status,'not_dispatched');assert.equal(restored.tasks.get(id).status,'waiting');await restored.close();
+ saved.operations.early={effect:'write',tool:'conversation.send',status:'intent',lifecycle:{policy:'newer-event',phase:'protected'}};saved.status='running';h.records.set(id,saved);
+ const second=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await second.restore();assert.equal(second.tasks.get(id).operations.early.status,'intent');assert.equal(second.tasks.get(id).status,'needs_attention');await second.close();await h.runtime.close();
 });

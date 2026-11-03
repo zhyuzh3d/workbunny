@@ -360,8 +360,8 @@ class Monitor extends EventEmitter {
           const model = o.providerData?.model || o.model;
           if (typeof model === 'string') s.task.model = model;
           s.assistantText = txt;
-          s.task.summary = txt;
-          s.task.candidateAt = ts;
+          if(txt.trim()==='Interrupted by user'){s.task.summary='';this.finishTask('owner-stopped',ts,s);}
+          else{s.task.summary = txt;s.task.candidateAt = ts;}
           if (!e.priming) this.emit('update', s);
         }
       }
@@ -426,17 +426,23 @@ class Monitor extends EventEmitter {
   }
 
   /** 收掉当前任务（正常交付 / 被新指令顶掉 / 超时放弃） */
+  confirmStopped(sessionId,taskId,messageKey){
+    const snap=[...this.sessions.values()].map(e=>e.snap).find(s=>s.sessionId===sessionId),task=snap?.task;
+    if(!task||task.id!==taskId||messageKey&&task.messageKey!==messageKey)throw Error('工作轮次已经变化');
+    if(task.status!=='running')return;
+    this.finishTask('owner-stopped',Date.now(),snap);
+  }
   finishTask(reason, atTs, s) {
     const t = s.task;
     if (!t || t.status !== 'running') return;
     // 被新指令顶掉时，用新指令的时间当结束时间，这样耗时才是真的
-    const endAt = reason === 'superseded' ? atTs || s.lastEventAt || Date.now() : s.lastEventAt || Date.now();
+    const endAt = ['owner-stopped','superseded'].includes(reason) ? atTs || s.lastEventAt || Date.now() : s.lastEventAt || Date.now();
     t.endedAt = endAt;
     t.durationMs = Math.max(0, t.endedAt - t.startedAt);
     // 被新指令顶掉、而助手还没给出最终答复时，手里那段只是中间汇报，不能当结果记
     if (reason === 'superseded' && !t.candidateAt) t.summary = '';
     t.status =
-      reason === 'abandoned' || (reason === 'superseded' && !t.summary)
+      reason === 'owner-stopped' ? 'stopped' : reason === 'abandoned' || (reason === 'superseded' && !t.summary)
         ? 'abandoned'
         : t.summary && SELF_FAILURE_OPENING.test(t.summary.trim())
           ? 'failed'

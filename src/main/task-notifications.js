@@ -10,10 +10,10 @@ const ABNORMAL = new Set(['paused', 'failed', 'waiting', 'repeated-errors', 'sta
 const TTL = 15 * 60000, GAP = 20 * 60000;
 const policyId = scene => 'task-notification-policy:' + normalizeScene(scene);
 const message = kind => ({
-  waiting: 'WorkBuddy 有一项任务需要你的信息或确认，请查看 Bunny 的工作与日常面板。',
-  overdue: 'WorkBuddy 有一项任务已超过预计时间，Bunny 正在保留进度，请查看工作与日常面板。',
-  stall: 'WorkBuddy 有一项任务较长时间没有新进展，请查看 Bunny 的工作与日常面板。',
-})[kind] || 'WorkBuddy 有一项任务遇到阻碍，Bunny 已保留当前状态，请查看工作与日常面板。';
+  waiting: 'WorkBuddy 有一项任务需要你的信息或确认，请查看 Bunny 的任务与工作面板。',
+  overdue: 'WorkBuddy 有一项任务已超过预计时间，Bunny 正在保留进度，请查看任务与工作面板。',
+  stall: 'WorkBuddy 有一项任务较长时间没有新进展，请查看 Bunny 的任务与工作面板。',
+})[kind] || 'WorkBuddy 有一项任务遇到阻碍，Bunny 已保留当前状态，请查看任务与工作面板。';
 
 class TaskNotifications {
   constructor({ memory, deliver, canOperate = async () => false, ready = () => false, getScene = () => 'life', clock = Date.now } = {}) {

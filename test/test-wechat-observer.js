@@ -115,7 +115,8 @@ async function testSmallSidebarBadgeRequiresSameRoiSpatialOverlap() {
     assert.deepEqual(h.nativeCalls.map(call => call.op), ['frontmost', 'visualSample', 'visualSample']);
     assert.equal(h.nativeCalls[1].payload.regions[0].minChangedPixels, 3);
     assert.equal(h.nativeCalls[1].payload.regions[0].minChangedRatio, 0);
-    assert.equal(h.nativeCalls[1].payload.regions[1].minChangedRatio, 0.0015, 'conversation retains the large change threshold');
+    assert.equal(h.nativeCalls[1].payload.regions[1].minChangedPixels, 8);
+    assert.equal(h.nativeCalls[1].payload.regions[1].minChangedRatio, 0, 'small stable conversation changes are inspected');
     return { ...h, result };
   };
 

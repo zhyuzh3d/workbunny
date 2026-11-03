@@ -11,6 +11,9 @@
 <link rel="icon" type="image/svg+xml" href="../../res/logo.svg">
 <link rel="stylesheet" href="./brand.css">
 <script type="module" src="./brand-window.mjs"></script>
+<link rel="stylesheet" href="./task-card.css">
+<link rel="stylesheet" href="./panel-theme.css">
+<script type="module" src="./panel-theme.mjs"></script>
 </head>
 <body data-p="settings">
 
@@ -142,6 +145,7 @@
   </div>
 
   <div class="pb" data-page="data">
+    <section id="softwarePermissions" aria-label="软件操作授权"></section>
     <div class="group">对话显示</div>
     <label class="row"><span>对话文字显示在角色背后</span><input id="dialogueBehind" type="checkbox" role="switch"></label>
     <div class="note">关闭时显示在角色上方；打开后角色会遮挡背后的文字。</div>

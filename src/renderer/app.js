@@ -11,6 +11,8 @@ import { processMotionClip, crossFadeMotionAction } from './motion-quality.mjs';
 import { captureThumbReference, sourceThumbReference, thumbPolicy, bakeThumbPolicy } from './thumb-relax.js';
 import { createBodyAvoidance } from './body-avoidance.mjs';
 import { createPCMPlayer } from './pcm-player.mjs';
+import { taskActivity } from './task-activity.mjs';
+import { taskCard, refreshTaskClock } from './task-card.mjs';
 import { createBubbleController } from './bubble-ui.mjs';
 import { characterText } from './character-name.mjs';
 import { createAvatarLighting } from './avatar-lighting.mjs';
@@ -912,18 +914,19 @@ function characterRect() {
 }
 
 let lastHit = null;
-let interactiveState = false;
+let interactiveState = false, taskHitState=false;
 function updateHit(e) {
   const overUi = !!(e.target && e.target.closest &&
-    e.target.closest('#dialogueOverlay, #ear, #dock, #bubble, #settings, #motions, #fab, #rec, #activity, button, input, textarea'));
+    e.target.closest('#dialogueOverlay, #ear, #dock, #bubble, #settings, #motions, #fab, #rec, #activity, #activityDetails, button, input, textarea'));
   let inside = dragging || overUi;
   if (!inside && cfg?.ui?.avatarHidden !== true) {
     const r = lastHit;
     if (r) inside = e.clientX >= r.x0 && e.clientX <= r.x1 && e.clientY >= r.y0 && e.clientY <= r.y1;
   }
-  if (inside !== interactiveState) {
+  const taskUi=!!e.target?.closest?.("#activity, #activityDetails");
+  if (inside !== interactiveState || taskUi!==taskHitState) {
     interactiveState = inside;
-    pet.hit(inside);
+    taskHitState=taskUi;pet.hit(inside,taskUi);
   }
 }
 
@@ -940,7 +943,7 @@ function avatarThroughDialogue(event) {
 }
 
 document.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0 || e.target.closest('#statusRow, #dock, #bubble, #activity, button, input')) return;
+  if (e.button !== 0 || e.target.closest('#statusRow, #dock, #bubble, #activity, #activityDetails, button, input')) return;
   const overDialogue = !!e.target.closest('#dialogueOverlay');
   if (overDialogue && !avatarThroughDialogue(e)) return;
   if (overDialogue) { e.preventDefault(); e.target.setPointerCapture?.(e.pointerId); }
@@ -1157,6 +1160,7 @@ function paintLive(text) {
 }
 
 function openDock() {
+  if(activityExpandedKey)closeActivityCard();
   hideBubble();
   dockMode = 'open';
   document.body.classList.add('dialogue-input-open');
@@ -1268,13 +1272,13 @@ document.addEventListener('contextmenu', event => {
     return;
   }
   if (cfg?.ui?.avatarHidden === true) return;
-  if (event.target.closest('#statusRow, #dock, #bubble, #activity, button, input, textarea')) return;
+  if (event.target.closest('#statusRow, #dock, #bubble, #activity, #activityDetails, button, input, textarea')) return;
   if (modelContextHit(dataAvatar?.root || vrm?.scene, renderer, scene, camera, stageViewport, event.clientX, event.clientY)) {
     event.preventDefault(); pet.contextMenu?.({ x: event.clientX, y: event.clientY });
   }
 });
 document.addEventListener('pointerdown', event => {
-  if (event.button !== 0 || event.target.closest('#statusRow, #dock, #bubble, #activity, button, input') ||
+  if (event.button !== 0 || event.target.closest('#statusRow, #dock, #bubble, #activity, #activityDetails, button, input') ||
       (event.target.closest('#dialogueOverlay') && !avatarThroughDialogue(event))) return;
   if (!speakingNow && !thinkingNow) return;
   lastInterruptedAt = performance.now();
@@ -1862,63 +1866,18 @@ let actLines = [];        // 当前要轮播的全部行：{ key, text }
 let actSig = '';          // 这些行的"身份"（不含耗时，避免每分钟重置到第一行）
 let actIdx = 0;
 let actTimer = null;
+let actExpiryTimer = null;
 let actTextMode = false;  // 临时提示语抢占时暂停轮播
-/* 被主人点 ✓ 收起的那几条：${sessionId}#${taskId}。
- * 同一个任务从「在干活」变成「做完了」也不再冒出来 —— 他点的是"这个任务别显示了"。
- * 任务重新开始会换新的 taskId，所以不会被旧记录挡住。 */
+/* ✓ 只收起已结束的提示，正在执行或监看的任务始终可见。 */
 const actSeen = new Set();
+const activityStopPending=new Set(),activityActionMessages=new Map();
+let activityExpandedKey=null,activityCardSignature='';
 
 const actTextEl = () => document.getElementById('activityText');
-const actKey = (t) => `${t.sessionId || ''}#${t.taskId || 0}`;
 
-function actNode(t, i, n) {
-  const mins = Math.floor((t.durationMs || 0) / 60000);
-  const pos = n > 1 ? `${i + 1}/${n} · ` : '';
-  const lead =
-    t.status === 'running' ? `在干活 ${pos}`
-      : t.status === 'failed' ? '这次没成 · '
-        : t.status === 'abandoned' ? '没下文 · '
-          : '有结果 · ';
-  const name = t.name || '一件事';
-  const tail = mins >= 1 ? `（${mins} 分）` : '';
-  // 一行能放多少字：状态条现在能用到窗口右侧（约 260px 文字区），中文 11px 一个字 ≈ 22 字
-  const BUDGET = 22;
-  return lead + name + (tail && lead.length + name.length + tail.length <= BUDGET ? tail : '');
-}
 
 function activityLines(snap) {
-  const tasks = (snap && snap.tasks) || [];
-  const running = tasks.filter((t) => t.status === 'running' && !actSeen.has(actKey(t)));
-  const out = [];
-  const desktopTask = lastDesktopEvent?.task;
-  if (desktopTask) {
-    const status = desktopTask.status;
-    const text = status === 'starting' ? 'Bunny 正在准备代理操作'
-      : status === 'running' ? (desktopTask.handoffSent ? 'WorkBuddy 已收到原文 · Bunny 正在观察' : 'Bunny 正在操作目标窗口')
-        : status === 'awaiting' ? '已提交，等待 WorkBuddy 开始处理'
-        : status === 'monitoring' ? 'Bunny 正在观察 WorkBuddy 会话'
-          : status === 'verifying' ? 'Bunny 正在核对可见结果'
-            : ['paused', 'stopped'].includes(status) ? (desktopTask.handoffSent ? 'Bunny 代理已暂停 · WorkBuddy 会话可能继续' : 'Bunny 代理已暂停')
-              : status === 'review' ? (desktopTask.origin === 'dialogue' ? '已有结果，Bunny 正在核对' : '代理结果待你确认')
-                : status === 'accepted' ? (desktopTask.automaticAccepted ? 'Bunny 已核对代理结果' : '你已确认代理结果')
-                  : status === 'failed' ? '代理任务未完成'
-                  : '';
-    const active = ['starting', 'running', 'awaiting', 'monitoring', 'verifying', 'review'].includes(status) || lastDesktopEvent.running === true;
-    const recentTerminal = ['paused', 'stopped', 'accepted', 'failed'].includes(status) && Date.now() < desktopRecentUntil;
-    const key = `desktop#${desktopTask.id || ''}#${status}`;
-    if (text && !actSeen.has(key) && (active || (recentTerminal && running.length === 0))) return [{ key, text: characterText(text, cfg) }];
-  }
-  for(const task of lastAgentEvent?.tasks||[]){
-    const key='agent#'+task.id;if(actSeen.has(key)||['completed','stopped','expired'].includes(task.status))continue;
-    const lead=task.status==='needs_attention'?'需要核对 · ':task.status==='paused'?'已暂停 · ':task.queuedEvents?'有待处理事项 · ':'正在跟进 · ';
-    out.push({key,text:lead+task.goal});
-  }
-  running.forEach((t, i) => out.push({ key: actKey(t), text: actNode(t, i, running.length) }));
-  for (const t of tasks) {
-    if (t.status === 'running' || actSeen.has(actKey(t))) continue;
-    out.push({ key: actKey(t), text: actNode(t, 0, 0) });
-  }
-  return out.slice(0, 4);
+  return taskActivity({agent:lastAgentEvent||{},desktop:lastDesktopEvent||{},work:snap||{},now:Date.now(),recentUntil:desktopRecentUntil,seen:actSeen,selectedKey:activityExpandedKey});
 }
 
 function paintDesktopActivity(event) {
@@ -1936,17 +1895,17 @@ function paintDesktopActivity(event) {
   paintActivity(lastWorkSnap || { tasks: [] });
 }
 
-function canOpenDesktopActivity() {
-  const task = lastDesktopEvent?.task;
-  if (!task) return false;
-  if (lastDesktopEvent.running === true || ['starting', 'running', 'awaiting', 'monitoring', 'verifying', 'review'].includes(task.status)) return true;
-  return Date.now() < desktopRecentUntil && actLines[actIdx % Math.max(1, actLines.length)]?.key === `desktop#${task.id || ''}#${task.status}`;
-}
+function canOpenDesktopActivity() { return actLines.length>0; }
 
 function setActLine(txt) {
   const el = actTextEl();
-  if (!el || el.textContent === txt) return;
+  if (!el) return;
   el.textContent = txt;
+  const row=actLines[actIdx%Math.max(1,actLines.length)],icon=activity.querySelector('.workbuddy-logo');
+  if(icon){icon.src=row?.source==='workbuddy'?'./assets/icons/workbuddy-logo.png':'../../res/icon.png';icon.alt=row?.source==='workbuddy'?'WorkBuddy':'Bunny';}
+  const button=document.getElementById('actDone');button.hidden=actTextMode||!row?.action;button.textContent=row?.action==='stop'?'×':'✓';button.title=row?.action==='stop'?'停止这项任务':'收起已完成任务';button.setAttribute('aria-label',button.title);button.disabled=activityStopPending.has(row?.key);
+  activity.title=txt+(row?' · 点击展开任务详情':'');
+  paintActivityCard();
 }
 
 function slideLine(txt, up = true) {
@@ -1959,7 +1918,7 @@ function slideLine(txt, up = true) {
     [{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: `translateY(${min * 0.55}px)` }],
     { duration: 190, easing: 'ease-in' }
   ).onfinish = () => {
-    el.textContent = txt;
+    setActLine(txt);
     el.animate(
       [{ opacity: 0, transform: `translateY(${-min * 0.55}px)` }, { opacity: 1, transform: 'translateY(0)' }],
       { duration: 250, easing: 'ease-out' }
@@ -1972,14 +1931,15 @@ function slideLine(txt, up = true) {
 let actHover = false;
 activity.addEventListener('pointerenter', () => { actHover = true; stopRoll(); });
 activity.addEventListener('pointerleave', () => { actHover = false; startRoll(); });
+activity.addEventListener('wheel',event=>{if(actLines.length<2)return;event.preventDefault();stopRoll();actIdx=(actIdx+(event.deltaY>0?1:-1)+actLines.length)%actLines.length;if(activityExpandedKey)activityExpandedKey=actLines[actIdx].key;setActLine((actIdx+1)+'/'+actLines.length+' · '+actLines[actIdx].text);if(!actHover)startRoll();},{passive:false});
 activity.tabIndex = -1;
 activity.addEventListener('click', (event) => {
   if (event.target.closest('#actDone') || !canOpenDesktopActivity()) return;
-  pet.open('desktop');
+  toggleActivityCard();
 });
 activity.addEventListener('keydown', (event) => {
   if ((event.key === 'Enter' || event.key === ' ') && !event.target.closest('#actDone') && canOpenDesktopActivity()) {
-    event.preventDefault(); pet.open('desktop');
+    event.preventDefault(); toggleActivityCard();
   }
 });
 
@@ -1990,13 +1950,13 @@ function stopRoll() {
 
 function startRoll() {
   stopRoll();
-  if (actHover) return;                 // 鼠标还停在上面，等它移开再重新开始计时
+  if (actHover || activityExpandedKey) return;                 // 鼠标还停在上面，等它移开再重新开始计时
   if (actLines.length < 2 || actTextMode) return;
   actTimer = setInterval(() => {
     if (actTextMode || !actLines.length) return;
     if (activity.classList.contains('hidden')) return;
     actIdx = (actIdx + 1) % actLines.length;
-    slideLine(actLines[actIdx].text);
+    slideLine((actLines.length>1?(actIdx+1)+'/'+actLines.length+' · ':'')+actLines[actIdx].text);
   }, ACT_ROLL_MS);
 }
 
@@ -2013,13 +1973,18 @@ function paintIdle() {
 
 /** 状态条只说"在做什么/做完了没"，绝不显示命令、路径、工具名。多任务时轮播。 */
 function paintActivity(snap) {
+  clearTimeout(actExpiryTimer);
   lastWorkSnap = snap;
   lastActivityAt = Date.now();
   if (!snap) { activity.classList.add('hidden'); actLines = []; actSig = ''; stopRoll(); return; }
   const lines = activityLines(snap);
   if (!lines.length) { paintIdle(); return; }
+  const expiries=lines.map(l=>l.expiresAt).filter(Boolean);
+  if(expiries.length)actExpiryTimer=setTimeout(()=>paintActivity(lastWorkSnap||{tasks:[]}),Math.max(1,Math.min(...expiries)-Date.now()+10));
   const sig = lines.map((l) => l.key).join('|');
   actLines = lines;
+  for(const key of activityActionMessages.keys())if(!lines.some(l=>l.key===key))activityActionMessages.delete(key);
+  if(activityExpandedKey&&!lines.some(l=>l.key===activityExpandedKey)){closeActivityCard(false);}
   activity.classList.remove('hidden');
   activity.classList.remove('idle');
   activity.classList.toggle('desktop-openable', canOpenDesktopActivity());
@@ -2028,19 +1993,62 @@ function paintActivity(snap) {
   if (sig !== actSig) {
     // 任务集合变了（新任务 / 被点掉一条）：从第一条重新开始
     actSig = sig;
-    actIdx = 0;
-    setActLine(lines[0].text);
+    actIdx = Math.max(0,lines.findIndex(l=>l.key===activityExpandedKey));
+    setActLine((lines.length>1?(actIdx+1)+'/'+lines.length+' · ':'')+lines[actIdx].text);
   } else {
     // 只是耗时在涨：原地更新当前这一行，别把轮播打回第一行
-    setActLine(lines[actIdx % lines.length].text);
+    setActLine((lines.length>1?(actIdx+1)+'/'+lines.length+' · ':'')+lines[actIdx % lines.length].text);
   }
-  startRoll();
+  if(!actTimer)startRoll();
 }
 
+function toggleActivityCard(){
+ const row=actLines[actIdx%Math.max(1,actLines.length)];if(!row)return;
+ if(activityExpandedKey){closeActivityCard();return;}
+ activityExpandedKey=row.key;activityCardSignature='';stopRoll();document.getElementById('activityDetails').hidden=false;activity.setAttribute('aria-expanded','true');
+ void pet.activityExpanded(true).catch(()=>{});paintActivity(lastWorkSnap||{});
+}
+function closeActivityCard(repaint=true){
+ activityExpandedKey=null;activityCardSignature='';document.getElementById('activityDetails').hidden=true;activity.setAttribute('aria-expanded','false');void pet.activityExpanded(false).catch(()=>{});if(repaint)paintActivity(lastWorkSnap||{});
+}
+function switchActivityCard(delta){
+ if(actLines.length<2)return;actIdx=(actIdx+delta+actLines.length)%actLines.length;activityExpandedKey=actLines[actIdx].key;activityCardSignature='';paintActivity(lastWorkSnap||{});
+}
+function paintActivityCard(){
+ if(!activityExpandedKey)return;const row=actLines.find(l=>l.key===activityExpandedKey);if(!row)return;
+ const details=document.getElementById('activityDetails'),body=document.getElementById('activityTaskCard');details.hidden=false;
+ document.getElementById('activityTaskCount').textContent=(actIdx+1)+' / '+actLines.length+' · 轮播已暂停';
+ for(const id of ['activityPrevious','activityNext'])document.getElementById(id).disabled=actLines.length<2;
+ const record=row.record||{},status=['ready','running','waiting'].includes(record.status)?'active':record.status,signature=JSON.stringify([row.key,status,record.note,record.presentation,record.queuedEvents,record.result,record.delivery,record.schedule,activityStopPending.has(row.key),activityActionMessages.get(row.key)]);
+ if(signature===activityCardSignature){refreshTaskClock(body,record);return;}activityCardSignature=signature;
+ const scroll=body.scrollTop,open=[...body.querySelectorAll('details[open]')].map(d=>d.dataset.detailsKey);
+ const card=taskCard(record,{external:row.ref.source!=='agent',pending:activityStopPending.has(row.key),message:activityActionMessages.get(row.key)||'',onAction:operation=>void runActivityAction(row,operation),onArtifact:(id,index)=>pet.agentArtifact(id,index).catch(error=>{activityActionMessages.set(row.key,error.message);activityCardSignature='';paintActivityCard();})});
+ body.replaceChildren(card);for(const d of body.querySelectorAll('details'))if(open.includes(d.dataset.detailsKey))d.open=true;body.scrollTop=scroll;
+}
+async function runActivityAction(row,operation){
+ if(operation==='details'){const d=document.querySelector('#activityTaskCard [data-details-key="reason"]');if(d)d.open=true;return;}
+ if(activityStopPending.has(row.key))return;activityStopPending.add(row.key);activityActionMessages.delete(row.key);activityCardSignature='';paintActivityCard();
+ try{const result=await pet.activityControl(operation,row.ref);if(!result?.ok)throw Error(result?.error||'操作尚未确认');if(result.message)activityActionMessages.set(row.key,result.message);}
+ catch(error){activityActionMessages.set(row.key,error.message);}
+ finally{activityStopPending.delete(row.key);activityCardSignature='';paintActivity(lastWorkSnap||{});}
+}
+for(const [id,delta]of [['activityPrevious',-1],['activityNext',1]])document.getElementById(id).onclick=()=>switchActivityCard(delta);
+document.getElementById('activityCollapse').onclick=()=>closeActivityCard();
+document.getElementById('activityAllTasks').onclick=()=>{closeActivityCard();pet.open('desktop');};
+addEventListener('keydown',event=>{if(event.key==='Escape'&&activityExpandedKey){event.preventDefault();closeActivityCard();}});
+
 /** ✓：把当前显示的那一条收起来，剩下还有就继续轮到下一条 */
-function dismissCurrent() {
+async function dismissCurrent() {
   if (!actLines.length) return;
   const cur = actLines[actIdx % actLines.length];
+  if(cur.action==='stop'){
+    if(activityStopPending.has(cur.key))return;activityStopPending.add(cur.key);setActLine(actTextEl().textContent);
+    try{const result=await pet.activityStop(cur.ref);if(!result?.ok)throw Error(result?.error||'停止尚未确认');}
+    catch(error){if(activityExpandedKey===cur.key){activityActionMessages.set(cur.key,error.message);activityCardSignature='';paintActivityCard();}else paintActivityText(error.message);}
+    finally{activityStopPending.delete(cur.key);if(!actTextMode)paintActivity(lastWorkSnap||{});}return;
+  }
+  if(cur.action!=='dismiss')return;
+  if(activityExpandedKey===cur.key)closeActivityCard(false);
   actSeen.add(cur.key);
   if (actSeen.size > 60) {
     // 只留最近的一批，别无限长
@@ -2060,7 +2068,7 @@ window.__act = () => ({
   idx: actIdx,
   seen: [...actSeen],
   text: actTextEl() ? actTextEl().textContent : null,
-  cls: activity.className,
+  cls: activity.className,expandedKey:activityExpandedKey,
 });
 
 /** 临时提示语（"看着呢"之类）：占住横幅，过一会儿自动回到轮播 */

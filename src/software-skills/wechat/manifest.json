@@ -1,0 +1,21 @@
+{
+  "schema": "bunny.software-skill/v1",
+  "id": "wechat",
+  "version": 6,
+  "skills": [
+    "conversation.manage",
+    "conversation.send",
+    "conversation.read"
+  ],
+  "application": "wechat",
+  "methods": [
+    "external-display-visual-keyboard-mouse"
+  ],
+  "resources": [
+    {
+      "path": "guide.md",
+      "sha256": "8c40c3a8126821b60851770344da3c00a59c9fd1173e5527d6d77fb881825a87"
+    }
+  ],
+  "toolProtocol": "bunny.screen/v2"
+}

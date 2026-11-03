@@ -1,7 +1,7 @@
 {
   "name": "workbunny",
   "productName": "WorkBunny",
-  "version": "0.16.1",
+  "version": "0.24.6",
   "description": "WorkBunny · 有长期记忆的桌面情感伙伴与工作小秘书",
   "main": "src/main/entry.js",
   "private": true,

@@ -56,7 +56,7 @@ class CompanionAutonomy {
     this.note = '以后的小作品会保存在新目录'; return this.status();
   }
   async control(action) {
-    if (!['pause', 'resume', 'cancel'].includes(action)) throw new Error('未知的自主生活操作');
+    if (!['pause', 'resume', 'cancel'].includes(action)) throw new Error('未知的自主工作操作');
     await this.ensureDefaults();
     if (action !== 'resume') {
       const attempt = this.activeAttempt;
@@ -70,7 +70,7 @@ class CompanionAutonomy {
       await this.memory.write([{ id: POLICY, kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2,
         value: { ...prior?.value, initialized: true, paused: this.policyPaused, sources: [] } }]);
     });
-    this.note = action === 'resume' ? '恢复了，空闲时再找些事情做' : action === 'pause' ? '自主生活已暂停' : '这次的小任务已取消';
+    this.note = action === 'resume' ? '恢复了，空闲时再找些事情做' : action === 'pause' ? '自主工作已暂停' : '这次的小任务已取消';
     return this.status();
   }
   async status() {

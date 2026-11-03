@@ -94,7 +94,7 @@ class TaskSupervision {
     const elapsed = Math.max(1, Math.round((this.clock() - task.startedAt) / MINUTE));
     const minutes = Math.max(1, Math.round(state.estimate.ms / MINUTE));
     const phrases = {
-      done: `WorkBuddy的“${title}”这一轮已有答复，请留意结果；还没有经过我独立验收。`,
+      done: `“${title}”已结束，正在收集最终结论。`,
       failed: `WorkBuddy报告“${title}”这项任务没有完成，建议看一下当前答复再决定下一步。`,
       abandoned: `“${title}”已经较长时间没有动静，也没有确认交付，建议检查WorkBuddy当前状态。`,
       waiting: `“${title}”正在等你提供信息或确认，可以看看WorkBuddy的问题。`,

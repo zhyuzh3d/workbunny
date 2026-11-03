@@ -15,4 +15,8 @@ function canvasArea(display) {
   const bounds = display.bounds, top = Math.max(bounds.y, display.workArea.y);
   return { x:bounds.x, y:top, width:bounds.width, height:bounds.y + bounds.height - top };
 }
-module.exports = { layoutWindow, canvasArea };
+function expandTaskWindow(layout,area,minimumHeight=520){
+ const extra=Math.max(0,Math.min(minimumHeight-layout.bounds.height,layout.bounds.y-area.y));
+ return {...layout,bounds:{...layout.bounds,y:layout.bounds.y-extra,height:layout.bounds.height+extra},viewport:{...layout.viewport,offsetY:layout.viewport.offsetY+extra}};
+}
+module.exports = { layoutWindow, canvasArea, expandTaskWindow };

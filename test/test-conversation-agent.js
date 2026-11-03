@@ -13,6 +13,11 @@ test('cursor ignores history and own replies but treats a later repeated text as
  cursor.noteSent('received');assert.equal(cursor.observe([message('old'),message('hello'),message('received','outgoing')]).messages.length,0);
  assert.equal(cursor.observe([message('old'),message('hello'),message('received','outgoing'),message('hello')]).messages.length,1);
 });
+test('a newly recognized message reacts immediately and the next poll waits from completion time',async()=>{
+ let h;h=harness({brain:()=>{h.advance();return {decision:'reply',reply:'received',summary:'noted',completed:false,progress:{},unknown:[]};}});
+ const {id}=await h.start();await h.runtime.tick(id);h.incoming('new');await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).nextCheckAt,h.runtime.clock());
+ await h.runtime.tick(id);const task=h.runtime.tasks.get(id);assert.equal(task.nextCheckAt,h.runtime.clock()+3000);assert.equal(task.state.conversations[Object.keys(task.state.conversations)[0]].lastSentAt,h.runtime.clock());
+});
 test('owner inbox excludes Bunny echo even when all bubbles are outgoing',()=>{
  const c=new ConversationCursor();c.observe([message('old','outgoing')],{ownerChannel:true});c.noteSent('ack');
  assert.equal(c.observe([message('old','outgoing'),message('ack','outgoing')],{ownerChannel:true}).messages.length,0);
@@ -28,10 +33,27 @@ test('consecutive identical messages are counted and an uncertain view cannot co
  const original=c.snapshot().baseline;assert(c.observe([message('unrelated view')]).uncertain);assert.deepEqual(c.snapshot().baseline,original);
  assert.equal(c.observe([message('same'),message('same'),message('finally new')]).messages[0].text,'finally new');
 });
-function harness({behavior='reply',brain,completion='manual',subjects=[{application:'wechat',recipient:'Alice'}]}={}){
+test('file-card labels and sizes may vary without hiding a following real text message',()=>{
+ const c=new ConversationCursor(),file=text=>({...message(text,'outgoing'),kind:'file'});
+ c.observe([message('completed','outgoing'),file('[文件] owner-result.txt 22B')]);
+ const delta=c.observe([message('completed','outgoing'),file('[文件]'),message('BUNNY SOAK 1')]);
+ assert.equal(delta.uncertain,undefined);assert.deepEqual(delta.messages.map(m=>m.text),['BUNNY SOAK 1']);
+ assert.equal(c.observe([message('completed','outgoing'),file('owner-result.txt 22字节'),message('BUNNY SOAK 1')]).messages.length,0);
+});
+test('a verified outgoing file card matches the delivery outbox by its separate visible filename',()=>{
+ const c=new ConversationCursor();c.observe([message('old','outgoing')],{ownerChannel:true});
+ const delta=c.observe([message('old','outgoing'),{...message('[文件]','outgoing'),kind:'file',fileName:'result.txt'}],{ownerChannel:true,sentMessages:[{id:'file-1',kind:'file',text:'［Bunny］ result.txt'}]});
+ assert.equal(delta.messages.length,0);assert.equal(c.snapshot().recent.at(-1).origin,'bunny');
+});
+test('uncertain message order opens the exact conversation before another full-screen recovery observation',async()=>{
+ const h=harness(),{id}=await h.start();await h.runtime.tick(id);h.setVisible([message('different screen')]);await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).status,'waiting');await h.runtime.tick(id);
+ const task=h.runtime.tasks.get(id);assert.equal(task.status,'needs_attention');assert(Object.values(task.operations).some(op=>op.tool==='conversation.open'&&op.key.startsWith('recover:')&&op.status==='confirmed'));assert.equal(h.sent.length,0);
+});
+function harness({behavior='reply',brain,completion='manual',subjects=[{application:'wechat',recipient:'Alice'}],observe,transcribe,onOpen}={}){
  let visible=[message('old')],busy=false;const sent=[],reports=[],records=new Map(),tools=new ToolRegistry();let now=1000;
- tools.register({name:'conversation.observe',description:'pixels',effect:'read',capabilities:['conversation.read'],scope:a=>a,execute:async()=>({headerMatched:true,changed:true,messages:visible,draft:''})});
- tools.register({name:'conversation.open',description:'open',effect:'read',capabilities:['screen.input'],scope:a=>a,execute:async()=>({ok:true})});
+ tools.register({name:'conversation.observe',description:'pixels',effect:'read',capabilities:['conversation.read'],scope:a=>a,execute:async a=>observe?observe(a,visible):({headerMatched:true,changed:true,messages:visible,draft:''})});
+ tools.register({name:'conversation.open',description:'open',effect:'read',capabilities:['screen.input'],scope:a=>a,execute:async()=>{onOpen?.();return {ok:true};}});
+ tools.register({name:'conversation.transcribe',description:'voice',effect:'read',capabilities:['screen.input','conversation.read'],scope:a=>a,execute:async a=>transcribe?transcribe(a):({pending:true})});
  tools.register({name:'conversation.send',description:'send',effect:'write',capabilities:['conversation.send'],scope:a=>a,execute:async a=>{sent.push(a.message);visible=[...visible,message(a.message,'outgoing')];return {ok:true,verified:true,receipt:{at:now}};}});
  tools.register({name:'memory.related',description:'related shared memories',effect:'read',capabilities:['memory.read'],scope:a=>a,execute:async()=>({items:[]})});
  tools.register({name:'owner.dispatch',description:'owner',effect:'write',capabilities:['owner.command'],scope:a=>a,execute:async()=>({ok:true,verified:true})});
@@ -77,4 +99,54 @@ test('reply generation receives actual previous messages and only supplied relat
  let payload;const brain=new ConversationBrain({request:async options=>{payload=JSON.parse(options.messages[1].content);return {response:{text:JSON.stringify({decision:'reply',reply:'Okay.',summary:'confirmed',completed:false,progress:{},unknown:[]})}};}});
  await brain.decide({task:{goal:'ask progress',criteria:'answer',policy:'no commitments',parameters:{behavior:'reply'}},subject:{recipient:'Alice'},conversation:{cursor:{recent:[message('The project is called Alpha.')]},summary:'project conversation'},incoming:[message('It is done.')],memories:[{text:'Alice prefers concise messages',source:'owner'}]});
  assert.equal(payload.conversation[0].text,'The project is called Alpha.');assert.equal(payload.memories.length,1);
+});
+
+test('a shared scene revision is processed even after another observer marked it unchanged',async()=>{
+ let rev='first';const h=harness({observe:(_a,visible)=>({headerMatched:true,changed:false,revision:rev,messages:visible,draft:''})}),{id}=await h.start();
+ await h.runtime.tick(id);h.incoming('new');rev='second';await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).inbox.length,1);
+ await h.runtime.tick(id);assert.deepEqual(h.sent,['reply new']);
+});
+test('voice stays queued while transcription is pending and replies once with verified text',async()=>{
+ let calls=0;const h=harness({transcribe:async a=>{calls++;return calls===1?{requested:true,pending:true}:{verified:true,text:'你好，明天见'};}}),{id}=await h.start();
+ await h.runtime.tick(id);h.setVisible([message('old'),{...message('[语音]'),kind:'voice'}]);await h.runtime.tick(id);await h.runtime.tick(id);
+ assert.equal(h.sent.length,0);assert.equal(h.runtime.tasks.get(id).inbox.length,1);assert(Object.values(h.runtime.tasks.get(id).inbox[0].voiceStates)[0].requestedAt);
+ await h.runtime.tick(id);assert.deepEqual(h.sent,['reply 你好，明天见']);assert.equal(h.runtime.tasks.get(id).inbox.length,0);
+});
+test('consecutive text and voice messages are combined in order and answered once',async()=>{
+ const calls=[];const h=harness({transcribe:async a=>{calls.push(a.sequence);return {verified:true,text:'voice '+a.sequence};}}),{id}=await h.start();
+ await h.runtime.tick(id);h.setVisible([message('old'),message('first'),{...message('[语音]'),kind:'voice'},message('last')]);await h.runtime.tick(id);await h.runtime.tick(id);
+ assert.deepEqual(h.sent,['reply first+voice 2+last']);assert.deepEqual(calls,[2]);assert.equal(h.runtime.tasks.get(id).inbox.length,0);
+});
+test('separate new messages can be answered without an artificial default delay',async()=>{
+ const h=harness(),{id}=await h.start();await h.runtime.tick(id);h.incoming('one');await h.runtime.tick(id);await h.runtime.tick(id);
+ h.incoming('two');await h.runtime.tick(id);await h.runtime.tick(id);assert.deepEqual(h.sent,['reply one','reply two']);
+});
+
+test('an unread badge opens the authorized contact even if its header already matches',async()=>{
+ let unread=false,opens=0;const h=harness({observe:(_a,visible)=>({headerMatched:true,changed:false,unread,messages:visible,draft:''}),onOpen:()=>{opens++;unread=false;}}),{id}=await h.start();
+ await h.runtime.tick(id);const before=opens;unread=true;h.incoming('hello');await h.runtime.tick(id);assert.equal(opens,before+1);assert.equal(h.runtime.tasks.get(id).inbox.length,1);await h.runtime.tick(id);assert.deepEqual(h.sent,['reply hello']);
+});
+test('an initially unverified text is retained, visually rechecked and replied to',async()=>{
+ let allow=false;const h=harness({observe:(args,visible)=>({headerMatched:true,changed:true,messages:visible.map(m=>m.text==='new'&&args.force&&allow?{...m,incomingVerified:true}:m),draft:''})}),{id}=await h.start();
+ await h.runtime.tick(id);h.setVisible([message('old'),{...message('new'),incomingVerified:false}]);await h.runtime.tick(id);await h.runtime.tick(id);
+ assert.equal(h.sent.length,0);assert.equal(h.runtime.tasks.get(id).inbox.length,1);allow=true;await h.runtime.tick(id);
+ assert.deepEqual(h.sent,['reply new']);assert.equal(h.runtime.tasks.get(id).inbox.length,0);
+});
+test('multiple voice messages are transcribed in order before one reply',async()=>{
+ const seen=[];const h=harness({transcribe:async a=>{seen.push(a.sequence);return {verified:true,text:'语音'+a.sequence};}}),{id}=await h.start();
+ await h.runtime.tick(id);h.setVisible([message('old'),{...message('[语音]'),kind:'voice'},{...message('[语音]'),kind:'voice'}]);await h.runtime.tick(id);await h.runtime.tick(id);
+ assert.deepEqual(seen,[1,2]);assert.deepEqual(h.sent,['reply 语音1+语音2']);
+});
+test('a reply from a delayed decision executes once even if subsequent samples are quiet',async()=>{
+ let finish,entered;const startedDecision=new Promise(r=>entered=r),decision=new Promise(r=>finish=r);let changed=true,revision='base';
+ const h=harness({observe:(_a,visible)=>({headerMatched:true,changed,revision,messages:visible,draft:''}),brain:async()=>{entered();return decision;}}),{id}=await h.start();
+ await h.runtime.tick(id);h.incoming('new');revision='new';await h.runtime.tick(id);
+ const running=h.runtime.tick(id);await startedDecision;changed=false;await h.runtime.tick(id);assert.equal(h.sent.length,0);
+ finish({decision:'reply',reply:'received',summary:'done',completed:false,progress:{},unknown:[]});await running;await h.runtime.tick(id);
+ assert.deepEqual(h.sent,['received']);assert.equal(h.runtime.tasks.get(id).inbox.length,0);
+});
+test('an exhausted model output budget retries the same observation with a bounded larger budget',async()=>{
+ const calls=[],{checkedJSON}=require('../src/main/agent-json');
+ const result=await checkedJSON({messages:[{role:'user',content:'fixture'}]},value=>value,{request:async options=>{calls.push(options);if(calls.length===1)throw Object.assign(Error('limited'),{code:'E_OUTPUT_LIMIT'});return {response:{text:'{"ok":true}'}};}});
+ assert.equal(result.value.ok,true);assert.equal(calls.length,2);assert.equal(calls[1].maxTokens,4096);assert.deepEqual(calls[1].messages,calls[0].messages);
 });

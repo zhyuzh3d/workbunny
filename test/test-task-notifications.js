@@ -5,7 +5,7 @@ const { MemoryService } = require('../src/main/memory-service');
 const { TaskNotifications } = require('../src/main/task-notifications');
 const { InteractionStrategy } = require('../src/main/interaction-strategy');
 const { validateIntent } = require('../src/main/dialogue-actions');
-const { notificationLoginAction } = require('../src/main/desktop-service');
+const { wechatAuthReason } = require('../src/main/wechat-auth-state');
 async function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bunny-alerts-')); let now = 1000000;
   const memory = new MemoryService({ dir: root, bin: path.resolve('bin/vault'), openKey: async () => Buffer.alloc(32, 61), getSettings: () => ({ enabled: true, extract: false, scene: 'life' }) });
@@ -106,13 +106,12 @@ test('cancelling a task cancels its pending alert', async t => {
   const f = await fixture(t); await f.enqueue('failed'); await f.enqueue('cancelled'); await f.svc.tick();
   assert.equal(f.sent.length, 0);
 });
-test('notification login is visual, single-attempt and skips phone/QR-only states', () => {
+test('notification authentication detection is read-only and never offers a login click', () => {
   const row = text => ({ text, confidence: .95, x: .4, y: .5, width: .2, height: .1 });
   const button = { ocr: [row('登录')] };
-  assert.deepEqual(notificationLoginAction(button), { action: 'click', x: .5, y: .55, reason: '视觉确认微信一键登录，仅尝试一次' });
-  assert.deepEqual(notificationLoginAction(button, true), { skip: true });
-  assert.deepEqual(notificationLoginAction({ ocr: [row('扫码登录')] }), { skip: true });
-  assert.deepEqual(notificationLoginAction({ ocr: [row('登录'), row('请在手机上确认登录')] }), { skip: true });
-  assert.deepEqual(notificationLoginAction({ ocr: [row('为了你的账号安全，请重新登录。'), row('我知道了')] }), { skip: true });
-  assert.equal(notificationLoginAction({ ocr: [row('登录'), { ...row('搜索'), x: .1 }] }), null, 'ordinary messages in the main UI do not look like a login screen');
+  assert.match(wechatAuthReason(button.ocr), /登录界面/);
+  assert.match(wechatAuthReason([row('扫码登录')]), /登录界面/);
+  assert.match(wechatAuthReason([row('登录'), row('请在手机上确认登录')]), /登录界面/);
+  assert.match(wechatAuthReason([row('为了你的账号安全，请重新登录。'), row('我知道了')]), /重新登录/);
+  assert.equal(wechatAuthReason([row('登录'), { ...row('搜索'), x: .1 }]), null, 'ordinary messages in the main UI do not look like a login screen');
 });

@@ -14,6 +14,12 @@ test('replaced or truncated session files do not leave an old offset permanently
 function addMessage(m,e,role,content,timestamp=Date.now()){
  m.handleEvent({type:'message',role,content,timestamp},e);
 }
+test('a real user interruption is stopped on both live ingestion and historical replay, never a completed result',t=>{
+ const {m,e}=fixture(t),done=[];m.on('taskDone',s=>done.push(s));addMessage(m,e,'user','Bunny stop experiment',1000);addMessage(m,e,'assistant','Interrupted by user',1500);
+ assert.equal(e.snap.task.status,'stopped');assert.equal(e.snap.history[0].status,'stopped');assert.deepEqual(done,[]);
+ addMessage(m,e,'user','new experiment',2000);const current=e.snap.task;
+ assert.throws(()=>m.confirmStopped(e.snap.sessionId,current.id+1),/轮次/);m.confirmStopped(e.snap.sessionId,current.id,current.messageKey);assert.equal(current.status,'stopped');assert.deepEqual(done,[]);
+});
 test('actual WorkBuddy Bash footers distinguish completed transport from command failure; answered questions clear waiting', t => {
  const {m,e}=fixture(t);addMessage(m,e,'user','请检查项目',1000);
  for(let i=0;i<3;i++)m.handleEvent({type:'function_call_result',name:'Bash',status:'completed',output:{type:'text',text:'synthetic output\nExit code: 1\nSignal: (none)'},timestamp:1100+i},e);

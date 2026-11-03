@@ -5,14 +5,15 @@ const {canRead}=require('./memory-scope');
 // Learned knowledge is scoped data, never executable code or a capability grant.
 // Proof versions append sources; an ongoing task never depends on its own proof.
 class AgentLearning{
- constructor({memory,skills}){Object.assign(this,{memory,skills});}
+ constructor({memory,skills,packages=[],request}){Object.assign(this,{memory,skills,packages,request});}
+ catalog(scene){return this.latest(this.inventory||[]).filter(r=>r.value.scene===scene&&canRead(scene,r)).map(r=>({skill:r.value.skill,revision:r.value.revision,status:r.value.status,proofs:r.value.proofs?.length||0}));}
  async rows(){
   if(!this.memory?.ready)return [];
   const result=[];let cursor={};
   for(;;){const rows=await this.memory.query('task',200,{...cursor,state:'all',scene:null});
    for(const row of rows)if(row.state==='active'&&row.value.taskType==='agent-skill')result.push(row);
    if(rows.length<200)break;const last=rows.at(-1);cursor={before:last.ts,beforeId:last.id};
-  }return result;
+  }this.inventory=result;return result;
  }
  latest(rows){const result=new Map();for(const row of rows){const old=result.get(row.value.knowledgeId);if(!old||row.value.revision>old.value.revision)result.set(row.value.knowledgeId,row);}return [...result.values()];}
  async write(value,scope){
@@ -31,15 +32,36 @@ class AgentLearning{
   const id=await this.write(value,task);return {ok:true,verified:true,knowledgeId:id,status:'candidate'};
  }
  async prepare(task){
-  if(task.skill==='skill.learn')return;
-  const rows=this.latest(await this.rows()).filter(r=>r.value.skill===task.skill&&canRead(task.scene,r)&&r.value.scene===task.scene).slice(-4);
-  task.state.operatingKnowledge=rows.map(r=>({sourceId:r.id,status:r.value.status,instructions:r.value.instructions}));
+  if(task.skill==='skill.learn'||task.skill==='task.resolve')return;
+  const rows=this.latest(await this.rows()).filter(r=>r.value.skill===task.skill&&canRead(task.scene,r)&&r.value.scene===task.scene&&r.value.status!=='quarantined').slice(-4);
+  task.state.operatingKnowledge=this.packages.filter(p=>(p.skills.includes(task.skill)||task.skill==='software.execute'&&task.subjects.some(s=>s.application===p.application))).map(p=>({packageId:p.id,version:p.version,status:'bundled',instructions:p.instructions})).concat(rows.filter(r=>r.value.status!=='quarantined').map(r=>({sourceId:r.id,status:r.value.status,instructions:r.value.instructions})));
+  task.state.softwarePackages=this.packages.filter(p=>(p.skills.includes(task.skill)||task.skill==='software.execute'&&task.subjects.some(s=>s.application===p.application))).map(p=>({id:p.id,version:p.version}));
   task.sources=[...new Set([...task.sources,...rows.map(r=>r.id)])];
   task.visibilityFloor=Math.max(task.visibilityFloor,...rows.map(r=>r.visibilityFloor??r.value.visibilityFloor??0));
  }
+ async failed(task,error){
+  if(!this.memory?.ready||error.code==='E_PERMISSION_REQUIRED'||/网络|连接|timeout|超时|忙|空闲|草稿|授权|暂停|停止|熔断/iu.test(error.message))return;
+  const rows=await this.rows(),latest=this.latest(rows);
+  for(const used of task.state.operatingKnowledge||[]){if(!used.sourceId)continue;
+   const original=rows.find(r=>r.id===used.sourceId),current=original&&latest.find(r=>r.value.knowledgeId===original.value.knowledgeId);
+   if(!current||current.value.instructions!==used.instructions||current.value.failedTasks?.includes(task.id))continue;
+   const failedTasks=[...(current.value.failedTasks||[]),task.id].slice(-4);
+   if(failedTasks.length<2){await this.write({...current.value,revision:current.value.revision+1,failedTasks,sources:[current.id,task.id]},task);continue;}
+   const previous=rows.filter(r=>r.value.knowledgeId===current.value.knowledgeId&&r.value.status==='validated'&&r.value.instructions!==current.value.instructions).sort((a,b)=>b.value.revision-a.value.revision)[0];
+   await this.write({...current.value,...(previous?{instructions:previous.value.instructions,proofs:previous.value.proofs,status:'validated',rolledBackFrom:current.id}:{status:'quarantined'}),revision:current.value.revision+1,failedTasks:[],sources:[current.id,task.id,...(previous?[previous.id]:[])]},task);
+  }
+ }
+ async extractRecovery(task){
+  if(!this.memory?.ready||!['software.execute','system.operate'].includes(task.skill))return;
+  const attempts=task.state.attempts||[],failed=attempts.filter(a=>a.error&&!/授权|空闲|网络|超时|timeout/iu.test(a.error));
+  if(!failed.length||!attempts.some(a=>a.result?.verified===true&&(!('exitCode'in a.result)||a.result.exitCode===0)))return;
+  const {value}=await require('./agent-json').checkedJSON({messages:[{role:'system',content:'从一次已完成任务的真实失败与恢复记录提取可复用操作经验。只写证据支持的技巧、适用条件和失效后替代路径，不保存测试文件名、联系人私事或凭据，不扩大权限，不把一次成功说成普遍保证。若没有明确可迁移经验返回instructions=null，否则严格JSON {"instructions":"600字以内具体技巧"}。'},{role:'user',content:JSON.stringify({skill:task.skill,goal:task.goal,attempts,environment:task.state.softwarePackages})}]},v=>{if(!v||v.instructions!==null&&(typeof v.instructions!=='string'||!v.instructions.trim()||v.instructions.length>1200))throw Error('恢复经验格式无效');return v;},this.request?{request:this.request}:{});
+  if(value.instructions){const taught=await this.teach({skill:task.skill,instructions:value.instructions},{task});task.state.learnedRecovery=taught.knowledgeId;}
+ }
  async completed(task){
+  try{await this.extractRecovery(task);}catch{ /* Learning never invalidates a delivered result. */ }
   const used=task.state.operatingKnowledge||[];
-  if(!used.length||!Object.values(task.operations).some(op=>op.effect==='write'&&op.status==='confirmed'))return;
+  if(!used.length||!Object.values(task.operations).some(op=>op.effect==='write'&&op.status==='confirmed'&&op.result?.verified===true))return;
   const rows=await this.rows(),latest=this.latest(rows);
   for(const item of used){const original=rows.find(r=>r.id===item.sourceId);if(!original)continue;
    const current=latest.find(r=>r.value.knowledgeId===original.value.knowledgeId);if(!current||current.value.instructions!==item.instructions)continue;
@@ -53,7 +75,7 @@ function registerLearning(tools,skills,learning){
  tools.register({name:'skill.learn',description:'保存主人传授的操作经验，带来源与版本；实际核验后积累证明，不修改代码或扩大权限。',effect:'write',capabilities:['skill.learn'],
   validate:v=>{fields(v,['skill','instructions'],'技能经验');return {skill:text(v.skill,'技能ID',100),instructions:text(v.instructions,'操作经验',6000)};},execute:(a,c)=>learning.teach(a,c)});
  skills.register({id:'skill.learn',title:'学习操作经验',version:1,description:'主人传授或修正已有技能的操作方法。parameters={skill:已有技能ID,instructions:完整经验}，subjects=[{application:"bunny"}]。经验保存为候选，两次真实核验后标记已验证。',
-  tools:['skill.learn'],capabilities:['skill.learn'],validate:(spec,actor)=>{if(actor.channel!=='dialogue')throw new Error('学习或修正技能经验请从本机主人对话交办');skills.get(spec.parameters.skill);text(spec.parameters.instructions,'操作经验',6000);},
+  tools:['skill.learn'],capabilities:['skill.learn'],validate:(spec,actor)=>{if(!['dialogue','bound-contact'].includes(actor.channel))throw new Error('学习经验需要已核实的主人交办入口');skills.get(spec.parameters.skill);text(spec.parameters.instructions,'操作经验',6000);},
   async run({task,call,report}){await call({tool:'skill.learn',key:'learn-once',args:{skill:task.parameters.skill,instructions:task.parameters.instructions}});await report('已保存这条操作经验。后续会在原权限内参考，并用实际核验积累证明。','learned');return {status:'completed',note:'操作经验已保存为候选',state:task.state};}});
 }
 module.exports={AgentLearning,registerLearning};

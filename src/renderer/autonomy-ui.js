@@ -4,7 +4,7 @@ export function setupAutonomy(pet) {
   const note = text => { $('autonomyStatus').textContent = text; };
   function paint() {
     if (!state) return;
-    note(state.paused ? '自主生活已暂停' : state.note);
+    note(state.paused ? '自主工作已暂停' : state.note);
     $('autonomyPath').textContent = state.directory || '等待资料库就绪';
     $('autonomyPause').hidden = !!state.paused;
     $('autonomyResume').hidden = !state.paused;
@@ -22,7 +22,7 @@ export function setupAutonomy(pet) {
       for (const file of row.artifactManifest?.files || []) { const path = document.createElement('p'); path.className = 'inline-note artifact-path'; path.textContent = file.path; box.append(path); }
       return box;
     }));
-    if (!list.children.length) list.textContent = '还没有生活记录，空闲时慢慢开始。';
+    if (!list.children.length) list.textContent = '还没有自主工作记录，空闲时会开始尝试。';
   }
   async function load() {
     const current = ++revision;

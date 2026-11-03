@@ -22,6 +22,7 @@ function code(dir) { for (const entry of fs.readdirSync(path.join(root, dir), { 
   else if (/\.(js|mjs|html|css|sh)$/.test(entry.name)) copy(relative);
 } }
 code('src');
+for(const pack of require('../src/main/software-skill-package').loadSoftwarePackages()){copy('src/software-skills/'+pack.id+'/manifest.json');for(const resource of pack.resources)copy('src/software-skills/'+pack.id+'/'+resource.path);}
 for (const file of fs.readdirSync(path.join(root, 'licenses'))) copy('licenses/' + file);
 for (const relative of ['package.json','README.md','LICENSE','THIRD_PARTY_NOTICES.md',...BRAND_FILES,'src/renderer/assets/icons/workbuddy-logo.png']) copy(relative);
 for (const asset of manifest.assets) {

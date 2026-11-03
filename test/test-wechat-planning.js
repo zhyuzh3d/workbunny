@@ -4,6 +4,17 @@ const { DesktopService } = require('../src/main/desktop-service');
 const scope = { id:'wechat-fixture', target:'wechat', operation:'send', recipient:'Alice', message:'hello',
  goal:'给Alice发送hello',workModel:'deepseek-v4.1-flash',thinking:'high',steps:[] };
 const shot = { preview:'data:image/png;base64,YQ==',ocr:[] };
+test('bilingual OCR duplicates cannot prevent exact readback of an already inserted draft',()=>{
+ const {wechatMessageVisible}=require('../src/main/desktop-service');
+ const frame={ocr:[{text:'[Bunny]',confidence:1,x:.33,y:.837,width:.08,height:.016},{text:'Good evening —',confidence:1,x:.42,y:.837,width:.3,height:.016},{text:'Good evening 一',confidence:.5,x:.42,y:.837,width:.3,height:.016},{text:'Message 123 received.',confidence:1,x:.33,y:.86,width:.3,height:.016},{text:'Message 123 received.',confidence:1,x:.33,y:.86,width:.3,height:.016}]};
+ assert(wechatMessageVisible(frame,'［Bunny］ Good evening — Message 123 received.','composer'));assert(!wechatMessageVisible(frame,'［Bunny］ Good evening — Message 124 received.','composer'));
+});
+test('a verified original draft and a unique pixel-derived send button submit without another model decision',()=>{
+ const {visualDraftSubmit}=require('../src/main/desktop-service'),frame={ocr:[{text:'Alice',confidence:.99,x:.4,y:.05,width:.1,height:.03},{text:'hello',confidence:.99,x:.4,y:.8,width:.1,height:.03},{text:'发送(S)',confidence:.99,x:.9,y:.94,width:.05,height:.03}]};
+ assert.equal(visualDraftSubmit(scope,frame,true).purpose,'submit');assert.equal(visualDraftSubmit({...scope,submitAttemptedAt:1},frame,true),null);
+ assert.equal(visualDraftSubmit({...scope,recipient:'Bob'},frame,true),null);assert.equal(visualDraftSubmit({...scope,message:'changed'},frame,true),null);assert.equal(visualDraftSubmit(scope,frame,false),null);assert.equal(visualDraftSubmit({...scope,attachment:{}},frame,true),null);
+ assert.equal(visualDraftSubmit(scope,{ocr:[...frame.ocr,{text:'发送',confidence:.99,x:.7,y:.94,width:.05,height:.03}]},true),null);
+});
 test('WeChat planning has explicit action JSON and retries only bounded read-only output exhaustion', async()=>{
  const calls=[];
  const s=new DesktopService({native:{},modelRequest:async options=>{
@@ -27,4 +38,10 @@ test('WeChat before/after screenshots are in one multimodal turn and do not surv
  assert.equal(calls[0].messages[1].content.filter(p=>p.type==='image_url').length,2);
  await s.nextAction({...scope,id:'another-task',submitAttempted:true},shot,new AbortController().signal);
  assert.equal(calls[1].messages[1].content.filter(p=>p.type==='image_url').length,1);
+});
+test('an inconclusive post-send view retries full-screen location twice without any further input',async()=>{
+ let frames=0,decisions=0,inputs=0;const now=Date.now(),s=new DesktopService({native:{request:async op=>op==='frontmost'?{application:{bundleId:'com.tencent.xinWeChat',pid:10},windows:[{pid:10,layer:0,windowId:20,rect:{width:821,height:909}}]}:{}},planner:async()=>{decisions++;return {action:'done',completed:false,evidence:'画面尚未核对'};}});
+ s.task={...scope,domain:'life',scene:'life',visibilityFloor:1,startedAt:now,attemptStartedAt:now,submitAttemptedAt:now-1000,draftInserted:true,status:'running',steps:[]};s.running=true;s.generation=1;s.controller=new AbortController();s.displayRegionAnchor={windowId:20};
+ s.capture=async()=>{frames++;return {at:Date.now(),ocr:[],preview:shot.preview};};s.act=async()=>{inputs++;};s.assertScreenshotCurrent=async()=>{};
+ await s.runOwned(1,{...scope,startedAt:now,attemptStartedAt:now});assert.equal(frames,3);assert.equal(decisions,3);assert.equal(inputs,0);assert.equal(s.displayRegionAnchor,null);assert.equal(s.task.status,'paused');assert(s.task.proofCorrection.includes('全屏重新定位'));
 });
