@@ -364,7 +364,7 @@ function renderKnowledgeRecord(raw) {
   top.append(node('span', 'badge', row.label || knowledgeTypeLabel(row.knowledgeType)));
   for (const tag of (row.tags || []).filter(t => t === '主动记忆' || t === '自动记忆')) top.append(node('span', 'badge', tag));
   if (row.status) top.append(node('span', `badge${['pending', 'open', 'unresolved', 'snoozed'].includes(row.status) ? ' pending' : ''}`,
-    row.knowledgeType === 'experience' && row.status === 'candidate' ? '单次已验收' : knowledgeStatusLabel(row.status)));
+    row.knowledgeType === 'experience' && row.status === 'candidate' ? '参考经验' : knowledgeStatusLabel(row.status)));
   card.append(top, node('div', 'record-content', row.content || '（空内容）'));
 
   const choices = Array.isArray(row.memberChoices) ? row.memberChoices.filter(choice =>
@@ -644,6 +644,12 @@ $('knowledgeCategory').addEventListener('change', event => {
   memoryCategory = ['all', 'relation', 'doubt', 'experience', 'tool'].includes(event.target.value) ? event.target.value : 'all';
   loadMemoryList(true);
 });
+for(const [id,kind] of [['experienceImportZip','zip'],['experienceImportFolder','folder']])$(id).onclick=async()=>{
+  $('experienceImportZip').disabled=$('experienceImportFolder').disabled=true;
+  try{setNote('experienceImportNote','正在读取资源包…');const result=await api('experienceImport',kind);if(result.canceled){setNote('experienceImportNote','');return;}setNote('experienceImportNote',result.duplicate?'已导入过此版本，无需重复添加':`已导入 ${result.experiences} 条经验、${result.tools} 个工具；Bunny 将整理吸收`);await loadMemoryList(true);}
+  catch(error){setNote('experienceImportNote',error.message);}
+  finally{$('experienceImportZip').disabled=$('experienceImportFolder').disabled=false;}
+};
 $('memorySearchBtn').addEventListener('click', () => { memoryQuery = $('memorySearch').value.trim(); loadMemoryList(true); });
 $('memorySearch').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('memorySearchBtn').click(); } });
 $('memoryMore').addEventListener('click', () => { if (memoryHasMore) loadMemoryList(false); });
@@ -864,8 +870,7 @@ function paintAgent(snapshot) {
   const finished = rows.filter(t => ['completed','stopped','expired'].includes(t.status));
   if (finished.length) { const details = node('details','watch-inactive'); details.append(node('summary','',`最近结束的任务（${finished.length}）`)); for (const task of finished.slice(-20).reverse()) details.append(render(task)); list.append(details); }
   const skills = $('agentSkillList'); skills?.replaceChildren();
-  for(const pack of agentSnapshot.softwarePackages||[]){const item=node('article','watch-item');item.append(node('div','watch-item-name',(pack.id==='wechat'?'微信':'WorkBuddy')+' · 基础套件 v'+pack.version),node('div','watch-item-note',pack.id==='wechat'?'外部画面与键鼠，区域失效时全屏重新定位':'专用控件优先，截图与键鼠兜底'));skills?.append(item);}
-  for (const skill of agentSnapshot.skills || []) { const item=node('article','watch-item'); item.append(node('div','watch-item-name',skill.title || '操作技能'),node('div','watch-item-note',skill.description)); const learned=(agentSnapshot.learnedSkills||[]).find(k=>k.skill===skill.id);if(learned)item.append(node('div','watch-item-time','操作经验 r'+learned.revision+' · '+({candidate:'候选',validated:'已核对',quarantined:'已停用'}[learned.status]||learned.status)+' · '+learned.proofs+' 次结果证明'));skills?.append(item); }
+  for (const skill of agentSnapshot.skills || []) { const item=node('article','watch-item'); item.append(node('div','watch-item-name',skill.title || '任务执行器'),node('div','watch-item-note',skill.description));skills?.append(item); }
   $('agentCircuit').hidden = !agentSnapshot.circuit; $('agentReconnect').hidden = !agentSnapshot.circuit;
   if (agentSnapshot.circuit) $('agentCircuit').textContent = '微信操作已停止：'+agentSnapshot.circuit.reason+'。Bunny 不会自动重开或登录微信。';
 }

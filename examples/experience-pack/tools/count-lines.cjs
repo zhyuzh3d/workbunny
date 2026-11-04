@@ -1,0 +1,3 @@
+'use strict';
+// JSON on stdin; JSON on stdout. No files, network, or imported dependencies.
+let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>{input+=chunk;if(input.length>500000){process.stderr.write('input too large');process.exit(1);}});process.stdin.on('end',()=>{try{const value=JSON.parse(input);if(typeof value.text!=='string')throw Error('text is required');const lines=value.text?value.text.split(/\r?\n/u):[];process.stdout.write(JSON.stringify({lines:lines.length,nonEmptyLines:lines.filter(s=>s.trim()).length}));}catch(e){process.stderr.write(e.message);process.exitCode=1;}});

@@ -14,6 +14,23 @@ async function withTempDir(fn) {
 }
 
 async function main() {
+  const taskId='agent-'+require('node:crypto').randomUUID();
+  const owned=path.join(os.homedir(),'Library','Application Support','workbunny','workspaces',taskId);
+  await fs.mkdir(owned,{recursive:true});
+  try {
+    const file=path.join(owned,'result.md'),secret=path.join(owned,'passwords.txt');
+    await fs.writeFile(file,'Synthetic output used only by the evidence test.');
+    await fs.writeFile(secret,'Synthetic protected filename fixture.');
+    const task={userRequest:'请生成成果并放入本任务成果目录',workProductionOnly:true,sources:[taskId],authorizedArtifactRoots:[owned],monitorSummary:JSON.stringify([file,secret])};
+    const result=await collectDeliveryEvidence(task);
+    assert.equal(result.files.find(f=>f.path===file)?.role,'artifact');
+    assert.ok(result.files.find(f=>f.path===file)?.sha256,'host-created task workspace remains readable under Library');
+    assert.ok(!result.files.find(f=>f.path===secret)?.sha256,'sensitive filenames remain protected inside the workspace');
+    const discovered=await collectDeliveryEvidence({...task,monitorSummary:'result.md 已保存，目录 '+JSON.stringify(owned)});
+    assert.ok(discovered.files.find(f=>f.path===file)?.sha256,'an owned output can be recovered from a directory and basename report');
+    assert.equal((await collectDeliveryEvidence({...task,sources:[]})).files.length,0,'unbound Library roots cannot be admitted');
+    assert.equal((await collectDeliveryEvidence({...task,authorizedArtifactRoots:[path.dirname(owned)]})).files.length,0,'a broader Library root cannot be admitted');
+  } finally { await fs.rm(owned,{recursive:true,force:true}); }
   await withTempDir(async root => {
     const dir = path.join(root, 'authorized output with spaces');
     await fs.mkdir(dir);

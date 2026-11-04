@@ -149,6 +149,7 @@ class MemoryService {
     this.blocks = new (require('./message-blocks').MessageBlocks)({ memory: this, clock });
     this.knowledge = createMemoryKnowledge({ memory: this, clock });
     this.experiences = createExperienceMemory({ memory: this, clock });
+    this.experienceRepository = new (require('./experience-repository').ExperienceRepository)({memory:this,clock});
     this.affect = new CompanionAffect({ clock });
     this.cognition = new CognitionRepository({ memory: this, clock, onChange: () => { this.selfRevisionChanged?.(); void this.notifyChange(); } });
     this.growth = new (require('./companion-growth').CompanionGrowth)({ memory: this, clock });
@@ -202,7 +203,7 @@ class MemoryService {
     this.recent = [];
     if (this.ready) {
       await this.tail;
-      const rows = conversationMessages(await this.query('message', 80, { scene, sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse();
+      const rows = conversationMessages(await this.query('message', 80, { scene, channelId:'local', sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse();
       if (token === this.sceneEpoch) this.recent = rows;
     }
   }
@@ -213,11 +214,19 @@ class MemoryService {
     return { id: record.id, kind: record.kind, ts: record.ts, updatedAt: record.updatedAt || record.ts, state: record.state || 'active', expiresAt: record.expiresAt || null,
       ...scope, ...(restoreSequence ? { ingestionSeq: record.ingestionSeq } : {}), body: vc.seal(this.key, { ...record.value, _scopeV1: scope }, record.id + ':' + record.kind),
       tokens: vc.tokenKeys(this.key, references.tokens(record.value).join(' ') + ' ' +
+        ((record.kind === 'message' || record.value.channelId) ? require('./dialogue-channels').marker(record.value.channelId || 'local') + ' ' : '') +
+        (record.value.ownerOnly === true ? 'bunny_owner_only ' : '') +
+        (record.kind === 'state' && record.value.origin === 'dialogue-channel-v1' ? 'bunny_dialogue_channel ' : '') +
         (record.kind === 'task' && record.value.taskType === 'contact' ? 'bunny_contact_anchor ' : '') + knowledge.markersOf(record).join(' ') + ' ' +
+        require('./experience-repository').markers(record).join(' ') + ' ' +
+        (record.kind === 'task' && record.value.taskType === 'agent-skill' ? 'bunny_agent_skill ' : '') +
         (record.kind === 'task' && record.value.schema === 'task-notification/v1' ? 'bunny_task_notification_anchor ' : '') +
         (record.kind === 'task' && record.value.schema === 'interaction-strategy/v1' && record.value.outcome === 'failed' ? 'bunny_interaction_failed_anchor ' : '') +
         (record.kind === 'message' && !actors.isOwner(record.value) && !actors.isBunny(record.value) ? 'bunny_external_message ' : '') +
+        (record.kind === 'message' && actors.isOwner(record.value) && require('./sensitive-policy').sensitiveValues(record.value.content).length ? 'bunny_sensitive_content ' : '') +
+        (record.kind === 'memory' && record.value.sensitive === true ? 'bunny_sensitive_content ' : '') +
         (record.kind === 'state' && record.value.origin === 'message-block-v1' ? 'bunny_message_block ' : '') +
+        (record.kind === 'state' && record.value.origin === 'task-experience-queue-v1' && record.value.status === 'pending' ? 'bunny_task_experience_pending ' : '') +
         (record.kind === 'state' && record.value.schema === 'growth-entry/v1' ? `bunny_growth_entry ${record.value.entryId} ` : '') +
         (record.kind === 'memory' && record.value.origin === 'deepdream-merged-v1' ? 'bunny_memory_merged ' : '') +
         (record.kind === 'state' && ['context-head-v2', 'context-current-v2'].includes(record.value.origin) ? 'bunny_context_head ' : '') +
@@ -258,6 +267,9 @@ class MemoryService {
         if (!parents.has(source)) throw new Error('资料来源已删除或不存在');
         return parents.get(source);
       });
+      if(['memory','summary'].includes(r.kind)&&!r.value.perception){const perception=require('./perception').derived(r.kind,r.value.origin,sources);if(perception)r.value={...r.value,perception};}
+      if(!r.value.channelId&&['memory','summary'].includes(r.kind)){const evidence=sources.find(source=>source.id===r.value.evidenceSourceId);const channel=evidence?.value.channelId||(sources.length&&sources.every(source=>source.value.channelId===sources[0].value.channelId)?sources[0].value.channelId:null);if(channel)r.value={...r.value,channelId:channel};}
+      if(sources.some(source=>source.value.ownerOnly===true))r.value={...r.value,ownerOnly:true};
       const domain = r.domain ?? r.value.domain ?? this.scene();
       Object.assign(r, scopes.withSources(domain, sources, r.visibilityFloor ?? r.value.visibilityFloor));
     }
@@ -271,10 +283,25 @@ class MemoryService {
     return [...new Set(markers.flatMap(value => vc.tokenKeys(this.key, value, 8)))];
   }
   async query(kind, limit = 50, cursor = {}) {
-    this.check(); const { requiredMarkers, excludedMarkers, ...nativeCursor } = cursor;
+    this.check(); const { channelId, ownerOnly, requiredMarkers: requestedMarkers, excludedMarkers: requestedExcluded, ...nativeCursor } = cursor; const requiredMarkers=[...(requestedMarkers||[]),...(channelId?[require('./dialogue-channels').marker(channelId)]:[]),...(ownerOnly===true?['bunny_owner_only']:[])];const excludedMarkers=[...(requestedExcluded||[]),...(ownerOnly===false?['bunny_owner_only']:[])];
     return (await this.db.request('query', { kind, limit, scene: this.scene(), ...nativeCursor,
       ...(requiredMarkers ? { requiredTokens: this.markerTokens(requiredMarkers) } : {}),
       ...(excludedMarkers ? { excludedTokens: this.markerTokens(excludedMarkers) } : {}) })).rows.map(r => this.decode(r));
+  }
+  async sensitiveValues() {
+    // Protect known owner-provided values even when their originating scene is
+    // not visible to the current task. Do not return these values to the UI.
+    this.check(); await this.tail;const values=new Set();
+    for(const kind of ['message','memory']){let cursor={};for(;;){
+      const rows=await this.query(kind,200,{...cursor,scene:null,requiredMarkers:['bunny_sensitive_content']});
+      for(const row of rows)if(row.state==='active'&&(kind==='memory'&&row.value.sensitive===true||kind==='message'&&actors.isOwner(row.value))){
+        const found=require('./sensitive-policy').sensitiveValues(row.value.content);
+        for(const value of found)values.add(value);
+        if(kind==='memory'&&!found.length&&typeof row.value.content==='string'&&row.value.content.trim())values.add(row.value.content.trim());
+      }
+      if(rows.length<200)break;const last=rows.at(-1);cursor={before:last.ts,beforeId:last.id};
+    }}
+    return [...values];
   }
   async search(text, kinds = ['memory', 'summary', 'message'], limit = 30, { scene = this.scene(), domain, visibilityFloor, requiredMarkers, excludedMarkers, anyTokens } = {}) {
     this.check();
@@ -393,10 +420,11 @@ class MemoryService {
     });
   }
   addMessage(role, content, details = {}) {
-    if (containsSecret(content)) return Promise.reject(new Error('普通对话不能保存密码或密钥'));
     if (!this.getSettings().enabled || !String(content || '').trim()) return Promise.resolve(null);
     content = actors.validateText(content);
     const meta = actors.identity(role, details); role = meta.role;
+    const sensitive=containsSecret(content)||require('./sensitive-policy').sensitiveValues(content).length>0;
+    if(sensitive&&!(details.allowSensitive===true&&(actors.isOwner(meta)||actors.isBunny(meta)||!!details.channelId)))return Promise.reject(new Error('只有本机主人对话可保存敏感内容'));
     const cognitive = details.cognition && actors.isBunny(meta) ? require('./dialogue-cognition').stored(details.cognition) : null;
     const generation = this.generation;
     const scene = scopes.normalizeScene(details?.scene, this.scene());
@@ -419,7 +447,7 @@ class MemoryService {
       const turnId = safeDetails.turnId || (actors.isOwner(meta) ? recordId : actors.isBunny(meta) ? this.recent.filter(r => actors.isOwner(r.value)).at(-1)?.value.turnId : undefined);
       const record = { id: recordId, kind: 'message', ts: this.clock(), domain: details.domain ?? scene,
         ...(details.visibilityFloor !== undefined ? { visibilityFloor: details.visibilityFloor } : {}), value: {
-        ...meta, content,
+        ...meta, content,...(sensitive?{sensitive:true}:{}),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ...(cognitive ? { cognition: cognitive } : {}),
         ...(turnId ? { turnId } : {}),
@@ -432,6 +460,11 @@ class MemoryService {
       await this.write([record]); if (scopes.canRead(this.scene(), record)) this.recent.push(record); this.recent = this.recent.slice(-80);
       if (actors.isOwner(meta)) {
         this.userMessagesSeen = ordinal;
+        if(sensitive&&require('./memory-commands').explicitRequest(content)){
+          await this.write([{id:'sensitive-memory:'+recordId,kind:'memory',ts:record.ts,domain:record.domain,visibilityFloor:record.visibilityFloor,
+            value:{content,memoryKind:'credential',status:'confirmed',origin:'owner-sensitive',sensitive:true,importance:1,
+              evidence:content.slice(0,1200),evidenceSourceId:recordId,sources:[recordId]}}]);
+        }
         await this.ruleMemory(record);
         this.updateMood(content, record.id, record);
         await this.saveState();
@@ -441,11 +474,11 @@ class MemoryService {
     });
   }
   addMessageOnce(recordId, role, content, details = {}) {
-    if (containsSecret(content)) return Promise.reject(new Error('普通对话不能保存密码或密钥'));
     if (typeof recordId !== 'string' || !recordId || recordId.length > 256 ||
         typeof content !== 'string' || !content.trim()) return Promise.reject(new Error('幂等消息格式不合法'));
     content = actors.validateText(content);
     const meta = actors.identity(role, details); role = meta.role;
+    if((containsSecret(content)||require('./sensitive-policy').sensitiveValues(content).length)&&!(details.allowSensitive===true&&(actors.isOwner(meta)||actors.isBunny(meta)||!!details.channelId)))return Promise.reject(new Error('只有本机主人对话可保存敏感内容'));
     const cognitive = details.cognition && actors.isBunny(meta) ? require('./dialogue-cognition').stored(details.cognition) : null;
     const safeDetails = details && typeof details === 'object' && !Array.isArray(details) ? details : {};
     if (Object.hasOwn(safeDetails, 'privacyEpoch') && !Number.isSafeInteger(safeDetails.privacyEpoch)) {
@@ -480,7 +513,7 @@ class MemoryService {
         if (existing.kind !== 'message') throw new Error('幂等消息 ID 已被其他记录占用');
         const prior = this.decode(existing).value;
         const sameSources = JSON.stringify([...(prior.sources || [])].sort()) === JSON.stringify([...value.sources].sort());
-        if (actors.character(prior) !== meta.characterId || prior.role !== value.role || prior.content !== value.content || prior.delivery !== value.delivery || !sameSources ||
+        if ((prior.channelId||'local')!==meta.channelId||!!prior.ownerOnly!==!!meta.ownerOnly||!!prior.verifiedOwner!==!!meta.verifiedOwner||actors.character(prior) !== meta.characterId || prior.role !== value.role || prior.content !== value.content || prior.delivery !== value.delivery || !sameSources ||
             JSON.stringify(prior.cognition || null) !== JSON.stringify(value.cognition || null) || (prior.turnId || null) !== (value.turnId || null)) {
           throw new Error('幂等消息 ID 已存在，但内容或来源不一致');
         }
@@ -669,26 +702,27 @@ class MemoryService {
         value: { setting: snapshot, revision: (previous?.value.revision || 0) + 1, sources: [] } }]);
     });
   }
-  async context(userText, { internal = false, recent = [], budget = 8500, scene = this.scene() } = {}) {
+  async context(userText, { internal = false, recent = [], budget = 8500, scene = this.scene(), allowSensitive = false } = {}) {
     scopes.rank(scene);
     const now = this.clock(), time = timeContext(now), epoch = this.generation;
     const charBudget = Number.isFinite(budget) ? Math.max(0, Math.floor(budget)) : 8500;
     if (!this.db || !this.getSettings().enabled) {
       const text = time.line.slice(0, charBudget);
-      const session = recent.filter(r => scopes.canRead(scene, r) && !containsSecret(r.content)).map(r => ({ value: r }));
-      const selected = recentMessages(session, { count: 20, budget: Math.max(0, charBudget - text.length) });
+      const session = recent.filter(r => scopes.canRead(scene, r) && (allowSensitive||!containsSecret(r.content))).map(r => ({ value: r }));
+      const selected = recentMessages(session, { count: 20, budget: Math.max(0, charBudget - text.length),includeSensitive:allowSensitive });
       return { text, messages: selected.rows.map(actors.inputRow), epoch, scene, used: text.length + selected.used, sourceIds: [], references: [] };
     }
     await this.tail;
     const compression = !internal && this.compression ? await this.compression.snapshot(scene) : null;
-    const visibleRecent = conversationMessages(await this.query('message', 80, { scene, sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse();
-    const recentIds = new Set(recentMessages(visibleRecent, { count: this.getSettings().recentMessages || 20, budget: Math.floor(charBudget * .5) }).rows.map(row => row.id));
+    const visibleRecent = conversationMessages(await this.query('message', 80, { scene, channelId:'local', sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse();
+    const recentIds = new Set(recentMessages(visibleRecent, { count: this.getSettings().recentMessages || 20, budget: Math.floor(charBudget * .5),includeSensitive:allowSensitive }).rows.map(row => row.id));
     let memories = [], episodes = [], doubts = [], tentative = [];
     const knowledgeContext = !internal ? await this.knowledge.context(userText, { scene, budget: 1000 }) : { text: '', sourceIds: [], suppressedIds: [] };
     if (!internal) {
       doubts = await this.relevantConflicts(userText, { scene });
       const doubtfulKeys = new Set(doubts.map(row => row.value.key));
-      const found = (await this.recall(`${userText} ${time.monthDay} ${time.holiday}`, { scene })).filter(safeModelRow);
+      const allowedRow=row=>safeModelRow(row)||(allowSensitive&&(row.value?.sensitive===true||row.kind==='message'&&(actors.isOwner(row.value)||actors.isBunny(row.value))));
+      const found = (await this.recall(`${userText} ${time.monthDay} ${time.holiday}`, { scene })).filter(allowedRow);
       // Indexed anchors remain reachable after years of newer facts, without scanning the whole vault.
       const pinned = (await this.search('bunny_pinned_memory bunny_anniversary_memory', ['memory'], 20, { scene })).filter(safeModelRow).map(r => ({ ...r, score: 0, anchorOnly: true }));
       const anniversaryQueries = [`bunny_anniversary_solar_${time.month}_${time.day}`];
@@ -750,7 +784,7 @@ class MemoryService {
         const reviewTime = r.value.resolvedAt ?? r.value.correctedAt;
         const review = ['user-reviewed', 'user-reviewed-conflict', 'user-reviewed-doubt'].includes(r.value.origin) && r.value.status === 'confirmed'
           ? ` 用户已核对${Number.isSafeInteger(reviewTime) ? '于' + new Date(reviewTime).toISOString() : ''}，作为当前有效信息${r.value.resolvedFrom?.length ? '并替代此前不同说法' : ''}` : '';
-        const line = `[${r.id.slice(0, 8)} ${new Date(r.ts).toISOString()} ${r.value.role ? actors.character(r.value) : r.value.memoryKind || '摘要'}${r.value.evidenceCharacter ? ' 来源:' + r.value.evidenceCharacter : ''}${review}] ${JSON.stringify(clipped(r.normalizedContent || textOf(r.value), r.kind === 'message' ? 350 : 600))}`;
+        const line = `[${r.id.slice(0, 8)} ${new Date(r.ts).toISOString()} ${r.value.role ? actors.character(r.value) : r.value.memoryKind || '摘要'}${r.value.evidenceCharacter ? ' 来源:' + r.value.evidenceCharacter : ''}${review}${r.value.perception?' 感知:'+r.value.perception.channel+'/'+r.value.perception.level+' via '+r.value.perception.transforms.join('>'):''}] ${JSON.stringify(clipped(r.normalizedContent || textOf(r.value), r.kind === 'message' ? 350 : 600))}`;
         const cost = line.length + (section.length ? 1 : heading.length + 2);
         if (cost > historyRemaining) break;
         historyRemaining -= cost;
@@ -791,10 +825,10 @@ class MemoryService {
     }
     let remaining = charBudget - used(), messages = [];
     const source = visibleRecent.length ? visibleRecent : recent.filter(r => scopes.canRead(scene, r)).map(r => ({ id: r.id, value: r }));
-    const selected = recentMessages(source, { count: this.getSettings().recentMessages || 20, budget: remaining });
+    const selected = recentMessages(source, { count: this.getSettings().recentMessages || 20, budget: remaining,includeSensitive:allowSensitive });
     for (const r of selected.rows) { messages.push(actors.inputRow(r)); includeSource(r.id); }
     remaining -= selected.used;
-    const externalRows = (await this.query('message', 80, { scene, sort: 'ingestion', excludedMarkers: [], requiredMarkers: ['bunny_external_message'] })).reverse().filter(safeModelRow);
+    const externalRows = (await this.query('message', 80, { scene, channelId:'local', sort: 'ingestion', excludedMarkers: [], requiredMarkers: ['bunny_external_message'] })).reverse().filter(safeModelRow);
     const preparedExternal = this.blocks ? await this.blocks.prepare(externalRows) : { units: externalRows.map(actors.inputRow) };
     const externalMessages = (preparedExternal.units || []).slice(-8);
     for (const row of externalMessages) for (const id of row.sourceIds || [row.id]) includeSource(id);
@@ -924,7 +958,7 @@ class MemoryService {
   updateMemory(recordId, content) {
     this.cancelExtraction(); this.generation++; clearTimeout(this.extractTimer); this.extractTimer = null;
     return this.serial(async () => {
-      if (typeof content !== 'string' || !content.trim() || content.length > 1000 || SECRET.test(content)) throw new Error('请填写 1–1000 字的记忆，不保存密钥或密码');
+      if (typeof content !== 'string' || !content.trim() || content.length > 1000) throw new Error('请填写 1–1000 字的记忆');
       const previous = (await this.db.request('get', { ids: [recordId], scene: this.scene() })).rows[0];
       if (!previous || previous.kind !== 'memory') throw new Error('记忆已不存在');
       const r = this.decode(previous), ts = this.clock();
@@ -952,7 +986,8 @@ class MemoryService {
       const expiry = r.value.memoryKind === 'temporary' ? references.temporaryExpiry({ ts, value: { content: corrected } }) : r.expiresAt;
       await this.write([...superseded, { id: factId, kind: 'memory', ts, expiresAt: expiry, ...scope, value: {
         content: normalized.canonical, references: normalized.references, key: stableCorrection?.key || (['user.name', 'user.birthday'].includes(r.value.key) ? '' : r.value.key || ''),
-        memoryKind: stableCorrection?.memoryKind || (r.value.memoryKind === 'temporary' ? expiry ? 'temporary' : 'fact' : ['anniversary', 'candidate'].includes(r.value.memoryKind) ? 'fact' : r.value.memoryKind || 'fact'),
+        memoryKind: containsSecret(corrected)||r.value.sensitive===true?'credential':stableCorrection?.memoryKind || (r.value.memoryKind === 'temporary' ? expiry ? 'temporary' : 'fact' : ['anniversary', 'candidate'].includes(r.value.memoryKind) ? 'fact' : r.value.memoryKind || 'fact'),
+        ...(containsSecret(corrected)||r.value.sensitive===true?{sensitive:true}:{}),
         ...(stableCorrection ? { canonicalValue: stableCorrection.canonicalValue, ...(stableCorrection.anniversary ? { anniversary: stableCorrection.anniversary } : {}) } : {}),
         importance: 1, status: 'confirmed', evidence: corrected, supersedes: retiredIds, supersedesClaims: claims,
         ...(r.value.protected ? { protected: r.value.protected } : {}), ...(r.value.pinned ? { pinned: r.value.pinned } : {}),
@@ -1008,7 +1043,8 @@ class MemoryService {
       if (rows.length > 500000) throw new Error('资料过大，请分阶段导出');
       const last = page.at(-1); cursor = { before: last.ts, beforeId: last.id };
     }
-    return vc.exportEnvelope({ format: 1, exportedAt: this.clock(), records: rows, persona: personaSnapshot(this.getPersona()) }, passphrase);
+    const experienceResources=await this.experienceRepository.exportResources(rows);
+    return vc.exportEnvelope({ format: 1, exportedAt: this.clock(), records: rows, experienceResources,persona: personaSnapshot(this.getPersona()) }, passphrase);
     });
   }
   async restore(text, passphrase) {
@@ -1046,12 +1082,14 @@ class MemoryService {
     return this.serial(async () => {
       const currentCounts = (await this.db.request('stats')).counts;
       if (['message', 'memory', 'summary', 'task'].some(kind => (currentCounts[kind] || 0) > 0)) throw new Error('请先导出并清空当前记忆，再恢复备份');
+      await this.experienceRepository.restoreResources(data.records,data.experienceResources);
       if ((currentCounts.total || 0) > 0) this.epoch = (await this.db.request('clear')).epoch; // Fresh-install persona/state may be replaced by the verified backup.
       try {
         await this.db.request('begin_restore');
         for (const batch of restoreBatches) await this.write(batch, this.epoch, { notify: false, restoreSequence: true });
         await this.db.request('end_restore');
       } catch (e) { this.epoch = (await this.db.request('clear')).epoch; throw e; }
+      await this.experienceRepository.reindexAliases(data.records);
       this.generation++; this.recent = conversationMessages(await this.query('message', 40)).reverse();
       const restoredState = (await this.db.request('get', { ids: ['companion-state'] })).rows.map(r => this.decode(r))[0]?.value;
       if (restoredState) {

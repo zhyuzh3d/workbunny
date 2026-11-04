@@ -2,20 +2,22 @@
 // Repairs are small, request-scoped adjustments, never executable code or new authority.
 const crypto=require('node:crypto');
 const {parseStrictJson}=require('./strict-json');
-const BLOCKED=new Set(['E_PERMISSION_REQUIRED','E_TASK_AUTH','E_APP_CIRCUIT','E_GUI_BUSY','ABORT_ERR','E_ABORTED']);
-const OPTIONS={context:['compact_context','retry','defer'],schema:['repair_schema','retry','defer'],output:['increase_output','retry','defer'],unexpected:['retry','defer']};
+const BLOCKED=new Set(['E_PERMISSION_REQUIRED','E_TASK_AUTH','E_APP_CIRCUIT','E_GUI_BUSY','E_CAPTURE_BUSY','E_NO_PROGRESS','ABORT_ERR','E_ABORTED']);
+const OPTIONS={context:['compact_context','retry','defer'],schema:['repair_schema','retry','defer'],output:['increase_output','retry','defer'],response:['compact_response','retry','defer'],unexpected:['retry','defer'],stall:['reobserve','change_method','wait','ask_owner']};
 function category(error){
  const code=String(error?.code||'');if(BLOCKED.has(code))return null;
  if(['E_CONTEXT_WINDOW','E_CONTEXT_BUDGET'].includes(code))return 'context';
  if(['E_MODEL_SCHEMA','E_REPLY_PROTOCOL'].includes(code))return 'schema';
  if(['E_OUTPUT_LIMIT','E_EMPTY_RESPONSE'].includes(code))return 'output';
+ if(code==='E_PAYLOAD_TOO_LARGE')return 'response';
  if(/(?:timeout|超时|network|网络|连接|ECONNRESET|ETIMEDOUT)/iu.test(String(error?.message||'')))return null;
  return 'unexpected';
 }
 function incident(task,error){return crypto.createHash('sha256').update(JSON.stringify([task.skill,error.code||'E_STEP',String(error.message||''),task.inbox?.[0]?.key||'',task.state?.stepSequence||0,task.state?.goalRevision||0])).digest('hex').slice(0,24);}
-async function advise({kind,skill,code,attempt,phase,errorType,schemaAudit,signal,request,timeoutMs=12000}){
+async function advise({kind,skill,code,attempt,phase,errorType,schemaAudit,progress,signal,request,timeoutMs=12000}){
  const choices=OPTIONS[kind];if(!choices)throw Error('unsupported repair category');
- const context={kind,skill,code,attempt,...(phase?{phase}:{}),...(errorType?{errorType}:{}),...(schemaAudit?{schemaAudit}:{}),allowedActions:choices, constraints:'仅诊断可恢复的模型或任务错误；不能修改任务目标、权限、实际数据或已确认操作。'};
+ const timing=progress?Object.fromEntries(['elapsedMs','withoutProgressMs','waitingMs','stage','stageElapsedMs','repeatedEvidence','reviews','lastMethod','waitReason','facts','spent'].filter(k=>Object.hasOwn(progress,k)).map(k=>[k,progress[k]])):undefined;
+ const context={kind,skill,code,attempt,...(phase?{phase}:{}),...(errorType?{errorType}:{}),...(schemaAudit?{schemaAudit}:{}),...(timing?{progress:timing}:{}),allowedActions:choices, constraints:'仅诊断可恢复的模型或任务错误；不能修改任务目标、权限、实际数据或已确认操作。连续核查没有新证据时要改变方法，不能用同一检查或笼统等待重复续期；时间只用于决策，不可编造成功或重发未知写入。'};
  try{
   const invoke=request||require('./verification-transport').requestVerification,controller=new AbortController();
   const cancel=()=>controller.abort();signal?.addEventListener('abort',cancel,{once:true});
@@ -24,14 +26,16 @@ async function advise({kind,skill,code,attempt,phase,errorType,schemaAudit,signa
   let response;
   try{
    const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(Error('diagnostic timeout'));},Math.min(12000,Math.max(1,timeoutMs)));});
-   response=await Promise.race([invoke({signal:controller.signal,messages:[{role:'system',content:'你是Bunny的错误诊断器。只根据提供的错误类别与运行元数据选择一个允许的修复动作；不能执行工具或要求扩大权限。输出严格JSON {"action":"允许动作之一"}。不需要任务正文。'},{role:'user',content:JSON.stringify(context)}]}),timeout]);
+   response=await Promise.race([invoke({signal:controller.signal,messages:[{role:'system',content:require('./action-progress').GUIDANCE+'你是Bunny，负责根据错误类别与运行元数据自主决定恢复方法，不能扩大权限。'+(kind==='stall'?'耗时和重复是供你判断的事实，不是任务失败结论。判断怎样取得关键新信息、换方法、等待实际条件或请求主人帮助。输出JSON {"action":"允许动作之一","nextStep":"具体下一步及依据"}；选择wait时另加waitFor为具体等待条件、waitMs为下次检查间隔（毫秒）。不要反复重试同一无效检查。':'输出严格JSON {"action":"允许动作之一"}。不需要任务正文。')},{role:'user',content:JSON.stringify(context)}]}),timeout]);
   }finally{clearTimeout(timer);signal?.removeEventListener('abort',cancel);controller.abort();}
   const value=parseStrictJson(response?.response?.text||'');
-  if(!value||Array.isArray(value)||Object.keys(value).length!==1||!choices.includes(value.action))throw Error('invalid advice');
-  return {action:value.action,source:'llm'};
+  if(!value||Array.isArray(value)||!choices.includes(value.action)||kind!=='stall'&&Object.keys(value).length!==1)throw Error('invalid advice');
+  if(kind==='stall'&&value.nextStep!==undefined&&(typeof value.nextStep!=='string'||!value.nextStep.trim()||value.nextStep.length>1000))throw Error('invalid next step');
+  if(kind==='stall'&&value.action==='wait'&&(typeof value.waitFor!=='string'||!value.waitFor.trim()||value.waitFor.length>300||!Number.isFinite(value.waitMs)))throw Error('waiting needs a condition');
+  return {action:value.action,source:'llm',...(kind==='stall'?{nextStep:value.nextStep,waitFor:value.waitFor,waitMs:value.waitMs}:{})};
  }catch(error){
   if(signal?.aborted)throw error;
-  return {action:{context:'compact_context',schema:'repair_schema',output:'increase_output',unexpected:'defer'}[kind],source:'local'};
+  return {action:{context:'compact_context',schema:'repair_schema',output:'increase_output',response:'compact_response',unexpected:'defer',stall:'reobserve'}[kind],source:'local'};
  }
 }
 function auditSchemas(catalog){
@@ -54,6 +58,7 @@ function applyAction(profile={},action,{code}={}){
  if(action==='compact_context'){next.contextLevel=Math.min(2,(next.contextLevel||0)+1);if(code==='E_CONTEXT_WINDOW')next.budgetScale=.5;}
  if(action==='repair_schema')next.schemaHint=true;
  if(action==='increase_output')next.maxTokens=8192;
+ if(action==='compact_response')next.responseLevel=Math.min(2,(next.responseLevel||0)+1);
  return next;
 }
 // Whitelist only replaceable historical context; never trim task goals,
@@ -86,6 +91,7 @@ function applyProfile(options,profile){
   const system=messages.find(m=>m.role==='system'&&typeof m.content==='string');
   if(system)system.content+='\n'+hint;else messages.unshift({role:'system',content:hint});
  }
- return {...options,messages,...(profile.maxTokens?{maxTokens:Math.min(8192,Math.max(4096,Number(profile.maxTokens)||4096))}:{}),...(profile.budgetScale===.5?{budgetScale:.5}:{})};
+ const response=profile.responseLevel?{maxTokens:profile.responseLevel>1?1024:2048,thinking:'low',budgetScale:.5,extraBody:{...options.extraBody,reasoning_effort:'low'}}:{};
+ return {...options,messages,...(profile.maxTokens?{maxTokens:Math.min(8192,Math.max(4096,Number(profile.maxTokens)||4096))}:{}),...(profile.budgetScale===.5?{budgetScale:.5}:{}),...response};
 }
-module.exports={category,incident,advise,applyAction,applyProfile,compactValue,auditSchemas};
+module.exports={OPTIONS,category,incident,advise,applyAction,applyProfile,compactValue,auditSchemas};

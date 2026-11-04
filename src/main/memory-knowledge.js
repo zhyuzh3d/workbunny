@@ -200,6 +200,7 @@ function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
 
   async function list({ category = 'all', query = '', before, beforeId, scene = memory.scene() } = {}) {
     if (!['all', 'relation', 'doubt', 'experience', 'tool'].includes(category)) throw new Error('未知的资料类别');
+    if(['experience','tool'].includes(category)&&memory.experienceRepository)return memory.experienceRepository.list({scene,query,kind:category,before,beforeId});
     const requiredMarkers = [marker(category)];
     const options = { scene, before, beforeId, requiredMarkers, ...(category === 'all' ? { excludedMarkers: [marker('decision')] } : {}) };
     const rows = query ? await memory.search(query, ['state'], 50, options) : await memory.query('state', 50, options);
@@ -207,6 +208,9 @@ function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
     for (const row of rows) {
       const type = typeOf(row);
       if (!type || type === 'decision') continue;
+      if(row.value.schema==='bunny.experience/v1'){
+        const r=await memory.experienceRepository.resolve(row,scene,true);if(r)result.push({id:row.id,kind:'state',ts:row.ts,domain:r.domain,visibilityFloor:r.visibilityFloor,knowledgeType:type,label:LABELS[type],status:r.value.status,tags:r.value.tags||[],content:r.value.instructions||r.value.title,sources:r.value.sources||[],revision:r.value.revision});continue;
+      }
       let status = row.value.status, choices = [];
       if (type === 'relation') {
         const checked = await validRelation(row, scene);

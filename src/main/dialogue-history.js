@@ -16,7 +16,7 @@ async function dialoguePage(memory, options = {}, scene) {
   if (before && after) throw new Error('对话分页方向无效');
   const limit = options.probe === true ? 1 : PAGE_SIZE;
   const rows = await memory.query('message', limit, {
-    scene, excludedMarkers: ['bunny_external_message'],
+    scene, channelId:'local', excludedMarkers: ['bunny_external_message'],
     ...(before ? { before: before.ts, beforeId: before.id } : {}),
     ...(after ? { after: after.ts, afterId: after.id, order: 'asc' } : {}),
   });

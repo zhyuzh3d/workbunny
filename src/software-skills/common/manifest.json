@@ -1,0 +1,24 @@
+{
+  "schema": "bunny.software-skill/v1",
+  "id": "common",
+  "version": 6,
+  "skills": [
+    "software.execute",
+    "system.operate",
+    "work.delegate",
+    "conversation.manage",
+    "conversation.send"
+  ],
+  "application": "common",
+  "methods": [
+    "autonomous-action-and-time-awareness",
+    "protected-memory-and-text-attachment"
+  ],
+  "resources": [
+    {
+      "path": "guide.md",
+      "sha256": "f624843465f749f736119dd7f2bdd393baee1391d4e91a59b4834f6df9492c94"
+    }
+  ],
+  "toolProtocol": "bunny.screen/v2"
+}

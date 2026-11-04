@@ -106,6 +106,22 @@ class MemoryMaintenance {
     return { ok: true, queued: true };
   }
 
+  requestExperience({automatic=false}={}) {
+    // Explicit import processes this source only; it must not force unrelated
+    // private conversations through manual Dream.
+    if(!this.hasQueued('dream'))this.experienceOnly=true;
+    return this.request('dream',{automatic});
+  }
+  async runKnowledge(mode,signal) {
+    const options={signal,reserveModelCall:s=>this.reserveModelCall(s)};
+    if(this.experienceOnly){const result=await this.memory.experienceRepository.maintain({...options,request:this.memory.agentLearning?.request});if(result==='done')this.experienceOnly=false;return result;}
+    const lanes=[()=>mode==='dream'?this.runExtract(signal):this.runDeepdream(signal),
+      ()=>this.memory.agentLearning?require('./task-experience-maintenance').maintain(this.memory.agentLearning,mode,options):'done',
+      ()=>this.memory.experienceRepository?.maintain({...options,request:this.memory.agentLearning?.request})||'done'];
+    for(let i=0;i<lanes.length;i++){const index=((this.knowledgeLane||0)+i)%lanes.length,result=await lanes[index]();if(result!=='done'){this.knowledgeLane=(index+1)%lanes.length;return result;}}
+    return 'done';
+  }
+
   requestReflection(reason = 'feedback', { manual = false } = {}) {
     this.reflectionReason = String(reason).slice(0, 80);
     if (reason === 'settings') this.settingsOnly = true;
@@ -275,7 +291,7 @@ class MemoryMaintenance {
           this.publish({ status: 'paused', mode, note: '记忆未解锁或当前不适合整理，稍后可继续' });
           break;
         }
-        const outcome = mode === 'blocks' ? await this.runBlocks(this.controller.signal) : mode === 'doze' ? await this.runDoze(this.controller.signal) : mode === 'dream' ? await this.runExtract(this.controller.signal) : await this.runDeepdream(this.controller.signal);
+        let outcome = mode === 'blocks' ? await this.runBlocks(this.controller.signal) : mode === 'doze' ? await this.runDoze(this.controller.signal) : await this.runKnowledge(mode,this.controller.signal);
         if (outcome === 'budget') {
           this.queue.unshift(mode);
           this.publish({ status: 'queued', mode, note: `${this.budgetReason}，等待后继续` });
@@ -628,6 +644,7 @@ class MemoryMaintenance {
       reserveModelCall: budgetSignal => this.reserveModelCall(budgetSignal) });
     this.pauseNote = result.note || '';
     this.publish({ processed: (this.statusValue.processed || 0) + (result.processed || 0), versions: result.versions });
+    if(result.status==='done' && this.memory.dialogueChannels){const channels=await this.memory.dialogueChannels.runDoze({signal,force:this.requestSources.get(this.activeMode)==='manual',canRun:d=>this.permitted(d),reserveModelCall:s=>this.reserveModelCall(s)});return channels.status==='done'&&channels.processed?'continue':channels.status;}
     return result.status;
   }
 

@@ -1,7 +1,7 @@
 'use strict';
 const fs=require('fs'),path=require('path'),crypto=require('crypto');
 function loadSoftwarePackages(root=path.join(__dirname,'../software-skills')){
- return ['workbuddy','wechat'].map(id=>{
+ return ['workbuddy','wechat','common'].map(id=>{
   const directory=path.join(root,id),manifest=JSON.parse(fs.readFileSync(path.join(directory,'manifest.json'),'utf8'));
   if(manifest.schema!=='bunny.software-skill/v1'||manifest.id!==id||!Number.isSafeInteger(manifest.version)||manifest.version<1||!Array.isArray(manifest.skills)||!Array.isArray(manifest.resources))throw Error('软件技能包清单无效：'+id);
   let instructions='';for(const resource of manifest.resources){

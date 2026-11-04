@@ -55,7 +55,7 @@ async function queryAll(memory, kind) {
   return memory.query(kind, 200, { scene: null, state: 'all', sort: 'ingestion', order: 'asc' });
 }
 
-async function testCorrectionRejectsSecretWithoutDeletingSource() {
+async function testCorrectionStoresSecretWithoutDeletingSource() {
   const { memory } = await createMemory('edit-reject');
   try {
     const source = message('edit-secret-source', 'user', '我想把一个普通偏好改得更简洁。', 'edit-turn', 10);
@@ -65,11 +65,12 @@ async function testCorrectionRejectsSecretWithoutDeletingSource() {
         evidence: '普通偏好', evidenceSourceId: source.id, sources: [source.id] } };
     await memory.write([record], memory.epoch, { notify: false });
 
-    await assert.rejects(memory.updateMemory(record.id, SECRET_A), /密码|密钥|秘密/,
-      'editing a memory to contain a password phrase must be rejected');
+    const changed=await memory.updateMemory(record.id, SECRET_A);
     assert.equal((await memory.db.request('get', { ids: [record.id, source.id] })).rows.length, 2,
-      'rejected correction leaves both the memory and its source intact');
+      'correction retains the prior source and the superseded memory');
     assert.equal((await decoded(memory, record.id)).value.content, record.value.content);
+    assert.equal((await decoded(memory, changed.factId)).value.sensitive,true);
+    assert((await memory.sensitiveValues()).includes('fixture-only-credential-991'));
     assert.equal((await decoded(memory, source.id)).value.content, source.value.content);
   } finally { await memory.close(); }
 }
@@ -244,7 +245,7 @@ async function testSecretCompressionOutputNeverCommitsHeadOrDeletesSources() {
 async function main() {
   if (!fs.existsSync(bin) || !fs.statSync(bin).isFile()) throw new Error(`existing native vault binary is required: ${bin}`);
   try {
-    await testCorrectionRejectsSecretWithoutDeletingSource();
+    await testCorrectionStoresSecretWithoutDeletingSource();
     await testLegacyCredentialsStayLocalButNeverEnterContextOrModelInputs();
     await testSecretCandidateIsDroppedAndMalformedDreamDoesNotAdvance();
     await testSecretCompressionOutputNeverCommitsHeadOrDeletesSources();

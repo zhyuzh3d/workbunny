@@ -32,7 +32,7 @@ async function scenario({ occupied = false, typeFails = false, sendFails = false
 (async () => {
   const ok = await scenario();
   assert.equal(ok.result.ok, true, ok.result.error);
-  assert.deepEqual(ok.calls.filter(x => ['workbuddyInspect', 'capture', 'click', 'type', 'key'].includes(x)), ['workbuddyInspect', 'capture', 'click', 'type', 'capture', 'key']);
+  assert.deepEqual(ok.calls.filter(x => ['workbuddyInspect', 'capture', 'click', 'type', 'key'].includes(x)), ['workbuddyInspect', 'workbuddyInspect', 'capture', 'click', 'type', 'capture', 'key']);
   assert.equal(ok.submissions, 1);
   assert.equal(ok.desktop.task.previousMonitorMessageKey, 'old');
   assert(ok.journal.some(t => t.followUpPending?.state === 'unknown' && t.followUpRound === 1));

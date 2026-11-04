@@ -3,20 +3,23 @@
 // Other actions and unrelated events never cancel them implicitly.
 class ActionLifecycle {
  constructor(){this.active=new Map();}
- start({id,taskId,scope,eventKey,policy='independent',parentSignal,onPhase=async()=>{}}){
+ start({id,taskId,scope,eventKey,policy='independent',parentSignal,progress,onPhase=async()=>{}}){
   if(this.active.has(id))throw Error('同一动作正在执行');
   const controller=new AbortController(),entry={id,taskId,scope,eventKey,policy,controller,phase:'preparing',superseded:false,onPhase};
   const cancel=()=>controller.abort(parentSignal?.reason);parentSignal?.addEventListener('abort',cancel,{once:true});if(parentSignal?.aborted)cancel();
   this.active.set(id,entry);
   const assertCurrent=()=>{if(entry.superseded&&entry.phase!=='committed')throw Object.assign(Error('同一目标有新事件，已保留原事件并重新规划'),{code:'E_ACTION_SUPERSEDED',dispatched:false});};
   return {
+   progress,
    signal:controller.signal,
    get superseded(){return entry.superseded;},
    get phase(){return entry.phase;},
    get policy(){return entry.policy;},
    assertCurrent,
    protect:async()=>{assertCurrent();entry.phase='protected';await entry.onPhase(entry.phase);assertCurrent();},
+   retryBeforeEffect:async()=>{assertCurrent();if(entry.phase!=='protected')throw Error('只有确认未发令的保护阶段可重新准备');entry.phase='preparing';await entry.onPhase(entry.phase);assertCurrent();},
    commit:async()=>{assertCurrent();entry.phase='committed';await entry.onPhase(entry.phase);},
+   reconcile:async review=>{if(review?.observed!=='not_applied'||typeof review.basis!=='string'||review.basis.trim().length<3)throw Error('重新准备动作需要明确的未生效核查依据');entry.phase='preparing';await entry.onPhase(entry.phase);assertCurrent();},
    finish:()=>{parentSignal?.removeEventListener('abort',cancel);if(this.active.get(id)===entry)this.active.delete(id);}
   };
  }

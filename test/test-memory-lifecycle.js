@@ -53,7 +53,7 @@ async function immediate() {
   const taught = await m.addMessage('user', '请整理经验：构建失败时先检查编译日志，再核对依赖版本。');
   const lesson = await rememberRequest(m, { action: 'learn_experience', content: '构建失败先检查编译日志，再核对依赖版本', quotes: ['构建失败时先检查编译日志'] }, { userRecord: taught });
   assert(lesson.ok);
-  const list = await m.knowledge.list({ category: 'experience' }); assert(list.rows.some(r => r.id === lesson.id && r.status === 'unverified'));
+  const list = await m.knowledge.list({ category: 'experience' }); assert(list.rows.some(r => r.id === lesson.id && r.status === 'candidate'));
   const retrieved = await m.experiences.findApplicable({ goal: '编译日志和依赖版本核对', target: 'current', scene: 'life' });
   assert(retrieved.text.includes('用户传授经验（未实测'));
   settings.scene = 'private'; await m.changeScene('private');

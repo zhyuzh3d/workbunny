@@ -1,3 +1,4 @@
+import { mountOwnerSecurity } from './owner-security.mjs';
 import '../shared/motion-core.js';
 import { mountSoftwarePermissions } from './software-permissions.mjs';
 import { mountProductInfo } from './product-info-ui.mjs';
@@ -1050,3 +1051,5 @@ function buildMotionList() {
 });
 
 window.__panel = () => ({ which, motions: MOTIONS.length, groups: MOTION_GROUPS.length, avatar: avatarKey, scale: viewScale });
+
+mountOwnerSecurity(window.pet);

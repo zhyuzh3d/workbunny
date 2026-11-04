@@ -197,10 +197,10 @@ class CompanionAutonomy {
     const current = async () => !controller.signal.aborted && generation === this.memory.generation && this.memory.ready &&
       grant.value.expiresAt > this.clock() && this.getScene() === scene && new Date(this.clock()).getHours() >= 9 && new Date(this.clock()).getHours() < 22 && await this.canRun() && (await verifySnapshots(this.memory, snapshots)).ok;
     const self = await this.memory.cognition.loadRoleView();
-    const growth = await this.memory.growth?.view({ scene: grant.value.scene, budget: 2400, query: grant.value.subject });
+    const growth = await this.memory.growth?.view({ scene: require('./dialogue-channels').ordinaryScene(grant.value.scene), budget: 2400, query: grant.value.subject });
     const active = (growth?.entries || []).filter(e => e.type === 'pursuit' && e.status === 'active').slice(0, 3);
     const query = [grant.value.subject, ...active.map(e => `${e.content} ${e.nextStep}`)].join(' ') || '近期兴趣、未完话题与值得探索的想法';
-    const context = await this.memory.context(query, { scene: grant.value.scene, budget: 5000 });
+    const context = await this.memory.context(query, { scene: require('./dialogue-channels').ordinaryScene(grant.value.scene), budget: 5000 });
     const inputs = await readRecords(this.memory, [...new Set([...context.sourceIds, ...(growth?.sourceIds || []), ...(growth?.heads || []).map(r => r.id)])], { scene: grant.value.scene });
     const inputSnapshots = snapshotsOf(inputs), baseCurrent = current;
     const evidenceCurrent = async () => await baseCurrent() && (await verifySnapshots(this.memory, inputSnapshots, { scene: grant.value.scene })).ok &&

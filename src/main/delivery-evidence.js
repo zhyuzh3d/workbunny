@@ -132,9 +132,9 @@ function collectAuthorizedPathReferences(value) {
   if (typeof value !== 'string') return [];
   const sanitized = maskAuthorizationData(value.slice(0, MAX_USER_REQUEST_CHARS));
   const lexical = collectPathReferences(sanitized);
-  const actionPattern = /只读|读取|核对|检查|审查|查看|验证|确认|审阅|分析|打开|列出|比对|创建|新建|写入|保存|生成|输出|编辑|修改|删除|移除|复制|移动|\bread\b|\binspect\b|\bcheck\b|\breview\b|\bverify\b|\bopen\b|\blist\b|\bcreate\b|\bwrite\b|\bsave\b|\bgenerate\b|\boutput\b|\bedit\b|\bmodify\b|\bdelete\b|\bremove\b|\bcopy\b|\bmove\b/giu;
+  const actionPattern = /只读|读取|核对|检查|审查|查看|验证|确认|审阅|分析|打开|列出|比对|创建|新建|写入|写在|写到|保存|生成|输出|编辑|修改|删除|移除|复制|移动|写在|写到|\bread\b|\binspect\b|\bcheck\b|\breview\b|\bverify\b|\bopen\b|\blist\b|\bcreate\b|\bwrite\b|\bsave\b|\bgenerate\b|\boutput\b|\bedit\b|\bmodify\b|\bdelete\b|\bremove\b|\bcopy\b|\bmove\b/giu;
   const negation = /(?:不要|不得|不许|禁止|无需|不必|勿|不能|不需要|别|不|\bdo\s+not\b|\bdon't\b|\bnever\b|\bnot\b)\s*$/iu;
-  const bridgeWord = /^(?:\s|[：:,，、;；和以及及与/“”「」『』‘’"'`]|目录|文本|文件|路径|文档|代码|内容|结果|以下|这些|指定|这个|该|源|输出|交付|列表|中的|里的|中|里|的|到|为|with|the|a|an|at|to|into|new|text|utf-?8|encoded|encoding|named|called|following|these|this|source|output|delivery|file|files|directory|folder|path|document|code)*$/iu;
+  const bridgeWord = /^(?:\s|[：:,，、;；和以及及与/“”「」『』‘’"'`]|目录|文本|文件|路径|文档|代码|内容|结果|在|以下|这些|指定|这个|该|源|输出|交付|列表|中的|里的|中|里|的|到|为|with|the|a|an|at|to|into|new|text|utf-?8|encoded|encoding|named|called|following|these|this|source|output|delivery|file|files|directory|folder|path|document|code)*$/iu;
   const out = new Map();
   let priorAuthorizedEnd = -1;
   let priorRequiredOutput = false;
@@ -152,16 +152,16 @@ function collectAuthorizedPathReferences(value) {
         if (bridgeWord.test(after)) { action = candidate; break; }
       }
       if(!action&&!/(?:不要|不得|不许|禁止|无需|不必|不能|不需要|别|\bdo\s+not\b|\bdon't\b)\s*(?:在|对|向|从|把|将)?\s*$/iu.test(prefix)){
-        const suffix=sanitized.slice(occurrence.end,occurrence.end+160),post=/^\s*(?:(?:目录|文件夹|文件|路径)?(?:下|里|中|内|上))?\s*(创建|新建|写入|保存|生成|输出|读取|核对|检查|审查|查看|验证|确认|审阅|分析|打开|编辑|修改|\bcreate\b|\bwrite\b|\bread\b|\bcheck\b|\bverify\b|\bgenerate\b)/iu.exec(suffix);
+        const suffix=sanitized.slice(occurrence.end,occurrence.end+160),post=/^\s*(?:(?:目录|文件夹|文件|路径)?(?:下|里|中|内|上))?\s*(创建|新建|写(?:入|在|到)?|保存|生成|输出|读取|核对|检查|审查|查看|验证|确认|审阅|分析|打开|编辑|修改|\bcreate\b|\bwrite\b|\bread\b|\bcheck\b|\bverify\b|\bgenerate\b)/iu.exec(suffix);
         if(post)action=[post[1]];
       }
       let output = false;
-      if (action) output = /^(?:创建|新建|写入|保存|生成|输出|\bcreate\b|\bwrite\b|\bsave\b|\bgenerate\b|\boutput\b)/iu.test(action[0]);
+      if (action) output = /^(?:创建|新建|写(?:入|在|到)?|保存|生成|输出|\bcreate\b|\bwrite\b|\bsave\b|\bgenerate\b|\boutput\b)/iu.test(action[0]);
       else if (priorAuthorizedEnd >= 0 && occurrence.start >= priorAuthorizedEnd && occurrence.start - priorAuthorizedEnd <= 48) {
         const connector = sanitized.slice(priorAuthorizedEnd, occurrence.start);
         if (/^(?:\s|[,，、;；和以及及与]|\band\b|\bplus\b|[“”「」『』‘’"'`])*$/iu.test(connector)) output = priorRequiredOutput;
-        else if (/^(?:\s|[,，、;；]|(?:以及|然后|并且|再|and\s+then)\s*)(?:创建|新建|写入|保存|生成|输出|\bcreate\b|\bwrite\b|\bsave\b|\bgenerate\b|\boutput\b)(?:\s|[：:,，、;；和以及及与]|文件|文档|输出|结果|到|为)*$/iu.test(connector)) {
-          output = /(?:创建|新建|写入|保存|生成|输出|\bcreate\b|\bwrite\b|\bsave\b|\bgenerate\b|\boutput\b)/iu.test(connector);
+        else if (/^(?:\s|[,，、;；]|(?:以及|然后|并且|再|and\s+then)\s*)(?:创建|新建|写(?:入|在|到)?|保存|生成|输出|\bcreate\b|\bwrite\b|\bsave\b|\bgenerate\b|\boutput\b)(?:\s|[：:,，、;；和以及及与]|文件|文档|输出|结果|到|为)*$/iu.test(connector)) {
+          output = /(?:创建|新建|写(?:入|在|到)?|保存|生成|输出|\bcreate\b|\bwrite\b|\bsave\b|\bgenerate\b|\boutput\b)/iu.test(connector);
         } else continue;
       } else continue;
       const previous = out.get(ref.path);
@@ -205,6 +205,18 @@ function protectedPath(value) {
 function isWithin(root, candidate) {
   const relative = path.relative(root, candidate);
   return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
+}
+
+function taskOutputPath(value, task) {
+  if (task?.workProductionOnly !== true) return false;
+  const base = path.join(os.homedir(), 'Library', 'Application Support', 'workbunny', 'workspaces');
+  return (task.sources || []).some(id => /^agent-[a-f0-9-]{36}$/u.test(id) &&
+    (task.authorizedArtifactRoots || []).includes(path.join(base, id)) && isWithin(path.join(base, id), path.resolve(value)));
+}
+
+function deliveryPathProtection(value, task) {
+  const reason = protectedPath(value);
+  return reason === 'user-library' && taskOutputPath(value, task) ? null : reason;
 }
 
 async function inspectNoSymlinkPath(absolute) {
@@ -300,7 +312,7 @@ async function collectDeliveryEvidence(task) {
     roots.push({ path: ref.path, real: checked.real || ref.path, kind,producesArtifact:ref.producesArtifact });
   }
   if(task.workProductionOnly===true)for(const rootPath of task.authorizedArtifactRoots||[]){
-    if(typeof rootPath!=='string'||!path.isAbsolute(rootPath)||protectedPath(rootPath))continue;
+    if(typeof rootPath!=='string'||!path.isAbsolute(rootPath)||deliveryPathProtection(rootPath,task))continue;
     const checked=await inspectNoSymlinkPath(rootPath);if(checked.exists&&!checked.reason&&checked.stat.isDirectory())roots.push({path:rootPath,real:checked.real||rootPath,kind:'directory',producesArtifact:true,authorizedBy:'task-output-directory'});
   }
   if (!roots.length) {
@@ -317,6 +329,7 @@ async function collectDeliveryEvidence(task) {
   for (const ref of collectPathReferences(reportText)) {
     for (const root of roots) {
       if (root.kind === 'directory' && isWithin(root.real, ref.path)) {
+        if (ref.path === root.path || ref.path === root.real) break;
         const previous = candidates.get(ref.path);
         candidates.set(ref.path, { ...ref, root, explicit: false,
           lines: [...new Set([...(previous?.lines || []), ...(ref.lines || [])])] });
@@ -327,6 +340,23 @@ async function collectDeliveryEvidence(task) {
         candidates.set(ref.path, { ...ref, root, explicit: true,
           lines: [...new Set([...(previous?.lines || []), ...(ref.lines || [])])] });
         break;
+      }
+    }
+  }
+  // The host owns these isolated output folders. Discover a bounded set of
+  // actual files even when the executor reports only a folder or basename.
+  // User-authorized general directories keep their explicit-reference policy.
+  for (const root of roots.filter(r => r.authorizedBy === 'task-output-directory')) {
+    const pending = [{path:root.path,depth:0}]; let scanned=0;
+    while (pending.length && scanned < MAX_PATH_REFERENCES) {
+      const directory=pending.shift();
+      const entries=await fs.readdir(directory.path,{withFileTypes:true}).catch(()=>[]);
+      for (const entry of entries.sort((a,b)=>a.name.localeCompare(b.name))) {
+        if (++scanned > MAX_PATH_REFERENCES) break;
+        const file=path.join(directory.path,entry.name);
+        if (entry.name.startsWith('.') || deliveryPathProtection(file,task) || entry.isSymbolicLink()) continue;
+        if (entry.isDirectory() && directory.depth < 2) pending.push({path:file,depth:directory.depth+1});
+        if (entry.isFile() && !candidates.has(file)) candidates.set(file,{path:file,root,explicit:false,lines:[]});
       }
     }
   }
@@ -351,7 +381,7 @@ async function collectDeliveryEvidence(task) {
   let remainingExcerptBytes = MAX_TOTAL_EXCERPT_BYTES;
   for (const candidate of selected) {
     const record = { path: candidate.path, authorizedBy: candidate.root.authorizedBy||(candidate.explicit ? 'user-explicit-file' : 'user-explicit-directory'), exists: false,role:candidate.root.producesArtifact?'artifact':'evidence' };
-    const blocked = protectedPath(candidate.path);
+    const blocked = deliveryPathProtection(candidate.path,task);
     if (blocked) { result.rejectedCount++; record.status = blocked; result.files.push(record); continue; }
     if (!(candidate.explicit && candidate.root.kind === 'file') && !isWithin(candidate.root.real, candidate.path)) {
       result.rejectedCount++; record.status = 'outside-authorized-directory'; result.files.push(record); continue;

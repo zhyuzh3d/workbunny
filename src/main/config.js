@@ -403,7 +403,7 @@ function save(patch, { replaceAvatarDescriptions = false } = {}) {
   return next;
 }
 
-function buildSystemPrompt(extraContext, { scene = load().memory.scene, roleView, motionView } = {}) {
+function buildSystemPromptBody(extraContext, { scene = load().memory.scene, roleView, motionView } = {}) {
   const c = load();
   const ctx = extraContext || '主人现在没有在跑任务，可能只是在发呆或者看别的东西。';
   const motions = motionView?.motions || availableMotions();
@@ -428,6 +428,8 @@ function buildSystemPrompt(extraContext, { scene = load().memory.scene, roleView
     `\n\n# 当前对话场景\n${LABELS[scene]}。共用角色身份不变；只使用本轮提供的可见资料，不猜测其他场景。${sceneProfile ? '\n当前场景补充设定：\n' + sceneProfile : ''}` +
     '\n\n' + WORK_DIVISION_RULE;
 }
+
+function buildSystemPrompt(...args) { return require('./bunny-principles') + '\n' + buildSystemPromptBody(...args); }
 
 module.exports = {
   setMotionCatalog: provider => { motionCatalog = provider; },

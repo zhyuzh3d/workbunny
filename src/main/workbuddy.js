@@ -312,4 +312,4 @@ async function chat(opts) {
   }
 }
 
-module.exports = { configureConnection, chat, request, discovery, chatPayload, parseChatBody, openApplication, sanitizeUsage, chatWithTransport, isTransientConnectionError };
+module.exports = { configureConnection, chat: opts => require('./owner-security').withPrinciples(chat,opts), request, discovery, chatPayload, parseChatBody, openApplication, sanitizeUsage, chatWithTransport, isTransientConnectionError };

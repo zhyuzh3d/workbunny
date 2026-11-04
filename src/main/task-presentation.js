@@ -9,7 +9,7 @@ function taskGuidance(task,{handling=false}={}){
  if(task.state?.lastFailure?.code==='E_APP_CIRCUIT')return {kind:'wechat-unavailable',title:'微信需要恢复后继续',detail:'请在本机恢复原微信账号，确认已登录并显示后重新定位。Bunny 不会自动重启或登录；窗口变化后会重新建立来信基线，主人入口需重新绑定。',primaryLabel:'原账号已恢复，重新定位'};
  if(intent&&['conversation.send','result.deliver','result.attach'].includes(intent.tool)){
   const pending=handling||!!task.state?.recoveryRequestedAt;
-  if(task.state?.conversationProgress?.phase==='draft')return {kind:'wechat-send',title:handling?'正在继续原草稿':pending?'等待空闲后继续草稿':'回复停在草稿中',detail:pending?'Bunny 会先核对原来的联系人和完整草稿，再继续发送这一次回复。':'回复已填入输入框，尚未提交。Bunny 可以核对原草稿后继续发送，不会重新输入一份。',primaryLabel:pending?'正在继续…':'核对草稿并发送',working:pending};
+  if(task.state?.conversationProgress?.phase==='draft')return {kind:'wechat-send',title:handling?'正在核对输入状态':pending?'等待空闲后核对':'输入状态待核对',detail:'输入操作已发出，Bunny 会核对联系人、编辑区和发送状态，再决定如何继续。',primaryLabel:pending?'正在核对…':'核对并继续',working:pending};
   return {kind:'wechat-send',title:handling?'正在核对发送结果':pending?'等待空闲后核对':'发送结果待确认',detail:pending?'Bunny 会核对刚才那一次发送，确认后继续原任务；不会重复发送已提交的消息。':'回复可能已发送，Bunny 已暂停以免重发。点击核对，确认结果后自动继续原任务。',primaryLabel:pending?'正在核对…':'核对并继续',working:pending};
  }
  if(intent)return {kind:'inspect',title:'这一步的结果待确认',detail:'这一步可能已经执行，Bunny 已暂停。请先查看原软件的实际结果；操作详情和已有进展保留在这里。',primaryLabel:'查看操作详情'};

@@ -484,6 +484,15 @@ html, body {
 .iconBtn.primary { background: var(--ink); color: #fff; }
 .iconBtn.primary:hover { background: #3a3e44; color: #fff; }
 
+/* 私聊时，底部各个独立控件使用同一组粉色背景。 */
+body.private-scene :is(#activity, #ear, #ear.on, #fab button, #dock) {
+  background: rgba(255, 222, 232, .96);
+}
+body.private-scene :is(#ear:hover, #fab button:hover) { background: #ffeaf0; }
+body.private-scene #fab #dialogueBtn[data-mode]:not([data-mode="avatar"]) { background: #f7bdcf; }
+body.private-scene #dock .iconBtn.primary { background: #c75e80; }
+body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
+
 /* ── 首次提示 ── */
 #hint {
   position: fixed;

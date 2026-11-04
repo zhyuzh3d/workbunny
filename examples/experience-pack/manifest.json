@@ -1,0 +1,80 @@
+{
+  "schema": "bunny.experience-pack/v1",
+  "id": "org.workbunny.example.text-lines",
+  "version": "1.0.0",
+  "title": "示例：文本行数经验与工具",
+  "experiences": [
+    {
+      "id": "text-lines",
+      "title": "统计已获准文本的行数",
+      "path": "experiences/text-lines.md",
+      "summary": "按需参考配套工具，依据任务自主检查并改进方法。",
+      "tags": [
+        "topic:text",
+        "tool:count-lines"
+      ],
+      "appliesTo": {
+        "runtime": "Node.js >= 18"
+      },
+      "toolRefs": [
+        "count-lines"
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "id": "count-lines",
+      "title": "统计文本行数",
+      "entry": "tools/count-lines.cjs",
+      "runtime": "node",
+      "interfaceVersion": "1",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "lines": {
+            "type": "integer"
+          },
+          "nonEmptyLines": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lines",
+          "nonEmptyLines"
+        ],
+        "additionalProperties": false
+      },
+      "effect": "read",
+      "capabilities": [
+        "terminal.execute"
+      ],
+      "dependencies": {
+        "node": ">=18"
+      }
+    }
+  ],
+  "resources": [
+    {
+      "path": "experiences/text-lines.md",
+      "bytes": 596,
+      "sha256": "1d648ade759aa15209a555654988890c4389b7692b70343466d6c99962264dda"
+    },
+    {
+      "path": "tools/count-lines.cjs",
+      "bytes": 620,
+      "sha256": "611b3b189b21d2ae7f5ce07073c86f6d10909856edb3eed0b46a96f3e814597c"
+    }
+  ]
+}

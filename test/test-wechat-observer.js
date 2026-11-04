@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { WeChatObserver } = require('../src/main/wechat-observer');
+const { WeChatObserver, observationOCR } = require('../src/main/wechat-observer');
 const { WatchService, incomingDelta } = require('../src/main/watch-service');
 
 const BUNDLE = 'com.tencent.xinWeChat';
@@ -213,7 +213,7 @@ async function testDirectionsAndNonTextKindsArePreserved() {
 async function testIncomingVerificationRequiresVisualAndOcrEvidence() {
   const text = '你好呀';
   const incoming = (evidence = {}) => message('incoming', text, 'text', { confidence: 0.96, leftAvatar: { x: 0.42, y: 0.34 }, ...evidence });
-  const validOcr = [...header(), { text, confidence: 0.95, x: 0.39, y: 0.35, width: 0.08, height: 0.02 }];
+  const validOcr = [...header(), { text, confidence: 0.95, x: 0.45, y: 0.35, width: 0.08, height: 0.02 }];
   const valid = await inspectHarness({ ocr: validOcr, response: inspection({ messages: [incoming()] }) });
   assert.equal(valid.view.messages[0].incomingVerified, true, 'canonical header, high-confidence left avatar and matching OCR text establish incoming evidence');
 
@@ -228,13 +228,22 @@ async function testIncomingVerificationRequiresVisualAndOcrEvidence() {
     const result = await inspectHarness({ ocr: item.ocr, response: inspection({ messages: [item.msg] }) });
     assert.equal(result.view.messages[0].incomingVerified, false, item.label);
   }
+  const body='Please confirm deadline',rows=[...header(),
+    {text:'deadline',confidence:1,x:.5,y:.2,width:.2,height:.04},
+    {text:body,confidence:1,x:.45,y:.7,width:.35,height:.04}];
+  const h=harness({ocr:rows,responses:[inspection({messages:[message('incoming',body,'text',{confidence:.95,leftAvatar:{x:.35,y:.71}})]})]});
+  const data=Buffer.alloc(100*100*4,230);for(let y=20;y<24;y++)for(let x=50;x<70;x++){const i=(y*100+x)*4;data[i]=0;data[i+1]=200;data[i+2]=0;}
+  h.observer.bitmap=()=>({data,width:100,height:100});
+  const view=await h.observer.inspect({recipient:'Alice'},{pngBase64});
+  assert.equal(view.messages[0].incomingVerified,true,'a matching word in an earlier green outgoing bubble cannot override the current incoming bubble');
 }
 
 async function testBadJsonAndDirectionsFailClosed() {
   await assert.rejects(() => inspectHarness({ response: '{"headerMatched":true,"recipientUnread":false,"draft":"","messages":[]' }), /JSON|结果/u);
   await assert.rejects(() => inspectHarness({ response: inspection({ messages: [{ direction: 'maybe', kind: 'text', text: 'x', time: '' }] }) }), /方向/u);
   await assert.rejects(() => inspectHarness({ response: inspection({ messages: [message('incoming', 'x'.repeat(2501))] }) }), /方向|正文/u);
-  await assert.rejects(() => inspectHarness({ response: JSON.stringify({ ...JSON.parse(inspection()), surprise: true }) }), /结果/u);
+  const extra=await inspectHarness({ response: JSON.stringify({ ...JSON.parse(inspection()), surprise: true }) });
+  assert.equal(extra.view.surprise,undefined,'unrecognized observation metadata is ignored rather than triggering another full image request');
 }
 
 async function testScreenshotAndOcrAreUntrustedUserData() {
@@ -312,6 +321,15 @@ async function testReplySchemaAndInjectionBoundary() {
 }
 
 async function run() {
+  const noisy = Array.from({length:160},(_,i)=>({text:'sidebar '+i,confidence:.999999,x:.123456789,y:i/200,width:.123456789,height:.012345678}));
+  const chat = Array.from({length:60},(_,i)=>({text:'chat '+i,confidence:.999999,x:.423456789,y:.1+i/100,width:.323456789,height:.012345678}));
+  const compact = observationOCR([...noisy,...header(),...chat],'Alice');
+  assert.equal(compact.length,46);
+  assert.equal(compact[0].text,'Alice');
+  assert.equal(compact.at(-1).text,'chat 59','the newest visible lines survive the OCR budget');
+  assert.ok(compact.every(r=>!r.text.startsWith('sidebar')));
+  assert.equal(compact.at(-1).x,.423);
+  assert.ok(JSON.stringify(compact).length<6000,'geometry precision and irrelevant sidebar cannot consume the observation budget');
   await testStableAndUnstableSamplingNeverRunsRecognition();
   await testEqualChangedAreaIsNotEvidenceOfStability();
   await testSmallSidebarBadgeRequiresSameRoiSpatialOverlap();

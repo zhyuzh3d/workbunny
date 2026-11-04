@@ -5,6 +5,8 @@ class GuiLease {
     this.owner = null;
     this.depth = 0;
     this.waiters = [];
+    this.revision = 0;
+    this.lastOwner = null;
   }
 
   isFree() { return this.owner === null; }
@@ -15,6 +17,8 @@ class GuiLease {
     if (this.owner === null) {
       this.owner = owner;
       this.depth = 1;
+      if (this.lastOwner !== owner) this.revision++;
+      this.lastOwner = owner;
       return Promise.resolve(true);
     }
     if (this.owner === owner) {
@@ -55,6 +59,8 @@ class GuiLease {
       }
       this.owner = waiter.owner;
       this.depth = 1;
+      if (this.lastOwner !== waiter.owner) this.revision++;
+      this.lastOwner = waiter.owner;
       waiter.resolve(true);
       return;
     }

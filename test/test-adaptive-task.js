@@ -25,14 +25,19 @@ test('a cross-software task sees only its scoped tool capabilities and can compo
  const started=await f.agent.start({skill:'software.execute',goal:'读取Alice来信并把清单制作交给WorkBuddy，交办后汇报',subjects:[{application:'wechat',recipient:'Alice'},{application:'workbuddy'}]},f.owner);assert(started.ok,started.error);
  for(let i=0;i<3;i++)await f.agent.runtime.tick(started.id);assert.equal(f.agent.runtime.tasks.get(started.id).status,'completed');assert.equal(f.reports.length,1);await f.agent.close();
 });
-test('input success alone cannot complete a software task before a subsequent actual observation',async()=>{
- const f=fixture((i,options)=>{if(i===2)assert.match(options.messages.at(-1).content,/尚未核对业务结果/u);return i===0?{done:false,tool:'screen.action',args:{application:'workbuddy',frameId:'fixture',action:'click',targetType:'icon',pixelX:400,pixelY:300}}:i===2?{done:false,tool:'screen.observe',args:{application:'workbuddy'}}:{done:true,summary:'已在操作后观察并确认。'};});
+test('unobserved input is information for Bunny to judge; the host does not dictate a business verdict',async()=>{
+ const f=fixture((i,options)=>{const input=JSON.parse(options.messages[1].content[0].text);if(i===1)assert.deepEqual(input.pendingObservation,['workbuddy']);return i===0?{done:false,tool:'screen.action',args:{application:'workbuddy',frameId:'fixture',action:'click',targetType:'icon',pixelX:400,pixelY:300}}:i===1?{done:false,tool:'screen.observe',args:{application:'workbuddy'}}:{done:true,summary:'已在操作后观察并确认。'};});
  let inputs=0,observations=0;
  f.agent.tools.tools.set('screen.action',{...f.agent.tools.get('screen.action'),execute:async()=>{inputs++;return {ok:true,verified:true,receipt:{inputPerformed:true,businessResult:'needs observation'}};}});
  f.agent.tools.tools.set('screen.observe',{...f.agent.tools.get('screen.observe'),execute:async()=>{observations++;return {available:true,changed:false,frameId:'after-input'};}});
  const started=await f.agent.start({skill:'software.execute',goal:'操作后核对软件画面',subjects:[{application:'workbuddy'}]},f.owner);
  await f.agent.runtime.tick(started.id);assert.deepEqual(f.agent.runtime.tasks.get(started.id).state.pendingObservation,['workbuddy']);await f.agent.restore();await f.agent.runtime.tick(started.id);assert.equal(f.agent.runtime.tasks.get(started.id).status,'waiting');await f.agent.runtime.tick(started.id);
- assert.equal(f.agent.runtime.tasks.get(started.id).status,'completed');assert.equal(inputs,1);assert.equal(observations,1);assert.equal(f.requests(),4);await f.agent.close();
+ assert.equal(f.agent.runtime.tasks.get(started.id).status,'completed');assert.equal(inputs,1);assert.equal(observations,1);assert.equal(f.requests(),3);await f.agent.close();
+});
+test('the same input lifecycle supplies fresh evidence so the next model call can finish without requesting a screenshot',async()=>{
+ const f=fixture((i,options)=>{const input=JSON.parse(options.messages[1].content[0].text);if(i===1){assert.deepEqual(input.pendingObservation,[]);assert.equal(input.currentFrame.frameId,'after-click');assert.equal(options.messages[1].content.at(-1).type,'image_url');}return i===0?{done:false,tool:'screen.action',args:{application:'workbuddy',frameId:'fixture',action:'click',targetType:'icon',pixelX:400,pixelY:300}}:{done:true,summary:'依据操作后的实际画面确认完成。'};});
+ f.agent.tools.tools.set('screen.action',{...f.agent.tools.get('screen.action'),execute:async()=>({ok:true,verified:true,receipt:{inputPerformed:true},observation:{available:true,preview:'data:image/png;base64,fixture',frameId:'after-click',width:800,height:600,at:Date.now()}})});
+ const started=await f.agent.start({skill:'software.execute',goal:'点击并自行核查结果',subjects:[{application:'workbuddy'}]},f.owner);await f.agent.runtime.tick(started.id);await f.agent.runtime.tick(started.id);assert.equal(f.agent.runtime.tasks.get(started.id).status,'completed');assert.equal(f.requests(),2);await f.agent.close();
 });
 test('composed file inspection produces real artifacts and delegates the final text and attachment to the shared delivery pipeline',async t=>{
  const directory=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bunny-composed-file-')));t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));const file=path.join(directory,'context.txt');fs.writeFileSync(file,'Cedar-A20; Thursday.');const delivered=[];
@@ -54,11 +59,38 @@ test('invalid primitive arguments are repaired before an operation is persisted 
  const f=fixture(i=>({done:false,tool:'screen.action',args:{application:'workbuddy',action:'click',targetType:'icon',pixelX:400,pixelY:300,...(i?{frameId:'current-frame'}:{})}}));let inputs=0;f.agent.tools.tools.set('screen.action',{...f.agent.tools.get('screen.action'),execute:async()=>{inputs++;return {ok:true,verified:true,receipt:{inputPerformed:true}};}});
  const created=await f.agent.start({skill:'software.execute',goal:'click the actual button',subjects:[{application:'workbuddy'}]},f.owner);await f.agent.runtime.tick(created.id);const task=f.agent.runtime.tasks.get(created.id);assert.equal(f.requests(),2);assert.equal(inputs,1);assert.equal(task.state.stepSequence,1);assert.equal(Object.values(task.operations).filter(o=>o.effect==='write').length,1);await f.agent.close();
 });
+test('the model can retrieve the full scoped experience when a summary is insufficient',async()=>{
+ const full='适用系统检查。\n\n'+('详细方法和失效条件。'.repeat(450));let sawFull=false;
+ const f=fixture((i,options)=>{const input=JSON.parse(options.messages[1].content[0].text);
+  if(i===0){assert(input.knowledge[0].truncated);assert(input.tools.some(t=>t.name==='experience.read'));return {done:false,tool:'experience.read',args:{reference:'experience-1',limit:12000}};}
+  sawFull=input.attempts[0].result.instructions===full;return {done:true,summary:'已读取完整经验。'};
+ });
+ const created=await f.agent.start({skill:'system.operate',goal:'了解系统检查方法',subjects:[{application:'system'}]},f.owner),task=f.agent.runtime.tasks.get(created.id);
+ task.state.operatingKnowledge=[{sourceId:'experience-1',status:'candidate',instructions:full}];
+ await f.agent.runtime.tick(created.id);await f.agent.runtime.tick(created.id);
+ assert(sawFull);assert.equal(task.status,'completed');
+ const read=f.agent.tools.get('experience.read');await assert.rejects(read.execute({reference:'other',offset:0,limit:100},{task}),/不属于/);await f.agent.close();
+});
 
-test('explicit continuation renews the exploration budget without reusing durable operation keys',async()=>{
- const f=fixture(()=>({done:false,tool:'terminal.execute',args:uname})),started=await f.agent.start({skill:'system.operate',goal:'核对内核',subjects:[{application:'system'}]},f.owner),task=f.agent.runtime.tasks.get(started.id);
- task.state.stepSequence=64;await f.agent.runtime.tick(started.id);assert.equal(task.status,'needs_attention');assert.equal(f.requests(),0);
- assert((await f.agent.control('resume',task.id)).ok);await f.agent.runtime.tick(task.id);assert.equal(task.state.stepSequence,65);assert.equal(task.state.explorationStart,64);assert.equal(task.counters.writes,1);assert.equal(task.status,'waiting');await f.agent.close();
+test('the model can adjust an optional context fragment and continue the same goal',async()=>{
+ let second;
+ const f=fixture((i,options)=>{
+  const input=JSON.parse(options.messages[1].content[0].text);
+  if(i===0)return {done:false,reassemble:{fragment:'knowledge',detail:'full',limit:1,maxTokens:3000},reason:'需要查看更完整的经验'};
+  second=input;return {done:false,tool:'terminal.execute',args:uname};
+ });
+ const created=await f.agent.start({skill:'system.operate',goal:'核对系统实际状态',criteria:'给出真实输出',subjects:[{application:'system'}]},f.owner),task=f.agent.runtime.tasks.get(created.id);
+ task.state.operatingKnowledge=[{sourceId:'a',instructions:'第一条经验。'}, {sourceId:'b',instructions:'第二条经验。'}];
+ await f.agent.runtime.tick(created.id);assert.deepEqual(task.state.contextTuning.knowledge,{detail:'full',limit:1,maxTokens:3000});assert.equal(task.counters.writes,0);
+ await f.agent.runtime.tick(created.id);assert.equal(second.goal,'核对系统实际状态');assert.equal(second.criteria,'给出真实输出');assert.equal(second.knowledge.length,1);
+ assert.equal(task.state.attempts.length,1);assert.match(task.state.attempts[0].result.stdout,/Darwin/);await f.agent.close();
+});
+
+test('an exploration checkpoint reviews progress and continues without owner intervention',async()=>{
+ let review;const f=fixture((_i,options)=>{review=JSON.parse(options.messages[1].content[0].text).explorationReview;return {done:false,tool:'terminal.execute',args:uname};});
+ const started=await f.agent.start({skill:'system.operate',goal:'核对内核',subjects:[{application:'system'}]},f.owner),task=f.agent.runtime.tasks.get(started.id);
+ task.state.stepSequence=64;await f.agent.runtime.tick(started.id);
+ assert.equal(f.requests(),1);assert.equal(review.from,0);assert.equal(review.to,64);assert.equal(task.state.stepSequence,65);assert.equal(task.state.explorationStart,64);assert.equal(task.counters.writes,1);assert.equal(task.status,'waiting');await f.agent.close();
 });
 test('revising a task discards its old pending plan while preserving confirmed operations',async()=>{
  const f=fixture(()=>({done:false,tool:'terminal.execute',args:uname})),started=await f.agent.start({skill:'system.operate',goal:'旧目标',subjects:[{application:'system'}]},f.owner),task=f.agent.runtime.tasks.get(started.id);
@@ -72,7 +104,7 @@ test('authentication circuit immediately pauses an adaptive task rather than con
 });
 for(const changed of [false,true])test('a slow visual decision '+(changed?'replans on actual changed pixels':'executes after fresh identical pixels'),async()=>{
  let now=1000,inputs=[],checks=0;const image='data:image/png;base64,b2xk',newImage='data:image/png;base64,bmV3';
- const f=fixture(i=>{now+=i===0?31000:0;return {done:false,tool:'screen.action',args:{application:'workbuddy',frameId:i===0?'original':'fresh',action:'click',targetType:'icon',pixelX:400,pixelY:300}};});
+ const f=fixture((i,options)=>{now+=i===0?31000:0;if(i>0&&changed)assert.equal(JSON.parse(options.messages[1].content[0].text).previousVisualDecision.args.frameId,'original');return {done:false,tool:'screen.action',args:{application:'workbuddy',frameId:i===0?'original':'fresh',action:'click',targetType:'icon',pixelX:400,pixelY:300}};});
  f.agent.runtime.clock=()=>now;
  f.agent.tools.tools.set('screen.observe',{...f.agent.tools.get('screen.observe'),execute:async(a,c)=>{assert.equal(a.force,true);checks++;c.task.state.screenAnchors.workbuddy={...c.task.state.screenAnchors.workbuddy,frameId:'fresh',at:now};return {available:true,changed:true,preview:changed?newImage:image,frameId:'fresh',width:800,height:600,at:now};}});
  f.agent.tools.tools.set('screen.action',{...f.agent.tools.get('screen.action'),execute:async a=>{inputs.push(a.frameId);return {ok:true,verified:true,receipt:{inputPerformed:true}};}});

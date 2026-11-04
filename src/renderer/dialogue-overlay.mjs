@@ -109,6 +109,7 @@ export function createDialogueOverlay(pet, initialConfig) {
     document.body.classList.toggle('dialogue-open', opened());
     document.body.classList.toggle('dialogue-behind', current.id === 'behind');
     document.body.classList.toggle('dialogue-avatar-hidden', current.id === 'text');
+    document.body.classList.toggle('private-scene', config.memory?.scene === 'private');
     if (old.memory?.scene !== next.memory?.scene || old.memory?.enabled !== next.memory?.enabled || wasOpen !== opened()) reset();
   }
   toggle.onclick = async () => {

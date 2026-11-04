@@ -6,19 +6,20 @@ const { readRecords, snapshotsOf } = require('./memory-evidence');
 const { tagged } = require('./memory-tags');
 const scopes = require('./memory-scope');
 function explicitRequest(text) {
-  if (typeof text !== 'string' || containsSecret(text) || /(?:别|不要|不用|无需|不必).{0,12}(?:记住|记下|记录|保存|整理)|\b(?:do not|don't|never)\s+(?:remember|save|record)/iu.test(text) ||
+  if (typeof text !== 'string' || /(?:别|不要|不用|无需|不必).{0,12}(?:记住|记下|记录|保存|整理)|\b(?:do not|don't|never)\s+(?:remember|save|record)/iu.test(text) ||
       /(?:如果|假如|假设|例如|比如).{0,24}(?:记住|记下|记录|保存|整理)/u.test(text) || /[“「『"].*(?:记住|记下|保存).*[”」』"]/u.test(text)) return false;
   return /记住|记一下|记着|记下来|记下|存下来|保存.{0,12}(?:记忆|经验|方法)|整理.{0,16}(?:经验|方法)|总结.{0,16}(?:经验|方法)|\b(?:remember|save (?:this|that)|record (?:this|that))\b/iu.test(text);
 }
 function validateMemoryIntent(value) {
   if (!value || !['remember', 'learn_experience'].includes(value.action) || Object.keys(value).some(k => !['action', 'content', 'quotes'].includes(k)) ||
-      typeof value.content !== 'string' || !value.content.trim() || value.content.length > 1200 || containsSecret(value.content) ||
+      typeof value.content !== 'string' || !value.content.trim() || value.content.length > 1200 || value.action==='learn_experience'&&containsSecret(value.content) ||
       !Array.isArray(value.quotes) || value.quotes.length < 1 || value.quotes.length > 4 ||
-      value.quotes.some(q => typeof q !== 'string' || q.length < 3 || q.length > 500 || containsSecret(q))) throw new Error('记忆请求缺少有效内容和原文依据');
+      value.quotes.some(q => typeof q !== 'string' || q.length < 3 || q.length > 500 || value.action==='learn_experience'&&containsSecret(q))) throw new Error('记忆请求缺少有效内容和原文依据');
   return Object.freeze({ action: value.action, content: value.content.trim(), quotes: [...new Set(value.quotes)] });
 }
 async function rememberRequest(memory, intent, { userRecord, scene = memory.scene(), signal, isCurrent = () => true } = {}) {
   intent = validateMemoryIntent(intent);
+  if(intent.action==='learn_experience'&&scene==='private')return {ok:false,text:'私聊内容保留为私聊记忆，不形成任务经验。'};
   const generation = memory.generation, sceneEpoch = memory.sceneEpoch;
   return memory.serial(async () => {
     const current = () => !signal?.aborted && isCurrent() && generation === memory.generation && sceneEpoch === memory.sceneEpoch && scene === memory.scene();
@@ -47,9 +48,9 @@ async function rememberRequest(memory, intent, { userRecord, scene = memory.scen
     const same = existing.find(r => r.value.content === content || fact && r.value.key === fact.key && r.value.canonicalValue === fact.canonicalValue);
     if (same && intent.action === 'remember') return { ok: true, duplicate: true, text: same.value.status === 'pending' ? '新的说法已经记下，与原有记忆的差异还需要核对。' : '已经记住了。', id: same.id };
     const quote = intent.quotes.find(q => evidence.value.content.includes(q)) || request.value.content.slice(0, 500);
-    const experience = intent.action === 'learn_experience';
-    const value = tagged({ content, references: normalized.references, origin: experience ? 'user-experience-v1' : 'user-statement',
-      status: experience ? 'unverified' : 'confirmed', memoryKind: 'fact', importance: 1,
+    const experience = intent.action === 'learn_experience',sensitive=!experience&&(containsSecret(intent.content)||intent.quotes.some(containsSecret));
+    const value = tagged({ ...(experience?{evidenceOnly:true}:{}),content, references: normalized.references, origin: experience ? 'user-experience-v1' : 'user-statement',
+      status: experience ? 'unverified' : 'confirmed', memoryKind: sensitive?'credential':'fact',...(sensitive?{sensitive:true}:{}),importance: 1,
       outcome: experience ? 'user-taught-unverified' : undefined,
       evidence: quote, evidenceSourceId: evidence.id, sources: [...new Set([...unique.map(r => r.id), ...normalized.references.entities.map(e => e.sourceId).filter(Boolean)])],
       analysisSnapshots: snapshotsOf(unique) }, ['active']);
@@ -57,6 +58,10 @@ async function rememberRequest(memory, intent, { userRecord, scene = memory.scen
     if (!experience) delete value.outcome;
     if (!current()) throw new Error('场景或轮次已变化，本次没有保存');
     await memory.write([{ id: rid, kind: experience ? 'state' : 'memory', ts: memory.clock(), expiresAt: experience ? null : require('./memory-references').temporaryExpiry(evidence), ...scope, value }]);
+    if(experience){
+      const saved=await memory.experienceRepository.putPrepared({title:content.slice(0,60),instructions:content,summary:content.slice(0,240),tags:['主动记忆'],appliesTo:{},toolRefs:[]},{origin:'owner-teaching',status:'candidate'},{scene,sources:[rid],dirty:true});
+      memory.maintenance?.requestExperience?.();return {ok:true,id:saved.head.id,text:'已经记为可修订的经验，实际使用时会结合情景判断。'};
+    }
     return { ok: true, id: rid, text: experience ? '已经记为你教给我的经验，实际使用时我会核对适用条件。' : '已经记住了。' };
   });
 }

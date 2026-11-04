@@ -1,5 +1,5 @@
 'use strict';
-const test=require('node:test'),assert=require('node:assert/strict'),{keyboardVisible}=require('./phone-visual.cjs');
+const test=require('node:test'),assert=require('node:assert/strict'),{keyboardVisible}=require('./support/phone-visual.cjs');
 test('an already visible keyboard requires no risky second composer tap',()=>{
  const keys='qwertyuiop'.split('').map((text,i)=>({text,x:.05+i*.09,y:.74}));
  assert(keyboardVisible([...keys,{text:'123',x:.8,y:.95}]));

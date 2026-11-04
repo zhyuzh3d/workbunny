@@ -99,8 +99,9 @@ async function evidenceFor(memory, record, { scene = null } = {}) {
   const quote = value.evidence;
   const content = value.content;
   const sources = value.sources;
-  if (typeof quote !== 'string' || quote.length < 3 || quote.length > 2000 || containsSecret(quote) ||
-      typeof content !== 'string' || containsSecret(content) || !Array.isArray(sources) || sources.length > 200 ||
+  const sensitiveOwnerFact=value.sensitive===true&&value.memoryKind==='credential'&&value.status==='confirmed';
+  if (typeof quote !== 'string' || quote.length < 3 || quote.length > 2000 || !sensitiveOwnerFact&&containsSecret(quote) ||
+      typeof content !== 'string' || !sensitiveOwnerFact&&containsSecret(content) || !Array.isArray(sources) || sources.length > 200 ||
       sources.some(source => !validId(source))) return null;
 
   let sourceIds;
@@ -121,7 +122,7 @@ async function evidenceFor(memory, record, { scene = null } = {}) {
     try { sourceScope = scopes.scopeOf(source); } catch { continue; }
     if (sourceScope.visibilityFloor > memoryScope.visibilityFloor) continue;
     const sourceContent = source.value?.content;
-    if (typeof sourceContent !== 'string' || containsSecret(sourceContent) || !sourceContent.includes(quote)) continue;
+    if (typeof sourceContent !== 'string' || !sensitiveOwnerFact&&containsSecret(sourceContent) || !sourceContent.includes(quote)) continue;
     return { recordId: record.id, sourceId: source.id, quote, source };
   }
   return null;

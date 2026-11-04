@@ -1,26 +1,19 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
-const {transcribeVoice}=require('../src/main/wechat-voice');
-function fixture({text='',menu=true,voiceVerified=true}={}){
- const calls=[],window={bundleId:'com.tencent.xinWeChat',pid:12,windowId:8,rect:{x:100,y:100,width:800,height:700}},front={application:{bundleId:window.bundleId,pid:12},windows:[window]};
- const native={request:async(op,payload)=>{calls.push({op,payload});if(op==='frontmost')return front;if(op==='inputIdle')return {hidIdleMs:5000};if(op==='capture')return {pngBase64:'fixture'};if(op==='recognize')return {texts:menu?[{text:'转文字',confidence:.99,x:.5,y:.3,width:.1,height:.03}]:[]};if(op==='click')return {performed:true};throw Error('unexpected '+op);}};
- const scene={native,assertTaskIdentity:async()=>{},assertHealthy:async()=>window,observe:async()=>({headerMatched:true,messages:[{direction:'incoming',kind:'voice',voiceVerified,voiceCenter:{x:.5,y:.4},voiceText:text}]}),invalidate:()=>{}};
- const subject={application:'wechat',recipient:'Alice'},cursor=new (require('../src/main/conversation-cursor').ConversationCursor)();cursor.observe([{direction:'incoming',kind:'voice',text:'[语音]'}]);const state=cursor.snapshot();state.sequence=1;state.recent[0].sequence=1;return {scene,calls,subject,sequence:1,task:{id:'fixture',state:{conversations:{[require('../src/main/conversation-skill').subjectKey(subject)]:{cursor:state}}}},canOperate:async()=>true};
-}
-test('voice conversion clicks the verified voice and the visible conversion menu',async()=>{
- const f=fixture(),result=await transcribeVoice(f);assert.equal(result.requested,true);const clicks=f.calls.filter(c=>c.op==='click');assert.equal(clicks.length,2);assert.equal(clicks[0].payload.button,'right');assert.equal(clicks[1].payload.windowId,8);
+const {transcribeVoice}=require('../src/main/wechat-voice'),{subjectKey}=require('../src/main/conversation-skill');
+function fixture(){const subject={application:'wechat',recipient:'Alice'};return {subject,sequence:3,task:{id:'voice-task',state:{conversations:{[subjectKey(subject)]:{cursor:{ready:true,recent:[{kind:'voice',direction:'incoming',sequence:3,voiceCenter:{x:.44,y:.78}},{kind:'text',direction:'incoming',sequence:4,text:'separately observed transcript'},{kind:'voice',direction:'incoming',sequence:5}]}}}}},operationId:'read-voice-3'};}
+test('voice adapter supplies the original target to the shared visual Action and returns its actual read result',async()=>{
+ const f=fixture();let received;
+ const result=await transcribeVoice({...f,execute:async args=>{received=args;return {ok:true,verified:true,text:'明天的会议改到下午3点了。'};}});
+ assert.equal(received.operation,'read');assert.equal(received.readRequest.sequence,3);assert.equal(received.readRequest.ordinalFromLatestKnownVoice,2);assert.deepEqual(received.readRequest.originalPosition,{x:.44,y:.78});assert.equal(received.task,f.task);assert.equal(received.operationId,f.operationId);
+ assert(result.verified);assert.equal(result.text,'明天的会议改到下午3点了。');assert.deepEqual(result.perception.transforms,['asr','ocr','vision']);
 });
-test('existing transcript is read without clicking and missing evidence never triggers input',async()=>{
- let f=fixture({text:'你好'});assert.deepEqual(await transcribeVoice(f),{text:'你好',verified:true});assert.equal(f.calls.filter(c=>c.op==='click').length,0);
- f=fixture({voiceVerified:false});assert((await transcribeVoice(f)).pending);assert.equal(f.calls.filter(c=>c.op==='click').length,0);
- f=fixture({menu:false});assert((await transcribeVoice(f)).pending);assert.equal(f.calls.filter(c=>c.op==='click').length,1);
+test('an unfinished read keeps the logical target instead of claiming conversion or inventing a transcript',async()=>{
+ const f=fixture();const result=await transcribeVoice({...f,execute:async()=>({ok:false,error:'Bunny正在依据当前画面调整方法'})});assert(result.pending);assert.equal(result.verified,undefined);assert.equal(result.text,undefined);
+ const empty=await transcribeVoice({...f,execute:async()=>({ok:true,verified:true,text:''})});assert(empty.pending);assert.equal(empty.verified,undefined);
 });
-test('requested transcription waits without reissuing the conversion',async()=>{
- const f=fixture();const result=await transcribeVoice({...f,requested:true});assert(result.pending);assert.equal(f.calls.filter(c=>c.op==='click').length,0);
-});
-test('multiple voice bubbles use the queued sequence to select the correct position',async()=>{
- const f=fixture(),first={direction:'incoming',kind:'voice',text:'[语音]',voiceVerified:true,voiceCenter:{x:.5,y:.3}},second={...first,voiceCenter:{x:.5,y:.5}};
- const cursor=new (require('../src/main/conversation-cursor').ConversationCursor)();cursor.observe([{direction:'incoming',kind:'text',text:'old'}]);cursor.observe([{direction:'incoming',kind:'text',text:'old'},first,second]);
- f.task.state.conversations[require('../src/main/conversation-skill').subjectKey(f.subject)].cursor=cursor.snapshot();f.scene.observe=async()=>({headerMatched:true,messages:[{direction:'incoming',kind:'text',text:'old'},first,second]});
- const r=await transcribeVoice({...f,sequence:1});assert(r.requested);const click=f.calls.find(c=>c.op==='click');assert.equal(click.payload.y,310);
+test('task cancellation prevents a new visual Action and is forwarded through an active one',async()=>{
+ const f=fixture(),controller=new AbortController();controller.abort();let calls=0;
+ await assert.rejects(transcribeVoice({...f,signal:controller.signal,execute:async()=>{calls++;}}));assert.equal(calls,0);
+ const active=new AbortController();await transcribeVoice({...f,signal:active.signal,execute:async args=>{assert.equal(args.signal,active.signal);return {ok:true,verified:true,text:'actual text'};}});
 });

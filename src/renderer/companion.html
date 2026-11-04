@@ -76,6 +76,7 @@
         </select>
       </div>
       <div class="search-row"><input id="memorySearch" type="search" placeholder="搜索内容" aria-label="搜索记忆内容"><button id="memorySearchBtn" class="button quiet">搜索</button></div>
+      <div class="button-row"><button id="experienceImportZip" class="button quiet">导入经验 ZIP</button><button id="experienceImportFolder" class="button quiet">导入经验文件夹</button><span id="experienceImportNote" class="inline-note" role="status"></span></div>
       <p class="inline-note">编辑会保留原始聊天并更正事实；彻底遗忘会移除证据原话及其派生记录。</p>
       <div id="memoryList" class="records" aria-live="polite"></div>
       <div class="more-row"><span id="memoryListNote" class="inline-note"></span><button id="memoryMore" class="button quiet" hidden>更早内容</button></div>
@@ -98,7 +99,7 @@
     </header>
     <nav id="desktopTabs" class="tabs desktop-tabs" role="tablist" aria-label="任务与工作">
       <button class="tab active" role="tab" aria-selected="true" data-desktop-tab="current">任务</button>
-      <button class="tab" role="tab" aria-selected="false" data-desktop-tab="skills">技能</button>
+      <button class="tab" role="tab" aria-selected="false" data-desktop-tab="skills">任务能力</button>
       <button class="tab" role="tab" aria-selected="false" data-desktop-tab="workbuddy">WorkBuddy</button>
       <button class="tab" role="tab" aria-selected="false" data-desktop-tab="autonomy">自主工作</button>
       <button class="tab" role="tab" aria-selected="false" data-desktop-tab="permissions">系统权限</button>
@@ -139,7 +140,7 @@
       </details>
       </section>
       <section data-desktop-page="skills" role="tabpanel" hidden><section class="card">
-        <div class="section-heading"><div><h2>已安装技能</h2><p>任务按需使用技能，只有真实核验后才确认完成。</p></div></div>
+        <div class="section-heading"><div><h2>可用任务能力</h2><p>经验和工具在记忆中管理；Bunny按目标选择能力并自主核查结果。</p></div></div>
         <div id="agentSkillList" class="watch-list"></div>
       </section></section>
       <section data-desktop-page="workbuddy" role="tabpanel" hidden>

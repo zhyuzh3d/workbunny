@@ -11,6 +11,9 @@ const {
   app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage,
   shell, dialog, globalShortcut, Notification, systemPreferences, safeStorage, powerMonitor,
 } = require('electron');
+// All renderer IPC responses pass the same identity-secret output boundary.
+const registerIPC=ipcMain.handle.bind(ipcMain);
+ipcMain.handle=(name,handler)=>registerIPC(name,async(...args)=>require('./owner-security').sanitize(await handler(...args)));
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -33,7 +36,7 @@ const inputAdmission = require('./conversation-input');
 const { MemoryMaintenance } = require('./memory-maintenance');
 const { ContextCompression } = require('./context-compression');
 const { scopedMonitorContext } = require('./work-context');
-const presentConversation = text => inputAdmission.containsSecret(text) ? '' : rawPresentation(text);
+const presentConversation = rawPresentation;
 const { observeWorkBuddy } = require('./workbuddy-observation');
 const { createTaskJournal } = require('./task-journal');
 const { prepareVisionPreview } = require('./vision-preview');
@@ -114,9 +117,9 @@ process.on('SIGTERM', () => {
 /* ── 文件日志（桌宠没有终端，出问题只能看这个） ── */
 const LOG_PATH = path.join(USER_DIR, 'buddy.log');
 function log(...args) {
-  const line = `[${new Date().toISOString().slice(11, 19)}] ` + args.map((a) =>
+  const line = require('./owner-security').redact(`[${new Date().toISOString().slice(11, 19)}] ` + args.map((a) =>
     typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })()
-  ).join(' ');
+  ).join(' '));
   // 只留最近 400 行，防止日志无限长
   try {
     fs.mkdirSync(USER_DIR, { recursive: true });
@@ -201,7 +204,7 @@ let desktop = null;
 let workBuddyStopper = null;
 let watchDesktop = null, contacts = null, agent = null;
 let pendingTaskPermission = null;
-let secretary = null, autonomy = null;
+let secretary = null, autonomy = null, ownerSecurity = null, dialogueChannels = null;
 let taskNotifications = null, alertDesktop = null, notificationTimer = null;
 let delegationMonitor = null;
 let currentRecall = [];
@@ -292,12 +295,12 @@ const avatarPackPickers = new Map();
 const interactionAudio = new InteractionAudio(path.join(USER_DIR, 'cache', 'interactions'));
 function pushHistory(role, content, details = {}) {
   if (!content) return;
-  if (inputAdmission.containsSecret(content)) return;
+  if(role==='user'&&(!details.characterId||details.characterId==='owner')&&!details.perception)details={...details,perception:require('./perception').fromDetails(details)||require('./perception').keyboard()};
   if (role === 'user' && (!details.characterId || details.characterId === 'owner') && details.source !== 'user-reviewed') void autonomy?.ownerInput().catch(() => {});
   const scope = { domain: details.domain ?? details.scene ?? currentScene(), visibilityFloor: details.visibilityFloor ?? scopePolicy.rank(details.scene ?? currentScene()) };
-  if (visibleHere(scope)) history.push({ role, content: String(content), ...scope });
+  if (visibleHere(scope)) history.push({ role, content: String(content), ...(details.perception?{perception:details.perception}:{}), ...scope });
   if (history.length > 24) history = history.slice(-24);
-  return memory?.addMessage(role, content, { ...details, ...scope, scene: details.scene ?? currentScene() }).catch(() => log('[memory] 写入失败，未降级明文'));
+  return memory?.addMessage(role, require('./owner-security').redact(content), { ...details, ...scope, scene: details.scene ?? currentScene(),allowSensitive:(!details.characterId||['owner','bunny'].includes(details.characterId))&&details.delivery!=='task-receipt' }).catch(() => log('[memory] 写入失败，未降级明文'));
 }
 function publishRecall(entries = []) {
   currentRecall = entries.filter(row => row && ['memory', 'summary'].includes(row.kind))
@@ -595,6 +598,7 @@ ipcMain.on('pet:drag', (event, action) => {
 
 /* ── 事件推给渲染层 ── */
 function send(type, payload) {
+  payload=require('./owner-security').sanitize(payload);
   if (['chat', 'delta', 'say'].includes(type) && !(type === 'chat' && payload?.role === 'user') && typeof payload?.text === 'string') {
     const text = presentConversation(payload.text);
     if (!text) {
@@ -818,7 +822,7 @@ function prefetchNext() {
   const c = config.load();
   if (!(c.tts.enabled && c.voice.enabled)) return;
   const next = speechQueue[0];
-  if (next && presentConversation(next.text)) synthBuffer(presentConversation(next.text), next.emo);
+  if (next && !next.privateSpeech && presentConversation(next.text)) synthBuffer(presentConversation(next.text), next.emo);
 }
 
 async function pumpSpeech() {
@@ -832,6 +836,7 @@ async function pumpSpeech() {
   const gen = speechGen;
   activeSpeechReplyId = item.messageId || null;
   const c = config.load();
+  if(item.privateSpeech)c.tts={...c.tts,engine:'system'};
   // 持续聆听保持识别；没有 AEC 时同时用文字过滤回声。
   send('speaking', { on: true, text: item.text, interaction: item.interaction === true });
 
@@ -855,7 +860,7 @@ async function pumpSpeech() {
           const identity = profile ? { ...profile, style: item.emo || '' } : null;
           return interactionAudio.audio(item.motion, item.text, identity, () => synthBuffer(item.text, item.emo, undefined, c, identity));
         })
-        : synthBuffer(item.text, item.emo, playback.options);
+        : synthBuffer(item.text, item.emo, playback.options,c);
       prefetchNext();           // 和当前这句并行，先把下一句准备出来
       const result = await bufP, buffer = result.buffer;
       // 被打断/换代：不能裸 return —— 那样 speaking 和闭麦都留在原地，麦克风永久哑
@@ -912,9 +917,10 @@ function finishSpeech(confirmed = true) {
   if (speechQueue.length) setTimeout(pumpSpeech, 60);
 }
 
-function speak(text, { motion, emo, silent = false, messageId } = {}) {
+function speak(text, { motion, emo, silent = false, messageId,privateSpeech=false } = {}) {
   silent ||= !!speakerFilter.enrollment || suppressEnrollmentFinal;
-  const clean = presentConversation(text);
+  const clean = presentConversation(require('./owner-security').redact(text));
+  privateSpeech ||= inputAdmission.containsSecret(clean);
   if (!clean) return;
   if (!messageId) publishWebSources();
   if (motion) void embodiment.perform(motion, 'autonomy');
@@ -925,7 +931,7 @@ function speak(text, { motion, emo, silent = false, messageId } = {}) {
   const flush = () => { if (chunk.trim()) parts.push(chunk.trim()); chunk = ''; };
   const splitter = llm.makeSentenceSplitter(sentence => { if (chunk.length + sentence.length > 180) flush(); chunk += sentence; });
   splitter.push(clean); splitter.flush(); flush();
-  for (const part of parts) for (let offset = 0; offset < part.length; offset += 400) speechQueue.push({ text: part.slice(offset, offset + 400), emo, messageId });
+  for (const part of parts) for (let offset = 0; offset < part.length; offset += 400) speechQueue.push({ text: part.slice(offset, offset + 400), emo, messageId,privateSpeech });
   pumpSpeech();
 }
 
@@ -953,10 +959,9 @@ function dialogueReady() {
   return c.brain.source === 'apikey' ? !!config.resolveLLM(c).apiKey : connection.status().ready;
 }
 
-async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn, userMessage }) {
+async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn, userMessage, perception }) {
   const localTaskControl = internal ? null : dialogueActions.taskControl(userText, agent ? agent.currentTask() : desktop?.task);
   if (storageBusy || storageError || !localTaskControl && !dialogueReady()) { voiceTurn?.skip(); send('toast', { text: storageError || connection.status().note }); return null; }
-  if (!internal && inputAdmission.containsSecret(userText)) { voiceTurn?.skip(); send('toast', { text: inputAdmission.NOTICE }); return null; }
   const c = config.load(), scene = currentScene();
   let requestEpoch = contextEpoch;
   if (screenLocked || (c.memory.enabled && !memory?.ready)) { send('toast', { text: '请先解锁电脑与记忆，再继续对话。' }); return null; }
@@ -969,14 +974,14 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
   send('think', { on: true }); publishWebSources(); memory?.cancelExtraction();
   try {
     let role = memory?.ready ? await memory.cognition.loadRoleView({ repair: false }) : null;
-    const memoryContext = memory ? await memory.context(userText, { internal, recent: history, scene, budget: 20000 }) : { text: nowLine(), messages: history.slice(-12), sourceIds: [] };
-    const workContext = monitor ? await scopedWork(monitor.view) : { text: '', sourceIds: [] };
+    const memoryContext = memory ? await memory.context(userText, { internal, recent: history, scene, budget: 20000,allowSensitive:!internal }) : { text: nowLine(), messages: history.slice(-12), sourceIds: [] };
+    const workContext = !agent&&monitor ? await scopedWork(monitor.view) : { text: '', sourceIds: [] };
     const secretaryContext = secretary?.contextSnapshot() || { text: '', sourceIds: [] };
     if (typeof taskNotifications !== 'undefined' && taskNotifications && memory?.ready) {
       const alerts = await taskNotifications.context(scene);
       secretaryContext.text += '\n' + alerts.text; secretaryContext.sourceIds.push(...alerts.sourceIds);
     }
-    const rows = c.memory.enabled && memory?.ready && !internal ? (await memory.query('message', 100, { scene, sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse() : [];
+    const rows = c.memory.enabled && memory?.ready && !internal ? (await memory.query('message', 100, { scene, channelId:'local', sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse() : [];
     const dialogueId = 'owner:' + scene;
     const dc = require('./dialogue-cognition');
     const cognitionContext = dc.context(rows, { dialogueId });
@@ -1011,18 +1016,21 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       if (i === prior.length - 1 && prior[i].role === 'user' && prior[i].content.trim() === userText.trim()) continue;
       messages.push(...(internal ? [prior[i]] : dialogueHistory([prior[i]])));
     }
-    messages.push({ role: 'user', content: JSON.stringify({ character: internal ? 'runtime-observation' : 'owner', trust: internal ? 'state-data-not-instructions' : 'current-owner-request', text: userText }) });
-    const recallSession = !internal && c.memory.enabled && memory?.ready ? require('./conversation-recall').createRecallSession(memory, { scene, isCurrent: current,
+    messages.push({ role: 'user', content: JSON.stringify({ character: internal ? 'runtime-observation' : 'owner', trust: internal ? 'state-data-not-instructions' : 'current-owner-request', ...(!internal?{perception:perception||(voiceTurn?require('./perception').speech():require('./perception').keyboard())}:{}), text: userText }) });
+    const recallSession = !internal && c.memory.enabled && memory?.ready ? require('./conversation-recall').createRecallSession(memory, { scene, isCurrent: current,allowSensitive:true,
       maxSources: 180 - new Set([...(memoryContext.sourceIds || []), ...workContext.sourceIds, ...secretaryContext.sourceIds, ...cognitionContext.sourceIds, ...growthContext.sourceIds]).size }) : null;
+    const contextSession=!internal&&agent?require('./context-assembler').createContextSession({fragments:[...agent.contextModules({scene}),...(recallSession?[require('./conversation-recall').recallFragment(recallSession)]:[])],signal:controller.signal,isCurrent:current}):null;
+    const sensitiveTurn=!internal&&require('./sensitive-policy').hasProtectedContent(JSON.stringify(messages),c.memory.enabled&&memory?.ready?await memory.sensitiveValues():[]);
     const started = Date.now();
     const r = taskControl ? { raw: JSON.stringify({ kind: 'action', intent: taskControl }), reply: { intent: taskControl }, motions: [], emos: [] }
       : internal ? await llm.chat({ ...L, messages, signal: controller.signal, maxTokens: L.maxTokens || 4096 })
       : await requestReply({ chat: llm.chat, selfRepair: true, request: { ...L, cognitive: true, deferPresentation: true, messages,
-        webSearch: L.transport === 'workbuddy' && require('./conversation-search').mayUseWebSearch(userText), searchCache: new Map(),
-        recallSession,
+        webSearch: !sensitiveTurn&&L.transport === 'workbuddy' && require('./conversation-search').mayUseWebSearch(userText), searchCache: new Map(),
+        recallSession,contextSession,
         maxTokens: L.maxTokens || 4096, signal: controller.signal, isCurrent: current } });
     if (!current()) return null;
     if (recallSession && !await recallSession.verify()) throw new Error('本轮回忆依据已变化，请重试');
+    if(contextSession)await contextSession.verify();
     log(`[brain] 完成 ${Date.now() - started}ms（${r.attempts || 1}次请求 · ${L.provider}/${r.model || L.model}）`);
     if (r.cognitionDegraded) log('[brain] 对话协议降级为已校验普通回复' + (['json', 'envelope', 'review', 'reply', 'prediction'].includes(r.cognitionFailureStage) ? '（阶段：' + r.cognitionFailureStage + '）' : ''));
     const reply = internal ? { text: r.text } : r.reply;
@@ -1032,7 +1040,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       userMessage = voiceTurn.remember();
     }
     let userRecord = !internal ? await userMessage : null;
-    if (!internal && !userRecord && !voiceTurn && c.memory.enabled) userRecord = await pushHistory('user', userText, { scene });
+    if (!internal && !userRecord && !voiceTurn && c.memory.enabled) userRecord = await pushHistory('user', userText, { scene,perception:perception||require('./perception').keyboard() });
     if (!current()) return null;
     if (!internal && c.memory.enabled && !userRecord) throw new Error('本轮原文未能保存，请重试');
     const sources = [...new Set([userRecord?.id, ...(memoryContext.sourceIds || []), ...(workContext.sourceIds || []), ...secretaryContext.sourceIds,
@@ -1069,7 +1077,6 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     const clean = presentConversation(tags.clean.replace(/<\s*skip\s*\/?>/gi, '')).trim();
     if (!clean) return null;
     r.text = conversationText(clean);
-    if (inputAdmission.containsSecret(r.text)) throw new Error('回复含敏感凭据，已阻止显示与朗读');
     let motionStarted = false;
     const postureIntent = internal || activeAvatarPack() ? null : require('./posture-intent').postureIntent(userText);
     const gesture = postureIntent || tags.motions[0] || ({ happy: 'cheer', sad: 'sorry', angry: 'angry', surprised: 'surprise', relaxed: 'idle' })[tags.emos[0]];
@@ -1085,7 +1092,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       if (cognition && !cognitionContext.previousReplyId) cognition.review = { ...cognition.review, grade: 'unassessed' };
       if (cognition && reply.intent) cognition.prediction = null;
       if (cognition?.basis) cognition.basis = reply.intent ? [] : cognition.basis.filter(id => basisCandidates.includes(id));
-      const result = await memory.addMessageOnce('reply:' + userRecord.id, 'assistant', r.text, { delivery: 'generated', scene,
+      const result = await memory.addMessageOnce('reply:' + userRecord.id, 'assistant', r.text, { delivery: 'generated', scene,allowSensitive:true,
         turnId: userRecord.value.turnId || userRecord.id, sources: [...new Set(sources)], evidenceSnapshots: recallSession?.snapshots, ...(cognition ? { cognition } : {}) });
       record = result.record;
       if (['opposite', 'branch_miss'].includes(cognition?.review.grade) || cognitionContext.data.consecutiveMisses >= 2 || /不是这个意思|你误会|先听我说/u.test(userText)) maintenance?.requestReflection('conversation-correction');
@@ -1099,7 +1106,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       lastDialogueAt = Date.now();
     }
     if (internal) presentedReplies.clear();
-    if (allowSpeech) speak(r.text, { emo: tags.emos[0], messageId: record?.id });
+    if (allowSpeech) speak(r.text, { emo: tags.emos[0], messageId: record?.id,privateSpeech:sensitiveTurn });
     else {
       if (tags.motions[0] && !motionStarted) log('[motion] 本轮动作未确认执行');
       if (tags.emos[0]) send('emo', { key: tags.emos[0] });
@@ -1233,7 +1240,7 @@ async function proactive() { return refreshSupervision(); }
 function notify(title, body) {
   try {
     if (!Notification.isSupported()) return;
-    const n = new Notification({ title, body, silent: true });
+    const n = new Notification({ title:require('./owner-security').redact(title), body:require('./owner-security').redact(body), silent: true });
     n.on('click', () => { showWindow(); });
     n.show();
   } catch {}
@@ -1279,7 +1286,7 @@ function startMonitor() {
         scope = scopePolicy.scopeOf(memory.decode(stored)); sources = [taskId];
       }
       await memory.addMessageOnce('workbuddy-event:' + event.id, 'user', event.content, {
-        characterId: 'workbuddy', characterName: 'WorkBuddy', channel: 'workbuddy', conversationId: event.snap.sessionId,
+        characterId: 'workbuddy', characterName: 'WorkBuddy', channel: 'workbuddy', channelId:'local', conversationId: event.snap.sessionId,
         taskId: taskId || String(event.snap.task?.messageKey || event.snap.task?.id || ''), originalRole: event.role,
         occurredAt: event.time, sources, ...scope, privacyEpoch,
       });
@@ -1610,14 +1617,13 @@ const voiceTurns = require('./voice-turns').createVoiceTurns({
   allowShort: () => Date.now() - lastDialogueAt < 90_000,
   onRequest: (turn) => handleUtterance(turn.text, turn),
   onInvalidate: () => stopSpeaking(),
-  onRemember: (text, metadata) => pushHistory('user', text, { turnId: metadata.turnId }),
+  onRemember: (text, metadata) => pushHistory('user', text, { turnId: metadata.turnId,perception:require('./perception').speech(metadata.turnId) }),
   onError: (message) => { log('[listen] ' + message); send('toast', { text: message }); },
   onLive: publishVoiceLive,
 });
 
 async function handleUtterance(text, voiceTurn) {
   const t = String(text || '').trim();
-  if (inputAdmission.containsSecret(t)) { voiceTurn?.skip(); send('toast', { text: inputAdmission.NOTICE }); return; }
   if (!worthJudging(t)) { log('[listen] drop noise'); return; }
   // 这句可能就是我自己刚说的（回声消除没吃干净）→ 当没听见
   if (recentEcho(t)) {
@@ -1653,21 +1659,21 @@ async function handleUtterance(text, voiceTurn) {
 
   // 名字唤醒通过后，仍使用同一次请求判断是否在对她说话。
   if (nameHit(t) && !c.asr.judge) {
-    const userMessage = voiceTurn ? undefined : pushHistory('user', t);
+    const userMessage = voiceTurn ? undefined : pushHistory('user', t, {perception:require('./perception').speech()});
     log('[listen] name hit -> direct reply');
-    const r = await think({ userText: t, voiceTurn, userMessage });
+    const r = await think({ userText: t, voiceTurn, userMessage,perception:require('./perception').speech() });
     if (r && (!voiceTurn || voiceTurn.isCurrent())) send('heard', { text: t, replied: true });
     return;
   }
 
   if (!c.asr.judge) {
-    const userMessage = voiceTurn ? undefined : pushHistory('user', t);
+    const userMessage = voiceTurn ? undefined : pushHistory('user', t, {perception:require('./perception').speech()});
     send('chat', { role: 'user', text: t });
-    think({ userText: t, voiceTurn, userMessage });
+    think({ userText: t, voiceTurn, userMessage,perception:require('./perception').speech() });
     return;
   }
   // 一次模型输出：要回复就直接给正文；否则只输出 <skip>。
-  const r = await think({ userText: t, judge: true, voiceTurn });
+  const r = await think({ userText: t, judge: true, voiceTurn,perception:require('./perception').speech() });
   if (!r || (voiceTurn && !voiceTurn.isCurrent())) return;
   const skipped = /<\s*skip\s*\/?>/i.test(r.text || '');
   send('heard', { text: t, replied: !skipped });
@@ -1727,6 +1733,9 @@ async function ensureSelfRole() {
   return view;
 }
 function selfAccess(e) { trustedCompanion(e); if (!memory?.ready || screenLocked) throw new Error('请先在记忆与关系中解锁资料库'); }
+ipcMain.handle('pet:owner-security-status',e=>{selfAccess(e);return {...ownerSecurity.status(),channels:dialogueChannels.list()};});
+ipcMain.handle('pet:owner-security-change',async(e,key)=>{selfAccess(e);trustedCompanion(e,'settings');const result=await ownerSecurity.change(key);send('owner-security',result);return result;});
+ipcMain.handle('pet:owner-security-enable',async(e,enabled)=>{selfAccess(e);trustedCompanion(e,'settings');const result=await ownerSecurity.setEnabled(enabled);send('owner-security',result);return result;});
 ipcMain.handle('pet:autonomy-status', async e => { selfAccess(e); return autonomy.status(); });
 ipcMain.handle('pet:autonomy-save', async (e, value) => { selfAccess(e); return autonomy.save(value); });
 ipcMain.handle('pet:growth-dismiss', async (e, entryId) => { selfAccess(e); autonomy.pause(); await memory.growth.dismiss(entryId); return autonomy.status(); });
@@ -1780,6 +1789,11 @@ ipcMain.handle('pet:open-web-source', async (e, value) => {
   await shell.openExternal(url); return { ok: true };
 });
 ipcMain.handle('pet:memory-maintenance-status', e => { trustedCompanion(e, 'memory'); return maintenance?.status() || { status: 'idle', note: '等待记忆解锁' }; });
+ipcMain.handle('pet:experience-import',async(e,kind)=>{
+  selfAccess(e);trustedCompanion(e,'memory');if(!['zip','folder'].includes(kind))throw Error('请选择ZIP或文件夹');
+  const result=await dialog.showOpenDialog({title:'导入经验和工具',properties:[kind==='zip'?'openFile':'openDirectory'],...(kind==='zip'?{filters:[{name:'经验资源包',extensions:['zip']}]}:{})});
+  if(result.canceled)return {canceled:true};selfAccess(e);return memory.experienceRepository.import(result.filePaths[0]);
+});
 ipcMain.handle('pet:memory-maintain', (e, mode) => {
   trustedCompanion(e, 'memory');
   if (!memory?.ready || !config.load().memory.enabled) return { ok: false, error: '请先启用并解锁记忆' };
@@ -2224,7 +2238,6 @@ ipcMain.on('pet:composing', (event, value) => {
 
 ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
   const t = String(text || '').trim();
-  if (inputAdmission.containsSecret(t)) return { ok: false, error: inputAdmission.NOTICE };
   if (!t) return { ok: false };
   if (storageBusy || storageError) return { ok: false, error: storageError || '数据库正在迁移' };
   const localControl=dialogueActions.taskControl(t,agent?agent.currentTask():desktop?.task);
@@ -2898,15 +2911,20 @@ if (!lock) {
     });
     memory.selfRevisionChanged = () => { autonomy?.pause(); contextEpoch++; if (!selfMutationOwner) { activeThought?.abort(); voiceTurns.reset(); stopSpeaking(); } };
     const guiLease = new GuiLease();
+    ownerSecurity=await new(require('./owner-security').OwnerSecurity)({file:path.join(USER_DIR,'owner-security.json'),encrypt:value=>safeStorage.encryptString(value),decrypt:value=>safeStorage.decryptString(value),onChange:async()=>{contextEpoch++;activeThought?.abort();stopSpeaking();if(dialogueChannels)await dialogueChannels.revokeAll();send('owner-security',{configured:false});}}).init();
+    dialogueChannels=memory.dialogueChannels=new(require('./dialogue-channels').DialogueChannels)({memory,security:ownerSecurity,getScene:currentScene,onRevoke:ids=>agent?.revokeChannelOutputs(ids)});
+    await dialogueChannels.ensure({application:'bunny'});
+    const sensitivePolicy=require('./sensitive-policy').createSensitivePolicy({getValues:()=>memory.sensitiveValues(),authorizeChannel:(snapshot,recipient)=>{dialogueChannels.assert(snapshot);const channel=dialogueChannels.channels.get(snapshot.channelId);if(channel?.recipient!==recipient)throw require('./dialogue-channels').stale();return snapshot.owner;}});
     const imageResize = png => prepareVisionPreview(nativeImage.createFromBuffer(png));
     const imageCrop = (png, rect) => nativeImage.createFromBuffer(png).crop(rect).toPNG();
-    desktop = new DesktopService({ beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'primary', getScene: currentScene, emit: status => {
+    const imageBitmap=png=>{const image=nativeImage.createFromBuffer(png);return {data:image.toBitmap(),...image.getSize()};};
+    desktop = new DesktopService({ sensitivePolicy,beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'primary', getScene: currentScene, emit: status => {
       if (status.running&&!taskUiInteractive) setInteractive(false);
       send('desktop', status);
       secretary?.onStatus(status);
       if (['accepted', 'paused', 'stopped', 'cancelled'].includes(status.task?.status)) { delegationMonitor?.stop(); delegationMonitor = null; }
       for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'desktop', ...status });
-    }, imageResize, imageCrop, observeWorkBuddy: task => {
+    }, imageResize, imageCrop, bitmap:imageBitmap, observeWorkBuddy: task => {
       let source = monitor?.enabled ? monitor : delegationMonitor;
       if (!source) {
         source = delegationMonitor = new Monitor();
@@ -2943,14 +2961,12 @@ if (!lock) {
       }
     }) });
     desktop.contactDirectory = contacts;
-    watchDesktop = new DesktopService({ beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'agent-conversation', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop,
+    watchDesktop = new DesktopService({ sensitivePolicy,beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'agent-conversation', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop, bitmap:imageBitmap,
       persist: task => createTaskJournal(memory)({ ...task, taskType: 'agent-operation' }) });
     const agentNative = new (require('./desktop-native').DesktopNative)();
-    const canOperate = async () => {
-      if (!readyForOwner() || busy || speaking || composing || !guiLease.isFree() || secretary?.verifying) return false;
-      const idle = await agentNative.request('inputIdle', {}, 5000);
-      return typeof idle.hidIdleMs === 'number' && idle.hidIdleMs >= 2000;
-    };
+    // Local thinking and speech do not own the mouse or keyboard. Only GUI
+    // ownership/readiness and five seconds of quiet gate a new GUI action.
+    const canOperate = require('./gui-admission').createGuiAdmission({native:agentNative,lease:guiLease,ready:readyForOwner});
     const authorization=new (require('./authorization-service').AuthorizationService)({settings:()=>config.load().software,
       permissions:()=>agentNative.request('permissions',{},8000),onResolved:async id=>{if(pendingTaskPermission?.taskId===id){pendingTaskPermission=null;send('task-permission',{resolved:true});}},onMissing:async request=>{
         pendingTaskPermission=request;send('task-permission',request);
@@ -2958,12 +2974,12 @@ if (!lock) {
         if(panel.webContents.isLoading())panel.webContents.once('did-finish-load',show);else show();
       }});
     setInterval(()=>{if(!quitting&&readyForOwner())void agent?.refreshPermissions().then(()=>agent?.recoverPending()).catch(()=>{});},3000).unref();
-    agent = new (require('./agent-service').AgentService)({ desktop, conversationDesktop: watchDesktop, memory, contacts,
+    agent = new (require('./agent-service').AgentService)({ desktop, conversationDesktop: watchDesktop, memory, contacts, channels:dialogueChannels,
       authorization,taskDirectory:path.join(USER_DIR,'workspaces'),deliveryDirectory:path.join(USER_DIR,'deliveries'),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,setWeChatOwnership:ownership=>applySettings({software:{wechatAccountOwnership:ownership}}),
       native: agentNative, imageResize, bitmap: png => { const picture = nativeImage.createFromBuffer(png); return { data: picture.toBitmap(), ...picture.getSize() }; },
       getScene: currentScene, ready: readyForOwner, epoch: () => memory.generation, canOperate, report: queueTaskReport,stopWork:stopWorkBuddy,
       emit: status => { send('agent', status); for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'agent', ...status }); } });
-    alertDesktop = new DesktopService({ beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'task-alert', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop,
+    alertDesktop = new DesktopService({ sensitivePolicy,beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'task-alert', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop, bitmap:imageBitmap,
       persist: task => createTaskJournal(memory)({ ...task, taskType: 'notification-operation' }),
       modelRequest: options => {
         const L = config.resolveLLM(config.load());
@@ -2976,11 +2992,10 @@ if (!lock) {
     taskNotifications = new (require('./task-notifications').TaskNotifications)({ memory, getScene: currentScene,
       ready: () => readyForOwner() && config.load().memory.enabled,
       canOperate: async () => {
-        if (!readyForOwner() || busy || speaking || composing || secretary?.verifying || !guiLease.isFree() || Date.now() < quietUntil) return false;
+        if (Date.now() < quietUntil) return false;
         if(!agent||agent.scene.circuit)return false;
         try{await agent.scene.assertHealthy();}catch{return false;}
-        const idle = await alertDesktop.native.request('inputIdle', {}, 5000);
-        return Number.isFinite(idle.hidIdleMs) && idle.hidIdleMs >= 8000;
+        return canOperate();
       },
       deliver: async (event, signal) => {
         const stop = () => { void alertDesktop.stop('异常提醒被暂停').catch(() => {}); };
@@ -3017,7 +3032,7 @@ if (!lock) {
       canRun: () => readyForTasks() && config.load().memory.enabled && !busy && !speaking && !activeThought && !desktop?.running && !secretary?.verifying &&
         !maintenance?.activeMode && !taskReports.length && Date.now() >= quietUntil && Date.now() - lastHeardAt >= 15 * 60_000 && Date.now() - BOOT_AT >= 15 * 60_000 });
     memory.blocks.summarize = require('./workbuddy-free').summarizeBlock;
-    memory.compression = new ContextCompression({ memory, recentMessages: 20, summarize: require('./workbuddy-free').summarizeContext });
+    memory.compression = new ContextCompression({ memory, channelId:'local', recentMessages: 20, summarize: require('./workbuddy-free').summarizeContext });
     require('./model-catalog').refresh('workbuddy').catch(() => {});
     maintenance = memory.maintenance = new MemoryMaintenance({ memory, compression: memory.compression,
       extract: require('./workbuddy-free').extractMemories,

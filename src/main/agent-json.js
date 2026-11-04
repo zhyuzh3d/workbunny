@@ -9,7 +9,7 @@ function modelJSON(text){
 }
 async function checkedJSON(options,validate,{request=requestVerification}={}){
   options=require('./self-repair').applyProfile(options,options.repairProfile);
-  let error,retryOutputLimit=false;const messages=[...options.messages];
+  let error,retryOutputLimit=false;const messages=options.messages.map(m=>({...m}));const system=messages.find(m=>m.role==='system'&&typeof m.content==='string');if(system){if(!system.content.includes('# Bunny'))system.content=require('./bunny-principles')+'\n'+system.content;}else messages.unshift({role:'system',content:require('./bunny-principles')});
   for(let attempt=0;attempt<2;attempt++){
     if(options.signal?.aborted)throw new Error('任务已取消');
     let checked;try{checked=await request({...options,messages,...(retryOutputLimit?{maxTokens:Math.max(4096,Number(options.maxTokens)||0)}:{})});}catch(e){const transient=require('./workbuddy').isTransientConnectionError?.(e)||/timeout|超时|network|连接|fetch failed|ECONNRESET|ETIMEDOUT/iu.test(e.message||'');const outputLimit=e.code==='E_OUTPUT_LIMIT';if(!(transient||outputLimit)||attempt>0||options.signal?.aborted)throw e;retryOutputLimit=outputLimit;await new Promise(r=>setTimeout(r,500));continue;}

@@ -1,6 +1,18 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {WeChatScene}=require('../src/main/wechat-scene');
+test('unchanged conversation pixels reuse the actual interpretation despite draft changes and a slow background model',()=>{
+ const data=Buffer.alloc(100*100*4),identity={pid:77,windowId:9},url=b=>'data:image/png;base64,'+b.toString('base64');
+ const scene=new WeChatScene({native:{},bitmap:b=>({width:100,height:100,data:b})});
+ scene.knownWindow=identity;scene.last={observationId:'known',header:'Alice',headerMatched:true,conversationBottom:.8,messages:[{text:'actual known input'}]};
+ scene.observer.frames.set('known',{preview:url(data),identity});scene.inflight=new Promise(()=>{});
+ const draft=Buffer.from(data);draft.fill(255,(90*100+50)*4,(90*100+52)*4);
+ assert.equal(scene.reuseObservation({recipient:'Alice'},{preview:url(draft),at:2}).messages[0].text,'actual known input');
+ const body=Buffer.from(draft);body.fill(255,(50*100+50)*4,(50*100+52)*4);
+ assert.equal(scene.reuseObservation({recipient:'Alice'},{preview:url(body),at:3}),null,'actual new conversation pixels still require independent interpretation');
+ assert.equal(scene.reuseObservation({recipient:'Bob'},{preview:url(draft)}),null);
+ scene.knownWindow={...identity,pid:78};assert.equal(scene.reuseObservation({recipient:'Alice'},{preview:url(draft)}),null);
+});
 function fixture(){let now=1000,visible=true,login=false,changed=true;const calls=[],faults=[];let inspections=0;
  const native={request:async(op)=>{calls.push(op);
   if(op==='frontmost')return {application:{bundleId:'other.app'},windows:visible?[{bundleId:'com.tencent.xinWeChat',pid:77,windowId:9,layer:0,rect:{x:0,y:30,width:821,height:909}}]:[]};

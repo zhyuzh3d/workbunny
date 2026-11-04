@@ -20,7 +20,7 @@ function recentRounds(rows, { rounds = 8, budget = 4000 } = {}) {
   }
   return { rows: chosen, used, omitted: rows.length - chosen.length };
 }
-function recentMessages(rows, { count = 20, budget = 12000 } = {}) {
+function recentMessages(rows, { count = 20, budget = 12000, includeSensitive = false } = {}) {
   const actors = require('./message-identity'), groups = [];
   for (const row of rows.filter(r => actors.isDialogue(r.value))) {
     const previous = groups.at(-1);
@@ -30,7 +30,7 @@ function recentMessages(rows, { count = 20, budget = 12000 } = {}) {
   }
   let used = 0, n = 0; const chosen = [];
   for (const group of groups.reverse()) {
-    if (group.some(r => containsSecret(r.value.content))) continue;
+    if (!includeSensitive && group.some(r => containsSecret(r.value.content))) continue;
     if (n && n + group.length > count) break;
     const cost = group.reduce((sum, r) => sum + JSON.stringify(actors.inputRow(r)).length + 2, 0);
     if (used + cost > budget) break;

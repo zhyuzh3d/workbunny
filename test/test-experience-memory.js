@@ -160,11 +160,8 @@ async function testEligibilityScopeAndSourceRevalidation() {
   const privateTask = await addAcceptedTask(memory, { id: 'task-private-source', goal: '私聊来源的工作任务', scene: 'private', domain: 'work', visibilityFloor: 2,
     sourceText: '私密工作来源。' });
   const saved = await experience.recordAcceptedTask(privateTask.task.id);
-  assert.equal(saved.ok, true);
-  const hidden = await experience.findApplicable({ goal: '私聊来源', target: 'workbuddy', scene: 'work' });
-  assert(!hidden.experiences.some(row => row.id === saved.experienceId), 'private-floor derived work experience is hidden in work scene');
-  const visible = await experience.findApplicable({ goal: '私聊来源', target: 'workbuddy', scene: 'private' });
-  assert(visible.experiences.some(row => row.id === saved.experienceId));
+  assert.equal(saved.ok, false, 'private sources must never produce task experience');
+  for(const scene of ['work','life','private']){const matches=await experience.findApplicable({goal:'private source',target:'workbuddy',scene});assert(!matches.experiences.some(row=>row.taskId===privateTask.task.id));}
 
   const mutable = await addAcceptedTask(memory, { id: 'task-source-mutation', goal: '来源变更测试' });
   const created = await experience.recordAcceptedTask(mutable.task.id);

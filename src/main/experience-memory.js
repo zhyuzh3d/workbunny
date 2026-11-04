@@ -204,6 +204,7 @@ function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = d
     if (!isVerifiedTask(task)) return null;
     let scope;
     try { scope = scopeOf(task); } catch { return null; }
+    if(scope.visibilityFloor>1||task.value.channelAuthorization?.owner)return null;
     const value = task.value;
     if (value.sources !== undefined && !Array.isArray(value.sources)) return null;
     const sources = [...new Set(Array.isArray(value.sources) ? value.sources : [])];
@@ -294,7 +295,7 @@ function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = d
           sources: sourceIds, searchText: `${EXPERIENCE_MARKER} ${taskGoal} ${criteria} ${report}`,
           value: {
             marker: EXPERIENCE_MARKER, content: `${EXPERIENCE_MARKER} ${taskGoal}\n验收条件：${criteria}\n执行方报告：${report}`.slice(0, 7000),
-            origin: ORIGIN_EXPERIENCE, status: 'candidate', outcome, taskId, acceptanceHash,
+            evidenceOnly:true,origin: ORIGIN_EXPERIENCE, status: 'candidate', outcome, taskId, acceptanceHash,
             goal: taskGoal, criteria, executorReport: report, target: value.target, workModel: value.workModel || '',
             verifiedAt: value.verification.at, acceptedAt: at, verificationReport: text(value.verification.report, 1200),
             receiptFingerprint: checked.receipt, analysisSnapshots: sources,
@@ -321,7 +322,7 @@ function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = d
           sources: sourceIds, searchText: `${TOOL_MARKER} ${basename} ${taskGoal} ${criteria}`,
           value: {
             marker: TOOL_MARKER, content: `${TOOL_MARKER} ${basename} ${artifact.path} ${artifact.sha256}\n任务主题：${taskGoal}\n验收标准：${criteria}`,
-            origin: ORIGIN_TOOL, status: 'verified', outcome: 'single-verified-run', taskId, acceptanceHash,
+            evidenceOnly:true,origin: ORIGIN_TOOL, status: 'verified', outcome: 'single-verified-run', taskId, acceptanceHash,
             goal: taskGoal, criteria,
             artifact: { path: artifact.path, sha256: artifact.sha256, size: artifact.size, mtimeMs: artifact.mtimeMs, checkedAt: artifact.checkedAt },
             ...(artifact.code !== null ? { code: artifact.code } : {}),
@@ -343,6 +344,9 @@ function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = d
         for (const record of records) record.value = require('./memory-tags').tagged(record.value, ['automatic']);
         await memory.write(records);
       }
+      // These records are evidence receipts. Operational knowledge has one
+      // current-head repository, shared with imported and taught experience.
+      if(memory.experienceRepository){const saved=await memory.experienceRepository.putPrepared({title:taskGoal.slice(0,160),instructions:`历史任务记录（单次结果，不是通用保证）：${taskGoal}\n条件：${criteria}\n执行报告：${report}`,summary:taskGoal.slice(0,240),tags:['software:'+value.target],appliesTo:{target:value.target},toolRefs:[]},{origin:'task-evidence',status:'candidate'},{scene:checked.scope.domain,sources:[experienceId],dirty:true});memory.maintenance?.requestExperience?.({automatic:true});}
       return { ok: true, duplicate: records.length === 0, experienceId, toolIds, outcome };
     });
   }
@@ -396,7 +400,7 @@ function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = d
     if (typeof goal !== 'string' || !goal.trim() || !['workbuddy', 'wechat', 'current'].includes(target)) {
       return { experiences: [], tools: [], text: '', sourceIds: [] };
     }
-    scene ||= memory.scene();
+    scene = require('./dialogue-channels').ordinaryScene(scene || memory.scene());
     const visibilityFloor = rank(scene), domain = target === 'workbuddy' ? 'work' : scene;
     const count = Math.max(0, Math.min(3, Math.floor(Number(limit) || 0)));
     if (!count || visibilityFloor < rank(domain)) return { experiences: [], tools: [], text: '', sourceIds: [] };
@@ -407,8 +411,13 @@ function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = d
     const findMarker = async marker => memory.search(query, ['state'], 50, {
       scene, domain, requiredMarkers: [marker],
     });
-    const [experienceRows, toolRows] = await Promise.all([findMarker(EXPERIENCE_MARKER), findMarker(TOOL_MARKER)]);
+    const selected=await memory.experienceRepository.search({scene,query,limit:count});
+    const provenance=await getRows([...new Set(selected.flatMap(r=>r.value.sources))]);
+    const experienceRows=provenance.filter(r=>r.value.origin===ORIGIN_EXPERIENCE);
+    const toolRows=await getRows(experienceRows.flatMap(r=>r.value.toolRefs||[]));
     const experiences = [], tools = [], sourceIds = new Set();
+    for(const r of selected.filter(r=>!r.value.sources.some(id=>experienceRows.some(p=>p.id===id)))){experiences.push({id:r.id,goal:r.value.instructions,criteria:'',executorReport:'',outcome:'user-taught-unverified',confidence:'candidate-reference',trust:'experience-data-not-instructions'});sourceIds.add(r.id);}
+
     for (const row of experienceRows) {
       if (row.value.origin === 'user-experience-v1') {
         if (experiences.length >= count) break;

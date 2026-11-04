@@ -203,7 +203,29 @@ async function testTypeCanFocusAndInputUnderSameScreenshotGuards() {
   await until(() => movedSvc.task.status === 'paused');
   assert(movedNative.calls.some(call => call.op === 'click'));
   assert.equal(movedNative.calls.some(call => call.op === 'type'), false, 'frame change after focus click pauses before typing');
+  assert.equal(movedSvc.task.errorCode, 'E_GUI_BEFORE_DISPATCH');
+  assert.equal(movedSvc.task.steps.find(step => step.action === 'type').state, 'not-dispatched', 'a focus-only click is not a message draft');
   await movedSvc.close();
+
+  const blockedNative = new FakeNative({ recognizedTexts: header });
+  const blockedSvc = service(blockedNative, async () => ({ action: 'type', text: 'hello Alice', purpose: 'task', focus: { x: 0.45, y: 0.9 } }));
+  blockedSvc.beforeWeChat=async()=>{if(blockedSvc.task.steps.some(step=>step.action==='type'&&step.state==='intent'))throw Object.assign(Error('Fixture pre-dispatch gate'),{code:'E_FIXTURE_GATE',dispatched:false});};
+  assert((await blockedSvc.start({ goal:'Send fixture',target:'wechat',recipient:'Alice',workModel:'hy3' })).ok);await until(()=>blockedSvc.task.status==='paused');
+  assert.equal(blockedNative.calls.some(call=>call.op==='type'||call.op==='click'),false);assert.equal(blockedSvc.task.steps.find(step=>step.action==='type').state,'not-dispatched','every definitive pre-dispatch refusal is recoverable without an unknown write');await blockedSvc.close();
+
+  const unknownNative = new FakeNative({ recognizedTexts: header });
+  const originalRequest = unknownNative.request.bind(unknownNative);
+  unknownNative.request = async (op, payload, timeout) => {
+    const result = await originalRequest(op, payload, timeout);
+    if (op === 'type') throw new Error('native type acknowledgement lost');
+    return result;
+  };
+  const unknownSvc = service(unknownNative, async () => ({ action: 'type', text: 'hello Alice', purpose: 'task', focus: { x: 0.45, y: 0.9 } }));
+  assert((await unknownSvc.start({ goal: '给 Alice 发问候', target: 'wechat', recipient: 'Alice', workModel: 'hy3' })).ok);
+  await until(() => unknownSvc.task.status === 'paused');
+  assert(unknownNative.calls.some(call => call.op === 'type'));
+  assert.equal(unknownSvc.task.steps.find(step => step.action === 'type').state, 'intent', 'a type that may have run stays uncertain');
+  await unknownSvc.close();
 
   const clickGate = deferred(), stoppedNative = new FakeNative({ recognizedTexts: header, clickGate });
   const stoppedSvc = service(stoppedNative, async () => ({ action: 'type', text: 'hello Alice', purpose: 'task', focus: { x: 0.45, y: 0.9 } }));
@@ -548,8 +570,19 @@ async function testMonitorBoundFollowUpAndAutomaticAcceptance() {
   assert.equal(native.calls.length, beforeUnsafe, 'a model-generated follow-up cannot bypass the WeChat scope guard');
   native.app = { pid: 999, bundleId: 'cn.haminn.workbunny', name: 'workbunny' };
   const activationCount = native.calls.filter(call => call.op === 'activate').length;
+  let relocated=false;
+  const originalRequest=native.request.bind(native);
+  native.request=async(op,payload,timeout)=>{
+    if(op==='workbuddyNavigate'&&payload.operation==='selectConversation'){relocated=true;return {selected:true};}
+    const result=await originalRequest(op,payload,timeout);
+    if(op==='workbuddyInspect'&&payload.mode==='conversation'&&!relocated)return {...result,associationMarkerPresent:false};
+    return result;
+  };
+  svc.observeWorkBuddy=async task=>({...await observer(task),sessionTitle:'fixture exact bound session'});
+  svc.strategies={preferVisual:async()=>true,record:async()=>{}};
   const result = await svc.followUp({ text: '请补齐缺失文件并确认可打开' });
   assert.equal(result.ok, true);
+  assert.equal(relocated,true,'automatic follow-up locates the bound session before probing and does not let stale method advice block current proof');
   assert.equal(native.calls.filter(call => call.op === 'activate').length, activationCount + 1, 'a bound follow-up can reactivate WorkBuddy, then must recheck the actual conversation');
   assert.equal(result.sessionId, 'fixture-session-bound');
   assert.equal(svc.task.followUpRound, 1);
@@ -894,6 +927,13 @@ async function testFlashGuardPreflightAndBrainRequest() {
     assert.match(requests[0].messages[0].content, /若刚已聚焦且截图不变/);
     assert.match(requests[0].messages[0].content, /直接输出单个type动作并带focus:\{x,y\}/);
 
+    svc.task={id:'owner-visual',steps:[],channelAuthorization:{channelId:'wechat:fixture',owner:true,scene:'life',revision:4,keyVersion:2,expiresAt:Date.now()+60000}};
+    await svc.nextAction({id:'owner-visual',goal:'fixture',target:'wechat',operation:'read',recipient:'Alice',workModel:'deepseek-v4.1-flash'}, {ocr:[],preview:'data:image/png;base64,AA=='},new AbortController().signal);
+    const permissionPayload=JSON.parse(requests.at(-1).messages[1].content[0].text);assert.equal(permissionPayload.hostChannel.owner,true);assert.equal(permissionPayload.hostChannel.revision,4);assert.match(requests.at(-1).messages[0].content,/hostChannel.*程序提供/);
+    svc.task=null;
+    const transportCalls=[];wb.chat=async options=>{transportCalls.push(options);if(transportCalls.length===1)throw Object.assign(Error('broker cap'),{code:'E_PAYLOAD_TOO_LARGE'});return {text:'{"action":"done","completed":false,"evidence":"fixture"}',model:options.model};};
+    await svc.nextAction({id:'transport',goal:'保留原始目标',target:'workbuddy',workModel:'deepseek-v4.1-flash',thinking:'high'},{ocr:[],preview:'data:image/png;base64,AA=='},new AbortController().signal);
+    assert.equal(transportCalls.length,2);assert.equal(transportCalls[1].thinking,'low');assert.equal(transportCalls[1].model,transportCalls[0].model);assert.equal(JSON.parse(transportCalls[1].messages[1].content[0].text).goal,'保留原始目标');assert(!transportCalls[1].messages.some(m=>typeof m.content==='string'&&/上一条规划响应未通过/.test(m.content)),'a transport cap is not a schema failure');
     const repairCalls = [];
     wb.chat = async options => {
       repairCalls.push(options);
@@ -1164,19 +1204,89 @@ async function testGuiLeaseSerializesAndReleases() {
   const entered = deferred(), releasePlanner = deferred();
   const firstNative = new FakeNative();
   const sharedLease = new GuiLease();
-  const first = service(firstNative, async () => { entered.resolve(); return releasePlanner.promise; }, [], { lease: sharedLease, owner: 'primary' });
+  let firstPlans = 0;
+  const first = service(firstNative, async () => { if (firstPlans++ === 0) { entered.resolve(); return releasePlanner.promise; } return { action: 'done', completed: false, evidence: 'finished' }; }, [], { lease: sharedLease, owner: 'primary' });
   assert((await first.start({ goal: 'hold visual operation', target: 'current', workModel: 'hy3' })).ok);
   await entered.promise;
   const secondNative = new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: [{ text: 'Alice', confidence: 0.99, x: 0.4, y: 0.08 }] });
   const second = service(secondNative, async () => ({ action: 'done', completed: false, evidence: 'view only' }), [], { lease: sharedLease, owner: 'watch' });
   assert((await second.start({ goal: 'open contact', target: 'wechat', origin: 'watch', operation: 'open', recipient: 'Alice' })).ok);
-  await delay(50);
-  assert.equal(secondNative.calls.some(call => call.op === 'activate'), false, 'a second Desktop cannot activate while another owner holds the GUI');
-  await first.stop('release lease');
-  releasePlanner.resolve({ action: 'done', completed: false, evidence: 'stopped' });
   await until(() => secondNative.calls.some(call => call.op === 'activate'));
   await until(() => second.task.status === 'paused');
+  assert.equal(firstNative.calls.some(call => call.op === 'click'), false, 'the first model is still planning while the second GUI action runs');
+  releasePlanner.resolve({ action: 'click', x: 0.5, y: 0.5, reason: 'planned before other task' });
+  await until(() => first.task.status === 'paused');
+  assert.equal(firstNative.calls.filter(call => call.op === 'click').length, 1, 'an unchanged target executes the model action after another GUI owner');
   assert.equal(sharedLease.isFree(), true, 'run finally releases the shared lease');
+  await first.close(); await second.close();
+
+  const changedLease = new GuiLease(), changedNative = new FakeNative(), planned = deferred(), continuePlan = deferred();
+  let changedPlans = 0;
+  const changed = service(changedNative, async (_goal, _shot, _signal, task) => {
+    if (changedPlans++ === 0) { planned.resolve(); return continuePlan.promise; }
+    assert.equal(task.previousAction.action, 'click');
+    return { action: 'done', completed: false, evidence: 'new screen checked' };
+  }, [], { lease: changedLease, owner: 'changed-primary' });
+  assert((await changed.start({ goal: 'recheck visual operation', target: 'current', workModel: 'hy3' })).ok);
+  await planned.promise;
+  await changedLease.acquire('another-action'); changedNative.capturePNG = Buffer.from('different-screen'); changedLease.release('another-action');
+  continuePlan.resolve({ action: 'click', x: 0.5, y: 0.5, reason: 'previous screen' });
+  await until(() => changed.task.status === 'paused');
+  assert.equal(changedPlans, 2, 'a genuinely changed screen is assessed with the original action');
+  assert.equal(changedNative.calls.some(call => call.op === 'click'), false, 'stale coordinates are not dispatched');
+  await changed.close();
+}
+
+async function testSupersededDraftIsClearedOnlyWhenExact() {
+  const message='［Bunny］ hello Alice',header={text:'Alice',confidence:.99,x:.4,y:.08,width:.1,height:.03};
+  let present=true;
+  const native=new FakeNative({recognizedTexts:()=>[header,...(present?[{text:message,confidence:.99,x:.42,y:.8,width:.25,height:.03}]:[])]});
+  const request=native.request.bind(native);
+  native.request=async(op,payload,timeout)=>{
+    if(op==='inputIdle')throw Error('admitted draft cleanup must not recheck its own input');
+    const result=await request(op,payload,timeout);if(op==='key'&&payload.key==='backspace')present=false;return result;
+  };
+  const svc=service(native,async()=>({}));
+  svc.task={id:'draft-1',target:'wechat',operation:'send',status:'paused',scene:'life',domain:'life',visibilityFloor:1,
+    privacyEpoch:1,sources:['task-1'],recipient:'Alice',message,draftInserted:true,supersededByNewMessage:true,scope:{pid:234,windowId:7},steps:[]};
+  const observe=async()=>({headerMatched:true,draft:present?message:''});
+  assert((await svc.clearSupersededDraft({privacyEpoch:1,sources:['task-1'],scene:'life',observe})).ok);
+  assert.equal(present,false);assert.equal(svc.task.supersededCleanup.state,'cleared');
+  assert.deepEqual(native.calls.filter(c=>c.op==='key').map(c=>c.payload.key),['a','backspace']);
+  assert.equal(native.calls.some(c=>c.op==='type'||c.payload?.key==='enter'),false,'replacement never submits the stale reply');
+  await svc.close();
+
+  const otherNative=new FakeNative({recognizedTexts:[header,{text:message,confidence:.99,x:.42,y:.8,width:.25,height:.03}]});
+  const requestOther=otherNative.request.bind(otherNative);otherNative.request=async(op,payload,timeout)=>op==='inputIdle'?{hidIdleMs:5000}:requestOther(op,payload,timeout);
+  const other=service(otherNative,async()=>({}));other.task={id:'draft-2',target:'wechat',operation:'send',status:'paused',scene:'life',domain:'life',visibilityFloor:1,
+    privacyEpoch:1,sources:['task-1'],recipient:'Alice',message,draftInserted:true,supersededByNewMessage:true,scope:{pid:234,windowId:7},steps:[]};
+  const denied=await other.clearSupersededDraft({privacyEpoch:1,sources:['task-1'],scene:'life',observe:async()=>({headerMatched:true,draft:'somebody else typed this'})});
+  assert.equal(denied.ok,false);assert.equal(otherNative.calls.some(c=>c.op==='key'||c.op==='click'),false,'an unrelated draft is never modified');await other.close();
+}
+
+async function testLatePlannerCannotReleaseANewerActionLease() {
+  const lease=new GuiLease(),native=new FakeNative(),firstStarted=deferred(),firstResult=deferred(),clickGate=deferred();let plans=0;
+  const svc=service(native,async()=>{if(plans++===0){firstStarted.resolve();return firstResult.promise;}return plans===2?{action:'click',x:.5,y:.5}:{action:'done',completed:false,evidence:'done'};},[],{lease,owner:'same-service'});
+  assert((await svc.start({goal:'first task',target:'current',workModel:'hy3'})).ok);await firstStarted.promise;await svc.stop('stop first');
+  native.clickGate=clickGate;assert((await svc.start({goal:'second task',target:'current',workModel:'hy3'})).ok);
+  await until(()=>native.calls.some(c=>c.op==='click'));assert.equal(lease.owner,'same-service');
+  firstResult.resolve({action:'done',completed:false,evidence:'late first result'});await delay(20);
+  assert.equal(lease.owner,'same-service','a late result cannot release a newer GUI action');
+  clickGate.resolve();await until(()=>svc.task.status==='paused');assert(lease.isFree());await svc.close();
+}
+
+async function testRepeatedVisualActionAsksPlannerToReconsider() {
+  const rows=[{text:'Document',confidence:.99,x:.4,y:.1},{text:'Last line',confidence:.99,x:.4,y:.7}];
+  const native=new FakeNative({recognizedTexts:rows});let feedback;
+  const svc=service(native,async(_goal,_shot,_signal,scope)=>{
+    if(scope.progressFeedback){feedback=scope.progressFeedback;return {action:'done',completed:false,evidence:'reconsidered'};}
+    return {action:'scroll',x:.6,y:.5,deltaY:-400,reason:'inspect'};
+  });
+  assert((await svc.start({goal:'inspect document',target:'current',workModel:'hy3'})).ok);
+  await until(()=>svc.task.status==='paused');
+  assert(feedback && feedback.repeats>=2,'unchanged recognized content is returned to the planner for another strategy');
+  assert.equal(native.calls.filter(c=>c.op==='scroll').length,2,'the first two planned actions still execute');
+  await svc.close();
 }
 
 async function main() {
@@ -1261,6 +1371,9 @@ async function main() {
   await testTaskScopeVisibilityAndResumeGate();
   await testWechatResumeDoesNotReplayOrOverwrite();
   await testGuiLeaseSerializesAndReleases();
+  await testSupersededDraftIsClearedOnlyWhenExact();
+  await testLatePlannerCannotReleaseANewerActionLease();
+  await testRepeatedVisualActionAsksPlannerToReconsider();
   console.log('DesktopService integration checks passed');
 }
 

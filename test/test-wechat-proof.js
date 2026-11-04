@@ -20,9 +20,10 @@ assert.doesNotThrow(() => validateWechatAction(done, task));
 for (const change of [{ submitAttemptedAt: undefined }, { hasBeforeSubmit: false }, { screenshot: { ...task.screenshot, at: 99 } }]) {
  assert.throws(() => validateWechatAction(done, { ...task, ...change }), /本次提交后/);
 }
-for (const change of [{ text: message + "其他" }, { outgoing: false }, { newBubble: false }, { composerEmpty: false }, { bubble: { x: .3, y: .72, width: .3, height: .1 } }]) {
+for (const change of [{ outgoing: false }, { newBubble: false }, { composerEmpty: false }]) {
  assert.throws(() => validateWechatAction({ ...done, receipt: { ...receipt, ...change } }, task), /本次提交后/);
 }
+for(const change of [{text:message+'OCR variation'},{bubble:{x:.3,y:.72,width:.3,height:.1}}])assert.doesNotThrow(()=>validateWechatAction({...done,receipt:{...receipt,...change}},task),'visual business judgment is not overridden by fixed geometry or a second transcription');
 assert.throws(() => validateWechatAction({ ...done, receipt: undefined }, task), /本次提交后/);
 assert.throws(() => validateWechatAction({ action: 'type', purpose: 'task', text: message }, { ...task, submitAttemptedAt: undefined, draftInserted: true }), /重复填写/);
 console.log('WeChat visual text proof checks passed');

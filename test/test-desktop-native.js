@@ -3,10 +3,18 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
 const fs = require('fs');
-const { spawnSync } = require('child_process');
+const { spawnSync, spawn } = require('child_process');
 const { PassThrough, Writable } = require('stream');
 const { DesktopNative, defaultBinary } = require('../src/main/desktop-native');
 const nativeTestBinary = () => process.env.WORKBUNNY_NATIVE_TEST_BINARY || defaultBinary();
+test('display ownership excludes another process and is released automatically after a crash',async t=>{
+ const binary=nativeTestBinary();if(!fs.existsSync(binary))return t.skip('native bridge is not built');
+ const owner=spawn(binary,['--self-test-display-lease'],{stdio:['pipe','pipe','pipe']});t.after(()=>owner.kill('SIGKILL'));
+ const first=await new Promise((resolve,reject)=>{let text='';const timer=setTimeout(()=>reject(Error('capture lease probe timed out')),5000);owner.stdout.on('data',b=>{text+=b;if(text.includes('\n')){clearTimeout(timer);resolve(JSON.parse(text.trim().split('\n')[0]));}});owner.once('error',reject);});
+ assert.equal(first.held,true);const blocked=spawnSync(binary,['--self-test-display-lease'],{input:'\n',encoding:'utf8',timeout:5000});assert.equal(blocked.status,1);assert.equal(JSON.parse(blocked.stdout.trim()).code,'E_CAPTURE_BUSY');
+ const exited=new Promise(r=>owner.once('close',r));owner.kill('SIGKILL');await exited;
+ const recovered=spawnSync(binary,['--self-test-display-lease'],{input:'\n',encoding:'utf8',timeout:5000});assert.equal(recovered.status,0);assert.equal(JSON.parse(recovered.stdout.trim()).held,true);
+});
 
 function fixture(options = {}) {
   const children = [];

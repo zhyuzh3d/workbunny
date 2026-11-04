@@ -1,7 +1,7 @@
 {
   "schema": "bunny.software-skill/v1",
   "id": "wechat",
-  "version": 6,
+  "version": 7,
   "skills": [
     "conversation.manage",
     "conversation.send",
@@ -9,12 +9,13 @@
   ],
   "application": "wechat",
   "methods": [
-    "external-display-visual-keyboard-mouse"
+    "external-display-visual-keyboard-mouse",
+    "continuous-operations-and-asynchronous-voice-results"
   ],
   "resources": [
     {
       "path": "guide.md",
-      "sha256": "8c40c3a8126821b60851770344da3c00a59c9fd1173e5527d6d77fb881825a87"
+      "sha256": "3e7e58cddd2242a65acf6bbef0f6515eea8091d96de0a33d4182e37ec36b7ada"
     }
   ],
   "toolProtocol": "bunny.screen/v2"

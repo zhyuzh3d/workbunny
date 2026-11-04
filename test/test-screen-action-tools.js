@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict');const {Tool
 test('a visual primitive consumes one current anchor, shares the GUI lease, and never reports the business goal completed',async()=>{
  const tools=new ToolRegistry(),calls=[],lease=new GuiLease(),rect={x:20,y:30,width:800,height:600};const native={request:async(op,args)=>{calls.push({op,args});if(op==='frontmost')return {application:{bundleId:'wb',pid:12},windows:[{bundleId:'wb',windowId:7,pid:12,rect}]};if(op==='capture')return {pngBase64:'fixture'};if(op==='recognize')return {texts:[]};return {performed:true};}};
  registerScreenActions(tools,{native,lease,applications:{workbuddy:'wb'}});const tool=tools.get('screen.action'),task={id:'test',state:{screenAnchors:{workbuddy:{frameId:'frame',at:Date.now(),bundleId:'wb',pid:12,windowId:7,rect,previewWidth:800,previewHeight:600}}}},args=tool.validate({application:'workbuddy',frameId:'frame',action:'click',targetType:'icon',pixelX:400,pixelY:300});
- const result=await tool.execute(args,{task});assert.equal(result.verified,true);assert.equal(result.receipt.businessResult,'需要重新观察');assert.equal(calls.find(c=>c.op==='click').args.x,420);assert(lease.isFree());await assert.rejects(tool.execute(args,{task}),e=>e.dispatched===false);assert.equal(calls.filter(c=>c.op==='click').length,1);
+ const result=await tool.execute(args,{task});assert.equal(result.verified,true);assert.match(result.receipt.businessResult,/业务结果待自主判断/);assert.equal(calls.find(c=>c.op==='click').args.x,420);assert(lease.isFree());await assert.rejects(tool.execute(args,{task}),e=>e.dispatched===false);assert.equal(calls.filter(c=>c.op==='click').length,1);
 });
 test('WeChat primitive navigation cannot directly send text or close its window',()=>{
  const tools=new ToolRegistry();registerScreenActions(tools,{native:{},applications:{wechat:'wx'}});const validate=tools.get('screen.action').validate,base={application:'wechat',frameId:'frame'};
@@ -17,13 +17,13 @@ test('right mouse is an ordinary primitive and a file-dialog purpose cannot type
  await assert.rejects(tool.execute(tool.validate({application:'wechat',frameId:'frame',action:'type',text:'/tmp/receive-empty-fixture',purpose:'file-dialog'}),{task}),e=>e.dispatched===false);assert(!calls.some(c=>c.op==='type'));
  task.state.screenAnchors.wechat=anchor();await tool.execute(tool.validate({application:'wechat',frameId:'frame',action:'click',button:'right',pixelX:400,pixelY:300}),{task});assert.equal(calls.at(-1).args.button,'right');
 });
-test('a visual file dialog accepts only its prepared directory and yields immediately when the owner intervenes',async t=>{
+test('a visual file dialog uses admission once, preserves existing files and does not recheck injected input',async t=>{
  const fs=require('node:fs'),path=require('node:path'),os=require('node:os');const directory=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bunny-save-dialog-')));t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));const expectedPath=path.join(directory,'file.txt'),rect={x:0,y:30,width:800,height:600},tools=new ToolRegistry(),calls=[];let idle=1000;
  const native={request:async(op,args)=>{calls.push({op,args});if(op==='frontmost')return {application:{bundleId:'wx',pid:12},windows:[{bundleId:'wx',windowId:7,pid:12,rect}]};if(op==='capture')return {pngBase64:'fixture'};if(op==='recognize')return {texts:['前往文件夹：','取消'].map(text=>({text,confidence:1}))};if(op==='inputIdle')return {hidIdleMs:idle};return {performed:true};}};
- registerScreenActions(tools,{native,wechatScene:{assertTaskIdentity:async()=>{}},applications:{wechat:'wx'}});const tool=tools.get('screen.action'),anchor=()=>({frameId:'frame',at:Date.now(),bundleId:'wx',pid:12,windowId:7,rect,previewWidth:800,previewHeight:600}),task={id:'file-task',state:{fileDestinations:[{directory,expectedPath}],screenAnchors:{wechat:anchor()}}},args=tool.validate({application:'wechat',frameId:'frame',action:'type',text:directory,purpose:'file-dialog'});
+ let admitted=true;registerScreenActions(tools,{native,wechatScene:{assertTaskIdentity:async()=>{}},canOperate:async()=>admitted,applications:{wechat:'wx'}});const tool=tools.get('screen.action'),anchor=()=>({frameId:'frame',at:Date.now(),bundleId:'wx',pid:12,windowId:7,rect,previewWidth:800,previewHeight:600}),task={id:'file-task',state:{fileDestinations:[{directory,expectedPath}],screenAnchors:{wechat:anchor()}}},args=tool.validate({application:'wechat',frameId:'frame',action:'type',text:directory,purpose:'file-dialog'});
  assert((await tool.execute(args,{task})).verified);assert.equal(calls.filter(c=>c.op==='type').length,1);
- task.state.screenAnchors.wechat=anchor();idle=100;await assert.rejects(tool.execute(args,{task}),e=>e.dispatched===false&&e.code==='E_GUI_BUSY');assert.equal(calls.filter(c=>c.op==='type').length,1);
- task.state.screenAnchors.wechat=anchor();idle=1000;fs.writeFileSync(expectedPath,'keep');await assert.rejects(tool.execute(args,{task}),/不覆盖/);assert.equal(calls.filter(c=>c.op==='type').length,1);assert.equal(fs.readFileSync(expectedPath,'utf8'),'keep');
+ task.state.screenAnchors.wechat=anchor();admitted=false;idle=100;await assert.rejects(tool.execute(args,{task}),e=>e.dispatched===false);assert.equal(calls.filter(c=>c.op==='type').length,1);
+ task.state.screenAnchors.wechat=anchor();admitted=true;fs.writeFileSync(expectedPath,'keep');await assert.rejects(tool.execute(args,{task}),/不覆盖/);assert.equal(calls.filter(c=>c.op==='type').length,1);assert.equal(fs.readFileSync(expectedPath,'utf8'),'keep');assert.equal(calls.some(c=>c.op==='inputIdle'),false);
 });
 test('a real left click in the composer send area is rejected after projection, while right-click exploration remains possible',async()=>{
  const tools=new ToolRegistry(),rect={x:0,y:0,width:800,height:600};let inputs=0;registerScreenActions(tools,{native:{request:async op=>{if(op==='frontmost')return {application:{bundleId:'wx',pid:12},windows:[{bundleId:'wx',windowId:7,pid:12,rect}]};if(op==='capture')return {pngBase64:'fixture'};if(op==='recognize')return {texts:[]};inputs++;return {performed:true};}},wechatScene:{assertTaskIdentity:async()=>{}},applications:{wechat:'wx'}});const tool=tools.get('screen.action'),task={id:'test',state:{screenAnchors:{wechat:{frameId:'frame',at:Date.now(),bundleId:'wx',pid:12,windowId:7,rect,previewWidth:800,previewHeight:600}}}},base={application:'wechat',frameId:'frame',action:'click',targetType:'region',pixelX:416,pixelY:534};
@@ -62,4 +62,27 @@ test('WeChat authentication overlays stop every primitive before input, includin
  await assert.rejects(tool.execute(tool.validate({application:'wechat',frameId:'frame',action:'key',key:'f',modifiers:['cmd']}),{task}),e=>e.code==='E_APP_CIRCUIT'&&e.dispatched===false);
  assert.equal(inputs.length,0);assert.equal(faults.length,1);
  assert.throws(()=>tool.validate({application:'wechat',frameId:'frame',action:'click',label:'发送',purpose:'file-dialog'}),/conversation.send/);
+});
+
+test('decorative OCR bullets do not hide a label or bypass destructive control checks',()=>{
+ const {labelTarget,destructiveLabel}=require('../src/main/screen-action-tools');
+ assert.deepEqual(labelTarget('转文字',[{text:'• 转文字',confidence:.3,x:.4,y:.5,width:.1,height:.04}]),{x:.45,y:.52});
+ assert.equal(destructiveLabel('• 删除'),true);
+});
+test('OCR omissions do not veto a current visual text target, and the resulting scene returns in the same lifecycle',async()=>{
+ const tools=new ToolRegistry(),lease=new GuiLease(),rect={x:20,y:30,width:800,height:600};let clicks=0,observations=0;
+ const native={request:async op=>{if(op==='frontmost')return {application:{bundleId:'wb',pid:12},windows:[{bundleId:'wb',windowId:7,pid:12,rect}]};if(op==='capture')return {pngBase64:'current'};if(op==='recognize')return {texts:[]};clicks++;return {performed:true};}};
+ const task={id:'visual-text',state:{screenAnchors:{workbuddy:{frameId:'current',at:Date.now(),bundleId:'wb',pid:12,windowId:7,rect,previewWidth:800,previewHeight:600}}}};
+ registerScreenActions(tools,{native,lease,applications:{workbuddy:'wb'},observe:async()=>{observations++;assert(!lease.isFree(),'effect observation belongs to the same owned action');return {available:true,frameId:'after',preview:'actual-image'};}});
+ const tool=tools.get('screen.action'),result=await tool.execute(tool.validate({application:'workbuddy',frameId:'current',action:'click',label:'继续',targetType:'text',pixelX:400,pixelY:300,observeAfter:true}),{task});
+ assert.equal(clicks,1);assert.equal(observations,1);assert.equal(result.observation.frameId,'after');assert.equal(result.receipt.inputPerformed,true);assert(lease.isFree());
+ task.state.screenAnchors.workbuddy={frameId:'next-known-frame',at:Date.now(),bundleId:'wb',pid:12,windowId:7,rect,previewWidth:800,previewHeight:600};
+ const unchecked=await tool.execute(tool.validate({application:'workbuddy',frameId:'next-known-frame',action:'click',label:'继续',targetType:'text',pixelX:400,pixelY:300,observeAfter:false}),{task});
+ assert.equal(clicks,2);assert.equal(observations,1,'Bunny can choose to omit the intermediate observation');assert.equal(unchecked.observation,undefined);
+});
+test('a failed effect observation does not turn a known dispatched input into an unknown or replayable write',async()=>{
+ const tools=new ToolRegistry(),rect={x:0,y:0,width:800,height:600};let clicks=0;
+ registerScreenActions(tools,{applications:{workbuddy:'wb'},observe:async()=>{throw Error('capture unavailable');},native:{request:async op=>{if(op==='frontmost')return {application:{bundleId:'wb',pid:12},windows:[{bundleId:'wb',windowId:7,pid:12,rect}]};if(op==='capture')return {pngBase64:'current'};if(op==='recognize')return {texts:[]};clicks++;return {performed:true};}}});
+ const tool=tools.get('screen.action'),task={id:'after-effect',state:{screenAnchors:{workbuddy:{frameId:'current',at:Date.now(),bundleId:'wb',pid:12,windowId:7,rect,previewWidth:800,previewHeight:600}}}};
+ const result=await tool.execute(tool.validate({application:'workbuddy',frameId:'current',action:'click',targetType:'icon',pixelX:400,pixelY:300,observeAfter:true}),{task});assert.equal(clicks,1);assert(result.receipt.inputPerformed);assert.equal(result.observationError.message,'capture unavailable');assert.equal(result.observation,undefined);
 });

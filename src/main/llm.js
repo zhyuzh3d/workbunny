@@ -56,11 +56,12 @@ function makeSentenceSplitter(onSentence) {
 /**
  * @returns {Promise<{text:string,motions:string[],emos:string[],usage:any,ms:number}>}
  */
-function chat(opts) {
-  if (opts.transport === 'workbuddy') return opts.webSearch === true || opts.recallSession
+function chat(opts) { return require('./owner-security').withPrinciples(chatUnfiltered,opts); }
+function chatUnfiltered(opts) {
+  if (opts.transport === 'workbuddy') return opts.webSearch === true || opts.recallSession || opts.contextSession
     ? require('./conversation-search').chatWithSearch(opts) : require('./workbuddy').chat(opts);
-  if (opts.recallSession && !opts._toolRound) return require('./conversation-search').chatWithSearch(opts, {
-    chat: request => chat({ ...request, _toolRound: true, recallSession: undefined, webSearch: false }),
+  if ((opts.recallSession||opts.contextSession) && !opts._toolRound) return require('./conversation-search').chatWithSearch(opts, {
+    chat: request => chat({ ...request, _toolRound: true, recallSession: undefined,contextSession:undefined, webSearch: false }),
   });
   if (opts.transport === 'apikey' && !String(opts.apiKey || '').trim()) return Promise.reject(new Error('请先在智力设置中填写 API Key'));
   // Fit once the recall/search layer has attached its rules and tool schemas.

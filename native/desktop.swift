@@ -17,6 +17,19 @@ struct CaptureUnavailableError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
 }
+struct CaptureBusyError: LocalizedError { var errorDescription: String? { "另一个截图进程正在使用显示连接，稍后继续" } }
+var displayOwnerFD: Int32 = -1
+func ensureDisplayOwnership() throws {
+    if displayOwnerFD >= 0 { return }
+    let file = NSTemporaryDirectory() + "workbunny-display-\(getuid()).lock"
+    let fd = open(file, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { throw CaptureBusyError() }
+    guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { close(fd); throw CaptureBusyError() }
+    // WindowServer ownership lasts for this helper's lifetime. Kernel flock
+    // releases it even after a crash; a second helper must never initialize a
+    // competing CGDisplayStream and block the existing display connection.
+    displayOwnerFD = fd
+}
 let outputLock = NSLock()
 let workBuddyTextUTF16Limit = 12_000
 func workBuddyTextWithinLimit(_ text: String) -> Bool { text.utf16.count <= workBuddyTextUTF16Limit }
@@ -1089,6 +1102,7 @@ func waitForDisplayFrame(_ receiver: DisplayFrameReceiver, seconds: Double = 2) 
 // These backends capture the entire display and never use an app window filter.
 func traceDisplay(_ stage: String) { if ProcessInfo.processInfo.environment["BUNNY_DISPLAY_TRACE"] == "1" { fputs("display: \(stage)\n", stderr); fflush(stderr) } }
 func captureExternalDisplay(region: CGRect? = nil) throws -> (CGImage, CGRect, String, Date) {
+    try ensureDisplayOwnership()
     let display = CGMainDisplayID(), screen = CGDisplayBounds(CGMainDisplayID())
     let rect = region ?? screen
     guard !rect.isNull, !rect.isEmpty, [rect.minX, rect.minY, rect.width, rect.height].allSatisfy({ $0.isFinite }), screen.contains(rect) else {
@@ -1916,12 +1930,18 @@ func runNativeSelfTest() -> Never {
 if CommandLine.arguments.contains("--self-test-native") || CommandLine.arguments.contains("--self-test-input-plan") ||
    CommandLine.arguments.contains("--self-test-workbuddy") || CommandLine.arguments.contains("--self-test-visual") { runNativeSelfTest() }
 
+if CommandLine.arguments.contains("--self-test-display-lease") {
+    do { try ensureDisplayOwnership(); writeJSON(["ok": true, "held": true]); _ = readLine(); exit(0) }
+    catch { writeJSON(["ok": false, "code": "E_CAPTURE_BUSY"]); exit(1) }
+}
+
 func handleLineInPool(_ line: String) {
     guard let data = line.data(using: .utf8), let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         writeJSON(["id": NSNull(), "ok": false, "error": "无效 JSON 请求"]); return
     }
     let id = request["id"] ?? NSNull()
     do { writeJSON(["id": id, "ok": true, "result": try perform(request)]) }
+    catch is CaptureBusyError { writeJSON(["id": id, "ok": false, "code": "E_CAPTURE_BUSY", "error": "另一个截图进程正在使用显示连接，稍后继续"]) }
     catch let e as CaptureUnavailableError { writeJSON(["id": id, "ok": false, "code": "captureUnavailable", "error": e.message]) }
     catch let e as DesktopError { writeJSON(["id": id, "ok": false, "error": e.message]) }
     catch { writeJSON(["id": id, "ok": false, "error": error.localizedDescription]) }

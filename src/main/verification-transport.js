@@ -6,11 +6,11 @@ const FLASH = 'deepseek-v4.1-flash';
 
 // Read-only checking may retry once after the broker's inline-response cap or
 // an exhausted reasoning budget. Never retry a GUI action or pick a paid model.
-async function requestVerification({ messages, signal, vision = false, maxTokens, budgetScale }, { chat = wb.chat, selectFree = freeModel } = {}) {
+async function requestVerification({ messages, signal, vision = false, maxTokens, budgetScale,extraBody }, { chat = wb.chat, selectFree = freeModel } = {}) {
   const invoke = async (model, maxTokens) => {
     if (signal?.aborted) throw new Error('交付检查已取消');
     const response = await chat({ model, thinking: 'low', maxTokens, budgetScale, signal, messages, timeoutMs:25000,
-      extraBody: { reasoning_effort: 'low', response_format: { type: 'json_object' } } });
+      extraBody: { ...extraBody,reasoning_effort: 'low', response_format: { type: 'json_object' } } });
     if (response.model && response.model !== model) throw new Error('验收模型与所选模型不符');
     return response;
   };

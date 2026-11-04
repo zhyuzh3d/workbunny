@@ -1,8 +1,10 @@
 # 测试入口
 
-从项目根目录运行。测试代码与主代码保持同级深度，夹具放在 `test/fixtures/`；构建脚本仍在 `tools/`。
+从项目根目录运行。默认回归、隔离 GUI 验证与真实账号实验分开，不能把调用成功或截图相近当成业务目标已完成。
 
 ## 默认离线回归
+
+需要 macOS 原生构建环境、Node.js 22 以上和项目依赖：
 
 ```sh
 npm ci
@@ -13,41 +15,40 @@ zsh tools/build-keychain.sh
 npm test
 ```
 
-`npm test` 顺序执行本目录 `.js` 与 `.mjs` 文件，覆盖配置、素材、记忆、作用域、对话、授权、原生协议与本地语音模拟。部分用例会重建原生测试程序或使用临时数据库；不读取正式聊天库，不调用真实 LLM，不给真实联系人发送内容。Node22以上运行。
+`tools/test.cjs` 顺序运行本目录顶层的 `.js`、`.mjs` 用例。覆盖对话与场景、加密记忆与来源、渠道授权、Task/Action 生命周期、效果账本、保活、上下文、感知、经验资源包、工具引用、安装回滚及角色/语音基础能力。测试使用合成输入、临时数据库和受控原生协议，不读取正式聊天库、不调用真实 LLM、不向真实联系人发消息。
 
-单项示例：
+单项运行：
 
 ```sh
-node --test test/test-assets.js test/test-motion-policy.js
-node test/test-portability.js
-node test/test-memory-service.js
+node --test test/test-task-keepalive.js
+node --test test/test-experience-repository.js
+node --test test/test-dialogue-channels.js
 ```
 
-## 图形与打包集成
+`test/fixtures/` 保存合成界面，`test/support/` 保存公共夹具与驱动。设备驱动必须显式提供授权设备和会话目标，不内置开发者的账号或设备标识。
 
-`.cjs` 文件为显式运行的 Electron、界面或原生集成入口，不包含在默认命令中。按文件头的环境要求执行，例如：
+## 显式图形与安装包验证
+
+顶层 `.cjs` 是手动运行的 Electron、GUI 或原生集成入口，不纳入默认回归。先阅读文件头的运行环境与副作用说明，例如：
 
 ```sh
 env -u ELECTRON_RUN_AS_NODE node_modules/.bin/electron test/test-panel-scene-settings.cjs
-zsh tools/package.sh
-node test/test-portability-app.cjs
-node test/test-embodiment-app.cjs
-node test/test-avatar-picker-app.cjs
-node test/test-view-scale-app.cjs
+node test/test-embodiment-app.cjs --source
+node test/test-view-scale-app.cjs --source
 ```
 
-打包验收使用临时用户目录，检查签名包的入口、五个模型、评审后的动作、个人模型导入/重启、HTTP TTS 与真实 WebAudio 播放结束；不会打开正式 Vault。测试截图和日志是过程产物，保存在临时目录或 `.cache/`。
+需要安装包的用例先运行 `zsh tools/package.sh`。使用合成数据和临时用户目录；发行资源数量及哈希以 `resources-manifest.json` 为准。进程退出、系统授权、实际音频播放、界面结果和用户数据隔离分别检查。
 
-`test-avatar-picker-app.cjs` 验证统一模型下拉菜单、个人模型卡片双向同步、外部配置同步及真实 VRM 切换。设置面板夹具另覆盖保存失败回退、快速连续选择与模型列表刷新。
+## 显式模型与账号实验
 
-`test-view-scale-app.cjs` 验证底部控件收窄至 80%、50% 半身画布及投影以底部中心缩放、各档位控件尺寸固定，以及重启后恢复。使用隔离数据与真实 VRM，不调用大模型；加 `--source` 可验证当前源码。
+`test/live/` 及文件名带 `live`、`model` 的部分 `.cjs` 入口可能调用当前已登录服务或操作桌面。它们都需要独立授权与环境检查，不能随离线回归自动执行。执行前确认实际读取范围、费用、目标和停止条件。
 
-## 显式账号验收
+真实微信只能通过外部截图和通用输入操作，不能使用内部接口、数据库、辅助功能控制树或自动登录。保留输入前后、实际效果与接收方证据，结果未知时不重复发送。
 
-`test/live/` 中的合成验收会使用当前 WorkBuddy 账号和模型服务，默认不运行。需要时先阅读文件头，再显式执行。带 `live` 的 Electron 测试同样是手动入口，不纳入离线回归。
+绑定个人账号、USB 序列号或某一次实验路径的脚本、截图和报告存放在外置私有备份，不随公开源码分发。后续现场测试应由公共夹具和显式配置创建，不恢复硬编码的个人环境。
 
-动作素材检查：`node tools/motion-quality-audit.mjs`，结果写入 `.cache/motion-quality-report.json`。`tools/motion-window.cjs` 用于重新计算过长动作的裁切窗口；检查工具不会自动改写素材许可或将私人素材加入白名单。
+## 资料与产物
 
-0.14 增加动作调度/回执、说话人筛选、监督估计、虚拟窗口边界及打断预测资格用例。`test-embodiment-app.cjs --source` 可先验证真实源码入口；默认验证签名包，使用不可用的临时 Vault 隔离钥匙串与后台模型。`test-interaction-speech-ui.cjs` 还验证输入事件在500毫秒内停止真实WebAudio。原生声学性能自检：`bin/asr --voice-feature-test` 与 `bin/asr-legacy --voice-feature-test`，不需要麦克风授权。
+截图、日志、临时数据库及验收记录写入临时目录或忽略的本机目录，不写入 `docs/`。长期保留的过程资料和旧安装包移至指定外置备份；正式用户资料不作为测试缓存清理。
 
-动作调度与真实渲染验收：`node test/test-motion-playback-app.cjs`；对已构建的本地包使用 `node test/test-motion-playback-app.cjs --bundle`。测试使用临时数据目录，并覆盖按需加载、坐站转换和过渡中的请求。
+资源检查工具为 `node tools/motion-quality-audit.mjs`，结果写入 `.cache/`。检查不会自动改变许可状态或将个人资源加入发行白名单。默认测试通过不代表真实云服务、其它 Mac、旧系统或长期使用效果已经验收。

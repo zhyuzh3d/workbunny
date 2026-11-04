@@ -28,3 +28,10 @@ src/renderer/assets/models/*.vrm
 __pycache__/
 *.pyc
 coverage/
+
+# 私有实验、验收材料与本机工具产物
+.local/
+artifacts/
+test/private/
+docs/evidence/
+*.bunnyvault

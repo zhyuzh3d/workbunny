@@ -62,7 +62,7 @@ function groupTurns(rows) {
 function sourceDigest(rows) {
   return digest(JSON.stringify([...rows].sort(compareSeq).map(row => [
     row.id, row.ingestionSeq, row.ts, row.domain, row.visibilityFloor,
-    row.value.role, row.value.turnId || '', row.value.content, ...(row.value.characterId ? [row.value.characterId, row.value.channel || '', row.value.taskId || '', row.value.conversationId || ''] : []),
+    row.value.role, row.value.turnId || '', row.value.content, row.value.channelId || 'local', row.value.ownerOnly===true, row.value.verifiedOwner===true, ...(row.value.characterId ? [row.value.characterId, row.value.channel || '', row.value.taskId || '', row.value.conversationId || ''] : []),
   ])), 64);
 }
 
@@ -81,11 +81,11 @@ function legacySegmentId(scene, sourceHashValue) {
 }
 
 class ContextCompression {
-  constructor({ memory, summarize, clock = Date.now, recentRounds = 8, recentMessages, maxMessages = HARD_MAX_MESSAGES, maxChars = HARD_MAX_CHARS } = {}) {
+  constructor({ memory, summarize, channelId, ownerOnly, clock = Date.now, recentRounds = 8, recentMessages, maxMessages = HARD_MAX_MESSAGES, maxChars = HARD_MAX_CHARS } = {}) {
     if (!memory || typeof memory.query !== 'function' || typeof memory.write !== 'function' || typeof memory.serial !== 'function')
       throw new TypeError('ContextCompression requires MemoryService query/write/serial');
     if (typeof summarize !== 'function') throw new TypeError('ContextCompression requires a bounded summarize function');
-    this.memory = memory;
+    this.memory = memory; this.channelId=channelId; this.ownerOnly=ownerOnly;
     this.summarize = summarize;
     this.clock = clock;
     this.recentRounds = Math.max(1, Math.min(MAX_RECENT_ROUNDS, Number.isSafeInteger(recentRounds) ? recentRounds : 8));
@@ -94,6 +94,10 @@ class ContextCompression {
     this.recentMessages = recentMessages;
     this.running = null;
   }
+
+  partition(scene) { return this.channelId ? scene + ':' + require('./dialogue-channels').marker(this.channelId) + (this.ownerOnly===true?':owner':'') : scene; }
+  query(kind,limit,options={}) { return this.memory.query(kind,limit,{...options,...(kind==='message' && this.channelId ? {channelId:this.channelId,ownerOnly:this.ownerOnly} : {})}); }
+  write(records,...args) { return this.memory.write(this.channelId ? records.map(r=>({...r,value:{...r.value,channelId:this.channelId,...(this.ownerOnly===true?{ownerOnly:true}:{})}})) : records,...args); }
 
   async getDecoded(ids, scene) {
     const unique = [...new Set(ids)];
@@ -104,7 +108,7 @@ class ContextCompression {
     }
     const decoded = [];
     for (const row of rows) {
-      try { decoded.push(this.memory.decode(row)); }
+      try { const item=this.memory.decode(row);if(this.channelId&&item.kind==='message'&&((item.value.channelId||'local')!==this.channelId||this.ownerOnly===false&&item.value.ownerOnly===true||this.ownerOnly===true&&item.value.ownerOnly!==true))return null;decoded.push(item); }
       catch { return null; }
     }
     return decoded;
@@ -116,7 +120,7 @@ class ContextCompression {
     const segmentIds = segmentMeta.map(item => item?.id);
     const sourceIds = Array.isArray(value?.sources) ? value.sources : [];
     const batchIds = Array.isArray(value?.batchSourceIds) ? value.batchSourceIds : [];
-    return !!head && head.kind === 'state' && head.state === 'active' && head.id === headId(scene) && head.domain === scene && head.visibilityFloor === rank(scene) &&
+    return !!head && head.kind === 'state' && head.state === 'active' && head.id === headId(this.partition(scene)) && head.domain === scene && head.visibilityFloor === rank(scene) &&
       value?.origin === 'context-head-v1' && value.scene === scene && Number.isSafeInteger(value.version) && value.version >= 1 &&
       value.watermark && Number.isSafeInteger(value.watermark.ingestionSeq) && Array.isArray(value.segments) &&
       value.segments.length >= 1 && value.segments.length <= MAX_SEGMENTS && typeof value.text === 'string' && value.text.length <= HEAD_TEXT_BUDGET &&
@@ -130,11 +134,11 @@ class ContextCompression {
   }
 
   async inspectLegacyHead(scene) {
-    const raw = await this.memory.db.request('get', { ids: [headId(scene)], scene });
+    const raw = await this.memory.db.request('get', { ids: [headId(this.partition(scene))], scene });
     if (!raw?.rows?.length) {
       // A fixed lane ID that exists under another visibility floor is a
       // collision/corruption, not a missing checkpoint to rebuild over.
-      const anyScope = await this.memory.db.request('get', { ids: [headId(scene)] });
+      const anyScope = await this.memory.db.request('get', { ids: [headId(this.partition(scene))] });
       return anyScope?.rows?.length ? { head: null, invalid: true } : { head: null, invalid: false };
     }
     let head;
@@ -144,7 +148,7 @@ class ContextCompression {
 
   isValidPointer(pointer, scene) {
     const value = pointer?.value;
-    return !!pointer && pointer.kind === 'state' && pointer.state === 'active' && pointer.id === currentId(scene) &&
+    return !!pointer && pointer.kind === 'state' && pointer.state === 'active' && pointer.id === currentId(this.partition(scene)) &&
       pointer.domain === scene && pointer.visibilityFloor === rank(scene) && value?.origin === 'context-current-v2' &&
       value.scene === scene && typeof value.headId === 'string' && value.headId.startsWith(IMMUTABLE_HEAD_PREFIX + scene + ':') &&
       Number.isSafeInteger(value.version) && value.version >= 1 && value.watermark &&
@@ -169,7 +173,7 @@ class ContextCompression {
           !Number.isSafeInteger(item.range.lastSeq) || typeof item.range.firstId !== 'string' || typeof item.range.lastId !== 'string')) return false;
     const last = segments.at(-1);
     return last.range.lastSeq === value.watermark.ingestionSeq && last.range.lastId === value.watermark.id &&
-      head.id === immutableHeadId(scene, value.version, value.watermark, ids);
+      head.id === immutableHeadId(this.partition(scene), value.version, value.watermark, ids);
   }
 
   async verifyImmutableHeadGraph(head, scene) {
@@ -180,7 +184,7 @@ class ContextCompression {
   }
 
   async inspectCurrent(scene) {
-    const pointerId = currentId(scene);
+    const pointerId = currentId(this.partition(scene));
     const rawPointer = await this.memory.db.request('get', { ids: [pointerId], scene });
     if (!rawPointer?.rows?.length) {
       const anyScope = await this.memory.db.request('get', { ids: [pointerId] });
@@ -230,10 +234,14 @@ class ContextCompression {
   emptySnapshot() { return { text: '', sourceIds: [], version: 0, coveredThrough: null, recordId: null, updatedAt: null }; }
 
   async recentCutoff(scene, signal, afterSeq = 0) {
+    if (this.recentMessages && this.channelId && this.channelId!=='local') {
+      const rows=await this.query('message',this.recentMessages+1,{scene,sort:'ingestion',order:'desc'});
+      return rows.length>this.recentMessages ? rows[this.recentMessages-1].ingestionSeq : null;
+    }
     if (this.recentMessages) {
-      const human = (await this.memory.query('message', 80, { scene, sort: 'ingestion', order: 'desc', excludedMarkers: ['bunny_external_message'] })).filter(row => actors.isDialogue(row.value));
-      const external = await this.memory.query('message', 4, { scene, sort: 'ingestion', order: 'desc', requiredMarkers: ['bunny_external_message'], afterSeq });
-      if (external.length >= 4) return ((await this.memory.query('message', 1, { scene, sort: 'ingestion', order: 'desc' }))[0]?.ingestionSeq || 0) + 1;
+      const human = (await this.query('message', 80, { scene, sort: 'ingestion', order: 'desc', excludedMarkers: ['bunny_external_message'] })).filter(row => actors.isDialogue(row.value));
+      const external = await this.query('message', 4, { scene, sort: 'ingestion', order: 'desc', requiredMarkers: ['bunny_external_message'], afterSeq });
+      if (external.length >= 4) return ((await this.query('message', 1, { scene, sort: 'ingestion', order: 'desc' }))[0]?.ingestionSeq || 0) + 1;
       if (human.length <= this.recentMessages) return null;
       let index = this.recentMessages - 1;
       if (actors.isBunny(human[index].value) && human[index + 1] && actors.isOwner(human[index + 1].value)) index++;
@@ -243,7 +251,7 @@ class ContextCompression {
     let userCount = 0;
     const pageSize = this.maxMessages;
     while (!signal?.aborted) {
-      const page = await this.memory.query('message', pageSize, {
+      const page = await this.query('message', pageSize, {
         scene, sort: 'ingestion', order: 'desc', ...(beforeSeq === undefined ? {} : { beforeSeq }),
       });
       if (!page.length) return null;
@@ -272,7 +280,7 @@ class ContextCompression {
       let scanAfter = afterSeq, page;
       for (;;) {
         if (signal?.aborted) return { rows: [], aborted: true };
-        page = await this.memory.query('message', this.maxMessages + 1, { scene, sort: 'ingestion', order: 'asc', afterSeq: scanAfter, beforeSeq });
+        page = await this.query('message', this.maxMessages + 1, { scene, sort: 'ingestion', order: 'asc', afterSeq: scanAfter, beforeSeq });
         if (!page.length || page.some(r => !SECRET.test(r.value.content))) break;
         scanAfter = page.at(-1).ingestionSeq;
       }
@@ -317,7 +325,7 @@ class ContextCompression {
 
     for (;;) {
       if (signal?.aborted) return { rows: [], turns: 0, chars: 0, oversized: false, aborted: true, skippedSecretRounds };
-      const page = await this.memory.query('message', this.maxMessages + 1, {
+      const page = await this.query('message', this.maxMessages + 1, {
         scene, sort: 'ingestion', order: 'asc', afterSeq: scanAfter, beforeSeq,
       });
       if (!page.length) {
@@ -450,12 +458,12 @@ class ContextCompression {
 
   async findReusableSegment(scene, batch, turns, inputs, processed = batch) {
     const sourceHashValue = sourceDigest(batch);
-    const id = segmentIdentityId(scene, batch);
+    const id = segmentIdentityId(this.partition(scene), batch);
     let foundId = id;
     let raw = await this.memory.db.request('get', { ids: [id], scene });
     if (!raw?.rows?.length) {
       // Reuse an exact orphan created by the old v1 writer after a crash.
-      const priorId = legacySegmentId(scene, sourceHashValue);
+      const priorId = legacySegmentId(this.partition(scene), sourceHashValue);
       const prior = await this.memory.db.request('get', { ids: [priorId], scene });
       if (prior?.rows?.length) { raw = prior; foundId = priorId; }
       else {
@@ -485,7 +493,7 @@ class ContextCompression {
 
   makeSegment(scene, batch, summary, turns, sourceHashValue, processed = batch) {
     const first = processed[0], last = processed.at(-1);
-    const segmentId = segmentIdentityId(scene, batch, this.recentMessages ? processed : undefined);
+    const segmentId = segmentIdentityId(this.partition(scene), batch, this.recentMessages ? processed : undefined);
     return {
       id: segmentId,
       kind: 'state',
@@ -546,7 +554,7 @@ class ContextCompression {
     const version = (head?.value.version || 0) + 1;
     const watermark = { ingestionSeq: last.ingestionSeq, id: last.id, ts: last.ts };
     const nextHead = {
-      id: immutableHeadId(scene, version, watermark, segmentIds), kind: 'state', ts: last.ts,
+      id: immutableHeadId(this.partition(scene), version, watermark, segmentIds), kind: 'state', ts: last.ts,
       updatedAt: this.clock(), domain: scene, visibilityFloor: rank(scene),
       value: {
         origin: 'context-head-v2', scene, version, watermark, coveredThrough: watermark,
@@ -560,7 +568,7 @@ class ContextCompression {
     if (!nextHead.value.text || segmentIds.length > MAX_SEGMENTS || new Set(segmentIds).size !== segmentIds.length)
       throw new Error('上下文摘要头部校验失败');
     const pointer = {
-      id: currentId(scene), kind: 'state', ts: 0, updatedAt: this.clock(), domain: scene, visibilityFloor: rank(scene),
+      id: currentId(this.partition(scene)), kind: 'state', ts: 0, updatedAt: this.clock(), domain: scene, visibilityFloor: rank(scene),
       value: { origin: 'context-current-v2', scene, headId: nextHead.id, version,
         watermark, sources: [nextHead.id] },
     };
@@ -592,7 +600,7 @@ class ContextCompression {
       } else {
         const anyScope = await this.memory.db.request('get', { ids: [segment.id] });
         if (anyScope?.rows?.length || !allowed()) return false;
-        await this.memory.write([segment], this.memory.epoch, { notify: false });
+        await this.write([segment], this.memory.epoch, { notify: false });
       }
       if (!allowed() || !await this.verifyCurrentBatch(batch, scene, sourceHashValue)) return false;
 
@@ -609,7 +617,7 @@ class ContextCompression {
       } else {
         const anyScope = await this.memory.db.request('get', { ids: [nextHead.id] });
         if (anyScope?.rows?.length || !allowed()) return false;
-        await this.memory.write([nextHead], this.memory.epoch, { notify: false });
+        await this.write([nextHead], this.memory.epoch, { notify: false });
       }
       if (!allowed() || !await this.verifyCurrentBatch(batch, scene, sourceHashValue)) return false;
 
@@ -617,13 +625,13 @@ class ContextCompression {
       // immutable graph is durable. The pointer is never exposed as a source.
       const currentBeforePointer = await this.inspectState(scene);
       if (currentBeforePointer.invalid || !sameState(state, currentBeforePointer)) return false;
-      const pointerExists = await this.memory.db.request('get', { ids: [currentId(scene)], scene });
+      const pointerExists = await this.memory.db.request('get', { ids: [currentId(this.partition(scene))], scene });
       if (!pointerExists?.rows?.length) {
-        const anyPointer = await this.memory.db.request('get', { ids: [currentId(scene)] });
+        const anyPointer = await this.memory.db.request('get', { ids: [currentId(this.partition(scene))] });
         if (anyPointer?.rows?.length) return false;
       }
       if (!allowed()) return false;
-      await this.memory.write([pointer], this.memory.epoch, { notify: false });
+      await this.write([pointer], this.memory.epoch, { notify: false });
       return true;
     });
   }
@@ -682,7 +690,7 @@ class ContextCompression {
         if (head && !oldSegments) return outcome('paused');
         let summary, reusableSegment;
         if (this.recentMessages && this.memory.blocks) {
-          const overlap = (await this.memory.query('message', 4, { scene, sort: 'ingestion', order: 'desc', beforeSeq: cursorSeq + 1 })).reverse().filter(r => !SECRET.test(r.value.content));
+          const overlap = (await this.query('message', 4, { scene, sort: 'ingestion', order: 'desc', beforeSeq: cursorSeq + 1 })).reverse().filter(r => !SECRET.test(r.value.content));
           batch = [...overlap, ...batch];
           const planned = await require('./semantic-plan').planBatch(this.memory, { mode: 'doze', scope: { domain: scene, visibilityFloor: rank(scene) },
             rows: batch, generate: this.summarize, signal: controller, force, afterSeq: cursorSeq, reserveModelCall });

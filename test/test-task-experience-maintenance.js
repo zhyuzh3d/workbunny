@@ -1,0 +1,43 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {MemoryService}=require('../src/main/memory-service'),{AgentLearning}=require('../src/main/agent-learning');
+const {maintain}=require('../src/main/task-experience-maintenance');
+test('task recovery learning runs through bounded Dream and Deepdream with source-linked candidate results',async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bunny-task-dream-'));
+ const memory=new MemoryService({dir:path.join(dir,'vault'),bin:path.resolve('bin/vault'),openKey:async()=>Buffer.alloc(32,87),getSettings:()=>({enabled:true,extract:false,scene:'life'})});
+ await memory.init();assert(memory.ready,memory.error);t.after(async()=>{await memory.close();fs.rmSync(dir,{recursive:true,force:true});});
+ const owner=await memory.addMessage('user','检查示例软件的界面状态。');let calls=0,reserves=0,queued=0;
+ const learning=new AgentLearning({memory,skills:{get:()=>({})},request:async()=>{calls++;return {response:{text:JSON.stringify({instructions:'界面位置失效时先重新观察，再按新证据定位；原方法无效时尝试替代路径。'})}};}});
+ memory.maintenance={request:()=>{queued++;},cancel:()=>{},close:async()=>{}};
+ const task={id:'actual-completed',skill:'software.execute',status:'completed',scene:'life',visibilityFloor:1,subjects:[{application:'wechat'}],goal:'检查界面',sources:[owner.id],
+  state:{attempts:[{tool:'screen.action',error:'定位失效'},{tool:'screen.action',result:{verified:true}}]},operations:{}};
+ await memory.write([{id:task.id,kind:'task',ts:Date.now(),domain:'life',visibilityFloor:1,value:task}]);await learning.completed(task);
+ assert.equal(calls,0);assert.equal(queued,1);
+ const options={signal:new AbortController().signal,reserveModelCall:async()=>{reserves++;return {ok:true};}};
+ assert.equal(await maintain(learning,'dream',options),'continue');assert.equal(calls,1);assert.equal(reserves,1);
+ assert.equal(await maintain(learning,'dream',options),'done');assert.equal(calls,1);
+ const first=(await learning.rows())[0];assert.equal(first.value.status,'candidate');assert(first.value.sources.includes(task.id));
+ await learning.write({schema:'bunny.skill-knowledge/v1',knowledgeId:'other',skill:'conversation.manage',instructions:'界面定位不符时重新观察，语音转写等待真实结果。',tags:['wechat'],scene:'life',revision:1,status:'candidate',proofs:[],sources:[owner.id]},task);
+ const candidates=await learning.rows();await memory.experienceRepository.maintain({...options,request:async()=>{calls++;return {response:{text:JSON.stringify({action:'merge',ids:candidates.map(r=>r.id),instructions:'定位不符时按新画面调整，考虑语音转写的处理时间。',reason:'互补方法'})}};}});assert.equal(calls,2);
+ const combined=(await learning.rows()).find(row=>row.value.consolidatedFrom);assert(combined);assert.equal(combined.value.status,'candidate');assert.equal(combined.value.status,'candidate');assert.equal(combined.value.sources.length,2);
+ assert.equal(await maintain(learning,'deepdream',options),'done');assert.equal(calls,2);
+});
+test('ongoing actions learn through immutable scoped outcomes, never private content or their own derived experience',async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bunny-action-dream-'));
+ const memory=new MemoryService({dir:path.join(dir,'vault'),bin:path.resolve('bin/vault'),openKey:async()=>Buffer.alloc(32,89),getSettings:()=>({enabled:true,extract:false,scene:'life'})});
+ await memory.init();t.after(async()=>{await memory.close();fs.rmSync(dir,{recursive:true,force:true});});
+ let calls=0;const learning=new AgentLearning({memory,skills:{get:()=>({})},request:async options=>{calls++;const payload=JSON.parse(options.messages.at(-1).content);assert.equal(payload.outcome,'recovered');assert(!JSON.stringify(payload).includes('Alice'));return {response:{text:JSON.stringify({instructions:'位置失效后重新定位，已有转写可直接使用，不重复转换。'})}};}});
+ memory.maintenance={request:()=>{},cancel:()=>{},close:async()=>{}};
+ const task={id:'ongoing-task',skill:'conversation.manage',status:'waiting',scene:'life',visibilityFloor:1,subjects:[{application:'wechat',recipient:'Alice'}],sources:[],state:{},operations:{a:{actionId:'round-1',tool:'conversation.transcribe',status:'not_dispatched',error:'原控件位置失效'},b:{actionId:'round-1',tool:'conversation.send',status:'confirmed',result:{verified:true}}}};
+ await memory.write([{id:task.id,kind:'task',ts:Date.now(),domain:'life',visibilityFloor:1,value:task}]);
+ await learning.settled(task,{id:'round-1',status:'completed'});assert.equal(calls,0);
+ task.state.newRound='changed while Dream was queued';await memory.write([{id:task.id,kind:'task',ts:Date.now(),domain:'life',visibilityFloor:1,value:task}]);
+ await maintain(learning,'dream');assert.equal(calls,1);const rows=await learning.rows();assert.equal(rows.length,1);assert(rows[0].value.sources.includes(task.id));
+ await learning.prepare(task);assert.equal(task.state.operatingKnowledge.length,0,'a continuing monitor must not depend on experience derived from itself');
+ await learning.settled(task,{id:'round-1',status:'completed'});await maintain(learning,'dream');assert.equal(calls,1,'outcome is idempotent');
+ await learning.settled({...task,id:'private-task',scene:'private',visibilityFloor:2},{id:'private-round',status:'completed'});assert.equal(await maintain(learning,'dream'),'done');
+ await memory.write([{id:'private-source',kind:'task',ts:Date.now(),domain:'private',visibilityFloor:2,value:{sources:[]}}]);
+ await memory.write([{id:'private-source-queue',kind:'state',ts:Date.now(),domain:'life',visibilityFloor:2,value:{origin:'task-experience-queue-v1',status:'pending',sources:['private-source'],input:{...task,id:'private-source-queue',status:'completed',state:{attempts:[{tool:'conversation.transcribe',error:'unverified private-origin failure'}]}}}}]);
+ assert.equal(await maintain(learning,'dream'),'continue');assert.equal(calls,1,'authoritative inherited source scope overrides an incorrectly low input scope');
+ const other={...task,id:'new-task',sources:[],state:{}};await learning.prepare(other);assert.equal(other.state.operatingKnowledge.length,1);
+});

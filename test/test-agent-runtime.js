@@ -18,6 +18,32 @@ function setup(run,options={}){
   return {runtime,records,calls,tools,skills,journal,advance:()=>{now+=60000;}};
 }
 const send={tool:'conversation.send',key:'reply-event-1',args:{application:'wechat',recipient:'Alice',message:'hello'}};
+test('a replan after proven non-dispatch retains the failed attempt and completes the same logical step once',async()=>{
+ let attempts=0;const h=setup(async({task,call})=>{try{await call({...send,args:{...send.args,message:task.state.replanned?'new plan':'old plan'}});}catch(error){if(error.dispatched!==false)throw error;task.state.replanned=true;return {status:'waiting',nextCheckAt:0};}return {status:'completed'};});
+ const old=h.tools.get('conversation.send');h.tools.tools.set('conversation.send',{...old,execute:async(a,c)=>{attempts++;if(attempts===1)throw Object.assign(Error('known unsent'),{dispatched:false});return old.execute(a,c);}});
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.tick(id);await h.runtime.tick(id);
+ const task=h.runtime.tasks.get(id),ops=Object.values(task.operations);assert.equal(task.status,'completed');assert.equal(ops.length,2);assert.equal(ops[0].status,'not_dispatched');assert.equal(ops[1].status,'confirmed');assert.equal(ops[0].replacedBy,ops[1].id);assert.equal(ops[1].supersedes,ops[0].id);assert.equal(h.calls.length,1);assert.equal(h.calls[0].message,'new plan');await h.runtime.close();
+});
+test('a workflow can continue from its own confirmed receipt after a checkpoint loss without regenerating or repeating the write',async()=>{
+ let first=true;const h=setup(async({completedCall,call})=>{const done=completedCall(send.key,send.tool);if(done)return {status:'completed'};await call(send);if(first){first=false;throw Error('workflow checkpoint lost');}return {status:'completed'};});
+ h.runtime.diagnoseRepair=null;const created=await h.runtime.start(spec,owner);await h.runtime.tick(created.id);assert.equal(h.calls.length,1);
+ await h.runtime.tick(created.id);assert.equal(h.calls.length,1);assert.equal(h.runtime.tasks.get(created.id).status,'completed');await h.runtime.close();
+});
+test('a no-progress code from an uncertain write remains uncertain and is reported without automatic replay',async()=>{
+ const h=setup(async({call})=>{await call({tool:'fixture.unknown',key:'once',args:{}});return {status:'completed'};});let inputs=0,reports=0;
+ h.runtime.report=async()=>{reports++;};h.tools.register({name:'fixture.unknown',description:'uncertain fixture',effect:'write',capabilities:['conversation.send'],execute:async()=>{inputs++;return {ok:false,code:'E_NO_PROGRESS',error:'no new verification evidence'};}});
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.tick(id);const task=h.runtime.tasks.get(id);
+ assert.equal(task.status,'needs_attention');assert.equal(task.state.lastFailure.code,'E_NO_PROGRESS');assert.equal(Object.values(task.operations)[0].status,'intent');assert.equal(reports,1);
+ await h.runtime.tick(id);assert.equal(inputs,1);assert.equal(reports,1);await h.runtime.close();
+});
+test('GUI contention before dispatch preserves the event and retries promptly without repair or a failure lesson',async()=>{
+ let busy=true,diagnoses=0,failures=0;
+ const h=setup(async({event,call})=>{if(!event)return {status:'waiting'};if(busy)throw Object.assign(Error('GUI busy'),{code:'E_GUI_BUSY',dispatched:false});await call(send);return {status:'waiting'};});
+ h.runtime.diagnoseRepair=async()=>{diagnoses++;return {action:'retry'};};h.runtime.failed=async()=>{failures++;};
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'pending'});await h.runtime.tick(id);
+ const task=h.runtime.tasks.get(id);assert.equal(task.nextCheckAt,2000);assert.equal(task.inbox.length,1);assert.equal(task.status,'waiting');assert.equal(diagnoses,0);assert.equal(failures,0);assert.equal(task.state.lastFailure,undefined);
+ busy=false;await h.runtime.tick(id);assert.equal(task.inbox.length,0);assert.equal(h.calls.length,1);await h.runtime.close();
+});
 test('tasks require verified owner provenance and default to low-frequency observation',async()=>{
  const h=setup(async()=>({status:'waiting'}));
  assert.equal((await h.runtime.start(spec,{...owner,role:'contact'})).ok,false);
@@ -40,12 +66,31 @@ test('script validates every target before its first effect',async()=>{
  const {id}=await h.runtime.start(spec,owner);await h.runtime.tick(id);assert.equal(h.calls.length,0);
  assert.match(h.runtime.tasks.get(id).note,/范围/);
 });
+test('a task can discover and use an unlisted tool only within its capabilities and target',async()=>{
+ let catalog;const h=setup(async({call,availableTools})=>{
+  catalog=availableTools;
+  await call({tool:'screen.inspect',key:'inspect',args:{application:'wechat',recipient:'Alice'}});
+  return {status:'completed'};
+ });
+ h.tools.register({name:'screen.inspect',description:'inspect allowed target',effect:'read',capabilities:['screen.read'],scope:a=>a,execute:async()=>({ok:true})});
+ h.tools.register({name:'private.write',description:'requires another capability',effect:'write',capabilities:['private.write'],execute:async()=>({ok:true,verified:true})});
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.tick(id);const task=h.runtime.tasks.get(id);
+ assert.equal(task.status,'completed');assert(catalog.some(item=>item.name==='screen.inspect'));assert(!catalog.some(item=>item.name==='private.write'));
+ assert.throws(()=>h.tools.check('screen.inspect',{application:'wechat',recipient:'Bob'},task),/范围/);
+ assert.throws(()=>h.tools.check('private.write',{},task),/未授权/);await h.runtime.close();
+});
 test('unknown write pauses durably and cannot be replayed after restart',async()=>{
  const run=async({call})=>{await call(send);return {status:'completed'};},h=setup(run,{failWrite:true});
  const {id}=await h.runtime.start(spec,owner);await h.runtime.tick(id);
  assert.equal(h.calls.length,1);assert.equal(h.runtime.tasks.get(id).status,'needs_attention');await h.runtime.close();
  const restored=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await restored.restore();
  await restored.tick(id);assert.equal(h.calls.length,1);assert.equal((await restored.control('resume',id)).ok,false);
+});
+test('incompatible development tasks are ignored on restore rather than replayed',async()=>{
+ const h=setup(async()=>({status:'waiting'})),started=await h.runtime.start(spec,owner),old=structuredClone(h.records.get(started.id));
+ old.schema='bunny.task/v2';old.status='running';await h.journal.put(old);await h.runtime.close();
+ const restored=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});
+ const result=await restored.restore();assert.equal(result.restored,0);assert.equal(restored.tasks.size,0);assert.equal(h.calls.length,0);await restored.close();
 });
 test('host read-only reconciliation records a verified receipt and resumes without another write',async()=>{
  const h=setup(async({call})=>{await call(send);return {status:'completed'};},{failWrite:true}),{id}=await h.runtime.start(spec,owner);
@@ -60,6 +105,12 @@ test('verified effect is not repeated when a later read/planning step fails',asy
  const {id}=await h.runtime.start(spec,owner);await h.runtime.tick(id);await h.runtime.tick(id);
  assert.equal(h.calls.length,1);assert.equal(h.runtime.tasks.get(id).status,'completed');
 });
+test('a multi-step goal keeps one durable action identity and links its tool receipts',async()=>{
+ let round=0;const h=setup(async({call})=>{if(!round++)return {status:'waiting'};await call(send);return {status:'completed'};});
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.tick(id);const task=h.runtime.tasks.get(id),action=Object.values(task.actionRuns)[0];
+ assert.equal(action.status,'waiting');await h.runtime.tick(id);assert.equal(action.status,'completed');
+ assert.equal(Object.values(task.operations).find(op=>op.tool==='conversation.send').actionId,action.id);assert.equal(action.attempts,2);await h.runtime.close();
+});
 test('busy events remain in a durable queue and are consumed once after resuming',async()=>{
  let busy=true;const h=setup(async({event,call})=>{if(!event||busy)return {status:'waiting',consumeEvent:false};await call({...send,key:event.key});return {status:'waiting'};});
  const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'new-1',text:'hi'});await h.runtime.tick(id);
@@ -67,6 +118,68 @@ test('busy events remain in a durable queue and are consumed once after resuming
  await h.runtime.control('pause',id);assert((await h.runtime.enqueue(id,{key:'new-1',text:'hi'})).duplicate);
  busy=false;await h.runtime.control('resume',id);await h.runtime.tick(id);await h.runtime.tick(id);
  assert.equal(h.calls.length,1);assert.equal(h.runtime.tasks.get(id).inbox.length,0);
+});
+test('different scoped event actions run independently within one task and remain durable',async()=>{
+ let enterA,releaseA,enterB;const atA=new Promise(r=>enterA=r),gate=new Promise(r=>releaseA=r),atB=new Promise(r=>enterB=r);
+ const h=setup(async({event,signal})=>{
+  if(event?.key==='a'){enterA();await gate;assert.equal(signal.aborted,false);}
+  if(event?.key==='b')enterB();
+  return {status:'waiting'};
+ });
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'a',type:'test.event',scope:'alice'});
+ const first=h.runtime.tick(id);await atA;await h.runtime.enqueue(id,{key:'b',type:'test.event',scope:'bob'});
+ const second=h.runtime.tick(id);await Promise.race([atB,new Promise((_,reject)=>setTimeout(()=>reject(Error('independent action did not start')),500))]);
+ await second;assert.equal(h.runtime.tasks.get(id).inbox.some(e=>e.key==='a'),true);
+ releaseA();await first;const task=h.runtime.tasks.get(id);
+ assert.equal(task.inbox.length,0);assert.equal(Object.values(task.actionRuns).filter(a=>a.status==='completed').length,2);await h.runtime.close();
+});
+test('a host reconciliation controller is not displaced by another task action',async()=>{
+ let started=0;const h=setup(async()=>{started++;return {status:'waiting'};}),{id}=await h.runtime.start(spec,owner),host=new AbortController();
+ await h.runtime.enqueue(id,{key:'event',type:'test.event',scope:'alice'});h.runtime.controllers.set(id,host);await h.runtime.tick(id);
+ assert.equal(started,0);assert.equal(h.runtime.controllers.get(id),host);h.runtime.controllers.delete(id);await h.runtime.tick(id);assert.equal(started,1);await h.runtime.close();
+});
+test('same-scoped event actions serialize, while stopping the task cancels its children',async()=>{
+ let entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r),started=[];
+ const h=setup(async({event,signal})=>{started.push(event.key);if(event.key==='a'){entered();await gate;assert(signal.aborted);}return {status:'waiting'};});
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'a',type:'test.event',scope:'alice'});const first=h.runtime.tick(id);await at;
+ await h.runtime.enqueue(id,{key:'b',type:'test.event',scope:'alice'});await h.runtime.tick(id);assert.deepEqual(started,['a']);
+ assert((await h.runtime.control('stop',id)).ok);release();await first;assert.equal(h.runtime.tasks.get(id).status,'stopped');assert.deepEqual(started,['a']);await h.runtime.close();
+});
+test('an uncertain write in one event does not cancel a different scoped action',async()=>{
+ let entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
+ const h=setup(async({event,call,signal})=>{
+  if(event.key==='a'){entered();await gate;assert.equal(signal.aborted,false);return {status:'waiting'};}
+  await call(send);return {status:'waiting'};
+ },{failWrite:true});
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'a',type:'test.event',scope:'alice'});const first=h.runtime.tick(id);await at;
+ await h.runtime.enqueue(id,{key:'b',type:'test.event',scope:'bob'});await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).status,'needs_attention');
+ release();await first;const task=h.runtime.tasks.get(id);assert.equal(task.status,'needs_attention');
+ assert.equal(Object.values(task.actionRuns).find(a=>a.eventKey==='a').status,'completed');assert.equal(Object.values(task.actionRuns).find(a=>a.eventKey==='b').status,'needs_attention');await h.runtime.close();
+});
+test('after restart an uncertain action remains blocked while another scope can progress',async()=>{
+ const processed=[],h=setup(async({event,call})=>{if(event.key==='a')await call(send);processed.push(event.key);return {status:'waiting'};},{failWrite:true});
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'a',type:'test.event',scope:'alice'});await h.runtime.tick(id);
+ await h.runtime.enqueue(id,{key:'b',type:'test.event',scope:'bob'});await h.runtime.close();
+ const restored=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await restored.restore();await restored.tick(id);
+ const task=restored.tasks.get(id);assert.deepEqual(processed,['b']);assert.equal(task.status,'needs_attention');
+ assert.equal(task.inbox.some(e=>e.key==='a'),true);assert.equal(task.inbox.some(e=>e.key==='b'),false);assert.equal(h.calls.length,1);await restored.close();
+});
+test('resolving one action permission does not cancel another running action',async()=>{
+ let entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
+ const h=setup(async({event,signal})=>{
+  if(event.key==='a'){entered();await gate;assert.equal(signal.aborted,false);return {status:'waiting'};}
+  throw Object.assign(Error('permission needed'),{code:'E_PERMISSION_REQUIRED',dispatched:false});
+ });
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'a',type:'test.event',scope:'alice'});const first=h.runtime.tick(id);await at;
+ await h.runtime.enqueue(id,{key:'b',type:'test.event',scope:'bob'});await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).status,'waiting_permission');
+ assert((await h.runtime.control('resume',id)).ok);release();await first;assert.equal(h.runtime.tasks.get(id).inbox.some(e=>e.key==='a'),false);await h.runtime.close();
+});
+test('resume waits for an aborted worker to settle before starting its replacement',async()=>{
+ let entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r),starts=[];
+ const h=setup(async({event,signal})=>{starts.push(event.key);if(starts.length===1){entered();await gate;assert(signal.aborted);}return {status:'waiting'};});
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'a',type:'test.event',scope:'alice'});const first=h.runtime.tick(id);await at;
+ assert((await h.runtime.control('pause',id)).ok);assert((await h.runtime.control('resume',id)).ok);await h.runtime.tick(id);assert.deepEqual(starts,['a']);
+ release();await first;await h.runtime.tick(id);assert.deepEqual(starts,['a','a']);await h.runtime.close();
 });
 test('polling stores bounded receipts without pixel data',async()=>{
  const h=setup(async({task,call})=>{await call({tool:'screen.read',args:{},key:'sample-'+task.counters.wakes});return {status:'waiting'};});
@@ -168,4 +281,25 @@ test('restart retries only a proven pre-effect automatic reply, while protected 
  const restored=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await restored.restore();assert.equal(restored.tasks.get(id).operations.early.status,'not_dispatched');assert.equal(restored.tasks.get(id).status,'waiting');await restored.close();
  saved.operations.early={effect:'write',tool:'conversation.send',status:'intent',lifecycle:{policy:'newer-event',phase:'protected'}};saved.status='running';h.records.set(id,saved);
  const second=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await second.restore();assert.equal(second.tasks.get(id).operations.early.status,'intent');assert.equal(second.tasks.get(id).status,'needs_attention');await second.close();await h.runtime.close();
+});
+
+test('concurrent action checkpoints persist in invocation order without holding a model or GUI lock',async()=>{
+ const h=setup(async()=>({status:'waiting'})),{id}=await h.runtime.start(spec,owner),task=h.runtime.tasks.get(id);
+ const writes=[];let release,entered;
+ const enteredPromise=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
+ h.journal.put=async value=>{writes.push(value.state.revision);if(value.state.revision===1){entered();await gate;}h.records.set(id,structuredClone(value));};
+ task.state.revision=1;const first=h.runtime.save(task);await enteredPromise;
+ task.state.revision=2;const second=h.runtime.save(task);await Promise.resolve();assert.deepEqual(writes,[1]);
+ release();await Promise.all([first,second]);assert.deepEqual(writes,[1,2]);assert.equal(h.records.get(id).state.revision,2);await h.runtime.close();
+});
+
+test('a repeating action keeps its event and timing while Bunny decides recovery and when owner help is needed',async()=>{
+ const h=setup(async({task,event,call})=>{await call({tool:'screen.read',key:'sample:'+task.counters.wakes,args:{}});return {status:'waiting',note:'waiting for conversion',consumeEvent:false,nextCheckAt:1000,state:task.state};});
+ const diagnoses=[];h.runtime.diagnoseRepair=async info=>{diagnoses.push(info);return {action:diagnoses.length===1?'reobserve':diagnoses.length===2?'change_method':'ask_owner',nextStep:'核查方法无新证据，需要主人补充信息',source:'llm'};};
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'one-event',type:'fixture',scope:'one'});
+ for(let i=0;i<6;i++){await h.runtime.tick(id);h.advance();}
+ const task=h.runtime.tasks.get(id),run=Object.values(task.actionRuns)[0];
+ assert.equal(diagnoses.length,3);assert.equal(diagnoses[0].kind,'stall');assert(diagnoses[0].progress.elapsedMs>=120000);assert.equal(task.inbox[0].key,'one-event');
+ assert.equal(task.status,'needs_attention');assert.equal(run.recovery.action,'ask_owner');assert.equal(task.state.recoveryGuidance.eventKey,'one-event');assert.match(task.note,/需要主人补充/);assert.equal(run.startedAt,run.createdAt,'retries keep the original start time');
+ await h.runtime.close();
 });

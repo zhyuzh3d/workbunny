@@ -9,4 +9,14 @@ These terms apply to the motion data individually, independently of WorkBunny's 
 
 Changes: local semantic filenames; where needed, embedded JSON glTF was converted to GLB and `VRMC_vrm_animation.specVersion` normalized to 1.0. Original animation BIN payload, nodes, accessors, buffer views and animation channels were compared against the pinned upstream files and preserved. Runtime retargeting, cropping and foot grounding are performed by WorkBunny, without rewriting the distributed source motion files.
 
-Full applicable texts: `CC0-1.0.txt`, `CC-BY-4.0.txt`, `Apache-2.0.txt`, `homunculus-MIT.txt`. Detailed file hashes, provenance and per-file decisions are in `resources-manifest.json` and `docs/assets-audit.json`.
+Full applicable texts: `CC0-1.0.txt`, `CC-BY-4.0.txt`, `Apache-2.0.txt`, `homunculus-MIT.txt`. Detailed file hashes, provenance and per-file decisions are in `resources-manifest.json` and `licenses/assets-audit.json`.
+
+## 版权待核实的动作及授权请求
+
+以下动作已包含于本构建，文件均位于 `src/renderer/assets/motions/`；逐项来源、SHA-256 和当前许可状态见 [资源清单](resources-manifest.json)。Rocketbox/Hanami 上游标示 MIT，但该许可对对应动作素材的覆盖范围尚待权利人确认；旧动作库素材的原作者及许可尚未查明。
+
+- **Rocketbox / Hanami，许可范围待确认：** `rb_angry_2.vrma`、`rb_angry.vrma`、`rb_happy_2.vrma`、`rb_happy_3.vrma`、`rb_happy.vrma`、`rb_idle_2.vrma`、`rb_idle_3.vrma`、`rb_idle_4.vrma`、`rb_idle_talking_2.vrma`、`rb_idle_talking_3.vrma`、`rb_idle_talking.vrma`、`rb_idle.vrma`、`rb_laugh.vrma`、`rb_listen_2.vrma`、`rb_listen_3.vrma`、`rb_listen.vrma`、`rb_neutral_2.vrma`、`rb_neutral_3.vrma`、`rb_neutral_4.vrma`、`rb_neutral.vrma`、`rb_nod_2.vrma`、`rb_nod_3.vrma`、`rb_nod.vrma`、`rb_relaxed_2.vrma`、`rb_relaxed_3.vrma`、`rb_relaxed_4.vrma`、`rb_relaxed.vrma`、`rb_sad.vrma`、`rb_shake_2.vrma`、`rb_shake_3.vrma`、`rb_shake.vrma`、`rb_shrug_2.vrma`、`rb_shrug.vrma`、`rb_think_2.vrma`、`rb_think.vrma`、`rb_wave_2.vrma`、`rb_wave.vrma`。
+
+- **旧动作库，来源和许可待查：** `idle_look.vrma`、`idle_breath.vrma`、`idle_lalala.vrma`、`idle_shift.vrma`、`greet_wave.vrma`、`greet_hand.vrma`、`bye_goodbye.vrma`、`bye_wave.vrma`、`cheer_clap_vr.vrma`、`cheer_jump_vr.vrma`、`cheer_hop.vrma`、`cheer_yay.vrma`、`cheer_clap_maya.vrma`、`cheer_cross.vrma`、`cheer_joy.vrma`、`praise_snap.vrma`、`dance_excited_maya.vrma`、`dance_macarena.vrma`、`tease_cat.vrma`、`tease_scare.vrma`、`tease_catwalk.vrma`、`refuse_head.vrma`、`refuse_reject.vrma`、`refuse_shrug.vrma`、`refuse_waving.vrma`、`angry_pout.vrma`、`angry_tsundere.vrma`、`angry_hip.vrma`、`angry_arms.vrma`、`shy_cute.vrma`、`shy_bashful.vrma`、`think_lady.vrma`、`think_idea.vrma`、`think_cute.vrma`、`think_dw.vrma`、`sorry_sad.vrma`、`sorry_cry.vrma`、`sorry_sigh.vrma`、`tired_stretch_vr.vrma`、`tired_sleep.vrma`、`tired_reach.vrma`、`tired_nod.vrma`、`tired_yawn.vrma`、`tired_armstretch.vrma`、`thanks_bow_reika.vrma`、`thanks_maya.vrma`、`surprise_scratch.vrma`、`surprise_vr.vrma`、`motion_spinjump.vrma`、`motion_run.vrma`、`motion_situp2.vrma`、`motion_situp.vrma`、`motion_spin.vrma`、`talk_talk.vrma`。
+
+如您是上述素材的版权所有者，恳请您通过 [素材反馈](https://github.com/zhyuzh3d/workbunny/issues/new?template=asset-rights.md) 联系我们，确认是否授权分发；如您认为使用侵犯了您的权益，也请告知，我们会及时核实并移除。此请求和删除承诺本身不构成授权。

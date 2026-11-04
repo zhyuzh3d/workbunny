@@ -1,34 +1,28 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {AgentLearning}=require('../src/main/agent-learning');
-test('learned instructions are scoped, versioned and require two verified task proofs without a source cycle',async()=>{
- const records=new Map([['teaching',{id:'teaching',state:'active',value:{}}]]);
- const memory={ready:true,query:async()=>[...records.values()],write:async rows=>{for(const row of rows){for(const id of row.value.sources)assert(records.has(id));records.set(row.id,{...row,state:'active'});}}};
- const learning=new AgentLearning({memory,skills:{get:id=>{assert.equal(id,'conversation.manage');}}});
- const taught=await learning.teach({skill:'conversation.manage',instructions:'Wait at least half a second between logical inputs.'},{task:{id:'teaching',scene:'life',visibilityFloor:1}});
- const task={id:'first',skill:'conversation.manage',scene:'life',visibilityFloor:1,sources:['owner-turn'],state:{},operations:{write:{effect:'write',status:'confirmed',tool:'conversation.send',result:{ok:true,verified:true,receipt:{backend:'CGDisplayStream'}}}}};
- await learning.prepare(task);assert.equal(task.state.operatingKnowledge[0].sourceId,taught.knowledgeId);assert(task.sources.includes(taught.knowledgeId));
- records.set(task.id,{id:task.id,state:'active',value:structuredClone(task)});await learning.completed(task);
- let latest=learning.latest(await learning.rows())[0];assert.equal(latest.value.status,'candidate');assert.deepEqual(latest.value.proofs,['first']);
- const second={...structuredClone(task),id:'second',sources:['owner-turn'],state:{}};await learning.prepare(second);
- assert.equal(second.state.operatingKnowledge[0].sourceId,latest.id);records.set(second.id,{id:second.id,state:'active',value:structuredClone(second)});await learning.completed(second);
- latest=learning.latest(await learning.rows())[0];assert.equal(latest.value.status,'validated');assert.deepEqual(latest.value.proofs,['first','second']);
- await learning.completed(second);assert.equal(learning.latest(await learning.rows())[0].id,latest.id,'same proof is idempotent');
- const other={...structuredClone(task),scene:'work',state:{},sources:['owner-turn']};await learning.prepare(other);assert.equal(other.state.operatingKnowledge.length,0);
- const visit=(id,path=[])=>{assert(!path.includes(id),'source graph must remain acyclic');for(const parent of records.get(id)?.value.sources||[])visit(parent,[...path,id]);};visit(latest.id);
- const before=(await learning.rows()).length;await learning.completed({...task,id:'unverified',operations:{}});assert.equal((await learning.rows()).length,before);
+const {fixture}=require('./support/experience-fixture.cjs');
+async function save(memory,task){await memory.write([{id:task.id,kind:'task',ts:Date.now(),domain:task.scene,visibilityFloor:task.visibilityFloor,value:task}]);}
+const task=id=>({id,skill:'software.execute',scene:'life',visibilityFloor:1,goal:'处理微信对话',subjects:[{application:'wechat'}],sources:[],state:{},operations:{}});
+test('teaching and runtime experience use the same scoped current-head repository, with no fixed validation votes',async t=>{
+ const {memory,repo}=await fixture(t),learning=new AgentLearning({memory,skills:{get:()=>({})}}),source=task('teaching');await save(memory,source);
+ const taught=await learning.teach({instructions:'按目标安排检查，必要时重新观察。'},{task:source});const next=task('one');await save(memory,next);await learning.prepare(next);assert(next.sources.includes(taught.knowledgeId));
+ await learning.validateUsed(next,[{effect:'write',status:'confirmed',result:{verified:true}}]);await learning.failed(next,Error('此环境定位失效'));
+ let rows=await repo.search({query:'software:wechat'});assert.equal(rows.length,1);assert.equal(rows[0].value.status,'candidate');assert.equal(rows[0].value.feedback.length,2);assert.equal(rows[0].value.revision,1,'feedback does not append body revisions');
+ await learning.prepare(source);assert.equal(source.state.operatingKnowledge.length,0,'source task does not depend on its own lesson');
+ const work={...task('work'),scene:'work',visibilityFloor:0};await learning.prepare(work);assert.equal(work.state.operatingKnowledge.length,0);
 });
-test('a failing new method rolls back to earlier verified instructions, while transient waits do not count',async()=>{
- const rows=new Map(),memory={ready:true,query:async()=>[...rows.values()],write:async list=>{for(const r of list)rows.set(r.id,{...r,state:'active'});}};
- const learning=new AgentLearning({memory,skills:{get:()=>({})}}),base={scene:'life',visibilityFloor:1,skill:'software.execute',sources:['owner'],state:{},operations:{}};
- await learning.write({knowledgeId:'method',revision:1,skill:'software.execute',scene:'life',instructions:'verified old method',status:'validated',proofs:['verified-1','verified-2'],sources:['owner']},base);
- await learning.teach({skill:'software.execute',instructions:'new method with regression'},{task:{...base,id:'teaching'}});
- for(const id of ['one','two']){const task={...structuredClone(base),id};await learning.prepare(task);const before=(learning.latest(await learning.rows())[0].value.failedTasks||[]).length;await learning.failed(task,Object.assign(Error('网络超时'),{code:'E_NETWORK'}));assert.equal((learning.latest(await learning.rows())[0].value.failedTasks||[]).length,before);await learning.failed(task,Error('此布局的控件不存在'));}
- const current=learning.latest(await learning.rows())[0].value;assert.equal(current.status,'validated');assert.equal(current.instructions,'verified old method');assert(current.rolledBackFrom);
+test('small failures remain evidence for Bunny; repeated errors never trigger automatic quarantine or rollback',async t=>{
+ const {memory,repo}=await fixture(t),learning=new AgentLearning({memory,skills:{get:()=>({})}}),teacher=task('teacher');await save(memory,teacher);await learning.teach({instructions:'先观察再调整。'},{task:teacher});
+ for(const id of ['first','second','third']){const next=task(id);await save(memory,next);await learning.prepare(next);await learning.failed(next,Error('控件没有出现'));}
+ const row=(await repo.search({query:'software:wechat'}))[0];assert.equal(row.value.status,'candidate');assert.equal(row.value.feedback.length,3);
 });
-test('a verified recovery extracts candidate knowledge with real task provenance',async()=>{
- const rows=[],memory={ready:true,query:async()=>rows,write:async list=>rows.push(...list.map(r=>({...r,state:'active'})))};
- const learning=new AgentLearning({memory,skills:{get:()=>({})},request:async()=>({response:{text:JSON.stringify({instructions:'工具返回旧定位失效时，重新截图再按新位置操作。'})}})});
- const task={id:'actual-recovery',skill:'software.execute',scene:'life',visibilityFloor:1,goal:'探索新界面',state:{attempts:[{tool:'screen.action',error:'定位失效'},{tool:'screen.action',result:{verified:true}}]},operations:{}};
- await learning.completed(task);assert(task.state.learnedRecovery);assert.equal(rows[0].value.status,'candidate');assert.deepEqual(rows[0].value.sources,['actual-recovery']);
+test('recovery extraction preserves real task provenance and never treats an input receipt as proof',async t=>{
+ const {memory,repo}=await fixture(t),learning=new AgentLearning({memory,skills:{get:()=>({})},request:async()=>({response:{text:JSON.stringify({instructions:'旧定位失效时结合新画面重新选择方法。'})}})}),source=task('recovered');source.state.attempts=[{tool:'screen.action',error:'旧定位失效'},{tool:'screen.action',result:{verified:true}}];await save(memory,source);await learning.extractRecovery(source);
+ const row=(await repo.search({query:'software:wechat'}))[0];assert.equal(row.value.origin,'task-learning');assert.deepEqual(row.value.sources,[source.id]);const next=task('reader');await learning.prepare(next);await learning.validateUsed(next,[{effect:'write',status:'confirmed',result:{verified:true,receipt:{inputPerformed:true}}}]);assert.deepEqual((await repo.search({query:'software:wechat'}))[0].value.feedback,[]);
+});
+test('bundled and learned experience compete in one query, and imported knowledge can be read across task executors',async t=>{
+ const {memory}=await fixture(t),learning=new AgentLearning({memory,skills:{get:()=>({})},packages:require('../src/main/software-skill-package').loadSoftwarePackages()}),teacher=task('teacher');await save(memory,teacher);const taught=await learning.teach({instructions:'语音转写需要客观处理时间，依据结果继续。'},{task:teacher});
+ const next=task('new');await learning.prepare(next);assert(next.state.operatingKnowledge.some(r=>r.sourceId===taught.knowledgeId));assert(next.state.operatingKnowledge.every(r=>r.sourceId&&!r.packageId));assert.equal(next.state.softwarePackages.length,0);
+ const count=(await memory.query('state',80,{requiredMarkers:['bunny_experience_head_experience']})).length;await learning.prepare(task('another'));assert.equal((await memory.query('state',80,{requiredMarkers:['bunny_experience_head_experience']})).length,count,'built-in seeds are idempotent');
 });

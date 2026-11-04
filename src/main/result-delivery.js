@@ -3,9 +3,9 @@ const {fields,text}=require('./agent-contract');
 const {deliveryText}=require('./task-result');
 function registerResultTools(tools,{deliver}){
  tools.register({name:'result.deliver',description:'向本任务指定的微信对象交付已回收成果，不重做工作，不重复播报。',effect:'write',capabilities:['conversation.send'],
- validate:v=>{fields(v,['message'],'成果交付');return {message:text(v.message,'成果消息',3000)};},execute:(a,c)=>deliver(a.message,c.task,c.signal)});
+ validate:v=>{fields(v,['message'],'成果交付');return {message:text(v.message,'成果消息',3000)};},execute:(a,c)=>deliver(a.message,c.task,c.signal,undefined,c.operationId)});
  tools.register({name:'result.attach',description:'发送当前成果清单里的真实文件，核对文件指纹以及新增文件卡片。',effect:'write',capabilities:['conversation.send'],
- validate:v=>{fields(v,['index'],'成果附件');if(!Number.isInteger(v.index)||v.index<0||v.index>3)throw Error('附件序号无效');return v;},execute:(a,c)=>deliver(null,c.task,c.signal,a.index)});
+ validate:v=>{fields(v,['index'],'成果附件');if(!Number.isInteger(v.index)||v.index<0||v.index>3)throw Error('附件序号无效');return v;},execute:(a,c)=>deliver(null,c.task,c.signal,a.index,c.operationId)});
 }
 async function deliverResult({task,call,checkpoint,report}){
  if(!task.state.result)throw Error('还没有可交付的实际成果');

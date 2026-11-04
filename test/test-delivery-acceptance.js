@@ -4,11 +4,13 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 // Stub only the remote verdict. The actual filesystem evidence collector and
-// production acceptance gate remain wired together, with no account requests.
+// production evidence review remain wired together, with no account requests.
 const transport = require('../src/main/verification-transport');
 let calls = 0, duringCheck = async () => {};
-transport.requestVerification = async () => {
-  calls++; await duringCheck();
+transport.requestVerification = async options => {
+  calls++; await duringCheck();const input=JSON.parse(options.messages[1].content[0].text),availability=input.localDelivery.availability;
+  if(availability.inaccessible)return {model:'fixture',response:{text:JSON.stringify({verdict:'need_user',report:'当前证据不可读，需要合适的核查方式。'})}};
+  if(availability.missing.length)return {model:'fixture',response:{text:JSON.stringify({verdict:'revise',report:'实际文件缺失。',followUp:'继续原任务并检查实际文件。'})}};
   return { model: 'deepseek-v4.1-flash', response: { text: '{"verdict":"pass","report":"执行方说已完成。","followUp":""}' } };
 };
 const { verifyDelivery } = require('../src/main/secretary');
@@ -25,7 +27,7 @@ const { collectDeliveryEvidence } = require('../src/main/delivery-evidence');
       monitorSessionId: 'same-session', monitorSummary: `我已写好 ${output}，还检查了 ${outside}。` };
     assert.deepEqual((await collectDeliveryEvidence(task)).requiredOutputs, [output]);
     const absent = await verifyDelivery({ task });
-    assert.equal(absent.verdict, 'revise'); assert.equal(calls, 0, 'a missing requested file cannot be accepted by a remote completion claim');
+    assert.equal(absent.verdict, 'revise'); assert.equal(calls, 1, 'Bunny receives the actual missing-file facts and decides how to continue');
     await fs.writeFile(output, '# actual\nfirst\nsecond\nlast\n');
     const accepted = await verifyDelivery({ task });
     assert.equal(accepted.verdict, 'pass');
@@ -39,7 +41,7 @@ const { collectDeliveryEvidence } = require('../src/main/delivery-evidence');
       assert.deepEqual(Object.keys(file).sort(), ['checkedAt', 'mtimeMs', 'path','role', 'sha256', 'size']);
     }
     assert.equal(accepted.artifactManifest.files.find(f=>f.path===source).role,'evidence');assert.equal(accepted.artifactManifest.files.find(f=>f.path===output).role,'artifact');
-    assert.equal(calls, 1, 'a real stable file still reaches normal content verification');
+    assert.equal(calls, 2, 'a real stable file reaches normal content verification');
     const persistedTask = { ...task, id: 'manifest-persist-test', origin: 'dialogue', status: 'review', scene: 'life', domain: 'work', visibilityFloor: 1,
       privacyEpoch: 0, followUpRound: 0, observationHistory: [], evidence: '' };
     const desktop = { task: persistedTask, generation: 1,
@@ -56,7 +58,7 @@ const { collectDeliveryEvidence } = require('../src/main/delivery-evidence');
     assert.ok(persistedTask.verification.artifactManifest.files.every(file => Number.isFinite(file.checkedAt)));
     secretary.close();
     duringCheck = async () => fs.writeFile(output, 'changed while the model was checking');
-    assert.equal((await verifyDelivery({ task })).verdict, 'need_user', 'an old file snapshot cannot accept a file changed during checking');
+    await assert.rejects(verifyDelivery({task}),e=>e.code==='E_EVIDENCE_CHANGED','changed evidence requests fresh reasoning, preserving the goal');
     duringCheck = async () => {};
     await fs.rm(output);
     const negative = { ...task, userRequest: `只读 ${source}，不要创建 ${output}。` };
@@ -68,7 +70,7 @@ const { collectDeliveryEvidence } = require('../src/main/delivery-evidence');
     await fs.symlink(target, output);
     const previousCalls = calls;
     assert.equal((await verifyDelivery({ task })).verdict, 'need_user');
-    assert.equal(calls, previousCalls, 'an unsafe target is neither read by the model nor retried as a missing file');
-    console.log('Local delivery acceptance gate checks passed');
+    assert.equal(calls, previousCalls+1, 'Bunny receives only the unreadable-target fact; unsafe file content is never read');
+    console.log('Local delivery evidence and autonomous review checks passed');
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -9,11 +9,13 @@ test('bilingual OCR duplicates cannot prevent exact readback of an already inser
  const frame={ocr:[{text:'[Bunny]',confidence:1,x:.33,y:.837,width:.08,height:.016},{text:'Good evening —',confidence:1,x:.42,y:.837,width:.3,height:.016},{text:'Good evening 一',confidence:.5,x:.42,y:.837,width:.3,height:.016},{text:'Message 123 received.',confidence:1,x:.33,y:.86,width:.3,height:.016},{text:'Message 123 received.',confidence:1,x:.33,y:.86,width:.3,height:.016}]};
  assert(wechatMessageVisible(frame,'［Bunny］ Good evening — Message 123 received.','composer'));assert(!wechatMessageVisible(frame,'［Bunny］ Good evening — Message 124 received.','composer'));
 });
-test('a verified original draft and a unique pixel-derived send button submit without another model decision',()=>{
- const {visualDraftSubmit}=require('../src/main/desktop-service'),frame={ocr:[{text:'Alice',confidence:.99,x:.4,y:.05,width:.1,height:.03},{text:'hello',confidence:.99,x:.4,y:.8,width:.1,height:.03},{text:'发送(S)',confidence:.99,x:.9,y:.94,width:.05,height:.03}]};
+test('an approved continuation reuses one visual judgment; plain OCR does not decide submission for Bunny',()=>{
+ const {visualDraftSubmit}=require('../src/main/desktop-service'),crypto=require('crypto'),frame={preview:'actual',ocr:[{text:'Alice',confidence:.99,x:.4,y:.05,width:.1,height:.03},{text:'hello',confidence:.99,x:.4,y:.8,width:.1,height:.03},{text:'发送(S)',confidence:.99,x:.9,y:.94,width:.05,height:.03}]};
+ assert.equal(visualDraftSubmit(scope,frame,true),null,'a visible button alone is not a model decision');
+ frame.draftProof={matched:true,taskId:scope.id,messageHash:crypto.createHash('sha256').update(scope.message).digest('hex'),imageHash:crypto.createHash('sha256').update(frame.preview).digest('hex'),nextAction:{action:'click',purpose:'submit',x:.925,y:.955}};
  assert.equal(visualDraftSubmit(scope,frame,true).purpose,'submit');assert.equal(visualDraftSubmit({...scope,submitAttemptedAt:1},frame,true),null);
+ assert.equal(visualDraftSubmit(scope,{...frame,preview:'different'},true),null,'exact OCR cannot reauthorize a stale model continuation');
  assert.equal(visualDraftSubmit({...scope,recipient:'Bob'},frame,true),null);assert.equal(visualDraftSubmit({...scope,message:'changed'},frame,true),null);assert.equal(visualDraftSubmit(scope,frame,false),null);assert.equal(visualDraftSubmit({...scope,attachment:{}},frame,true),null);
- assert.equal(visualDraftSubmit(scope,{ocr:[...frame.ocr,{text:'发送',confidence:.99,x:.7,y:.94,width:.05,height:.03}]},true),null);
 });
 test('WeChat planning has explicit action JSON and retries only bounded read-only output exhaustion', async()=>{
  const calls=[];
@@ -24,7 +26,7 @@ test('WeChat planning has explicit action JSON and retries only bounded read-onl
  }});
  const result=await s.nextAction(scope,shot,new AbortController().signal);
  assert.equal(result.completed,false);assert.equal(calls.length,2);
- assert.deepEqual(calls.map(c=>c.maxTokens),[2048,2048]);
+ assert.deepEqual(calls.map(c=>c.maxTokens),[2048,8192]);
  assert(calls.every(c=>c.thinking==='low'&&c.extraBody.reasoning_effort==='low'));
  assert(calls[0].messages[0].content.includes('"action":"type"'));
  const payload=JSON.parse(calls[0].messages[1].content[0].text);

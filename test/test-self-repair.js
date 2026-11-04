@@ -73,3 +73,10 @@ test('local budget overflow reduces optional content without shrinking the usabl
  const local=repair.applyAction({},'compact_context',{code:'E_CONTEXT_BUDGET'}),remote=repair.applyAction({},'compact_context',{code:'E_CONTEXT_WINDOW'});
  assert.equal(local.contextLevel,1);assert.equal(local.budgetScale,undefined);assert.equal(remote.budgetScale,.5);
 });
+
+test('broker response caps shrink the request while output truncation can expand it',()=>{
+ assert.equal(repair.category({code:'E_PAYLOAD_TOO_LARGE'}),'response');assert.equal(repair.category({code:'E_OUTPUT_LIMIT'}),'output');
+ const messages=[{role:'user',content:JSON.stringify({goal:'keep goal',tools:[{name:'keep tool'}],confirmedEffects:[{id:'keep receipt'}]})}],options={messages,thinking:'high',maxTokens:8192};
+ const compact=repair.applyProfile(options,repair.applyAction({},'compact_response'));assert.equal(compact.thinking,'low');assert.equal(compact.maxTokens,2048);assert.equal(compact.budgetScale,.5);assert.deepEqual(compact.messages,messages);
+ assert.equal(repair.applyProfile(options,repair.applyAction({},'increase_output')).maxTokens,8192);
+});

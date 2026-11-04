@@ -35,7 +35,7 @@ function validate(value){
 }
 class AgentInterpreter{
  constructor({skills,request}={}){Object.assign(this,{skills,request});}
- async interpret(userText,{tasks=[],context='',signal,actor,repairProfile}={}){
+ async interpret(userText,{tasks=[],context='',signal,actor,repairProfile,perception}={}){
   const active=tasks.filter(t=>!['completed','stopped','expired'].includes(t.status));
   const validateCurrent=async value=>{const decision=validate(value);
    if(decision.kind==='task'){const skill=this.skills.get?.(decision.task.skill),applications=skill?.subjectApplications;if(skill?.internal)throw Error('内部编排步骤不能作为软件技能直接交办');if(['software.execute','system.operate'].includes(decision.task.skill)&&(!decision.task.delivery||!decision.task.workRequest))throw Error('一次性组合或系统操作必须指定workRequest（只含执行目标）和delivery（最终交付）：按主人原文选择微信收件人和是否发文件；未指定结果渠道用speech。最终交付由宿主负责，不是组合工具里的制作步骤。');if(applications&&decision.task.subjects.some(s=>!applications.includes(s.application)))throw Error('技能'+skill.id+'的执行对象只能是'+applications.join('、')+'；微信收件人必须放delivery，不能当作工作执行者。补充原工作请用kind=update指向原工作任务ID。');if(actor)await skill?.validate?.(decision.task,actor);}
@@ -47,7 +47,7 @@ class AgentInterpreter{
    return decision;
   };
   const result=await checkedJSON({signal,repairProfile,messages:[{role:'system',content:INSTRUCTION},{role:'user',content:JSON.stringify({
-   currentOwnerRequest:text(userText,'主人请求',12000),context,skills:this.skills.catalog(),tasks:active,recentEnded:tasks.filter(t=>!active.includes(t)).slice(-5).map(t=>({id:t.id,skill:t.skill,subjects:t.subjects,goal:t.goal.slice(0,250),status:t.status,note:t.note,result:t.result?{summary:t.result.summary,artifacts:t.result.artifacts}:null}))})}]},validateCurrent,this.request?{request:this.request}:{});
+   currentOwnerRequest:text(userText,'主人请求',12000),perception:require('./perception').record(perception),context,skills:this.skills.catalog(),tasks:active,recentEnded:tasks.filter(t=>!active.includes(t)).slice(-5).map(t=>({id:t.id,skill:t.skill,subjects:t.subjects,goal:t.goal.slice(0,250),status:t.status,note:t.note,result:t.result?{summary:t.result.summary,artifacts:t.result.artifacts}:null}))})}]},validateCurrent,this.request?{request:this.request}:{});
   return result.value;
  }
 }

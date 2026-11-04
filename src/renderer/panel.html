@@ -145,6 +145,12 @@
   </div>
 
   <div class="pb" data-page="data">
+    <div class="group">主人身份识别</div>
+    <label class="row"><span>允许外部对话认证主人身份</span><input id="ownerIdentityEnabled" type="checkbox" role="switch"></label>
+    <label class="row"><span>新身份密钥</span><input id="ownerIdentityKey" type="password" autocomplete="new-password" placeholder="至少8个字符；不会显示原值" disabled></label>
+    <div class="permBtns"><button id="ownerIdentitySave" class="mini" disabled>设置／替换密钥</button><button id="ownerIdentityClear" class="mini" disabled>清除密钥并撤销认证</button></div>
+    <div id="ownerIdentityStatus" class="permTip" role="status">正在读取身份设置…</div>
+    <div class="note">默认关闭，仅主人可在此开启。开启并设置密钥后，微信实际新消息含正确密钥时，该渠道（包含群聊）获得一小时主人权限。关闭或更换密钥立即撤销全部外部认证；重新开启不会恢复旧认证。本地对话不受影响。请使用独立密钥。</div>
     <section id="softwarePermissions" aria-label="软件操作授权"></section>
     <div class="group">对话显示</div>
     <label class="row"><span>对话文字显示在角色背后</span><input id="dialogueBehind" type="checkbox" role="switch"></label>

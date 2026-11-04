@@ -87,7 +87,7 @@ function safeChatFallbackOptions(request) {
   else messages.unshift({ role: 'system', content: rule });
   const options = makeChatOptions({ ...request, cognitive: false, extraBody: { ...request.extraBody, response_format: { type: 'json_object' } } }, messages);
   delete options.extraBody.tools; delete options.extraBody.tool_choice;
-  delete options.recallSession; delete options.searchCache; options.webSearch = false;
+  delete options.recallSession;delete options.contextSession; delete options.searchCache; options.webSearch = false;
   return options;
 }
 
@@ -184,7 +184,7 @@ async function requestReply(options={}) {
     const diagnostic=async({messages,signal})=>{
       const remaining=timeout-(clock()-started);if(remaining<=0)throw timeoutError();
       const safe={...request,messages,signal,timeoutMs:Math.min(remaining,12000),webSearch:false,extraBody:{response_format:{type:'json_object'}}};
-      for(const key of Object.keys(safe))if(/^on[A-Z]/.test(key)||['recallSession','searchCache','isCurrent'].includes(key))delete safe[key];
+      for(const key of Object.keys(safe))if(/^on[A-Z]/.test(key)||['recallSession','contextSession','searchCache','isCurrent'].includes(key))delete safe[key];
       const result=await chat(safe);return {response:{text:result.text||result.raw||''}};
     };
     const advice=await repair.advise({kind,skill:'dialogue',code:error.code||'E_STEP',attempt:1,signal:request.signal,timeoutMs:Math.min(12000,Math.max(1,timeout-(clock()-started))),request:diagnostic});

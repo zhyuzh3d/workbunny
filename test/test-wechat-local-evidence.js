@@ -21,7 +21,7 @@ test('coarse receipt geometry is refined only from a unique complete OCR text on
  {text:'demo project',x:.5,y:.7,width:.4,height:.03,confidence:.99},{text:'done',x:.5,y:.74,width:.1,height:.03,confidence:.99}]};
  const action={action:'done',completed:true,receipt:{outgoing:true,newBubble:true,composerEmpty:true,text:'demo project done',bubble:{x:.45,y:.76,width:.47,height:.07},composer:{x:.31,y:.83,width:.66,height:.09}}};
  const task={operation:'send',recipient:'Alice',message:'demo project done',submitAttemptedAt:1,hasBeforeSubmit:true,screenshot:shot};
- assert.throws(()=>validateWechatAction(action,task));const refined=refineReceipt(action,shot,task.message,()=>image);
+ assert.doesNotThrow(()=>validateWechatAction(action,task),'the host does not overrule a visual verdict based on fixed bubble geometry');const refined=refineReceipt(action,shot,task.message,()=>image);
  assert(refined.receipt.localGeometryVerified);validateWechatAction(refined,task);
  fill(239,239,239);assert.equal(refineReceipt(action,shot,task.message,()=>image),action,'incoming pixels cannot repair an outgoing proof');
  fill(248,248,248);assert.equal(refineReceipt(action,shot,task.message,()=>image),action,'plain composer pixels are not a sent bubble');

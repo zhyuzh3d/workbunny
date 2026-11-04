@@ -36,6 +36,17 @@ async function main(){
  await app.whenReady();win=new BrowserWindow({width:896,height:600,show:false,webPreferences:{preload:path.join(tmp,'preload.cjs'),contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});
  win.webContents.on('console-message',(_e,level,message)=>{if(level>=2)console.error(message);});
  await win.loadFile(path.join(tmp,'index.html'));await until('!!window.overlay','overlay initialized');assert.equal(requests,0);
+ const ids = ['activity','ear','muteBtn','dialogueBtn','gearBtn','dock','sendBtn'];
+ const colors = () => evaluate(`${JSON.stringify(ids)}.map(id=>getComputedStyle(document.getElementById(id)).backgroundColor)`);
+ const original = await colors();
+ merge({memory:{scene:'private'}}); await delay(350);
+ assert.equal(await evaluate('document.body.classList.contains("private-scene")'),true);
+ await evaluate('document.getElementById("ear").classList.add("on")'); await delay(350);
+ (await colors()).forEach((color,i)=>assert.notEqual(color,original[i],ids[i]+' has a private-scene background'));
+ await evaluate('document.getElementById("ear").classList.remove("on")');
+ merge({memory:{scene:'life'}}); await delay(350);
+ assert.equal(await evaluate('document.body.classList.contains("private-scene")'),false);
+ assert.deepEqual(await colors(),original);
  assert.equal(await evaluate('document.getElementById("dialogueBtn").dataset.mode'),'avatar');
  assert.equal(await evaluate('getComputedStyle(document.getElementById("stage")).visibility'),'visible');
  assert.equal(await evaluate('document.querySelector("#dialogueBtn .dialogue-mode-icon").tagName.toLowerCase()'), 'svg');
