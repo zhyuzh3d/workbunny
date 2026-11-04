@@ -35,3 +35,26 @@ artifacts/
 test/private/
 docs/evidence/
 *.bunnyvault
+
+# 本机凭据、环境变量与运行资料不得进入公开仓库
+.env
+.env.*
+.npmrc
+.netrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+config.json
+owner-security.json
+credentials.json
+secrets.json
+key-envelope
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.jsonl
