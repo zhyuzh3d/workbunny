@@ -3,7 +3,7 @@
 const REPOSITORY = 'https://github.com/zhyuzh3d/workbunny';
 function productInfo(version) {
   return {
-    name: 'WorkBunny', subtitle: '工作伴侣', author: 'zhyuzh3d（微信同号）', version,
+    name: 'WorkBunny', subtitle: '工作伴侣', author: 'zhyuzh3d（微信同号）', version, releaseStage: '早期 Beta 试用版',
     repository: REPOSITORY, repositoryLabel: 'zhyuzh3d/workbunny',
     source: '开源软件', license: 'MIT License',
     description: '陪你聊天、记住相处，也协助处理工作。',

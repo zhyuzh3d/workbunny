@@ -5,7 +5,7 @@ export async function mountProductInfo(root, pet) {
     const heading = document.createElement('h2'); heading.className = 'product-name'; heading.textContent = info.name + ' ' + info.subtitle;
     const intro = document.createElement('p'); intro.className = 'note'; intro.textContent = info.description;
     const facts = document.createElement('dl'); facts.className = 'product-facts';
-    for (const [label, text] of [['版本', 'v' + info.version], ['作者', info.author], ['项目', info.source], ['授权', info.license], ['GitHub', info.repositoryLabel]]) {
+    for (const [label, text] of [['版本', 'v' + info.version + (info.releaseStage ? ' · ' + info.releaseStage : '')], ['作者', info.author], ['项目', info.source], ['授权', info.license], ['GitHub', info.repositoryLabel]]) {
       const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = label; dd.textContent = text; facts.append(dt, dd);
     }
     const note = document.createElement('p'); note.className = 'note product-license'; note.textContent = info.licenseNote;

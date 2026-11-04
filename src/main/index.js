@@ -427,7 +427,7 @@ function createWindow() {
   const initial = placeWindow({ x, y, width: w, height: h });
 
   win = new BrowserWindow({
-    icon: path.join(__dirname, '..', '..', 'res', 'icon.png'),
+    icon: path.join(__dirname, '..', '..', 'res', 'window-icon.png'),
     ...initial.bounds,
     enableLargerThanScreen: true,
     transparent: true,
@@ -534,7 +534,7 @@ function openPanel(kind) {
     return old;
   }
   const w = new BrowserWindow({
-    icon: path.join(__dirname, '..', '..', 'res', 'icon.png'),
+    icon: path.join(__dirname, '..', '..', 'res', 'window-icon.png'),
     titleBarStyle: 'hidden',
     width: spec.w,
     height: Math.min(spec.h, screen.getPrimaryDisplay().workAreaSize.height - 48),

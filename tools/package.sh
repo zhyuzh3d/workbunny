@@ -16,7 +16,7 @@ DIST="$ROOT/dist"
 APP="$DIST/$APPNAME.app"
 node "$ROOT/tools/copy-release-resources.js" "$APP/Contents/Resources/app" "${1:-}" --check-only
 
-echo "▸ 从标准 SVG 生成品牌资源"
+echo "▸ 从应用原图和黑白标志分别生成图标"
 env -u ELECTRON_RUN_AS_NODE "$ROOT/node_modules/.bin/electron" "$ROOT/tools/make-icons.cjs"
 
 # Ship the matching local TTS engine so downloading weights is sufficient.
