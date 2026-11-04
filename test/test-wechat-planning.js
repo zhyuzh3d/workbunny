@@ -6,8 +6,8 @@ const scope = { id:'wechat-fixture', target:'wechat', operation:'send', recipien
 const shot = { preview:'data:image/png;base64,YQ==',ocr:[] };
 test('bilingual OCR duplicates cannot prevent exact readback of an already inserted draft',()=>{
  const {wechatMessageVisible}=require('../src/main/desktop-service');
- const frame={ocr:[{text:'[Bunny]',confidence:1,x:.33,y:.837,width:.08,height:.016},{text:'Good evening —',confidence:1,x:.42,y:.837,width:.3,height:.016},{text:'Good evening 一',confidence:.5,x:.42,y:.837,width:.3,height:.016},{text:'Message 123 received.',confidence:1,x:.33,y:.86,width:.3,height:.016},{text:'Message 123 received.',confidence:1,x:.33,y:.86,width:.3,height:.016}]};
- assert(wechatMessageVisible(frame,'［Bunny］ Good evening — Message 123 received.','composer'));assert(!wechatMessageVisible(frame,'［Bunny］ Good evening — Message 124 received.','composer'));
+ const frame={ocr:[{text:'[ᕱᕱ]',confidence:1,x:.33,y:.837,width:.08,height:.016},{text:'Good evening —',confidence:1,x:.42,y:.837,width:.3,height:.016},{text:'Good evening 一',confidence:.5,x:.42,y:.837,width:.3,height:.016},{text:'Message 123 received.',confidence:1,x:.33,y:.86,width:.3,height:.016},{text:'Message 123 received.',confidence:1,x:.33,y:.86,width:.3,height:.016}]};
+ assert(wechatMessageVisible(frame,'［ᕱᕱ］ Good evening — Message 123 received.','composer'));assert(!wechatMessageVisible(frame,'［ᕱᕱ］ Good evening — Message 124 received.','composer'));
 });
 test('an approved continuation reuses one visual judgment; plain OCR does not decide submission for Bunny',()=>{
  const {visualDraftSubmit}=require('../src/main/desktop-service'),crypto=require('crypto'),frame={preview:'actual',ocr:[{text:'Alice',confidence:.99,x:.4,y:.05,width:.1,height:.03},{text:'hello',confidence:.99,x:.4,y:.8,width:.1,height:.03},{text:'发送(S)',confidence:.99,x:.9,y:.94,width:.05,height:.03}]};

@@ -12,6 +12,19 @@ test('labelled and remembered values are caught even without a password label at
  assert(!hasProtectedContent('正常的项目状态报告',[fixtureSecret]));
 });
 
+test('private attachments remain removable with or without the external message marker',async t=>{
+ const directory=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bunny-private-cleanup-')));t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+ const {createSensitiveAttachment,removeSensitiveAttachment}=require('../src/main/sensitive-policy');
+ const untouched=path.join(directory,'unrelated.txt');fs.writeFileSync(untouched,'preserve');
+ for(const ownerMark of [false,true]){
+  const file=await createSensitiveAttachment(fixtureSecret,{directory,ownerMark});
+  if(ownerMark)assert(path.basename(file.path).startsWith('［ᕱᕱ］ '));
+  assert.equal(fs.readFileSync(file.path,'utf8'),fixtureSecret);
+  await removeSensitiveAttachment(file,{directory});assert(!fs.existsSync(path.dirname(file.path)));
+ }
+ assert.equal(fs.readFileSync(untouched,'utf8'),'preserve');
+});
+
 test('the host rejects secret text, other contacts, altered files and uninspectable attachments',async t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bunny-sensitive-policy-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const file=path.join(dir,'private.txt'),bytes=Buffer.from('示例凭据：'+fixtureSecret);fs.writeFileSync(file,bytes,{mode:0o600});

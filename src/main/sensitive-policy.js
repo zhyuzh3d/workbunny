@@ -3,6 +3,7 @@
 const fs=require('node:fs/promises'),crypto=require('node:crypto'),path=require('node:path'),os=require('node:os');
 const {constants}=require('node:fs');
 const {containsSecret}=require('./conversation-input');
+const {MARK}=require('../shared/external-message');
 
 // These detectors supplement explicit protected values; they are not a claim
 // that an arbitrary unknown password can be recognized from unlabelled text.
@@ -43,7 +44,7 @@ function redactSensitiveContent(content,values=[]){
 }
 async function createSensitiveAttachment(content,{directory=os.tmpdir(),ownerMark=false}={}){
  const root=await fs.realpath(directory),folder=await fs.mkdtemp(path.join(root,'workbunny-private-'));await fs.chmod(folder,0o700);
- const filename=(ownerMark?'［Bunny］ ':'')+'context-'+crypto.randomBytes(5).toString('hex')+'.txt',file=path.join(folder,filename);let handle;
+ const filename=(ownerMark?MARK+' ':'')+'context-'+crypto.randomBytes(5).toString('hex')+'.txt',file=path.join(folder,filename);let handle;
  try{
   const bytes=Buffer.from(content,'utf8');handle=await fs.open(file,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|(constants.O_NOFOLLOW||0),0o600);
   await handle.writeFile(bytes);await handle.sync();await handle.close();handle=null;
@@ -52,7 +53,8 @@ async function createSensitiveAttachment(content,{directory=os.tmpdir(),ownerMar
 }
 async function removeSensitiveAttachment(attachment,{directory=os.tmpdir()}={}){
  const root=await fs.realpath(directory),file=attachment?.path,folder=typeof file==='string'?path.dirname(file):'';
- if(path.dirname(folder)!==root||!/^workbunny-private-[A-Za-z0-9]+$/u.test(path.basename(folder))||!/^(?:［Bunny］ )?context-[a-f0-9]{10}\.txt$/u.test(path.basename(file||'')))throw Error('敏感附件清理范围无效');
+ const name=path.basename(file||''),plainName=name.startsWith(MARK+' ')?name.slice(MARK.length+1):name;
+ if(path.dirname(folder)!==root||!/^workbunny-private-[A-Za-z0-9]+$/u.test(path.basename(folder))||!/^context-[a-f0-9]{10}\.txt$/u.test(plainName))throw Error('敏感附件清理范围无效');
  const stat=await fs.lstat(folder);if(!stat.isDirectory()||stat.isSymbolicLink())throw Error('敏感附件目录已变化');
  await fs.unlink(file).catch(error=>{if(error.code!=='ENOENT')throw error;});await fs.rmdir(folder).catch(error=>{if(error.code!=='ENOENT')throw error;});
 }

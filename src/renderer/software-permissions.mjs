@@ -1,3 +1,5 @@
+import '../shared/external-message.js';
+const {MARK}=globalThis.BunnyExternalMessage;
 export function mountSoftwarePermissions(root,api,{config,save,onOpen}={}){
  if(!root)return;
  const title=document.createElement('div');title.className='group';title.textContent='主动自处理';root.append(title);
@@ -10,7 +12,7 @@ export function mountSoftwarePermissions(root,api,{config,save,onOpen}={}){
   row.append(span,input);root.append(row);inputs.set(key,input);
  }
  const ownershipRow=document.createElement('label');ownershipRow.className='row';const ownershipLabel=document.createElement('span');ownershipLabel.textContent='当前微信';const ownership=document.createElement('select');
- for(const [value,label]of [['owner','主人微信 · 代发带［Bunny］'],['bunny','Bunny自己的微信']]){const option=document.createElement('option');option.value=value;option.textContent=label;ownership.append(option);}ownership.value=config?.software?.wechatAccountOwnership||'owner';ownership.onchange=async()=>{ownership.disabled=true;try{await save({software:{wechatAccountOwnership:ownership.value}});}catch(error){status.textContent=error.message;}finally{ownership.disabled=false;}};ownershipRow.append(ownershipLabel,ownership);root.append(ownershipRow);
+ for(const [value,label]of [['owner',`主人微信 · 代发带${MARK}`],['bunny','Bunny自己的微信']]){const option=document.createElement('option');option.value=value;option.textContent=label;ownership.append(option);}ownership.value=config?.software?.wechatAccountOwnership||'owner';ownership.onchange=async()=>{ownership.disabled=true;try{await save({software:{wechatAccountOwnership:ownership.value}});}catch(error){status.textContent=error.message;}finally{ownership.disabled=false;}};ownershipRow.append(ownershipLabel,ownership);root.append(ownershipRow);
  const status=document.createElement('div');status.className='permTip';status.setAttribute('role','status');root.append(status);
  const buttons=document.createElement('div');buttons.className='permBtns';root.append(buttons);
  const paint=request=>{

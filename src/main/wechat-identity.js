@@ -1,7 +1,7 @@
 'use strict';
 const path=require('node:path'),fs=require('node:fs/promises'),os=require('node:os');
-const MARK='［Bunny］';
-function markedMessage(text,ownership='owner'){return ownership==='bunny'||/^[［\[]Bunny[］\]]/iu.test(String(text||''))?text:MARK+' '+text;}
+const {MARK,markedText}=require('../shared/external-message');
+function markedMessage(text,ownership='owner'){return ownership==='bunny'?text:markedText(text);}
 function markedFilename(file,ownership='owner'){return markedMessage(path.basename(file),ownership);}
 async function deliveryAttachment(file,{taskId,ownership='owner',directory=path.join(os.tmpdir(),'workbunny-deliveries')}={}){
  const source=await require('./result-attachment').verifyAttachment(file),name=markedFilename(source.path,ownership);

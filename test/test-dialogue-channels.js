@@ -64,7 +64,7 @@ test('near visual authentication uses the actual scoped source and cannot surviv
 });
 test('file-helper self messages are deduplicated by host receipt hash after channel reply payloads are released',()=>{
  const {ConversationCursor,messageKey}=require('../src/main/conversation-cursor'),cursor=new ConversationCursor();const baseline={direction:'outgoing',kind:'text',text:'Unique owner baseline',observedVerified:true};cursor.observe([baseline],{ownerChannel:true});
- const sent={direction:'outgoing',kind:'text',text:'[Bunny] Synthetic reply',observedVerified:true},receipt={id:'send-1',kind:'text',text:'channel-reply:opaque',messageKey:messageKey(sent)};
+ const sent={direction:'outgoing',kind:'text',text:'[ᕱᕱ] Synthetic reply',observedVerified:true},receipt={id:'send-1',kind:'text',text:'channel-reply:opaque',messageKey:messageKey(sent)};
  const first=cursor.observe([baseline,sent],{ownerChannel:true,sentMessages:[receipt]});assert.equal(first.messages.length,0);assert.equal(cursor.snapshot().recent.at(-1).origin,'bunny');assert.equal(cursor.snapshot().recent.at(-1).text,'channel-reply:opaque','task cursor retains the host reference instead of private reply content');
  const second=cursor.observe([baseline,sent,{...sent}],{ownerChannel:true,sentMessages:[receipt]});assert.equal(second.messages.length,1,'a later actual owner message is distinct from the already consumed Bunny send');
 });
@@ -174,7 +174,7 @@ test('internal screenshot recognition retains the actual key input without outpu
  const actual=await observer.inspect({recipient:'File helper'},{pngBase64:Buffer.from('fixture').toString('base64'),ocr:[{text:'File helper',x:.4,y:.05,confidence:1},{text:body,x:.5,y:.5,width:.4,height:.02,confidence:1}]});
  assert.equal(actual.messages[0].text,body);assert(actual.messages[0].observedVerified);
  const {DesktopService}=require('../src/main/desktop-service');const desktop=new DesktopService({native:{request:async op=>op==='permissions'?{accessibilityTrusted:true,screenCaptureAllowed:true,postEventAllowed:true}:{},close:async()=>{}},planner:async()=>({action:'done',completed:false,evidence:'fixture'}),persist:async()=>{},contactDirectory:{resolve:async name=>({recipient:name,aliases:[],confirmed:true})}});
- const output=await desktop.start({target:'wechat',recipient:'File helper',operation:'send',message:'Reply '+fixtureKey,goal:'Send fixture reply',criteria:'Visible sent reply'});assert(output.ok,output.error);assert.equal(desktop.task.message,'［Bunny］ Reply ********');await desktop.close();
+ const output=await desktop.start({target:'wechat',recipient:'File helper',operation:'send',message:'Reply '+fixtureKey,goal:'Send fixture reply',criteria:'Visible sent reply'});assert(output.ok,output.error);assert.equal(desktop.task.message,'［ᕱᕱ］ Reply ********');await desktop.close();
  const policy=require('../src/main/sensitive-policy').createSensitivePolicy();assert.equal((await policy.prepareWorkBuddy('Reply '+fixtureKey)).text,'Reply ********');const labelled=await policy.prepareWorkBuddy('身份密钥是'+fixtureKey);assert.equal(labelled.text,'身份密钥是********');assert(!labelled.attachment);await policy.check({target:'wechat',recipient:'File helper',text:'身份密钥是********'});
 });
 

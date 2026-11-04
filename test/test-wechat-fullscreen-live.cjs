@@ -12,7 +12,7 @@ const resumeAt = process.argv.indexOf('--resume');
 const resumeDirectory = resumeAt >= 0 ? process.argv[resumeAt + 1] : null;
 const temporary = resumeDirectory || fs.mkdtempSync(path.join(os.tmpdir(), 'bunny-wechat-fullscreen-live-'));
 fs.chmodSync(temporary, 0o700); app.setPath('userData', path.join(temporary, 'electron'));
-const message = '［Bunny］ Bunny 外部全屏截图实测 2026-11-02 A1';
+const message = '［ᕱᕱ］ Bunny 外部全屏截图实测 2026-11-02 A1';
 const recipient = '文件传输助手';
 let service, finalReceipt;
 const captures = [], phases = [], plans = [];

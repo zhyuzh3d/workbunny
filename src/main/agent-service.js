@@ -283,7 +283,7 @@ class AgentService{
  async dispatch(decision,actor,{signal,ownerRequest,ownerContext,excludeTaskId}={}){
   if(signal?.aborted)return {ok:false,text:'交办已取消，没有开始任务。'};
   if(decision.kind==='chat')return {ok:true,text:decision.text};
-  if(decision.kind==='wechat_identity'){if(!['dialogue','bound-contact'].includes(actor.channel)||!this.setWeChatOwnership)return {ok:false,text:'请在本机设置中选择当前微信归属。'};await this.setWeChatOwnership(decision.ownership);return {ok:true,text:decision.ownership==='bunny'?'已记住：这是Bunny自己的微信，后续无需代发标记。':'已记住：这是主人微信，后续代发都会带［Bunny］。'};}
+  if(decision.kind==='wechat_identity'){if(!['dialogue','bound-contact'].includes(actor.channel)||!this.setWeChatOwnership)return {ok:false,text:'请在本机设置中选择当前微信归属。'};await this.setWeChatOwnership(decision.ownership);return {ok:true,text:decision.ownership==='bunny'?'已记住：这是Bunny自己的微信，后续无需代发标记。':`已记住：这是主人微信，后续代发都会带${require('../shared/external-message').MARK}。`};}
   if(decision.kind==='update'){
     const prior=this.runtime.tasks.get(decision.id),patch=decision.patch;
     if(prior?.skill==='task.resolve'&&ownerRequest){prior.state.ownerRequest=(prior.state.ownerRequest+'\n主人补充：'+ownerRequest).slice(-12000);prior.state.ownerContext=[prior.state.ownerContext,ownerContext].filter(Boolean).join('\n').slice(-12000);delete prior.state.resolvedIntent;}

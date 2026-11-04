@@ -3,14 +3,14 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const {DesktopService,visualDraftSubmit}=require('../src/main/desktop-service');
 function fixture({matched=true,changed=false}={}){
  let present=true,captures=0,models=0;const calls=[],rect={x:10,y:20,width:800,height:600},header={text:'Alice',confidence:1,x:.4,y:.05,width:.1,height:.03};
- const message='[Bunny] The AI assistant is ready.';
+ const message='[ᕱᕱ] The AI assistant is ready.';
  const native={request:async(op,payload)=>{calls.push({op,payload});if(op==='frontmost')return {application:{pid:12,bundleId:'com.tencent.xinWeChat'},windows:[{pid:12,windowId:7,rect,layer:0}]};
   if(op==='capture')return {pngBase64:Buffer.from(changed&&++captures>1?'changed':'original').toString('base64'),desktopRect:rect,width:800,height:600,backend:'CGDisplayStream',capturedAt:Date.now()};
-  if(op==='recognize')return {texts:[header,...(present?[{text:'[Bunny] The Al assistant is ready.',confidence:1,x:.4,y:.82,width:.4,height:.04}]:[])]};
+  if(op==='recognize')return {texts:[header,...(present?[{text:'[ᕱᕱ] The Al assistant is ready.',confidence:1,x:.4,y:.82,width:.4,height:.04}]:[])]};
   if(op==='key'&&payload.key==='backspace')present=false;return {performed:true};},cancel:async()=>{},close:async()=>{}};
  const svc=new DesktopService({native,imageResize:b=>b,imageCrop:b=>b,modelRequest:async()=>{models++;return {text:JSON.stringify({matched,composer:{x:.3,y:.8,width:.65,height:.16},nextAction:matched?{action:'click',purpose:'submit',x:.9,y:.95,reason:'当前截图显示可发送'}:null})};}});
  svc.task={id:'draft-fixture',target:'wechat',operation:'send',status:'paused',scene:'life',domain:'life',visibilityFloor:1,privacyEpoch:1,sources:['task'],recipient:'Alice',message,draftInserted:true,supersededByNewMessage:true,scope:{pid:12,windowId:7},steps:[],startedAt:Date.now()};
- const clear=()=>svc.clearSupersededDraft({privacyEpoch:1,sources:['task'],scene:'life',observe:async()=>({headerMatched:true,draft:present?'[Bunny] The Al assistant is ready.':''})});
+ const clear=()=>svc.clearSupersededDraft({privacyEpoch:1,sources:['task'],scene:'life',observe:async()=>({headerMatched:true,draft:present?'[ᕱᕱ] The Al assistant is ready.':''})});
  return {svc,calls,clear,models:()=>models};
 }
 test('OCR letter confusion uses one independent visual proof and clears only the known unsubmitted draft',async()=>{

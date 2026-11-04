@@ -56,7 +56,7 @@ test('file-card labels and sizes may vary without hiding a following real text m
 });
 test('a verified outgoing file card matches the delivery outbox by its separate visible filename',()=>{
  const c=new ConversationCursor();c.observe([message('old','outgoing')],{ownerChannel:true});
- const delta=c.observe([message('old','outgoing'),{...message('[文件]','outgoing'),kind:'file',fileName:'result.txt'}],{ownerChannel:true,sentMessages:[{id:'file-1',kind:'file',text:'［Bunny］ result.txt'}]});
+ const delta=c.observe([message('old','outgoing'),{...message('[文件]','outgoing'),kind:'file',fileName:'result.txt'}],{ownerChannel:true,sentMessages:[{id:'file-1',kind:'file',text:'［ᕱᕱ］ result.txt'}]});
  assert.equal(delta.messages.length,0);assert.equal(c.snapshot().recent.at(-1).origin,'bunny');
 });
 test('uncertain message order reobserves the visible exact conversation without repetitive navigation',async()=>{

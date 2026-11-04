@@ -1058,7 +1058,7 @@ async function testContactDirectoryAndWechatOperations() {
   assert.equal(typeof createContactDirectory, 'function');
 
   const recipientOCR = [{ text: 'Alice', confidence: 0.98, x: 0.42, y: 0.08, width: 0.08, height: 0.02 }];
-  const body = '［Bunny］ 确认明天下午三点';
+  const body = '［ᕱᕱ］ 确认明天下午三点';
   const serviceOpts = { contactDirectory: directory };
   const events = [];
   const native = new FakeNative({ bundleId: 'com.tencent.xinWeChat', events, recognizedTexts: index => index === 0 ? recipientOCR : index === 1 ? [
@@ -1151,7 +1151,7 @@ async function testTaskScopeVisibilityAndResumeGate() {
 
 async function testWechatResumeDoesNotReplayOrOverwrite() {
   const header = [{ text: 'Alice', confidence: 0.99, x: 0.4, y: 0.08, width: 0.08, height: 0.02 }];
-  const body = '［Bunny］ 原始待发送内容';
+  const body = '［ᕱᕱ］ 原始待发送内容';
   const directory = createContactDirectory({ read: async () => [{ recipient: 'Alice', aliases: ['爱丽丝'], scene: 'life', domain: 'life', visibilityFloor: 1 }] });
   const native = new FakeNative({ bundleId: 'com.tencent.xinWeChat', recognizedTexts: [...header, { text: body, confidence: 0.99, x: 0.4, y: 0.82, width: 0.2, height: 0.02 }] });
   const actions = [
@@ -1238,7 +1238,7 @@ async function testGuiLeaseSerializesAndReleases() {
 }
 
 async function testSupersededDraftIsClearedOnlyWhenExact() {
-  const message='［Bunny］ hello Alice',header={text:'Alice',confidence:.99,x:.4,y:.08,width:.1,height:.03};
+  const message='［ᕱᕱ］ hello Alice',header={text:'Alice',confidence:.99,x:.4,y:.08,width:.1,height:.03};
   let present=true;
   const native=new FakeNative({recognizedTexts:()=>[header,...(present?[{text:message,confidence:.99,x:.42,y:.8,width:.25,height:.03}]:[])]});
   const request=native.request.bind(native);

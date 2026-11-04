@@ -16,6 +16,7 @@ fs.mkdirSync(app.getPath('userData'), { recursive: true });
 const preload = path.join(tmp, 'panel-fixture-preload.cjs');
 const panelHtml = path.resolve(__dirname, '../src/renderer/panel.html');
 const calls = [],softwarePermissionCalls=[];
+let ownerSecurityState={enabled:false,configured:false};
 let listeners = [];
 let failNextConfig = false;
 let fixtureAvatars = [
@@ -58,6 +59,7 @@ fs.writeFileSync(preload, `
   contextBridge.exposeInMainWorld('pet', {
     log: () => {}, selfView: () => api('selfView'), selfSettings: value => api('selfSettings', value), portability: () => api('portability'), ttsHTTPTemplate: kind => api('ttsHTTPTemplate', kind),
     productInfo: () => api('productInfo'), openRepository: () => api('openRepository'),
+    ownerSecurityStatus:()=>api('ownerSecurityStatus'),ownerSecurityEnable:value=>api('ownerSecurityEnable',value),ownerSecurityChange:value=>api('ownerSecurityChange',value),
     panelInit: (...a) => api('panelInit', ...a), brainInfo: (...a) => api('brainInfo', ...a), ttsInfo: (...a) => api('ttsInfo', ...a),
     brainModels: (...a) => api('brainModels', ...a),
     softwarePermission:kind=>api('softwarePermission',kind),config: (...a) => api('config', ...a), on: cb => ipcRenderer.on('panel-fixture:event', (_e, value) => cb(value)),
@@ -100,6 +102,9 @@ ipcMain.handle('panel-fixture:control', (_event, action, patch) => {
 ipcMain.handle('panel-fixture:api', async (_event, name, ...args) => {
   if (name === 'productInfo') return require('../src/main/product-info').productInfo('0.16.1');
   if (name === 'openRepository') { calls.push({openRepository:true}); return {ok:true}; }
+  if (name === 'ownerSecurityStatus') return ownerSecurityState;
+  if (name === 'ownerSecurityEnable') return ownerSecurityState={...ownerSecurityState,enabled:args[0]};
+  if (name === 'ownerSecurityChange') return ownerSecurityState={...ownerSecurityState,configured:!!args[0]};
   if (name === 'selfView') return { revision: settings.settingsRevision, settings: { identity: settings.buddy.profile, behavior: '' } };
   if (name === 'selfSettings') { settings.buddy.profile = args[0].identity; return { revision: settings.settingsRevision, settings: args[0] }; }
   if (name === 'portability') return { connection: { ready: true, note: '已连接' }, storage: { ok: true, dir: '/fixture/vault' }, asrMode: 'continuous', capabilities: {} };
@@ -148,6 +153,7 @@ async function main() {
   assert.equal(await evalIn(win,"[...document.querySelectorAll('input[type=checkbox]')].every(e=>e.getAttribute('role')==='switch'&&getComputedStyle(e).width==='36px')"),true);
   assert.equal(await evalIn(win,"getComputedStyle(document.querySelector('.permBox')).borderTopWidth"),'0px');
   assert.equal(await evalIn(win,'document.querySelectorAll("[data-software-capability]").length'),2);
+  assert.equal(await evalIn(win,'document.querySelector("#softwarePermissions option[value=owner]").textContent'),'主人微信 · 代发带［ᕱᕱ］');
   assert.equal(await evalIn(win,'[...document.querySelectorAll("[data-software-capability]")].every(e=>!e.checked)'),true);
   await evalIn(win,'document.querySelector("[data-software-capability=terminal]").click()');
   await waitFor(()=>Promise.resolve(settings.software?.terminal===true),'terminal toggle persisted');
@@ -192,7 +198,7 @@ async function main() {
   await chooseAvatar('custom-two.vrm');
   await waitFor(()=>Promise.resolve(settings.avatar==='custom-two.vrm'),'preview custom selection');
   await evalIn(win,'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-  fs.writeFileSync(path.resolve('.cache/avatar-select-update/picker.png'),(await win.webContents.capturePage()).toPNG());
+  fs.writeFileSync(path.join(tmp,'picker.png'),(await win.webContents.capturePage()).toPNG());
   await chooseAvatar('fixture-avatar');
   await waitFor(()=>Promise.resolve(settings.avatar==='fixture-avatar'),'restore initial fixture selection');
 
@@ -206,7 +212,7 @@ async function main() {
   await evalIn(win, 'document.getElementById("dialogueBehind").checked=true;document.getElementById("dialogueBehind").dispatchEvent(new Event("change"))');
   await waitFor(() => Promise.resolve(settings.ui?.dialogueBehind===true), 'dialogue layer persisted');
   await evalIn(win, 'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-  fs.writeFileSync(path.resolve('.cache/avatar-select-update/system.png'), (await win.webContents.capturePage()).toPNG());
+  fs.writeFileSync(path.join(tmp,'system.png'), (await win.webContents.capturePage()).toPNG());
   await evalIn(win, 'document.querySelector("[data-t=scene]").click()');
   const scene = () => evalIn(win, "document.getElementById('panelScene').value");
   const select = name => evalIn(win, `document.getElementById('panelScene').value='${name}';document.getElementById('panelScene').dispatchEvent(new Event('change'))`);
@@ -254,7 +260,7 @@ async function main() {
     assert.match(await evalIn(win, 'document.getElementById("brainHint").textContent'), /填写密钥/, 'no capability hint from a model that has not been fetched');
     await evalIn(win, `document.getElementById('brainKeyInput').value='fixture-'+${JSON.stringify(provider)};document.getElementById('brainKeyInput').dispatchEvent(new Event('input'))`);
     assert.match(await evalIn(win,'document.getElementById("brainKeyInput").parentElement.querySelector(".credential-preview").textContent'), /^fixt•+/, 'pasted key immediately shows a partial preview');
-    if (provider === 'grok') { await evalIn(win, 'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); fs.writeFileSync(path.resolve('.cache/test-credential-preview.png'), (await win.webContents.capturePage()).toPNG()); }
+    if (provider === 'grok') { await evalIn(win, 'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); fs.writeFileSync(path.join(tmp,'credential-preview.png'), (await win.webContents.capturePage()).toPNG()); }
     await click(win,'brainModelsBtn');
     await waitFor(() => evalIn(win, '!document.getElementById("brainModelsBtn").disabled'), 'model fetch '+provider);
     assert.deepEqual(await modelIds(), [provider==='grok'?'grok-4.20-0309-non-reasoning':provider+'-actual-first',provider+'-actual-second']);
