@@ -6,9 +6,9 @@
 
 Bunny 的目标是积极思考、自主行动、核查真实结果，并从成功与失败中积累经验。框架提供调度、感知、权限、工具和恢复保障；Bunny 根据情景选择方法，经验作为可修订的参考。
 
-[下载早期 Beta 试用版](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.24.22) · [产品需求](docs/product-requirements.md) · [架构设计](docs/architecture.md) · [架构 FLOW](docs/flows.md)
+[下载早期 Beta 试用版](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.24.23) · [产品需求](docs/product-requirements.md) · [架构设计](docs/architecture.md) · [架构 FLOW](docs/flows.md)
 
-> **0.24.22 · 早期 Beta 试用版**。这是非稳定预发布版本，面向愿意反馈问题的试用者；复杂任务、界面识别与长期学习仍在迭代。
+> **0.24.23 · 早期 Beta 试用版**。这是非稳定预发布版本，面向愿意反馈问题的试用者；复杂任务、界面识别与长期学习仍在迭代。
 
 ## 能做什么
 
@@ -23,7 +23,7 @@ Bunny 的目标是积极思考、自主行动、核查真实结果，并从成�
 
 目前面向 **Apple Silicon Mac**。最低构建目标为 macOS 13，持续端侧语音识别需要 macOS 26；当前设备验证不代表旧系统或其它 Mac 已通过。发行采用稳定本机开发签名，尚未完成苹果公证。
 
-1. 从 [0.24.22 早期 Beta](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.24.22) 下载 Apple Silicon 安装包，正常退出旧版后安装。
+1. 从 [0.24.23 早期 Beta](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.24.23) 下载 Apple Silicon 安装包，正常退出旧版后安装。
 2. 打开设置，选择并配置对话模型。WorkBuddy 模式连接当前已登录账号；也可配置直接 API。后台免费整理与 WorkBuddy 任务监督仍依赖 WorkBuddy。
 3. 按需要授权麦克风、语音识别、辅助功能及屏幕录制。文字输入可独立使用；微信仅使用外部视觉和键鼠，不使用内部接口或自动登录。
 4. 在对话中交办目标，或在“任务与工作”查看进展、暂停、继续和停止。Bunny 接到主人任务先回应，再执行。

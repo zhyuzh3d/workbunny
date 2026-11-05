@@ -266,8 +266,8 @@ function loadAvatarPacks() {
 const activeAvatarPack = () => avatarPacks.get(config.load().avatar) || null;
 const avatarCatalog = new (require('./avatar-catalog-router').AvatarCatalogRouter)(motionLibrary, activeAvatarPack);
 function avatarList() {
-  const packages = [...avatarPacks.values()].map(({ entry, runtime }) => ({ key: entry.key, file: entry.key, label: entry.name,
-    title: entry.name, personal: !entry.builtin, overridden: !!entry.overridden, kind: 'avatar-pack', version: entry.version, description: '',
+  const packages = [...avatarPacks.values()].map(({ entry, runtime }) => ({ key: entry.key, file: entry.key, label: entry.key === 'builtin_soft_bunny' ? '兔兔' : entry.name,
+    title: entry.key === 'builtin_soft_bunny' ? '兔兔' : entry.name, personal: !entry.builtin, overridden: !!entry.overridden, kind: 'avatar-pack', version: entry.version, description: '',
     palettes: (runtime.palettes || []).map(({ id, label, base }) => ({ id, label, color: base })), defaultPalette: runtime.defaultPalette || null }));
   const builtin = packages.filter(item => item.key === 'builtin_soft_bunny');
   return [...builtin, ...avatars.scan(), ...packages.filter(item => item.key !== 'builtin_soft_bunny')].map(item => ({ ...item, description: config.load().avatarDescriptions?.[item.key] || item.description || '' }));
@@ -1479,6 +1479,10 @@ function buildCharacterMenu() {
   const save = patch => applySettings(patch).catch(() => send('toast', { text: '设置未保存，请重试。' }));
   const sizes = SCALES.filter(k => !activeAvatarPack() || k !== 1);
   const selectedScale = activeAvatarPack() && clampScale(c.window.scale) === 1 ? .5 : clampScale(c.window.scale);
+  const avatarItems = avatarList();
+  const officialAvatars = avatarItems.filter(a => !a.personal);
+  const personalAvatars = avatarItems.filter(a => a.personal);
+  const avatarMenuItem = a => ({ label: a.label, type: 'checkbox', checked: c.avatar === a.key, click: () => save({ avatar: a.key }) });
   return Menu.buildFromTemplate([
     { label: '设置…', click: () => openPanel('settings') },
     { label: '显示对话内容', type: 'checkbox', checked: c.ui.dialogueVisible, click: item => save({ ui: { dialogueVisible: item.checked } }) },
@@ -1499,7 +1503,11 @@ function buildCharacterMenu() {
     } },
     { type: 'separator' },
     { label: '对话场景', submenu: ['private', 'life', 'work'].map(scene => ({ label: scopePolicy.LABELS[scene], type: 'radio', checked: scene === currentScene(), click: () => save({ memory: { scene } }) })) },
-    { label: '形象', submenu: avatarList().map(a => ({ label: a.label, type: 'radio', checked: c.avatar === a.key, click: () => save({ avatar: a.key }) })) },
+    { label: '形象', submenu: [
+      ...officialAvatars.map(avatarMenuItem),
+      ...(officialAvatars.length && personalAvatars.length ? [{ type: 'separator' }] : []),
+      ...personalAvatars.map(avatarMenuItem),
+    ] },
     { label: '外观大小', submenu: sizes.map(scale => ({ label: activeAvatarPack() ? ({ .25: '50%', .5: '100%', 1.5: '150%', 2: '200%' })[scale] : SCALE_LABELS[scale], type: 'radio', checked: scale === selectedScale,
       click: () => save({ window: { scale } }) })) },
     { type: 'separator' },
