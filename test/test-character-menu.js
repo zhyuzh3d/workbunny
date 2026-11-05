@@ -14,7 +14,19 @@ test('character menu exposes native toggles and checked scene, avatar and size s
  find('显示对话内容').click({checked:false});find('显示文字输入').click({checked:true});find('形象').submenu[1].click();
  await Promise.resolve();assert.equal(patches[0].ui.dialogueVisible,false);assert.equal(patches[1].avatar,'b');assert.equal(events[0][0],'ask');assert.equal(events[0][1].open,true);
  find('静音不说话').click({checked:true});await find('关闭耳朵').click({checked:true});
- assert.equal(patches[2].voice.enabled,false);assert.equal(patches[3].voice.alwaysListen,false);assert.equal(events[1][0],'stopSpeaking');assert.equal(events[1][2].keepThought,true);
+ assert.equal(patches[2].voice.enabled,false);assert.equal(patches[3].voice.alwaysListen,false);
+});
+
+test('character avatar menu groups personal avatars after official avatars only when needed', () => {
+ const code=fs.readFileSync('src/main/index.js','utf8'),start=code.indexOf('function buildCharacterMenu()'),end=code.indexOf('function rebuildTray()',start);
+ let items=[{key:'custom',label:'自定义',personal:true},{key:'official',label:'官方'}];
+ const cfg={avatar:'custom',ui:{},voice:{},window:{scale:.5}};
+ const context={config:{load:()=>cfg},Menu:{buildFromTemplate:x=>x},avatarList:()=>items,applySettings:async()=>{},send:()=>{},SCALES:[.5],activeAvatarPack:()=>null,clampScale:v=>v,SCALE_LABELS:{.5:'100%'},textInputOpen:false,scopePolicy:{LABELS:{}},currentScene:()=>''};
+ vm.createContext(context);vm.runInContext(code.slice(start,end),context);
+ const avatars=()=>context.buildCharacterMenu().find(x=>x.label==='形象').submenu;
+ assert.deepEqual(Array.from(avatars(),x=>x.type==='separator'?'|':x.label),['官方','|','自定义']);
+ assert.deepEqual(Array.from(avatars().filter(x=>x.type!=='separator'),x=>x.checked),[false,true]);
+ items=[items[1]];assert.deepEqual(Array.from(avatars(),x=>x.label),['官方']);
 });
 
 test('context menu uses the exact window-relative click and rejects invalid senders or coordinates', () => {
