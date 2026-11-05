@@ -1,57 +1,123 @@
-<img src="res/icon.png" alt="WorkBunny" width="88">
+![WorkBunny 七位角色的动画风群像，粉色笔记本电脑背面印着 WorkBuddy 图标](docs/images/readme-hero.webp)
 
 # WorkBunny
 
-有长期记忆的 macOS 桌面伙伴，也是能替主人行动的小秘书。
+**WorkBuddy的好帮手！**
 
-Bunny 的目标是积极思考、自主行动、核查真实结果，并从成功与失败中积累经验。框架提供调度、感知、权限、工具和恢复保障；Bunny 根据情景选择方法，经验作为可修订的参考。
+WorkBunny 是依托 WorkBuddy 的 macOS 桌面小秘书。打开并登录 WorkBuddy 后，Bunny 默认使用该账号的可用模型额度。你可以直接开始对话和交办任务，无须额外配置大模型或填写 API Key。
 
-[下载早期 Beta 试用版](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.24.23) · [产品需求](docs/product-requirements.md) · [架构设计](docs/architecture.md) · [架构 FLOW](docs/flows.md)
+有个想法，开口和 Bunny 聊就行。它会陪你理清需求、给出工作建议，把口头交代整理成目标、背景和交付要求清楚的提示词，再按你的交代直接调度 WorkBuddy 执行。你去忙别的，Bunny 会跟进 WorkBuddy 的进度，遇到卡住或需要你确认的情况及时提醒，完成后核对并把成果带回来。
 
-> **0.24.23 · 早期 Beta 试用版**。这是非稳定预发布版本，面向愿意反馈问题的试用者；复杂任务、界面识别与长期学习仍在迭代。
+[产品介绍与界面预览](https://bunny.airen.life/) · [下载 macOS 早期 Beta](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.24.23) · [技术架构](#技术架构) · [参与共建](#参与共建)
 
-## 能做什么
+## 核心功能
 
-- **陪伴与交流**：桌面角色、文字及语音对话、独立渠道历史、可查看和修订的自我理解。
-- **长期记忆**：记住主人交代的重要信息；Doze 压缩对话，Dream 与 Deepdream 整理事实、关系和经验，区分私聊、生活与工作。
-- **自主任务**：自然语言交办、持续监听、通用桌面与工具操作、WorkBuddy 委派、任务进度和结果回传。
-- **恢复与时间意识**：保留目标及实际回执，自主补证、换方法和恢复；任务真正空闲时由原调度器提醒继续思考。
-- **经验与工具积累**：ZIP 或文件夹导入经验和配套工具，按目标与标签检索，结合实际反馈整理和更新。
-- **本机管理**：加密资料库、个人形象与动作资源、数据迁移及加密备份；更新保留个人资料。
+| 模块 | 功能 |
+| --- | --- |
+| WorkBuddy 工作协作 | 在任务面板查看委派进度与交付结果，按需暂停、继续或停止任务。 |
+| 微信自动回复 | 在授权范围内值守 Mac 微信，按你指定的联系人和规则判断是否回复，处理后向你汇报。 |
+| 通用桌面控制 | Bunny 可以看屏幕、判断界面变化，并按目标自主组合点击、输入等操作，适用于不同桌面应用。 |
+| 长期记忆 | 按工作、生活和私聊场景检索过往对话、偏好与重要事实。你可以查看记忆来源、修订或删除。 |
+| 自主行动与进化 | 在授权范围内尝试方法、核查结果、遇到偏差时调整做法，从任务的成功与失败中积累经验，供下次参考。可开启空闲时的自主工作，也能导入经验及工具资源包。[经验资源包示例](examples/experience-pack/) |
+| 桌面角色与对话 | 3D 桌面浮窗，支持文字与语音交流，按渠道保存历史。可切换内置角色、调整配色与音色、导入兼容的角色与动作，也可接入自己的模型 API 或语音服务。 |
 
-## 安装与使用
+官网有真实应用界面可供预览。问卷与微信短片为情景演示，安装包的功能和适用条件以对应版本说明为准。[查看产品介绍](https://bunny.airen.life/)
 
-目前面向 **Apple Silicon Mac**。最低构建目标为 macOS 13，持续端侧语音识别需要 macOS 26；当前设备验证不代表旧系统或其它 Mac 已通过。发行采用稳定本机开发签名，尚未完成苹果公证。
+## 认识七位桌面伙伴
 
-1. 从 [0.24.23 早期 Beta](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.24.23) 下载 Apple Silicon 安装包，正常退出旧版后安装。
-2. 打开设置，选择并配置对话模型。WorkBuddy 模式连接当前已登录账号；也可配置直接 API。后台免费整理与 WorkBuddy 任务监督仍依赖 WorkBuddy。
-3. 按需要授权麦克风、语音识别、辅助功能及屏幕录制。文字输入可独立使用；微信仅使用外部视觉和键鼠，不使用内部接口或自动登录。
-4. 在对话中交办目标，或在“任务与工作”查看进展、暂停、继续和停止。Bunny 接到主人任务先回应，再执行。
-5. 在“记忆”导入经验 ZIP 或文件夹。可直接参考 [示例资源包](examples/experience-pack/)；导入不会自动执行其中的工具。
+WorkBunny 自带七位角色。你可以在桌面切换今天想见的那一位。下面是 WorkBunny 世界里的角色小传。
 
-朗读支持系统音色及可选的本地/远程引擎；本地 Qwen 权重按需下载，要求至少 16GiB 内存。[HTTP 配置示例](examples/tts-profiles/)不包含地址或凭据。
+- **兔兔**从一句没说完的「我有个想法」里蹦了出来。每次听见新点子，两只粉耳朵总比它先立起来。
+- **芭尼**曾在云端工位帮大家收拾散落的便签，发间的小花是第一次顺利交付后收到的礼物。她最喜欢陪你把一件看起来很大的事，拆成今天能做的一步。
+- **可可**放学后常留在社团活动室，把大家七嘴八舌的点子记下来。橙色领结是她给自己的一点勇气，戴上就敢第一个说「我们试试吧」。
+- **兰兰**以前在图书馆帮忙，闭馆前总会给读到一半的书夹上书签。她喜欢安静地听你讲，也愿意陪你把昨天聊到一半的事接下去。
+- **阿雅**在山坡上的花果铺长大，围裙上的草莓是她自己绣的。赶工的日子里，她会把刚烤好的点心推到你手边，问一句「今天过得怎么样？」
+- **琪琪**曾在夜班观测站追踪一颗忽明忽暗的卫星，后来把最喜欢的蓝光穿在了身上。遇到卡住的事，她总想换个角度，再试一次。
+- **美莉**来自海边剧团的服装间，侧马尾上的绿发带是首演前朋友送给她的。她把生活里每一件办成的小事，都当成值得鼓掌的一次谢幕。
 
-外部主人身份识别**默认关闭**，只能由主人在本地设置开启。开启后按实际新来信认证，临时授权属于整个对话渠道；关闭或修改密钥立即撤销外部授权。身份密钥在 Bunny 对话输出中替换为星号。详细权限与隐私要求见[产品需求](docs/product-requirements.md)。
+## 技术架构
 
-## 项目结构
+WorkBunny 使用 Electron 和 JavaScript。隔离的 Renderer 通过 Preload 暴露的 IPC 接口与主进程交互。主进程负责模型请求、任务调度和权限校验。截屏、键鼠、语音识别、SQLite 访问和钥匙串由 macOS 上的 Swift 辅助程序提供。
 
-```text
-src/                    主进程、隔离界面、预加载桥及发行资源
-native/                 ASR、Vault、钥匙串与桌面桥的 Swift 源码
-tools/                  开发、构建、打包、安装及资源检查工具
-test/                   离线回归、隔离 GUI 验证和显式账号测试
-examples/               经验与工具资源包、语音配置示例
-docs/                   产品需求、架构设计与流程图
-licenses/               第三方许可、署名与资源审计
-res/                    标准标志、图标与托盘资源
-resources-manifest.json  发行素材白名单、来源、许可状态及哈希
+```mermaid
+flowchart TB
+    UI["Electron Renderer<br/>Three.js / VRM · 对话和面板"]
+    IPC["Preload / IPC"]
+
+    subgraph Main["Electron 主进程"]
+        Chat["对话 · 渠道与场景"]
+        Task["任务 · AgentService / AgentRuntime"]
+        Context["上下文组装"]
+        Memory["记忆与经验"]
+        Tools["工具与执行适配"]
+    end
+
+    UI <--> IPC
+    IPC <--> Chat
+    IPC <--> Task
+    Chat -->|"交办授权任务"| Task
+    Task -->|"按原渠道回传"| Chat
+    Chat --> Context
+    Task --> Context
+    Context <--> Memory
+    Context -->|"组装请求上下文"| Models["模型接入<br/>WorkBuddy 额度 / 模型 API"]
+    Memory --> Vault["本机 Vault<br/>SQLite · 加密存储"]
+    Task -->|"持久化状态和回执"| Vault
+    Task <--> Tools
+    Tools <-->|"委派与跟进"| WorkBuddy["WorkBuddy"]
+    Tools <-->|"操作与观测"| Desktop["Swift 桌面桥<br/>截图与键鼠"]
 ```
 
-`node_modules/`、`bin/`、`dist/`、`.data/`、`.cache/` 是本机生成目录。真实聊天、设备标识、截图、历史实验和旧构建产物不属于公开源码。当前设计统一从 [docs 索引](docs/README.md)进入，避免重复维护按日期分散的计划。
+- **执行与核查**。Task 表示目标及生命周期，Action 是可以独立推进和恢复的执行单元，Operation 是一次具体操作，例如截图或点击。运行时记录操作意图与回执，Bunny 根据可观察到的结果确认 Action 和 Task 是否完成。发送结果不确定时会保留待核查状态。
+- **上下文与权限**。对话和任务按用途与预算加载记忆。主进程校验渠道授权、资料可见范围与工具权限，模型在这些约束内选择方法。任务执行时最多读取生活范围内的记忆。
+- **记忆持久化**。记忆与任务记录使用同一个本机 SQLite Vault，敏感正文加密。后台整理对话摘要、事实与任务经验，保留资料来源和可见范围。
 
-## 开发与构建
+[完整架构与源码索引](docs/architecture.md) · [任务、权限与恢复流程图](docs/flows.md)
 
-需要 Apple Silicon、macOS 26 SDK/Xcode 命令行工具、Node.js 22 以上、CMake 与 Git。
+## 下载与上手
+
+当前提供 **Apple Silicon Mac** 的 **v0.24.23 早期 Beta**。macOS 13 是最低构建目标，持续端侧语音识别需要 macOS 26，系统兼容性仍在验证。安装包使用本机开发签名，苹果公证待完成。复杂任务、界面识别和长期学习仍处于早期试用阶段。[发行说明与校验文件](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.24.23)
+
+1. **安装应用**。从发行页下载 `workbunny-0.24.23-macos-arm64.zip`，解压后将 `workbunny.app` 放入「应用程序」。升级前先退出旧版并备份资料。若 macOS 拦截首次启动，可在核对发行页的 SHA-256 后按系统提示允许打开。
+2. **先用文字聊一句**。保持 WorkBuddy 已登录，在 Bunny 设置里确认使用 WorkBuddy 模式。想用其他模型聊天时，也可以配置自己的模型 API。
+3. **随口交办一件小事**。例如「我想问问同事午休都喜欢做什么。五道题就好，请交给 WorkBuddy 做个能在本机打开的网页草稿，做好了告诉我。」
+4. **按需要开启更多能力**。语音输入需要麦克风与语音识别权限。可选择系统音色、本地 Qwen3-TTS（至少 16 GiB 内存）、局域网 CHP 或自有 HTTP 朗读服务。微信值守需要屏幕录制和辅助功能权限，Mac 保持唤醒且微信已登录、界面可操作。[HTTP 语音配置示例](examples/tts-profiles/)
+
+官方安装包免费。WorkBuddy、模型 API 和可选语音服务的额度与费用由各服务提供方决定。[全部发行记录](https://github.com/zhyuzh3d/workbunny/releases)
+
+## 记忆、隐私与授权
+
+| 对话场景 | Bunny 可以参考的资料 |
+| --- | --- |
+| 工作 | 工作范围内的资料，适合讨论目标、交付和进度 |
+| 生活 | 日常偏好和经历，也可以参考相关的工作资料 |
+| 私聊 | 私密话题有独立的使用范围，任务执行排除私聊记忆 |
+
+更新应用会保留个人资料，设置中也可以迁移聊天、记忆和配置。使用外部模型或语音服务时，对话、截图或语音合成文本等必要内容可能发送给所配置的服务。
+
+微信值守通过 Mac 微信的可见界面与键鼠操作实现。外部身份识别默认关闭，由你在本机设置中开启。开启前请了解渠道授权的范围，尤其是群聊中的临时授权。[隐私与权限说明](https://bunny.airen.life/privacy.html) · [场景与身份规则](docs/product-requirements.md)
+
+## 参与共建
+
+欢迎试用和贡献，也欢迎 fork WorkBunny，做出适合不同系统、工具或使用习惯的桌面伙伴。你可以独立维护变体，也可以把通用改进贡献回主项目。
+
+- **反馈与贡献**。遇到问题，可以附上 WorkBunny 版本、系统版本、复现步骤和脱敏后的错误信息。也欢迎贡献无障碍改进、语音适配、文档、测试和示例。[提交 Issue](https://github.com/zhyuzh3d/workbunny/issues) · [发起 Pull Request](https://github.com/zhyuzh3d/workbunny/pulls)
+- **探索 Windows 版**。可以从复用桌面界面、对话、记忆和任务机制开始，再为 Windows 实现屏幕感知、键鼠操作、语音及凭据存储，并适配安装和权限流程。
+- **探索 Codex 版**。可以参考现有的工作委派与状态读取逻辑，让 Bunny 把整理好的需求交给 Codex，持续展示进度，在需要用户确认时带回问题，最后汇报产物与验证结果。先从一条可复现的代码任务走通交办与回传。
+
+## 从源码开始
+
+| 想了解或修改 | 从这里开始 |
+| --- | --- |
+| 角色、对话界面和设置 | [`src/renderer/`](src/renderer/) · [`src/preload.js`](src/preload.js) |
+| 任务运行、状态与记忆 | [任务运行时](src/main/agent-runtime.js) · [记忆服务](src/main/memory-service.js) |
+| 工作委派与进度跟进 | [委派入口](src/main/work-delegation-skill.js) · [WorkBuddy 进度观察](src/main/workbuddy-observation.js) |
+| 模型接入和语音 | [模型请求](src/main/llm.js) · [语音识别](src/main/asr.js) · [朗读](src/main/tts.js) |
+| 桌面操作和原生存储 | [桌面桥](src/main/desktop-native.js) · [`native/`](native/) |
+
+### 本地开发
+
+准备 Apple Silicon Mac、带 macOS 26 SDK 的 Xcode 命令行工具、Node.js 22 或更新版本以及 Git。构建安装包还需要 CMake。
 
 ```sh
 npm ci
@@ -60,36 +126,26 @@ zsh tools/make-signing-cert.sh
 zsh tools/build-asr.sh
 zsh tools/build-asr-legacy.sh
 zsh tools/build-vault.sh
+zsh tools/build-keychain.sh
 zsh tools/build-desktop.sh
 zsh tools/dev-prepare.sh
 zsh tools/run-dev.sh
 ```
 
-开发资料独立使用 `.data/dev`，正式资料默认位于 `~/Library/Application Support/workbunny`。不要将正式资料、账号票据或个人模型复制进仓库。首次解锁请完成系统钥匙串授权；不要删除旧钥匙或资料库绕过锁定。
+开发资料保存在独立的 `.data/dev`。首次解锁时按提示完成系统钥匙串授权。提交代码和反馈时请使用合成或脱敏数据。
+
+### 测试与打包
 
 ```sh
 npm test
 zsh tools/package.sh
 node tools/verify-bundle.cjs dist/workbunny.app
-zsh tools/install-app.sh
 ```
 
-[测试入口](test/README.md)说明离线、图形和显式账号验收的区别。默认回归不调用真实 LLM 或给真实联系人发消息。
+默认回归使用合成数据，真实账号和桌面实验有独立入口。需要把本地构建安装到自己的 Mac 时，可以使用项目安装脚本，它支持失败回滚并保留用户资料。[测试说明](test/README.md) · [安装脚本](tools/install-app.sh) · [文档索引](docs/README.md)
 
-构建和安装核对当前源码、资源白名单、哈希与签名。正常退出旧版后安装；失败保留回滚，成功清理旧应用备份，用户资料不在清理范围内。关键版本需要外置归档时，使用 `WORKBUNNY_ARCHIVE_PREVIOUS=1`，并可通过 `WORKBUNNY_ARCHIVE_VOLUME` 指定外置卷；外置备份失败会停止安装。
+## 许可与项目关系
 
-准备公开源码快照时，先提交经过审查的文件并重新构建，再运行 `node tools/source-release.js`。它只收集 Git 跟踪的维护文件及已核验的发行资源，不打入 Git 历史、运行资料、私有实验或模型权重。创建 GitHub Release 是单独的发布步骤。
+WorkBunny 是独立开源项目，与 WorkBuddy、微信或腾讯无官方隶属关系。WorkBunny 自有源码采用 [MIT 许可](LICENSE)，欢迎使用、修改和分发，分发时请保留许可和版权声明。
 
-## 能力边界
-
-Bunny 依据实际信息自主验收 Task 与 Action，工具调用成功不等于业务完成。未知发送保留证据并继续核对，不自动重发。经验和自我修复不能扩大授权，也不代表允许自动改写正式应用。
-
-其它 Mac/旧系统兼容、长期学习效果和开放任务能力仍需持续验证；当前设备的真实实验与离线测试分别报告。资源包导入、模型整理和真实任务能力提升也分别验证。
-
-## 许可与素材
-
-WorkBunny 自有源码使用 [MIT](LICENSE)，官方发行保持免费。第三方形象、动作和组件按各自条款使用，不能用项目 MIT 覆盖。
-
-**当前资源选择中仍含权利待核实的动作，不能视为已取得再分发授权。** 逐项范围及授权请求见[动作署名与待核实清单](licenses/ANIMATION-NOTICE.md)，来源和哈希见[资源清单](resources-manifest.json)及[历史素材审计](licenses/assets-audit.json)。完整说明见[第三方声明](THIRD_PARTY_NOTICES.md)。
-
-版权所有者可通过[素材反馈](https://github.com/zhyuzh3d/workbunny/issues/new?template=asset-rights.md)联系项目。公示、免费或未收到异议均不构成授权。
+角色、动作、品牌标识及第三方组件各有适用条款。部分动作的再分发权利仍待核实，打包衍生版本时请选用已确认可再分发的素材。[第三方声明](THIRD_PARTY_NOTICES.md) · [素材清单](resources-manifest.json) · [动作署名与许可状态](licenses/ANIMATION-NOTICE.md) · [反馈素材权利问题](https://github.com/zhyuzh3d/workbunny/issues/new?template=asset-rights.md)
