@@ -502,6 +502,7 @@ function applyEmo(name, weight = 1, holdMs = 2600) {
 /* ═══════════ 音频（嘴型） ═══════════ */
 let audioCtx = null;
 let analyser = null;
+let voiceGain = null;
 let analyserData = null;
 let currentSource = null;
 let pcmPlayer = null;
@@ -514,7 +515,10 @@ function ensureAudio() {
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 512;
   analyser.smoothingTimeConstant = 0.55;
-  analyser.connect(audioCtx.destination);
+  voiceGain = audioCtx.createGain();
+  voiceGain.gain.value = (volumePreview ?? cfg?.voice?.volume ?? 100) / 100;
+  analyser.connect(voiceGain);
+  voiceGain.connect(audioCtx.destination);
   analyserData = new Uint8Array(analyser.fftSize);
   pcmPlayer = createPCMPlayer({ context: audioCtx, destination: analyser,
     onStart: () => { markReplyStarted(); pet.audioStarted(); },
@@ -1302,26 +1306,74 @@ let hintTimer = setTimeout(() => {
 }, 1800);
 
 document.getElementById('gearBtn').addEventListener('click', () => openSettings());
-document.getElementById('muteBtn').addEventListener('click', async () => {
-  const on = !cfg.voice.enabled;
-  cfg = await pet.config({ voice: { enabled: on } });
-  paintMute();
+const voiceControl = document.getElementById('voiceControl');
+const voiceButton = document.getElementById('muteBtn');
+const voicePopover = document.getElementById('voicePopover');
+const voiceVolume = document.getElementById('voiceVolume');
+const voiceVolumeValue = document.getElementById('voiceVolumeValue');
+const voiceMuteToggle = document.getElementById('voiceMuteToggle');
+let volumePreview = null;
+let volumeSaveRevision = 0;
+
+function setVoicePopover(open) {
+  voicePopover.hidden = !open;
+  voiceButton.setAttribute('aria-expanded', String(open));
+}
+voiceButton.addEventListener('click', () => setVoicePopover(voicePopover.hidden));
+document.addEventListener('pointerdown', event => {
+  if (!voiceControl.contains(event.target)) setVoicePopover(false);
+}, { capture: true });
+addEventListener('blur', () => setVoicePopover(false));
+
+async function saveVoiceSettings(voice) {
+  try {
+    const next = await pet.config({ voice });
+    if ((next.settingsRevision ?? 0) >= (cfg?.settingsRevision ?? 0)) cfg = next;
+  } catch {
+    showBubble('声音设置未保存，请重试。', 2200, true);
+  }
+}
+voiceVolume.addEventListener('input', () => {
+  volumePreview = voiceVolume.valueAsNumber;
+  paintVoiceControls();
 });
-function paintMute() {
-  const btn = document.getElementById('muteBtn');
-  const wave = document.getElementById('muteWave');
-  const cross = document.getElementById('muteCross');
-  const on = cfg && cfg.voice.enabled;
-  btn.classList.toggle('muted', !on);
-  wave.style.display = on ? '' : 'none';
-  cross.style.display = on ? 'none' : '';
-  btn.title = on ? '关闭语音' : '开启语音';
-  btn.setAttribute('aria-label', btn.title);
+voiceVolume.addEventListener('change', async () => {
+  const volume = voiceVolume.valueAsNumber;
+  const revision = ++volumeSaveRevision;
+  await saveVoiceSettings({ volume });
+  if (revision === volumeSaveRevision && volumePreview === volume) volumePreview = null;
+  paintVoiceControls();
+});
+voiceMuteToggle.addEventListener('click', async () => {
+  if (!cfg) return;
+  await saveVoiceSettings({ enabled: cfg.voice.enabled === false });
+  paintVoiceControls();
+});
+function paintVoiceControls() {
+  const volume = volumePreview ?? cfg?.voice?.volume ?? 100;
+  const muted = cfg?.voice?.enabled === false;
+  const silent = muted || volume === 0;
+  voiceVolume.value = volume;
+  voiceVolumeValue.value = volume + '%';
+  voiceVolume.setAttribute('aria-valuetext', voiceVolumeValue.value);
+  voiceVolume.style.setProperty('--voice-level', voiceVolumeValue.value);
+  voiceButton.classList.toggle('muted', silent);
+  document.getElementById('muteWave').style.display = silent ? 'none' : '';
+  document.getElementById('muteCross').style.display = silent ? '' : 'none';
+  voiceButton.title = muted ? 'Bunny 音量（已静音）' : 'Bunny 音量';
+  voiceButton.setAttribute('aria-label', voiceButton.title);
+  voiceMuteToggle.classList.toggle('muted', muted);
+  voiceMuteToggle.textContent = muted ? '取消静音' : '静音';
+  voiceGain?.gain.setTargetAtTime(volume / 100, audioCtx.currentTime, 0.012);
 }
 
 /* ═══════════ 录制 ═══════════ */
 addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeDock();
+  if (e.key !== 'Escape') return;
+  if (!voicePopover.hidden) {
+    setVoicePopover(false);
+    voiceButton.focus();
+  } else closeDock();
 });
 
 /* ═══════════ 常驻聆听 ═══════════ */
@@ -1652,7 +1704,7 @@ function wire() {
         cfg = ev.config;
         dataAvatar?.setPalette?.(cfg.avatarPalettes?.[avatarKey]);
         if (!dataAvatar && currentMotion && !motionEnabled(currentMotion)) toIdle(0.25);
-        paintMute();
+        paintVoiceControls();
         paintActivity(lastWorkSnap || {});
         break;
       case 'listen':
@@ -2119,7 +2171,7 @@ setInterval(() => {
     if (Array.isArray(init.motionGroups) && init.motionGroups.length) MOTION_GROUPS = init.motionGroups;
     viewScale = (cfg.window && cfg.window.scale) || 0.5;
     paintScale();
-    paintMute();
+    paintVoiceControls();
     wire();
     renderer.setAnimationLoop(frame);
     await loadMotions();

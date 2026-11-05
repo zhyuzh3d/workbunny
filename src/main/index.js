@@ -1446,7 +1446,7 @@ function buildTrayMenu() {
       submenu: [
         {
           label: '说话（TTS）', type: 'checkbox', checked: c.voice.enabled,
-          click: (i) => { config.save({ voice: { enabled: i.checked } }); rebuildTray(); },
+          click: i => { applySettings({ voice: { enabled: i.checked } }).catch(() => send('toast', { text: '声音设置未保存，请重试。' })); },
         },
         {
           label: '叫名字才回应', type: 'checkbox', checked: !!c.asr.wakeOnly,
@@ -1487,7 +1487,6 @@ function buildCharacterMenu() {
       send('ask', { open: item.checked, focus: item.checked });
     } },
     { label: '静音不说话', type: 'checkbox', checked: !c.voice.enabled, click: item => {
-      if (item.checked && (speaking || speechQueue.length)) stopSpeaking('user', { keepThought: true });
       save({ voice: { enabled: !item.checked } });
     } },
     { label: '关闭耳朵', type: 'checkbox', checked: !c.voice.alwaysListen, click: async item => {
@@ -2274,6 +2273,7 @@ async function applySettings(patch) {
   if (patch?.asr?.ownerOnly && !speakerFilter.status().ready) throw Error('请先朗读录入主人声音');
   if (patch?.window && Object.hasOwn(patch.window, 'scale')) patch = { ...patch, window: { ...patch.window, scale: clampScale(patch.window.scale) } };
   const c = config.save(patch || {});
+  if (previous.voice.enabled && !c.voice.enabled && (speaking || speechQueue.length)) stopSpeaking('user', { keepThought: true });
   if(patch?.software&&['terminal','systemConfiguration'].some(k=>k in patch.software)){pendingTaskPermission=null;await agent?.authorizationChanged();}
   if (c.memory.scene !== previous.memory.scene || c.memory.enabled !== previous.memory.enabled ||
       patch?.brain && JSON.stringify(c.brain) !== JSON.stringify(previous.brain)) {

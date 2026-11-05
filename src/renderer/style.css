@@ -330,6 +330,62 @@ html, body {
 #fab button:active { transform: scale(.92); }
 #fab button.muted { color: var(--bad); }
 
+#voiceControl { position: relative; }
+#voicePopover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 58px;
+  padding: 8px 4px 6px;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+  color: var(--ink-soft);
+  font-size: 11px;
+  white-space: nowrap;
+}
+#voicePopover[hidden] { display: none; }
+#voiceVolumeValue { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+#voiceVolume {
+  appearance: none;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 28px;
+  height: 98px;
+  margin: 3px 0 5px;
+  background: transparent;
+  cursor: pointer;
+}
+#voiceVolume::-webkit-slider-runnable-track {
+  width: 5px;
+  border-radius: 6px;
+  background: linear-gradient(to top, var(--accent) var(--voice-level, 100%), rgba(30, 24, 18, .12) var(--voice-level, 100%));
+}
+#voiceVolume::-webkit-slider-thumb {
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  margin-left: -5px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  background: var(--paper);
+  box-shadow: 0 1px 4px rgba(28, 22, 16, .18);
+}
+#voiceControl :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#fab #voiceMuteToggle {
+  width: 100%;
+  height: 24px;
+  padding: 0;
+  border-radius: 8px;
+  box-shadow: none;
+  font: inherit;
+}
+
 /* ══ 脚下那条：耳朵状态 + 电平 + 听到的话 ══
  * 左端固定在地面左下角；宽度是「内容要多少给多少，最多整窗」。
  * 关闭 = 灰；在听 = 绿（静态，不呼吸）；有声音 = 电平条跟着跳；
@@ -485,7 +541,7 @@ html, body {
 .iconBtn.primary:hover { background: #3a3e44; color: #fff; }
 
 /* 私聊时，底部各个独立控件使用同一组粉色背景。 */
-body.private-scene :is(#activity, #ear, #ear.on, #fab button, #dock) {
+body.private-scene :is(#activity, #ear, #ear.on, #fab button, #dock, #voicePopover) {
   background: rgba(255, 222, 232, .96);
 }
 body.private-scene :is(#ear:hover, #fab button:hover) { background: #ffeaf0; }

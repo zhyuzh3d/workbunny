@@ -3,7 +3,7 @@
   "assets": [
     {
       "path": "src/renderer/assets/models/Bani.vrm",
-      "sha256": "e85518c6bd2c971735fc64891515b2dbcd0872c6168839e344cd708ffb44e63c",
+      "sha256": "8f32e2b27b7275b1cf285c3fa77bba39199fe3e7f32ecdd90043bbb19f0f7160",
       "source": "WorkBunny character; generated with Hunyuan 3D Studio, face and expressions derived from VRoid AvatarSample D",
       "sourceURL": "https://vroid.pixiv.help/hc/en-us/articles/4402394424089",
       "redistribution": "unverified",

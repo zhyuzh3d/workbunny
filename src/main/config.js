@@ -228,7 +228,7 @@ const DEFAULTS = {
     judge: true,             // 先判断「这句是不是在对我说」，是才回
     ownerOnly: false,        // 需显式朗读录入声音；不是身份认证
   },
-  voice: { enabled: true, autoSpeak: true, alwaysListen: true },
+  voice: { enabled: true, volume: 100, autoSpeak: true, alwaysListen: true },
   monitor: {
     enabled: true,
     root: path.join(HOME, '.workbuddy', 'projects'),
@@ -334,6 +334,7 @@ function load() {
   if (disk.window && disk.window.canvasWidthVersion !== 1) merged.window.canvasWidthVersion = 0;
   if (disk.window && disk.window.canvasExpansionVersion !== 2) merged.window.canvasExpansionVersion = 0;
   cache = migrateBrain(merged);
+  if (!validVoiceVolume(cache.voice.volume)) cache.voice.volume = DEFAULTS.voice.volume;
   const known = new Set([...MOTIONS, ...(cache.motions.library?.items || [])].map(m => m.key));
   cache.motions.disabled = [...new Set((Array.isArray(cache.motions.disabled) ? cache.motions.disabled : []).filter(k => known.has(k)))];
   if (availableMotions().filter(m => m.slot === 'idle').every(m => cache.motions.disabled.includes(m.key)))
@@ -346,7 +347,12 @@ function load() {
   return cache;
 }
 
+function validVoiceVolume(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 100;
+}
+
 function save(patch, { replaceAvatarDescriptions = false } = {}) {
+  if (patch?.voice && Object.hasOwn(patch.voice, 'volume') && !validVoiceVolume(patch.voice.volume)) throw new Error('音量须为 0 至 100 的整数');
   const next = deepMerge(load(), patch || {});
   if (replaceAvatarDescriptions) next.avatarDescriptions = { ...patch?.avatarDescriptions };
   if (patch?.brain) {
