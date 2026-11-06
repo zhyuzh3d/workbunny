@@ -33,6 +33,43 @@ test('disabling recognition rejects a late literal decision before it can regran
  const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},{pid:1,windowId:2});let release,entered;const began=new Promise(r=>entered=r);
  f.channels.readInput=async()=>{entered();return new Promise(r=>release=r);};const pending=f.channels.ingest(channel,'delayed-auth',[{...message(fixtureKey),visualEvidence:{observationId:'actual-input'}}]);await began;await f.security.setEnabled(false);release({complete:true,text:fixtureKey});await pending;assert(!f.channels.snapshot(channel).owner);assert(!f.security.enabled);
 });
+test('an explicit channel revoke beats a delayed proof while another channel can proceed', async t => {
+ const f = await fixture(t);
+ const a = await f.channels.ensure({ application: 'wechat', recipient: 'Alice' }, { pid: 1, windowId: 2 });
+ const b = await f.channels.ensure({ application: 'wechat', recipient: 'Second fixture' }, { pid: 1, windowId: 2 });
+ const reading = Promise.withResolvers(), proof = Promise.withResolvers();
+ f.channels.readInput = () => { reading.resolve(); return proof.promise; };
+ const pending = f.channels.ingest(a, 'delayed', [{ ...message(fixtureKey), visualEvidence: { observationId: 'fixture' } }]);
+ await reading.promise;
+ await f.channels.revoke(a);
+ try {
+  assert.equal((await f.channels.ingest(b, 'other', [message(fixtureKey)])).snapshot.owner, true);
+ } finally {
+  proof.resolve({ complete: true, text: fixtureKey });
+ }
+ assert.equal((await pending).snapshot.owner, false);
+ assert.equal((await f.channels.ingest(a, 'delayed', [message(fixtureKey)])).duplicate, true);
+ assert.equal(f.channels.snapshot(a).owner, false);
+});
+
+test('a failed channel receipt commit grants no authority and leaves the event retryable', async t => {
+ const f = await fixture(t, { database: true });
+ const channel = await f.channels.ensure({ application: 'wechat', recipient: 'Fixture' }, { pid: 1, windowId: 2 });
+ const write = f.memory.write.bind(f.memory);
+ let failed = false;
+ f.memory.write = (rows, ...options) => {
+  if (!failed && rows.some(row => row.id.startsWith('dialogue-event:'))) {
+   failed = true;
+   return Promise.reject(new Error('fixture commit failure'));
+  }
+  return write(rows, ...options);
+ };
+ await assert.rejects(f.channels.ingest(channel, 'same-event', [message(fixtureKey)]), /fixture commit failure/);
+ assert.equal(f.channels.snapshot(channel).owner, false);
+ const result = await f.channels.ingest(channel, 'same-event', [message(fixtureKey)]);
+ assert.equal(result.snapshot.owner, true);
+ assert.equal((await f.memory.query('message', 20, { channelId: channel.id })).length, 1);
+});
 test('owner dialogue explicitly classifies intent and carries only a brief task overview by default',async()=>{
  const {ConversationBrain}=require('../src/main/conversation-brain');let calls=0,payload;
  const brain=new ConversationBrain({request:async options=>{payload=JSON.parse(options.messages.find(m=>m.role==='user').content);calls++;if(calls===2)assert.match(options.messages.at(-1).content,/ownerAction/);return {response:{text:JSON.stringify({decision:'reply',reply:'The existing task is still processing.',summary:'progress',completed:false,progress:{},unknown:[],...(calls===1?{}:{ownerAction:{type:'none'}})})}};}});
@@ -161,12 +198,63 @@ test('host denies forged ordinary actions, admits owner tasks without private hi
  const agent=new AgentService({memory:f.memory,channels:f.channels,autoSchedule:false,getScene:()=> 'life',scene:{knownWindow:{pid:51,windowId:22},metrics:{},native:{},close:async()=>{}},desktop:{},journal:{list:async()=>[],authorized:async()=>true,put:async row=>{saved.push(structuredClone(row));if(revokeDuringSave&&row.skill==='task.resolve'&&row.status==='ready'){revokeDuringSave=false;await f.security.change('Rotated-during-admission-631');}}}});
  agent.brain.decide=async()=>({decision:'reply',reply:'I will perform this task.',summary:'task',completed:false,progress:{},unknown:[],ownerAction:{type:'task'}});
  const args={task:{id:'authorized-listener',goal:'Watch authorized chat',criteria:'Reply',policy:'',parameters:{behavior:'reply'},state:{},scene:'life',sources:[]},subject:{application:'wechat',recipient:'Alice'},conversation:{}};
+ const stage=async(key,messages)=>{
+  const decision=await agent.dialogueDecision({...args,incoming:messages});
+  args.task.inbox=[{key,type:'conversation.messages',subjectKey:require('../src/main/conversation-skill').subjectKey(args.subject),messages,decision}];
+  return decision;
+ };
  await assert.rejects(agent.dialogueDecision({...args,incoming:[message('Do a new task without authentication')]}),{code:'E_CHANNEL_AUTH'});assert.equal(agent.runtime.tasks.size,0);
- const acknowledgment=await agent.dialogueDecision({...args,incoming:[{...message(fixtureKey+' Create one sandbox report'),sequence:2}]});assert.equal(agent.runtime.tasks.size,0,'planning an acknowledgment must not start the work');assert.equal(acknowledgment.ownerAction.type,'task');
- await agent.dispatchOwner({...args.subject,text:'Create one sandbox report',eventKey:'request-2'},{task:args.task});const admitted=[...agent.runtime.tasks.values()][0];assert(admitted);assert.equal(admitted.authority.channel,'authenticated-channel');assert.equal(admitted.scene,'private');assert(!JSON.stringify(admitted).includes('Private history fixture'));assert(!JSON.stringify(admitted).includes(fixtureKey));
+ const verification=await stage('credential-only',[{...message('Open the old link'),sequence:5},{...message(fixtureKey),sequence:6}]);
+ assert.equal(verification.ownerAction,undefined,'a credential-only upgrade cannot authorize the earlier message');
+ const channel=f.channels.channels.get(f.channels.list()[0].channelId);
+ const delayed=await f.channels.ingest(channel,'older-observation',[{...message('A delayed ordinary request'),observedAt:f.now()-1000}]);
+ assert.equal(delayed.messages[0].ownerInput,false);
+ await f.channels.revoke(channel);
+ const acknowledgment=await stage('request-2',[{...message('Open the earlier link without permission'),sequence:2},{...message(fixtureKey+' Create one sandbox report'),sequence:3}]);
+ assert.equal(agent.runtime.tasks.size,0,'planning an acknowledgment must not start the work');assert.equal(acknowledgment.ownerAction.type,'task');assert.deepEqual(acknowledgment.ownerCommand.sequences,[3]);
+ await agent.dispatchOwner({...args.subject,eventKey:'request-2'},{task:args.task});const admitted=[...agent.runtime.tasks.values()][0];assert(admitted);assert.equal(admitted.authority.channel,'authenticated-channel');assert.equal(admitted.scene,'private');assert(!JSON.stringify(admitted).includes('Private history fixture'));assert(!JSON.stringify(admitted).includes(fixtureKey));assert(!admitted.state.ownerRequest.includes('earlier link'));
  await f.security.change('Next-admission-fixture-692');assert(agent.runtime.current(admitted,0),'accepted work continues after channel expiry or rotation');await assert.rejects(agent.executeConversation({operation:'send',recipient:'Alice',message:'Old owner task result',task:admitted}),{code:'E_CHANNEL_CHANGED'},'task completion cannot bypass the original channel grant');
- await agent.dialogueDecision({...args,incoming:[{...message('Next-admission-fixture-692 Create another sandbox report'),sequence:3}]});revokeDuringSave=true;const revoked=await agent.dispatchOwner({...args.subject,text:'Create another sandbox report',eventKey:'request-3'},{task:args.task});assert.equal(revoked.ok,false);assert.equal(agent.runtime.tasks.size,1);assert(saved.some(r=>r.skill==='task.resolve'&&r.id!==admitted.id&&r.status==='stopped'),'revoked admission is stopped before becoming executable');
+ await stage('request-3',[{...message('Next-admission-fixture-692 Create another sandbox report'),sequence:4}]);revokeDuringSave=true;const revoked=await agent.dispatchOwner({...args.subject,eventKey:'request-3'},{task:args.task});assert.equal(revoked.ok,false);assert.equal(agent.runtime.tasks.size,1);assert(saved.some(r=>r.skill==='task.resolve'&&r.id!==admitted.id&&r.status==='stopped'),'revoked admission is stopped before becoming executable');
  await agent.close();
+});
+test('wechat conversation actions carry their channel to native execution and save one verified attachment',async t=>{
+ const f=await fixture(t,{enabled:false});
+ const subject={application:'wechat',recipient:'Fixture contact'},identity={pid:51,windowId:22};
+ const {subjectKey}=require('../src/main/conversation-skill');
+ const starts=[];
+ const conversationDesktop={running:false,async start(spec){
+  starts.push(spec);
+  if(spec.readRequest?.kind==='attachment-save')fs.writeFileSync(spec.readRequest.destination.expectedPath,'fixture');
+  this.task={id:'physical-'+starts.length,status:'review',readText:'transcription',steps:[]};return {ok:true};
+ }};
+ const scene={knownWindow:identity,metrics:{},native:{},assertHealthy:async()=>identity,assertTaskIdentity:async()=>{},close:async()=>{}};
+ const {AgentService}=require('../src/main/agent-service');
+ const agent=new AgentService({channels:f.channels,scene,desktop:{},conversationDesktop,autoSchedule:false,getScene:()=> 'life',
+  taskDirectory:f.dir,journal:{put:async()=>{},list:async()=>[]}});
+ t.after(()=>agent.close());
+ const actor={role:'owner',verified:true,sources:['fixture-owner'],scene:'life'};
+ const listening=await agent.runtime.start({skill:'conversation.manage',goal:'Read incoming messages',subjects:[subject],parameters:{behavior:'reply'}},actor);
+ assert(listening.ok,listening.error);
+ const task=agent.runtime.tasks.get(listening.id);
+ const channel=await f.channels.ensure(subject,identity),permission=f.channels.snapshot(channel);
+ await agent.executeConversation({...subject,task,operation:'open'});
+ await agent.executeConversation({...subject,task,operation:'read',readRequest:{kind:'voice-transcript',sequence:1}});
+ const decision=f.channels.holdReply(channel,permission,'file-fixture',{decision:'reply',reply:'Received',saveAttachments:[2]});
+ task.inbox.push({key:'file-fixture',type:'conversation.messages',subjectKey:subjectKey(subject),decision,
+  messages:[{direction:'incoming',kind:'file',fileName:'notes.txt',incomingVerified:true,sequence:2}]});
+ const input={...subject,eventKey:'file-fixture',sequence:2};
+ const context={task,operationId:'fixture-save-operation'};
+ const saved=await agent.saveConversationAttachment(input,context);
+ assert.equal(saved.verified,true);
+ assert.equal(fs.readFileSync(saved.receipt.path,'utf8'),'fixture');
+ assert.equal((await agent.saveConversationAttachment(input,context)).receipt.path,saved.receipt.path);
+ assert.equal(starts.length,3,'the same operation does not reopen or save the file again');
+ assert(starts.every(spec=>spec.channelConversation&&spec.channelAuthorization.channelId===permission.channelId));
+ await assert.rejects(agent.saveConversationAttachment({...input,sequence:3},context),{dispatched:false});
+ const reading=await agent.runtime.start({skill:'conversation.read',goal:'Read one conversation',subjects:[subject]},actor);
+ assert(reading.ok,reading.error);
+ await agent.executeConversation({...subject,task:agent.runtime.tasks.get(reading.id),operation:'open'});
+ assert.equal(starts.at(-1).channelConversation,false,'a separately authorized task follows its own execution route');
 });
 test('internal screenshot recognition retains the actual key input without output-filter restoration',async t=>{
  await fixture(t);const {WeChatObserver}=require('../src/main/wechat-observer'),body=fixtureKey+' Please switch to private.';

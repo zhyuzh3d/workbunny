@@ -75,3 +75,28 @@ test('fixed Grok variants never send reasoning effort; missing keys fail locally
   const prior=requests;await assert.rejects(llm.chat({transport:'apikey',baseURL,apiKey:'',model:'fixture',messages:[]}),/填写 API Key/);assert.equal(requests,prior);
   await assert.rejects(llm.chat({baseURL:baseURL+'/unsupported',apiKey:'fixture-key',model:'fixture',messages:[]}),e=>e.code==='E_MODEL_PARAMETER'&&/思考参数/.test(e.message)&&!e.message.includes('private-credential-echo'));
 });
+
+test('direct model requests use an absolute deadline and reject truncated tool calls', async t => {
+  const active = new Set();
+  const server = http.createServer((req, res) => {
+    req.resume();
+    res.setHeader('Content-Type', 'text/event-stream');
+    if (req.url.startsWith('/slow')) {
+      res.write(': started\n\n');
+      const timer = setInterval(() => res.write(': keepalive\n\n'), 10);
+      active.add(timer);
+      res.once('close', () => { clearInterval(timer); active.delete(timer); });
+      return;
+    }
+    const frame = { choices: [{ finish_reason: 'length', delta: { tool_calls: [
+      { index: 0, id: 'tool_one', type: 'function', function: { name: 'memory_lookup', arguments: '{}' } },
+    ] } }] };
+    res.end('data: ' + JSON.stringify(frame));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { for (const timer of active) clearInterval(timer); server.closeAllConnections(); server.close(); });
+  const baseURL = 'http://127.0.0.1:' + server.address().port;
+  const opts = { apiKey: 'fixture-key', model: 'fixture', messages: [], timeoutMs: 120 };
+  await assert.rejects(llm.chat({ ...opts, baseURL: baseURL + '/slow' }), { code: 'E_MODEL_TIMEOUT' });
+  await assert.rejects(llm.chat({ ...opts, baseURL }), { code: 'E_OUTPUT_LIMIT' });
+});

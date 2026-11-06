@@ -37,6 +37,14 @@ async function main() {
     'window.pet.scale(.25)',
     wait('window.__frame().scale===.25&&window.__frame().viewport.width===416'),
     'window.__freeze(false)',
+    check(`await window.pet.config({ui:{dialogueVisible:true,avatarHidden:true}});
+      for(let i=0;i<50&&!document.body.classList.contains('dialogue-avatar-hidden');i++)await new Promise(r=>setTimeout(r,20));
+      check(document.body.classList.contains('dialogue-avatar-hidden'),'hidden setting reached renderer');
+      const frame=window.__pet().renderFrame;await new Promise(r=>setTimeout(r,300));
+      check(window.__pet().renderFrame===frame,'hidden avatar must not draw new WebGL frames');
+      await window.pet.config({ui:{dialogueVisible:false,avatarHidden:false}});
+      for(let i=0;i<50&&window.__pet().renderFrame===frame;i++)await new Promise(r=>setTimeout(r,20));
+      check(window.__pet().renderFrame>frame,'avatar rendering resumes when shown');return {drawSuspended:true};`),
   ];
   const source = process.argv.includes('--source');
   async function run(script, markers, name) {
@@ -51,7 +59,7 @@ async function main() {
       assert(!log.includes('ERR:') && !log.includes('[selftest] fail'), log.slice(-8000));
     } finally { clearTimeout(timer); }
   }
-  await run(script, ['"baseline":true', '"halfPreset":true', '"halfCanvas":true', '"fixedControls":true', '"bottomAnchor":true', '"halfProjection":true', '"restored":true', '"largeControlsFixed":true'], 'switching');
+  await run(script, ['"baseline":true', '"halfPreset":true', '"halfCanvas":true', '"fixedControls":true', '"bottomAnchor":true', '"halfProjection":true', '"restored":true', '"largeControlsFixed":true', '"drawSuspended":true'], 'switching');
   await run([wait('window.__pet?.().vrm&&!window.__pet().loading'), check(`const f=window.__frame();check(f.scale===.25&&f.bust&&f.viewport.width===416&&f.viewport.height===400,'half preset must survive restart');return {restartHalf:true};`)], ['"restartHalf":true'], 'restart');
   console.log(JSON.stringify({ ok: true, source, scope: '80% controls + 50% bust canvas + anchored projection + fixed UI + restart', artifacts: root }));
 }

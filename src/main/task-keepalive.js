@@ -13,18 +13,35 @@ class TaskKeepalive{
   if(waiting)state.wait=waiting.waitReason&&Number.isFinite(waiting.nextCheckAt)?{reason:waiting.waitReason,until:waiting.nextCheckAt}:null;
  }
  cancel(taskId){for(const value of this.pending.values())if(!taskId||value.taskId===taskId)value.controller.abort();}
+ *candidates(runtime, task, now) {
+  if (this.closed || !this.remind || INACTIVE.has(task.status) || task.expiresAt && task.expiresAt <= now ||
+      !runtime.current(task, runtime.tokens.get(task.id), true)) return;
+  const group = runtime.actionGroups.get(task.id);
+  if (group?.parent?.signal.aborted || !group && runtime.controllers?.has(task.id)) return;
+  const runs = Object.values(task.actionRuns).filter(run => run.status === 'waiting' &&
+    (!run.eventKey || task.inbox.some(event => event.key === run.eventKey)));
+  const passive = ['conversation.manage', 'screen.watch'].includes(task.skill) && !task.inbox.length;
+  const workers = [...(group?.workers.values() || [])];
+  const pendingEffects = Object.values(task.operations).filter(op => op.effect === 'write' && op.status === 'intent');
+  for (const run of runs.length ? runs : passive ? [] : [null]) {
+    if (run ? workers.some(worker => worker.eventKey === (run.eventKey || undefined)) : workers.length) continue;
+    const key = this.key(task, run);
+    if (this.pending.has(key) || pendingEffects.some(op => !run || op.actionId === run.id)) continue;
+    const state = this.state(task, run);
+    yield { run, state, key, at: Math.max(state.lastActivityAt + this.idleMs, state.wait?.until || 0) };
+  }
+ }
+ nextWake(runtime, task, now) {
+  let next = Infinity;
+  for (const item of this.candidates(runtime, task, now)) next = Math.min(next, item.at);
+  return next;
+ }
  inspect(runtime){
   if(this.closed||!this.remind||runtime.closed||!runtime.ready())return;
+  const now = this.clock();
   for(const task of runtime.tasks.values()){
-   if(INACTIVE.has(task.status)||task.expiresAt&&task.expiresAt<=this.clock()||!runtime.current(task,runtime.tokens.get(task.id),true))continue;
-   const group=runtime.actionGroups.get(task.id),runs=Object.values(task.actionRuns||{}).filter(run=>run.status==='waiting'&&(!run.eventKey||task.inbox.some(e=>e.key===run.eventKey)));
-   const passive=['conversation.manage','screen.watch'].includes(task.skill)&&!task.inbox.length;
-   for(const run of runs.length?runs:passive?[]:[null]){
-    const workers=[...(group?.workers.values()||[])];if(run?workers.some(w=>w.eventKey===(run.eventKey||undefined)):workers.length)continue;
-    const state=this.state(task,run),key=this.key(task,run),now=this.clock();
-    if(this.pending.has(key)||now-state.lastActivityAt<this.idleMs||state.wait?.until>now)continue;
-    // Unknown side effects remain owned by the existing reconciliation path.
-    if(Object.values(task.operations||{}).some(op=>op.effect==='write'&&op.status==='intent'&&(!run||op.actionId===run.id)))continue;
+   for(const { run, state, key, at } of this.candidates(runtime, task, now)){
+    if (now < at) continue;
     const controller=new AbortController(),token=runtime.tokens.get(task.id),lastActivityAt=state.lastActivityAt;
     const entry={controller,taskId:task.id};this.pending.set(key,entry);
     state.lastReminderAt=now;state.reminders=(state.reminders||0)+1;
@@ -43,11 +60,11 @@ class TaskKeepalive{
       task.status='needs_attention';task.note=guidance.nextStep;
       await runtime.report({taskId:task.id,eventId:'keepalive:'+key+':'+now,text:guidance.nextStep,sources:[task.id],scene:task.scene,domain:task.domain,visibilityFloor:task.visibilityFloor,epoch:task.privacyEpoch});
      }
-     await runtime.save(task);runtime.schedule(25);
+     await runtime.save(task);
     })().catch(async error=>{
      if(controller.signal.aborted||this.closed||!runtime.current(task,token,true)||INACTIVE.has(task.status))return;
      state.lastActivityAt=this.clock();state.lastError=String(error.code||error.name||'E_KEEPALIVE').slice(0,80);await runtime.save(task).catch(()=>{});
-    }).finally(()=>{if(this.pending.get(key)===entry)this.pending.delete(key);});
+    }).finally(()=>{if(this.pending.get(key)===entry)this.pending.delete(key);runtime.schedule();});
     entry.work=work;
    }
   }

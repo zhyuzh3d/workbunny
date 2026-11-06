@@ -65,6 +65,7 @@ class WeChatScene{
   async captureOwned(force,repairProfile,referenceMessages){
     try{
       await this.assertHealthy();
+      const observedAt=this.clock();
       const frame=await this.observer.sample(this.binding,{reset:force||!this.last});this.metrics.samples++;
       if(frame.unstable)return {...this.last,unstable:true,changed:false};
       this.metrics.lastPixelArea=(frame.width||0)*(frame.height||0);
@@ -80,7 +81,7 @@ class WeChatScene{
       let view={headerMatched:false,messages:[],draft:''};
       if(header){view=await this.observer.inspect({recipient:header,identity:this.knownWindow,...(referenceMessages?.recipient===header?{referenceMessages:referenceMessages.messages}:{})},{...frame,ocr},undefined,repairProfile);this.metrics.modelInspections++;}
       await this.observer.commit(this.binding);
-      this.lastAt=this.clock();this.last={...view,header,unread,latestPending:view.latestPending===true||ocr.some(r=>r.x>.65&&r.y>.55&&/(?:条新消息|new messages?)/iu.test(r.text)),changed:true,revision:randomUUID(),at:this.lastAt};return this.last;
+      this.lastAt=this.clock();this.last={...view,messages:(view.messages||[]).map(message=>({...message,observedAt})),header,unread,latestPending:view.latestPending===true||ocr.some(r=>r.x>.65&&r.y>.55&&/(?:条新消息|new messages?)/iu.test(r.text)),changed:true,revision:randomUUID(),at:this.lastAt};return this.last;
     }catch(error){
       if(this.circuit)return {unavailable:true,reason:this.circuit.reason};
       if(/微信主窗口不可见|窗口或进程身份改变|没有屏幕录制|缺少屏幕录制|截图.*超时|请求超时.*(?:capture|visualSample)/u.test(error.message))return this.trip(error.message);

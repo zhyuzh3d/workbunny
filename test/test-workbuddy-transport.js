@@ -126,10 +126,33 @@ async function testNoFreeModelHasStableCodeWithoutPaidFallback() {
   assert.doesNotMatch(result.stdout, /paid-model/);
 }
 
+async function testBrokerCannotReceiveRequestsWithoutProof() {
+  const fs = require('node:fs'), net = require('node:net'), path = require('node:path');
+  const dir = fs.mkdtempSync('/tmp/bunny-broker-');
+  const endpoint = path.join(dir, 'fixture.sock'), requests = [];
+  const server = net.createServer(socket => {
+    const lines = new (require('../src/main/json-lines').JsonLines)(4096);
+    socket.on('data', chunk => lines.push(chunk, frame => {
+      requests.push(frame);
+      if (frame.type === 'session_hello') socket.write('{"type":"session_hello_ack","pipes":["wb.request"]}\n');
+    }));
+  });
+  try {
+    await new Promise(resolve => server.listen(endpoint, resolve));
+    await assert.rejects(require('../src/main/workbuddy').request({ method: 'POST', path: '/fixture', body_b64: 'private' },
+      { discover: () => ({ endpoint, ticket: 'fixture-ticket' }), timeoutMs: 1000 }), /身份验证|顺序/);
+    assert.deepEqual(requests.map(frame => frame.type), ['session_hello']);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 (async () => {
   await testFreeMemoryExtractionUsesOneBoundedFreeCall();
   await testToolCallProducesNoSpeechCallbacks();
   await testNoFreeModelHasStableCodeWithoutPaidFallback();
+  await testBrokerCannotReceiveRequestsWithoutProof();
   assert.throws(() => require('../src/main/workbuddy-free').parseObject(''), error => error.code === 'E_EMPTY_RESPONSE');
   console.log('WorkBuddy transport response checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

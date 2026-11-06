@@ -4,7 +4,7 @@ const {checkedJSON}=require('./agent-json');
 const {applicationScene,same}=require('./screen-geometry');
 const {createHash,randomUUID}=require('node:crypto');
 const APPLICATIONS=Object.freeze({wechat:'com.tencent.xinWeChat',workbuddy:'com.tencent.workbuddy.mac',finder:'com.apple.finder',chrome:'com.google.Chrome',codex:'com.openai.codex'});
-function registerScreenTools(tools,{native,imageResize,wechatScene,lease,canOperate,sensitivePolicy}){
+function registerScreenTools(tools,{native,imageResize,wechatScene,lease,canOperate,sensitivePolicy,assertWeChatInput}){
  const observeScreen=async(a,c)=>{
   if(a.application==='wechat')await wechatScene.assertHealthy();
   const f=await native.request('frontmost'),window=f.windows.filter(w=>w.bundleId===APPLICATIONS[a.application]&&w.layer===0&&w.rect.width>200&&w.rect.height>150).sort((x,y)=>y.rect.width*y.rect.height-x.rect.width*x.rect.height)[0];
@@ -21,7 +21,7 @@ function registerScreenTools(tools,{native,imageResize,wechatScene,lease,canOper
   anchor.ocr=ocr;c.task.state.screenAnchors??={};c.task.state.screenAnchors[a.application]=anchor;
   return {available:true,changed:!!image,frameId:anchor.frameId,width:anchor.previewWidth,height:anchor.previewHeight,at:anchor.at,ocr,perception:require('./perception').fromSensor('desktop.ocr',anchor.frameId),...(image?{preview:`data:${image.mime};base64,${image.preview.toString('base64')}`}:{})};
  };
- require('./screen-action-tools').registerScreenActions(tools,{native,wechatScene,lease,canOperate,sensitivePolicy,applications:APPLICATIONS,observe:observeScreen});
+ require('./screen-action-tools').registerScreenActions(tools,{native,wechatScene,lease,canOperate,sensitivePolicy,assertWeChatInput,applications:APPLICATIONS,observe:observeScreen});
  tools.register({name:'screen.observe',description:'观察目标软件，返回带唯一frameId及width/height的实际预览图。菜单越界时从全屏重新定位；不变画面复用图像引用。后续点击必须引用这一帧，文字用label，无文字目标用预览图pixelX/pixelY。',effect:'read',capabilities:['screen.read'],scope:a=>({application:a.application}),
  validate:v=>{fields(v,['application','regions','force'],'屏幕观察');if(v.force!==undefined&&typeof v.force!=='boolean')throw Error('force必须是布尔值');if(!APPLICATIONS[v.application])throw Error('尚未注册这个应用');return v;},execute:observeScreen});
  tools.register({name:'screen.commit',description:'确认已处理当前观察帧，不变画面不再调用识别模型。',effect:'read',capabilities:['screen.read'],scope:a=>({application:a.application}),validate:v=>{fields(v,['application'],'观察确认');return v;},
@@ -56,9 +56,9 @@ function screenWatchSkill({request}={}){return {id:'screen.watch',title:'画面�
   const result=checked.value;task.state.lastObservation={at:frame.at,...result,perception:require('./perception').screen(frame.frameId)};
   let triggered=false;
   if(result.matched&&!task.state.lastMatched){
-   task.state.lastMatched=true;
-   const queued=await enqueue({key:'condition:'+(frame.frameId||task.counters.wakes),scope:'screen:'+application,type:'screen.condition',application,goalRevision:task.state.goalRevision||0,at:frame.at,result});
-   if(!queued?.ok){task.state.lastMatched=false;throw Error('画面条件事件尚未入队，保留观察继续核对');}
+   const queued=await enqueue({key:'condition:'+(frame.frameId||task.counters.wakes),scope:'screen:'+application,type:'screen.condition',application,goalRevision:task.state.goalRevision||0,at:frame.at,result},
+    { advance: target => { target.state.lastMatched = true; } });
+   if(!queued?.ok)throw Error('画面条件事件尚未入队，保留观察继续核对');
    triggered=true;
   }else task.state.lastMatched=result.matched;
   await call({tool:'screen.commit',key:'commit:'+task.counters.wakes,args:{application}});

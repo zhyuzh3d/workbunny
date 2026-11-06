@@ -8,7 +8,7 @@ WorkBunny 是依托 WorkBuddy 的 macOS 桌面小秘书。打开并登录 WorkBu
 
 有个想法，开口和 Bunny 聊就行。它会陪你理清需求、给出工作建议，把口头交代整理成目标、背景和交付要求清楚的提示词，再按你的交代直接调度 WorkBuddy 执行。你去忙别的，Bunny 会跟进 WorkBuddy 的进度，遇到卡住或需要你确认的情况及时提醒，完成后核对并把成果带回来。
 
-[产品介绍与界面预览](https://bunny.airen.life/) · [下载 macOS 早期 Beta](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.24.23) · [技术架构](#技术架构) · [参与共建](#参与共建)
+[产品介绍与界面预览](https://bunny.airen.life/) · [下载 macOS 早期 Beta](https://github.com/zhyuzh3d/workbunny/releases/latest) · [技术架构](#技术架构) · [参与共建](#参与共建)
 
 ## 核心功能
 
@@ -76,9 +76,9 @@ flowchart TB
 
 ## 下载与上手
 
-当前提供 **Apple Silicon Mac** 的 **v0.24.23 早期 Beta**。macOS 13 是最低构建目标，持续端侧语音识别需要 macOS 26，系统兼容性仍在验证。安装包使用本机开发签名，苹果公证待完成。复杂任务、界面识别和长期学习仍处于早期试用阶段。[发行说明与校验文件](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.24.23)
+当前提供 **Apple Silicon Mac** 的 **v0.25.0 早期 Beta**。macOS 13 是最低构建目标，持续端侧语音识别需要 macOS 26，系统兼容性仍在验证。安装包使用本机开发签名，苹果公证待完成。复杂任务、界面识别和长期学习仍处于早期试用阶段。[发行说明与校验文件](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.25.0)
 
-1. **安装应用**。从发行页下载 `workbunny-0.24.23-macos-arm64.zip`，解压后将 `workbunny.app` 放入「应用程序」。升级前先退出旧版并备份资料。若 macOS 拦截首次启动，可在核对发行页的 SHA-256 后按系统提示允许打开。
+1. **安装应用**。从发行页下载 `workbunny-0.25.0-macos-arm64.zip`，解压后将 `workbunny.app` 放入「应用程序」。升级前先退出旧版并备份资料。若 macOS 拦截首次启动，可在核对发行页的 SHA-256 后按系统提示允许打开。
 2. **先用文字聊一句**。保持 WorkBuddy 已登录，在 Bunny 设置里确认使用 WorkBuddy 模式。想用其他模型聊天时，也可以配置自己的模型 API。
 3. **随口交办一件小事**。例如「我想问问同事午休都喜欢做什么。五道题就好，请交给 WorkBuddy 做个能在本机打开的网页草稿，做好了告诉我。」
 4. **按需要开启更多能力**。语音输入需要麦克风与语音识别权限。可选择系统音色、本地 Qwen3-TTS（至少 16 GiB 内存）、局域网 CHP 或自有 HTTP 朗读服务。微信值守需要屏幕录制和辅助功能权限，Mac 保持唤醒且微信已登录、界面可操作。[HTTP 语音配置示例](examples/tts-profiles/)
@@ -93,7 +93,7 @@ flowchart TB
 | 生活 | 日常偏好和经历，也可以参考相关的工作资料 |
 | 私聊 | 私密话题有独立的使用范围，任务执行排除私聊记忆 |
 
-更新应用会保留个人资料，设置中也可以迁移聊天、记忆和配置。使用外部模型或语音服务时，对话、截图或语音合成文本等必要内容可能发送给所配置的服务。
+更新应用会保留个人资料，设置中也可以迁移聊天、记忆和配置。0.25.0 使用 Task v4 恢复任务，旧版未完成的任务需重新交办。使用外部模型或语音服务时，对话、截图或语音合成文本等必要内容可能发送给所配置的服务。
 
 微信值守通过 Mac 微信的可见界面与键鼠操作实现。外部身份识别默认关闭，由你在本机设置中开启。开启前请了解渠道授权的范围，尤其是群聊中的临时授权。[隐私与权限说明](https://bunny.airen.life/privacy.html) · [场景与身份规则](docs/product-requirements.md)
 

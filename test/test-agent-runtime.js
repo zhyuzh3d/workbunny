@@ -196,6 +196,156 @@ test('same write key cannot silently change its arguments',async()=>{
  const h=setup(async({call})=>{await call(send);await call({...send,args:{...send.args,message:'changed'}});return {status:'completed'};});
  const {id}=await h.runtime.start(spec,owner);await h.runtime.tick(id);assert.equal(h.calls.length,1);assert.match(h.runtime.tasks.get(id).note,/不同工具或参数/);
 });
+test('parallel actions cannot dispatch the same logical write across authorization waits', async () => {
+  const h = setup(async ({ call }) => { await call(send); return { status: 'waiting' }; });
+  const firstAuthorized = Promise.withResolvers(), secondAuthorized = Promise.withResolvers();
+  const firstEntered = Promise.withResolvers();
+  let authorizations = 0;
+  h.runtime.authorize = () => {
+    if (++authorizations > 1) return secondAuthorized.promise;
+    firstEntered.resolve();
+    return firstAuthorized.promise;
+  };
+  const { id } = await h.runtime.start(spec, owner);
+  await h.runtime.enqueue(id, { key: 'a', scope: 'alice' });
+  const first = h.runtime.tick(id);
+  await firstEntered.promise;
+  await h.runtime.enqueue(id, { key: 'b', scope: 'bob' });
+  const second = h.runtime.tick(id);
+  await new Promise(resolve => setImmediate(resolve));
+  firstAuthorized.resolve();
+  await first;
+  secondAuthorized.resolve();
+  await second;
+  await h.runtime.tick(id);
+  assert.equal(h.calls.length, 1);
+  const task = h.records.get(id);
+  assert.equal(task.counters.writes, 1);
+  assert.equal(Object.values(task.operations)[0].status, 'confirmed');
+  await h.runtime.close();
+});
+
+test('amending a goal preserves a verified receipt that arrives after the change', async () => {
+  const h = setup(async ({ call }) => { await call(send); return { status: 'completed' }; });
+  const entered = Promise.withResolvers(), receipt = Promise.withResolvers();
+  const tool = h.tools.get(send.tool);
+  h.tools.tools.set(send.tool, { ...tool, execute: async (...args) => {
+    entered.resolve();
+    await receipt.promise;
+    return tool.execute(...args);
+  } });
+  const { id } = await h.runtime.start(spec, owner);
+  const running = h.runtime.tick(id);
+  await entered.promise;
+  const updated = await h.runtime.update(id, { goal: 'Revised goal' }, owner);
+  receipt.resolve();
+  await running;
+  assert.equal(updated.ok, true);
+  const saved = h.records.get(id);
+  assert.equal(saved.goal, 'Revised goal');
+  assert.equal(Object.values(saved.operations)[0].status, 'confirmed');
+  assert.equal((await h.runtime.control('resume', id)).ok, true);
+  await h.runtime.tick(id);
+  assert.equal(h.calls.length, 1);
+  await h.runtime.close();
+});
+
+test('an event is eligible for retry until its inbox commit succeeds', async () => {
+  const h = setup(async () => ({ status: 'waiting' }));
+  const { id } = await h.runtime.start(spec, owner);
+  const put = h.journal.put;
+  h.journal.put = async () => { throw new Error('fixture journal unavailable'); };
+  const advance = task => { task.state.observationCursor = 1; };
+  assert.equal((await h.runtime.enqueue(id, { key: 'retryable' }, { advance })).ok, false);
+  assert.deepEqual(h.runtime.tasks.get(id).inbox, []);
+  assert.equal(h.runtime.tasks.get(id).state.observationCursor, undefined);
+  h.journal.put = put;
+  assert.deepEqual(await h.runtime.enqueue(id, { key: 'retryable' }, { advance }), { ok: true });
+  assert.equal(h.records.get(id).inbox[0].key, 'retryable');
+  assert.equal(h.records.get(id).state.observationCursor, 1);
+  await h.runtime.close();
+});
+
+test('observations made against the same prior cursor cannot both advance it', async () => {
+  const h = setup(async () => ({ status: 'waiting' }));
+  const { id } = await h.runtime.start(spec, owner);
+  const task = h.runtime.tasks.get(id);
+  const current = () => task.state.observationCursor === undefined;
+  const first = h.runtime.enqueue(id, { key: 'one' }, { current, advance: target => { target.state.observationCursor = 1; } });
+  const overlapping = h.runtime.enqueue(id, { key: 'one-and-two' }, { current, advance: target => { target.state.observationCursor = 2; } });
+  assert.equal((await first).ok, true);
+  assert.equal((await overlapping).ok, false);
+  assert.equal(h.records.get(id).state.observationCursor, 1);
+  assert.deepEqual(h.records.get(id).inbox.map(event => event.key), ['one']);
+  await h.runtime.close();
+});
+
+test('a continuation transfers the previous task and its slot in one journal commit', async () => {
+  const h = setup(async () => ({ status: 'waiting' }));
+  h.skills.register({ id: 'task.resolve', version: 1, description: 'fixture', capabilities: [], tools: [], run: async () => ({ status: 'waiting' }) });
+  const original = await h.runtime.start(spec, owner);
+  for (let i = 0; i < 4; i++) await h.runtime.start(spec, owner);
+  const replacement = await h.runtime.start({ ...spec, skill: 'task.resolve' }, owner);
+  const before = h.records.get(original.id);
+  h.journal.putAll = async () => { throw new Error('fixture atomic write failed'); };
+  await assert.rejects(h.runtime.adopt(replacement.id, spec, owner, { replaceId: original.id }), /atomic write failed/);
+  assert.deepEqual(h.records.get(original.id), before);
+  assert.equal(h.runtime.tasks.get(original.id).status, 'ready');
+  h.journal.putAll = async tasks => {
+    assert.equal(tasks.length, 2);
+    for (const task of tasks) h.records.set(task.id, structuredClone(task));
+  };
+  const adopted = await h.runtime.adopt(replacement.id, spec, owner, { replaceId: original.id });
+  assert.equal(adopted.status, 'ready');
+  assert.equal(h.records.get(original.id).status, 'stopped');
+  assert.equal(h.runtime.capacity().active, 5);
+  await h.runtime.close();
+});
+
+test('a running worker is canceled at the task deadline before it can dispatch more input', async () => {
+  const entered = Promise.withResolvers(), resume = Promise.withResolvers();
+  const h = setup(async ({ call, signal }) => {
+    entered.resolve(signal);
+    await resume.promise;
+    await call(send);
+    return { status: 'completed' };
+  });
+  const { id } = await h.runtime.start({ ...spec, schedule: { durationMinutes: 1 } }, owner);
+  const running = h.runtime.tick(id);
+  const signal = await entered.promise;
+  h.advance();
+  await h.runtime.tick();
+  assert.equal(signal.aborted, true);
+  assert.equal(h.records.get(id).status, 'expired');
+  resume.resolve();
+  await running;
+  assert.deepEqual(h.calls, []);
+  await h.runtime.close();
+});
+
+test('local authorization is checked after the write intent is saved and before dispatch', async () => {
+  const h = setup(async ({ call }) => {
+    await call({ key: 'local-write', tool: 'terminal.execute', args: {} });
+    return { status: 'completed' };
+  });
+  let terminal = true;
+  const { AuthorizationService } = require('../src/main/authorization-service');
+  const authorization = new AuthorizationService({ settings: () => ({ terminal }) });
+  h.runtime.authorize = (...args) => authorization.check(...args);
+  h.tools.register({ name: 'terminal.execute', description: 'fixture', effect: 'write', capabilities: [],
+    execute: async () => { h.calls.push('dispatched'); return { ok: true, verified: true }; } });
+  const { id } = await h.runtime.start(spec, owner);
+  const put = h.journal.put;
+  h.journal.put = async task => {
+    await put(task);
+    if (Object.values(task.operations).some(op => op.status === 'intent')) terminal = false;
+  };
+  await h.runtime.tick(id);
+  assert.deepEqual(h.calls, []);
+  assert.equal(h.records.get(id).status, 'waiting_permission');
+  assert.equal(Object.values(h.records.get(id).operations)[0].status, 'not_dispatched');
+  await h.runtime.close();
+});
 test('queue capacity keeps the overflowing event and cursor durably until explicit resume',async()=>{
  const h=setup(async()=>({status:'waiting'})),{id}=await h.runtime.start(spec,owner);
  for(let i=0;i<201;i++)assert((await h.runtime.enqueue(id,{key:'event-'+i,text:'pending'})).ok);

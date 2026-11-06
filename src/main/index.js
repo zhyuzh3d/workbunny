@@ -206,7 +206,6 @@ let watchDesktop = null, contacts = null, agent = null;
 let pendingTaskPermission = null;
 let secretary = null, autonomy = null, ownerSecurity = null, dialogueChannels = null;
 let taskNotifications = null, alertDesktop = null, notificationTimer = null;
-let delegationMonitor = null;
 let currentRecall = [];
 const taskReports = [];
 let taskReportTimer = null;
@@ -453,6 +452,9 @@ function createWindow() {
   win.setAlwaysOnTop(true, 'screen-saver', 1);
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setIgnoreMouseEvents(true, { forward: true });
+  const petWindow = win;
+  win.on('show', () => { if (win === petWindow) send('pet-visibility', { visible: true }); });
+  win.on('hide', () => { if (win === petWindow) send('pet-visibility', { visible: false }); });
 
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
@@ -1167,13 +1169,13 @@ async function refreshSupervision() {
   if (supervisionBusy || !monitor || storageBusy || screenLocked || !memory?.ready || !config.load().monitor.enabled) return;
   supervisionBusy = true;
   try {
-    const epoch = memory.generation, scene = currentScene(), sources = [monitor, delegationMonitor].filter(Boolean);
-    const all = [];
-    for (const source of sources) { const scoped = await scopedWork(source.view); all.push(...(scoped.view.running || []), ...(scoped.view.done || [])); }
-    if (epoch !== memory.generation || scene !== currentScene()) return;
-    const unique = [...new Map(all.map(row => [taskSupervision.key(row), row])).values()]; taskSupervision.observe(unique);
+    const epoch = memory.generation, scene = currentScene(), source = monitor;
+    const { view } = await scopedWork(source.view);
+    if (source !== monitor || epoch !== memory.generation || scene !== currentScene() || !config.load().monitor.enabled) return;
+    const tasks = [...view.running, ...view.done];
+    taskSupervision.observe(tasks);
     if (typeof taskNotifications !== 'undefined' && taskNotifications) {
-      for (const row of unique) {
+      for (const row of tasks) {
         if (row.task?.status === 'ok' || row.task?.status === 'running' && Date.now() - row.lastEventAt < 20000 && !row.task.waitingForUser && !(row.task.consecutiveFailures >= 3)) {
           await taskNotifications.enqueue({ target: 'workbuddy', taskId: row.task.bunnyTaskId || taskSupervision.key(row), status: 'resolved', scene, epoch });
         }
@@ -1264,20 +1266,21 @@ async function scopedWork(input) {
   }
   return scopedMonitorContext(view, { scene, taskScopes, bootAt: BOOT_AT, ready: epoch === contextEpoch });
 }
-function startMonitor() {
-  if (storageBusy) return;
-  const c = config.load();
-  if (monitor) monitor.stop();
-  monitor = new Monitor();
+function monitoredSessions() {
+  return [...(monitor?.sessions.values() || [])].map(entry => entry.snap);
+}
 
-  const source = monitor;
-  monitor.on('sourceMessage', event => {
+function ensureMonitor() {
+  if (monitor) return monitor;
+  const source = monitor = new Monitor();
+  const passive = () => source === monitor && source.enabled && config.load().monitor.enabled && !storageBusy && !quitting;
+  source.on('sourceMessage', event => {
     const privacyEpoch = memory?.generation;
     void (async () => {
-      if (!memory?.ready || !config.load().memory.enabled || screenLocked) return;
+      if (!passive() || !memory?.ready || !config.load().memory.enabled || screenLocked) return;
       // Scope is obtained from durable Bunny tasks, never from the message text.
       const scoped = await scopedWork(event.snap);
-      if (!scoped.view.primary || privacyEpoch !== memory.generation) return;
+      if (!scoped.view.primary || !passive() || privacyEpoch !== memory.generation) return;
       const taskId = event.snap.task?.bunnyTaskId;
       let scope = { domain: 'work', visibilityFloor: 0 }, sources = [];
       if (taskId) {
@@ -1285,6 +1288,7 @@ function startMonitor() {
         if (!stored) return;
         scope = scopePolicy.scopeOf(memory.decode(stored)); sources = [taskId];
       }
+      if (!passive() || screenLocked || privacyEpoch !== memory.generation) return;
       await memory.addMessageOnce('workbuddy-event:' + event.id, 'user', event.content, {
         characterId: 'workbuddy', characterName: 'WorkBuddy', channel: 'workbuddy', channelId:'local', conversationId: event.snap.sessionId,
         taskId: taskId || String(event.snap.task?.messageKey || event.snap.task?.id || ''), originalRole: event.role,
@@ -1292,55 +1296,67 @@ function startMonitor() {
       });
     })().catch(() => log('[memory] WorkBuddy 原始消息未保存，未写入不完整文本'));
   });
-  monitor.on('update', async (v) => {
+  source.on('update', async view => {
+    if (!passive()) return;
     const token = ++monitorUpdateToken;
-    // 单会话事件（assistant 说话/工具调用）传进来的是 snap，汇总视图从 monitor 现取
-    const rawView = v && v.running ? v : source.view;
-    const scoped = await scopedWork(rawView).catch(() => scopedMonitorContext(null, { scene: currentScene() }));
-    if (token !== monitorUpdateToken || source !== monitor) return;
+    const scoped = await scopedWork(view).catch(() => scopedMonitorContext(null, { scene: currentScene() }));
+    if (token !== monitorUpdateToken || !passive()) return;
     monitorScoped = scoped;
-    const view = scoped.view;
-    if (view.primary) lastWorkSeenAt = Date.now();
-    const snapshot = snapshotForUi(view);
-    send('monitor', snapshot);
-    const panel = panels.get('desktop');
-    if (panel && !panel.isDestroyed()) panel.webContents.send('pet:ev', {
-      type: 'monitor', phase: snapshot?.phase, runningCount: snapshot?.runningCount, tasks: snapshot?.tasks || [],
-    });
-    // 状态映射到动作（只在空闲态跟随，避免打断正在播的动作）
-    if (view && view.running && view.running.length) send('phase', { phase: 'work' });
-    else if (view && view.primary && view.primary.phase === 'done') send('phase', { phase: 'done' });
-    else send('phase', { phase: 'idle' });
+    publishMonitorView(scoped.view);
   });
 
-  monitor.on('taskStart', async s => {
-    if (!(await scopedWork(s)).view?.primary) return;
+  source.on('taskStart', async s => {
+    if (!passive() || !(await scopedWork(s)).view.primary || !passive()) return;
     const now = Date.now();
     // 歇了半小时以上再开工 → 连续工作时间重新算
     if (!workSpanStart || now - lastWorkSeenAt > 30 * 60e3) workSpanStart = now;
     lastWorkSeenAt = now;
   });
 
-  monitor.on('taskDone', async (s) => {
+  source.on('taskDone', async s => {
     // Secretary verifies and reports its own handoffs; don't announce completion twice.
-    if (s.task?.bunnyTaskId) return;
-    if (!(await scopedWork(s)).view?.primary) return;
+    if (s.task?.bunnyTaskId || !passive() || !(await scopedWork(s)).view.primary || !passive()) return;
     const now = Date.now();
     if (!workSpanStart) workSpanStart = now;
     void proactive();
   });
 
-  monitor.on('taskLong', ({ snap, elapsedMs, round }) => {
-    proactive('taskLong', { snap, note: Math.round(elapsedMs / 60000) + 'min#' + round });
-  });
+  source.on('taskLong', () => { if (passive()) void proactive(); });
+  source.on('taskStall', () => { if (passive()) void proactive(); });
+  return source;
+}
 
-  monitor.on('taskStall', ({ snap, idleMs }) => {
-    proactive('taskStall', { snap, note: Math.round(idleMs / 60000) + 'min 无动静' });
+function publishMonitorView(view) {
+  if (view.primary) lastWorkSeenAt = Date.now();
+  const snapshot = snapshotForUi(view);
+  send('monitor', snapshot);
+  const panel = panels.get('desktop');
+  if (panel && !panel.isDestroyed()) panel.webContents.send('pet:ev', {
+    type: 'monitor', phase: snapshot.phase, runningCount: snapshot.runningCount, tasks: snapshot.tasks,
   });
+  send('phase', { phase: view.running.length ? 'work' : view.primary?.phase === 'done' ? 'done' : 'idle' });
+}
 
-  if (c.monitor.enabled) monitor.start(c.monitor.root);
+function startMonitor() {
+  if (storageBusy || quitting) return;
+  const source = ensureMonitor(), settings = config.load().monitor;
+  const delegating = desktop?.running && desktop.task?.target === 'workbuddy';
+  if (settings.enabled || delegating) {
+    if (!source.enabled || source.root !== settings.root) void source.start(settings.root).catch(() => log('[monitor] 会话扫描暂未完成'));
+    else if (settings.enabled) { source.lastSig = ''; source.publish(); }
+  } else {
+    source.stop();
+  }
   clearInterval(supervisionTimer);
-  supervisionTimer = setInterval(() => void refreshSupervision(), 10000); supervisionTimer.unref?.();
+  supervisionTimer = null;
+  if (settings.enabled) {
+    supervisionTimer = setInterval(() => void refreshSupervision(), 10000);
+    supervisionTimer.unref?.();
+  } else {
+    monitorUpdateToken++;
+    monitorScoped = scopedMonitorContext(null, { scene: currentScene() });
+    publishMonitorView(monitorScoped.view);
+  }
 }
 
 /* 汇总视图 → 给界面的扁平结构。
@@ -1729,7 +1745,7 @@ function clearTaskView() {
   if (!desktop) return;
   desktop.task = null; desktop.screenshot = null;
   desktop.emit(desktop.publicStatus());
-  delegationMonitor?.stop(); delegationMonitor = null;
+  if (!config.load().monitor.enabled) monitor?.stop();
 }
 async function ensureSelfRole() {
   const buddy = config.load().buddy;
@@ -1956,14 +1972,12 @@ async function stopDesktopActivity(id){
   await taskNotifications?.cancelTask(id);return {ok:true};
 }
 async function stopWorkBuddy(physical){
-  const sources=[monitor,delegationMonitor].filter(Boolean);
-  const matches=sources.flatMap(source=>[...source.sessions.values()].map(e=>e.snap)).filter(s=>s.task?.bunnyTaskId===physical.id&&(!physical.monitorSessionId||s.sessionId===physical.monitorSessionId));
-  const unique=[...new Map(matches.map(s=>[s.sessionId,s])).values()];
-  if(unique.length!==1){
+  const matches=monitoredSessions().filter(s=>s.task?.bunnyTaskId===physical.id&&(!physical.monitorSessionId||s.sessionId===physical.monitorSessionId));
+  if(matches.length!==1){
     if(['accepted','review'].includes(physical.status))return {ok:true,verified:true,alreadyEnded:true};
     throw Error('尚未绑定唯一 WorkBuddy 执行轮次，请稍后再次停止核对');
   }
-  const snap=unique[0];return workBuddyStopper.stop({sessionId:snap.sessionId,taskId:snap.task.id,messageKey:snap.task.messageKey,bunnyTaskId:physical.id});
+  const snap=matches[0];return workBuddyStopper.stop({sessionId:snap.sessionId,taskId:snap.task.id,messageKey:snap.task.messageKey,bunnyTaskId:physical.id});
 }
 ipcMain.handle('pet:desktop-insert', (e, text) => { trustedCompanion(e, 'desktop'); return desktop.insert(text); });
 ipcMain.handle('pet:interact', async (e, request) => {
@@ -2022,7 +2036,7 @@ ipcMain.handle('pet:init', async () => {
     motions: config.MOTIONS,
     motionGroups: config.MOTION_GROUPS,
     avatar: current, body: embodiment.snapshot(),
-    avatars: list, viewport: windowLayout?.viewport,
+    avatars: list, viewport: windowLayout?.viewport, visible: win?.isVisible() === true,
     monitor: snapshotForUi(monitorScoped.view),
     desktop: desktop?.publicStatus() || null,
     agent: agent?.status() || { tasks: [], skills: [] },
@@ -2497,7 +2511,7 @@ ipcMain.handle('pet:storage-migrate', async e => {
   try {
     const result = await storage.migrate(choice.filePaths[0], { quiesce: async () => {
       storageBusy = true; contextEpoch++; activeThought?.abort(); voiceTurns.reset(); stopListen(); stopSpeaking();
-      autonomy?.pause(); maintenance?.cancel(); monitor?.stop(); delegationMonitor?.stop(); void agent?.invalidate('资料或账号状态发生变化，任务已暂停');
+      autonomy?.pause(); maintenance?.cancel(); monitor?.stop(); monitor = null; void agent?.invalidate('资料或账号状态发生变化，任务已暂停');
       taskNotifications?.invalidate(); await alertDesktop?.stop('迁移资料库，异常微信提醒已暂停');
       await desktop?.stop('迁移资料库，代办已暂停且不会重发');
       await watchDesktop?.stop('迁移资料库');
@@ -2837,9 +2851,9 @@ function runMicProbeAll(sec) {
 }
 
 /* ── 启动 ── */
-require('./workbuddy').configureConnection({ ready: () => {
+require('./workbuddy').configureConnection({ ready: endpoint => {
   if (storageBusy || !connection.status().ready) return false;
-  try { if (connection.identity() !== connection.identityValue) { connection.invalidate('WorkBuddy 登录状态已变化，请重新连接', { identityChanged: true }); return false; } }
+  try { if (connection.identity(endpoint) !== connection.identityValue) { connection.invalidate('WorkBuddy 登录状态已变化，请重新连接', { identityChanged: true }); return false; } }
   catch { connection.invalidate(); return false; }
   return true;
 },
@@ -2855,7 +2869,7 @@ connection.on('change', status => {
     try { require('./model-catalog').invalidate('workbuddy'); } catch { log('[workbuddy] 旧目录缓存清理失败，连接保持暂停'); }
     contextEpoch++; activeThought?.abort(); memory?.cancelExtraction(); maintenance?.cancel(); autonomy?.pause();
     taskNotifications?.invalidate(); void alertDesktop?.stop('WorkBuddy 授权会话已变化，异常提醒已暂停').catch(() => {});
-    monitor?.stop(); delegationMonitor?.stop(); monitorScoped = scopedMonitorContext(null, { scene: currentScene() });
+    monitor?.stop(); monitor = null; monitorScoped = scopedMonitorContext(null, { scene: currentScene() });
     void desktop?.stop('WorkBuddy 连接变化，已暂停，未重发任务').catch(() => {});
     void agent?.invalidate('资料或账号状态发生变化，任务已暂停'); send('monitor', snapshotForUi(monitorScoped.view));
   } else if (connectionWasReady && !status.ready) {
@@ -2930,20 +2944,18 @@ if (!lock) {
       if (status.running&&!taskUiInteractive) setInteractive(false);
       send('desktop', status);
       secretary?.onStatus(status);
-      if (['accepted', 'paused', 'stopped', 'cancelled'].includes(status.task?.status)) { delegationMonitor?.stop(); delegationMonitor = null; }
+      if (!config.load().monitor.enabled && ['accepted', 'paused', 'stopped', 'cancelled'].includes(status.task?.status)) monitor?.stop();
       for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'desktop', ...status });
-    }, imageResize, imageCrop, bitmap:imageBitmap, observeWorkBuddy: task => {
-      let source = monitor?.enabled ? monitor : delegationMonitor;
-      if (!source) {
-        source = delegationMonitor = new Monitor();
-        source.start(config.load().monitor.root);
-      }
+    }, imageResize, imageCrop, bitmap:imageBitmap, observeWorkBuddy: async task => {
+      const source = ensureMonitor(), { root } = config.load().monitor;
+      if (!source.enabled || source.root !== root) await source.start(root);
+      if (source !== monitor || !source.enabled) return null;
       return observeWorkBuddy(source, task);
     }, persist: createTaskJournal(memory) });
     const readyForOwner = () => !quitting && !storageBusy && !screenLocked && !!memory?.ready;
     workBuddyStopper=new (require('./workbuddy-stop').WorkBuddyStopper)({native:desktop.native,lease:guiLease,
-      lookup:target=>[monitor,delegationMonitor].filter(Boolean).flatMap(m=>[...m.sessions.values()].map(e=>e.snap)).find(s=>s.sessionId===target.sessionId&&s.task?.id===target.taskId),
-      confirmed:target=>{for(const m of [monitor,delegationMonitor].filter(Boolean))if([...m.sessions.values()].some(e=>e.snap.sessionId===target.sessionId&&e.snap.task?.id===target.taskId))m.confirmStopped(target.sessionId,target.taskId,target.messageKey);}});
+      lookup:target=>monitoredSessions().find(s=>s.sessionId===target.sessionId&&s.task?.id===target.taskId),
+      confirmed:target=>monitor?.confirmStopped(target.sessionId,target.taskId,target.messageKey)});
     const readyForTasks = () => readyForOwner() && connection.status().ready && connection.status().tasks?.status !== 'unavailable';
     desktop.strategies = new (require('./interaction-strategy').InteractionStrategy)(memory, currentScene);
     contacts = new ContactDirectory({ read: ({ scene }) => memory.serial(async () => {
@@ -3380,7 +3392,7 @@ app.on('before-quit', event => {
   for (const controller of avatarDescriptionPending.values()) controller.abort();
   clearInterval(maintenanceTimer); clearInterval(supervisionTimer); clearInterval(notificationTimer); clearTimeout(positionSaveTimer);
   quitting = true;
-  autonomy?.pause(); secretary?.close(); void taskNotifications?.close(); clearTimeout(taskReportTimer); delegationMonitor?.stop();
+  autonomy?.pause(); secretary?.close(); void taskNotifications?.close(); clearTimeout(taskReportTimer);
   vaultKeyAbort?.abort();
   sessionGate?.close();
   markCleanExit();

@@ -10,7 +10,7 @@ fs.rmSync(stage,{recursive:true,force:true});fs.mkdirSync(stage,{recursive:true}
 // Use the reviewed Git inventory; ignored/local experiments are never swept in.
 const maintained=cp.execFileSync('git',['ls-files','-z','--','tools','test','native','docs','licenses','.github','examples'],{cwd:root,encoding:'utf8'}).split('\0').filter(Boolean);
 for(const p of maintained)if(/\.(js|cjs|mjs|py|sh|command|swift|json|md|txt|html|css)$/.test(p))files.add(p);
-for(const p of ['README.md','res/README.md','package-lock.json','resources-manifest.json','.gitignore'])files.add(p);
+for(const p of ['README.md','docs/images/readme-hero.webp','res/README.md','package-lock.json','resources-manifest.json','.gitignore'])files.add(p);
 const inventory=[];
 for(const p of [...files].sort()){
  const source=path.join(root,p),out=path.join(stage,p),st=fs.lstatSync(source);
@@ -21,5 +21,5 @@ for(const p of [...files].sort()){
 for(const a of built.privateAssets||[])if(fs.existsSync(path.join(stage,a.path)))throw Error('Withheld asset entered source: '+a.path);
 if(fs.existsSync(path.join(stage,'src/renderer/assets/models/58.vrm')))throw Error('Personal model entered source');
 fs.writeFileSync(path.join(stage,'SOURCE-INVENTORY.json'),JSON.stringify({version,sourceCommit:built.sourceCommit,sourceDirty:built.sourceDirty,files:inventory,gitHistoryIncluded:false,personalDataIncluded:false},null,2)+'\n');
-cp.execFileSync('/usr/bin/ditto',['-c','-k','--keepParent',stage,archive]);
+cp.execFileSync('/usr/bin/python3',['-m','zipfile','-c',archive,stage]);
 console.log(JSON.stringify({archive:path.relative(root,archive),files:inventory.length}));

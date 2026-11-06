@@ -78,7 +78,7 @@ class SoftAppendageRig {
   this.ikTarget=new T.Vector3();this.ikRoot=new T.Vector3();this.ikWork=new T.Vector3();this.ikPrev=new T.Vector3();
   this.ikSource=Array.from({length:this.segments},()=>new T.Vector3());this.ikAxis=new T.Vector3();this.ikTangent=new T.Vector3();this.ikDesired=new T.Vector3();this.ikParent=new T.Vector3();
   // Frequency and damping ratio fall from the firm root toward the softer tip.
-  this.jointTuning=[null,{hz:5.5,damping:.88,maxAngle:.22,drive:.18},{hz:3.1,damping:.55,maxAngle:.50,drive:.48},{hz:1.9,damping:.40,maxAngle:.70,drive:.82}];
+  this.jointTuning=[null,{hz:6.5,damping:.95,maxAngle:.17,drive:.14},{hz:3.1,damping:.55,maxAngle:.50,drive:.48},{hz:1.9,damping:.40,maxAngle:.70,drive:.82}];
   this.groupQ=new T.Quaternion();this.parentQ=new T.Quaternion();this.worldQ=new T.Quaternion();this.earTwist=new T.Quaternion();
   // Draw the actual bone origins and links as an x-ray overlay so the rig can
   // be inspected through the single opaque skinned surface.

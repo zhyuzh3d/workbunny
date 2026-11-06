@@ -2,7 +2,8 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { VaultDB } = require('./vault-db');
+const { VaultDB, VAULT_PAGE_SIZE } = require('./vault-db');
+const { TASK_MARKER } = require('./agent-journal');
 const vc = require('./vault-crypto');
 const { timeContext, elapsedLabel } = require('./companion-time');
 const scopes = require('./memory-scope');
@@ -87,9 +88,9 @@ function topologicalRestoreOrder(records) {
   let count = 0;
   while (ready.length) {
     // All rows in this wave depend only on earlier waves, so native's
-    // pre-insert FK check succeeds for every 200-row write batch.
-    for (let offset = 0; offset < ready.length; offset += 200)
-      batches.push(ready.slice(offset, offset + 200).map(index => records[index]));
+    // pre-insert FK check succeeds for each bounded write batch.
+    for (let offset = 0; offset < ready.length; offset += VAULT_PAGE_SIZE)
+      batches.push(ready.slice(offset, offset + VAULT_PAGE_SIZE).map(index => records[index]));
     count += ready.length;
     const next = [];
     for (const parent of ready) {
@@ -220,6 +221,7 @@ class MemoryService {
         (record.kind === 'task' && record.value.taskType === 'contact' ? 'bunny_contact_anchor ' : '') + knowledge.markersOf(record).join(' ') + ' ' +
         require('./experience-repository').markers(record).join(' ') + ' ' +
         (record.kind === 'task' && record.value.taskType === 'agent-skill' ? 'bunny_agent_skill ' : '') +
+        (record.kind === 'task' && record.value.taskType === 'agent-task' ? TASK_MARKER + ' ' : '') +
         (record.kind === 'task' && record.value.schema === 'task-notification/v1' ? 'bunny_task_notification_anchor ' : '') +
         (record.kind === 'task' && record.value.schema === 'interaction-strategy/v1' && record.value.outcome === 'failed' ? 'bunny_interaction_failed_anchor ' : '') +
         (record.kind === 'message' && !actors.isOwner(record.value) && !actors.isBunny(record.value) ? 'bunny_external_message ' : '') +
@@ -256,22 +258,27 @@ class MemoryService {
       await this.onChange({ type: 'memory-changed' });
     } catch { /* Refresh notifications must not affect committed writes. */ }
   }
-  async write(records, epoch = this.epoch, { notify = true, restoreSequence = false } = {}) {
+  async write(records, epoch = this.epoch, { notify = true, restoreSequence = false, strictSources = false } = {}) {
     const needed = [...new Set(records.flatMap(r => r.value.sources || []))], parents = new Map();
-    for (let i = 0; i < needed.length; i += 200) {
-      const found = await this.db.request('get', { ids: needed.slice(i, i + 200) });
+    // Each row can carry up to 2 MiB of ciphertext. Keep native responses
+    // below the framing limit even when one task depends on large records.
+    for (let i = 0; i < needed.length; i += VAULT_PAGE_SIZE) {
+      const found = await this.db.request('get', { ids: needed.slice(i, i + VAULT_PAGE_SIZE) });
       for (const r of found.rows) parents.set(r.id, this.decode(r));
     }
     for (const r of records) {
       const sources = (r.value.sources || []).map(source => {
-        if (!parents.has(source)) throw new Error('资料来源已删除或不存在');
-        return parents.get(source);
+        const parent = parents.get(source);
+        if (!parent || strictSources && parent.state !== 'active') throw new Error('资料来源已删除或不存在');
+        return parent;
       });
       if(['memory','summary'].includes(r.kind)&&!r.value.perception){const perception=require('./perception').derived(r.kind,r.value.origin,sources);if(perception)r.value={...r.value,perception};}
       if(!r.value.channelId&&['memory','summary'].includes(r.kind)){const evidence=sources.find(source=>source.id===r.value.evidenceSourceId);const channel=evidence?.value.channelId||(sources.length&&sources.every(source=>source.value.channelId===sources[0].value.channelId)?sources[0].value.channelId:null);if(channel)r.value={...r.value,channelId:channel};}
       if(sources.some(source=>source.value.ownerOnly===true))r.value={...r.value,ownerOnly:true};
       const domain = r.domain ?? r.value.domain ?? this.scene();
-      Object.assign(r, scopes.withSources(domain, sources, r.visibilityFloor ?? r.value.visibilityFloor));
+      const scope = scopes.withSources(domain, sources, r.visibilityFloor ?? r.value.visibilityFloor);
+      if (strictSources && scope.visibilityFloor !== r.visibilityFloor) throw new Error('任务来源的可见范围高于当前授权');
+      Object.assign(r, scope);
     }
     const result = await this.db.request('write', { epoch, ...(restoreSequence ? { restoreSequence: true } : {}), records: records.map(r => this.encode(r, restoreSequence)) });
     this.epoch = result.epoch;
@@ -285,8 +292,8 @@ class MemoryService {
   async query(kind, limit = 50, cursor = {}) {
     this.check(); const { channelId, ownerOnly, requiredMarkers: requestedMarkers, excludedMarkers: requestedExcluded, ...nativeCursor } = cursor; const requiredMarkers=[...(requestedMarkers||[]),...(channelId?[require('./dialogue-channels').marker(channelId)]:[]),...(ownerOnly===true?['bunny_owner_only']:[])];const excludedMarkers=[...(requestedExcluded||[]),...(ownerOnly===false?['bunny_owner_only']:[])];
     return (await this.db.request('query', { kind, limit, scene: this.scene(), ...nativeCursor,
-      ...(requiredMarkers ? { requiredTokens: this.markerTokens(requiredMarkers) } : {}),
-      ...(excludedMarkers ? { excludedTokens: this.markerTokens(excludedMarkers) } : {}) })).rows.map(r => this.decode(r));
+      ...(requiredMarkers.length ? { requiredTokens: this.markerTokens(requiredMarkers) } : {}),
+      ...(excludedMarkers.length ? { excludedTokens: this.markerTokens(excludedMarkers) } : {}) })).rows.map(r => this.decode(r));
   }
   async sensitiveValues() {
     // Protect known owner-provided values even when their originating scene is
@@ -306,6 +313,7 @@ class MemoryService {
   async search(text, kinds = ['memory', 'summary', 'message'], limit = 30, { scene = this.scene(), domain, visibilityFloor, requiredMarkers, excludedMarkers, anyTokens } = {}) {
     this.check();
     limit = Math.min(50, Math.max(0, Math.floor(Number(limit) || 0)));
+    if (!limit) return [];
     // Ignore common English function words at query time; they are frequent in
     // unrelated memories and add no useful ranking signal.
     const searchableText = vc.terms(text).filter(t => !QUERY_STOPWORDS.has(t)).join(' ');
@@ -317,7 +325,7 @@ class MemoryService {
       ...(requiredMarkers ? { requiredTokens: this.markerTokens(requiredMarkers) } : {}),
       ...(excludedMarkers ? { excludedTokens: this.markerTokens(excludedMarkers) } : {}) };
     const [exact, expanded] = await Promise.all([
-      this.db.request('search', { tokens: exactTokens, kinds, limit: Math.min(50, Math.max(limit, 40)), now: this.clock(), ...scopeFilter }),
+      exactTokens.length ? this.db.request('search', { tokens: exactTokens, kinds, limit: Math.min(50, Math.max(limit, 40)), now: this.clock(), ...scopeFilter }) : Promise.resolve({ rows: [] }),
       synonymTokens.length ? this.db.request('search', { tokens: synonymTokens, kinds, limit: 40, now: this.clock(), ...scopeFilter }) : Promise.resolve({ rows: [] }),
     ]);
     const ranked = new Map();
@@ -1038,7 +1046,7 @@ class MemoryService {
     return this.serial(async () => {
     const rows = []; let cursor = {};
     for (;;) {
-      const page = await this.query(undefined, 200, { ...cursor, state: 'all', scene: null }); if (!page.length) break;
+      const page = await this.query(undefined, VAULT_PAGE_SIZE, { ...cursor, state: 'all', scene: null }); if (!page.length) break;
       rows.push(...page.map(({ body, tokens, score, ...record }) => record));
       if (rows.length > 500000) throw new Error('资料过大，请分阶段导出');
       const last = page.at(-1); cursor = { before: last.ts, beforeId: last.id };

@@ -132,7 +132,7 @@ async function main() {
       win.webContents.sendInputEvent({type:'mouseDown',x:blank.x,y:blank.y,button:'left',clickCount:1});
       win.webContents.sendInputEvent({type:'mouseUp',x:blank.x,y:blank.y,button:'left',clickCount:1});await delay(100);
       assert.equal(requests.length,beforeBlank,'dialogue-only space does not interact with character');
-      assert.equal(hits.at(-1),true,'dialogue-only space still captures mouse instead of passing it to other applications');
+      assert.deepEqual(hits.at(-1), { inside: true, taskUi: false }, 'dialogue space captures the pointer as regular UI');
       const menuStart=menus.length;
       win.webContents.sendInputEvent({type:'mouseDown',x:blank.x,y:blank.y,button:'right',clickCount:1});
       win.webContents.sendInputEvent({type:'mouseUp',x:blank.x,y:blank.y,button:'right',clickCount:1});await delay(100);
@@ -149,7 +149,7 @@ async function main() {
 
     console.log(info.label + ': light=' + info.light + ', crown clicks animate in all 3 sizes');
   }
-  assert(hits.includes(true)); assert.equal(errors.length, 0, errors.join('; '));
+  assert(hits.some(hit => hit.inside)); assert.equal(errors.length, 0, errors.join('; '));
   console.log(`Actual VRM/preload/production IPC passed: ${list.length} avatars, ${requests.length} crown clicks, concrete enabled animation, and per-avatar lighting.`);
 }
 main().then(() => finish(0), error => { console.error(error, errors.join('; ')); finish(1); });

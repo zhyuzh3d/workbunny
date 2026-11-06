@@ -9,9 +9,14 @@ const ordinaryScene=scene=>rank(normalizeScene(scene))>1?'life':normalizeScene(s
 const stale=()=>Object.assign(Error('对话渠道权限已变化，重新组装后继续'),{code:'E_CHANNEL_CHANGED',dispatched:false});
 class DialogueChannels{
  constructor({memory,security:ownerSecurity,getScene=()=> 'life',clock=Date.now,onRevoke=async()=>{},request}={}){
-  Object.assign(this,{memory,security:ownerSecurity,getScene,clock,onRevoke,request});this.channels=new Map();this.compressions=new Map();this.replies=new Map();this.tail=Promise.resolve();
+  Object.assign(this,{memory,security:ownerSecurity,getScene,clock,onRevoke,request});
+  this.channels=new Map();this.compressions=new Map();this.replies=new Map();this.ingestions=new Map();this.writes=new Map();
  }
- serial(fn){const job=this.tail.then(fn);this.tail=job.catch(()=>{});return job;}
+ serial(queue, channelId, fn) {
+  const job = (queue.get(channelId) || Promise.resolve()).catch(() => {}).then(fn);
+  queue.set(channelId, job);
+  return job.finally(() => { if (queue.get(channelId) === job) queue.delete(channelId); });
+ }
  descriptor(subject,identity){
   if(subject.application==='bunny')return {id:LOCAL,application:'bunny',recipient:'owner',account:'local'};
   if(!identity||!Number.isInteger(identity.pid)||!Number.isInteger(identity.windowId))throw Error('渠道缺少任务已经核实的账号会话身份');
@@ -20,7 +25,7 @@ class DialogueChannels{
  }
  async ensure(subject,identity){
   const descriptor=this.descriptor(subject,identity);if(this.channels.has(descriptor.id))return this.channels.get(descriptor.id);
-  return this.serial(async()=>{
+  return this.serial(this.ingestions,descriptor.id,async()=>{
    if(this.channels.has(descriptor.id))return this.channels.get(descriptor.id);
    let saved;
    if(this.memory?.ready){const found=(await this.memory.db.request('get',{ids:['dialogue-channel:'+descriptor.id]})).rows?.[0];if(found)saved=this.memory.decode(found).value;}
@@ -35,32 +40,58 @@ class DialogueChannels{
    // reply references are already process-local; bumping here strands durable
    // task return routes even though the exact same grant remains valid.
    if(!saved)channel.revision++;
-   this.channels.set(channel.id,channel);await this.save(channel);return channel;
+   await this.save(channel);this.channels.set(channel.id,channel);return channel;
   });
  }
- async save(channel){if(this.memory?.ready)await this.memory.write([{id:'dialogue-channel:'+channel.id,kind:'state',ts:0,updatedAt:this.clock(),domain:'private',visibilityFloor:2,value:{...channel,origin:'dialogue-channel-v1',sources:[]}}]);}
+ channelRecord(channel) {
+  return { id:'dialogue-channel:'+channel.id, kind:'state', ts:0, updatedAt:this.clock(), domain:'private', visibilityFloor:2,
+   value:{...channel,origin:'dialogue-channel-v1',sources:[]} };
+ }
+ save(channel) {
+  return this.serial(this.writes, channel.id, async () => {
+   if(this.memory?.ready)await this.memory.write([this.channelRecord(channel)]);
+  });
+ }
  snapshot(channel){
   if(channel.id===LOCAL)return {channelId:LOCAL,owner:true,scene:normalizeScene(this.getScene()),revision:channel.revision,keyVersion:this.security?.version||0,expiresAt:null};
   const grant=channel.grant,owner=!!this.security?.enabled&&!!this.security.key&&!!grant&&grant.keyVersion===this.security.version&&grant.expiresAt>this.clock();
   return {channelId:channel.id,account:channel.account,owner,scene:owner?normalizeScene(channel.scene,this.getScene()):ordinaryScene(this.getScene()),revision:channel.revision,keyVersion:this.security?.version||0,expiresAt:owner?grant.expiresAt:null};
  }
- current(snapshot){const channel=this.channels.get(snapshot?.channelId);if(!channel)return false;const now=this.snapshot(channel);return ['owner','scene','revision','keyVersion'].every(k=>now[k]===snapshot[k])&&now.expiresAt===snapshot.expiresAt;}
+ current(snapshot){const channel=this.channels.get(snapshot?.channelId);if(!channel)return false;const now=this.snapshot(channel);return ['account','owner','scene','revision','keyVersion','expiresAt'].every(k=>now[k]===snapshot[k]);}
  assert(snapshot){if(!this.current(snapshot))throw stale();}
  async revokeAll(){
   // Invalidate all in-memory versions before awaiting a journal or a GUI lease.
-  const channels=[...this.channels.values()];for(const channel of channels){channel.grant=null;channel.scene=null;channel.revision++;}this.replies.clear();
-  await this.onRevoke(channels.map(c=>c.id));for(const channel of channels)await this.save(channel);
+  const channels=[...this.channels.values()];for(const channel of channels)this.invalidate(channel);this.replies.clear();
+  await Promise.all([this.onRevoke(channels.map(c=>c.id)), ...channels.map(channel => this.save(channel))]);
  }
- async revoke(channel){channel.grant=null;channel.scene=null;channel.revision++;for(const [id,entry]of this.replies)if(entry.channelId===channel.id)this.replies.delete(id);await this.onRevoke([channel.id]);await this.save(channel);}
- async setScene(channel,scene){if(!this.snapshot(channel).owner)throw Error('只有主人渠道可以切换场景');rank(scene);channel.scene=scene;channel.revision++;await this.save(channel);return this.snapshot(channel);}
- async ingest(channel,eventKey,messages,{signal}={}){return this.serial(async()=>{
+ invalidate(channel) { channel.grant=null;channel.scene=null;channel.revision++; }
+ async revoke(channel){
+  this.invalidate(channel);
+  for(const [id,entry]of this.replies)if(entry.channelId===channel.id)this.replies.delete(id);
+  await Promise.all([this.onRevoke([channel.id]), this.save(channel)]);
+ }
+ async setScene(channel, scene) {
+  return this.serial(this.ingestions, channel.id, async () => {
+   const before = this.snapshot(channel);
+   if (!before.owner) throw Error('只有主人渠道可以切换场景');
+   rank(scene);
+   const changed = { ...channel, scene, revision: channel.revision + 1 };
+   await this.save(changed);
+   this.assert(before);
+   Object.assign(channel, changed);
+   return this.snapshot(channel);
+  });
+ }
+ async ingest(channel,eventKey,messages,{signal}={}){return this.serial(this.ingestions,channel.id,async()=>{
   const eventId=hash(channel.id+'\0'+eventKey),receiptId='dialogue-event:'+eventId;
   if(this.memory?.ready){const row=(await this.memory.db.request('get',{ids:[receiptId]})).rows?.[0];if(row){const record=this.memory.decode(row),snapshot=this.snapshot(channel);return {duplicate:true,...record.value,...(record.visibilityFloor>rank(snapshot.scene)||record.value.ownerOnly&&!snapshot.owner?{messages:[],expired:true}:{}),snapshot};}}
   if(channel.seen.includes(eventId))return {duplicate:true,snapshot:this.snapshot(channel),messages:[]};
   const verified=messages.filter(m=>m.kind==='text'&&(m.incomingVerified||m.observedVerified));
-  let authenticate=false,authenticationMethod;const keyVersion=this.security?.version;
-  for(const message of verified){
-   if(!this.security?.enabled)break;
+  const before=this.snapshot(channel);
+  const validProof=()=>!signal?.aborted&&this.current(before);
+  let authenticationIndex=-1,authenticationMethod;
+  for(const [index,message] of verified.entries()){
+   if(!this.security?.enabled||!validProof())break;
    if(message.origin==='bunny'||message.actualNew===false)continue;
    let candidate=this.security?.candidate?.(message.text)||(this.security?.matches(message.text)?{score:1,text:this.security.key}:null);
    if(!candidate)continue;
@@ -69,27 +100,44 @@ class DialogueChannels{
     if(this.readInput){const literal=await this.readInput(message,{channel,expected:this.security.key,signal});if(!literal?.complete)continue;actual=literal.text;candidate=this.security.candidate?.(actual)||(this.security.matches(actual)?{score:1,text:this.security.key}:null);exact=!!candidate&&candidate.score===1;}
     else exact=await this.verifyInput?.(message,{channel,expected:this.security.key,signal})===true;
    }catch(error){if(signal?.aborted)throw error;continue;}
-   if(!candidate||keyVersion!==this.security.version||signal?.aborted)continue;
-   if(exact&&this.security.matches(actual)){authenticate=true;authenticationMethod='exact';break;}
+   if(!candidate||!validProof())continue;
+   if(exact&&this.security.matches(actual)){authenticationIndex=index;authenticationMethod='exact';break;}
    if(candidate.score>.6&&candidate.score<1){
     let decision;try{decision=await this.reviewIdentityCandidate({channel,message:{...message,text:actual},candidate,signal});}catch(error){if(signal?.aborted)throw error;}
-    if(decision?.approve===true&&keyVersion===this.security.version&&!signal?.aborted){this.security.protectedValues?.add(candidate.text);authenticate=true;authenticationMethod='bunny-judgment';break;}
+    if(decision?.approve===true&&validProof()){this.security.protectedValues?.add(candidate.text);authenticationIndex=index;authenticationMethod='bunny-judgment';break;}
    }
   }
-  if(authenticate){channel.grant={keyVersion:this.security.version,expiresAt:this.clock()+3600000};channel.scene=normalizeScene(this.getScene());channel.revision++;}
-  const snapshot=this.snapshot(channel),ids=[],clean=[];
+  const priorGrantStart=before.owner&&validProof()?before.expiresAt-3600000:null;
+  const authenticate=authenticationIndex>=0&&validProof();
+  const original = this.snapshot(channel);
+  const staged = authenticate ? { ...channel, grant:{keyVersion:this.security.version,expiresAt:this.clock()+3600000},
+   scene:normalizeScene(this.getScene()), revision:channel.revision+1 } : { ...channel };
+  const snapshot=this.snapshot(staged),ids=[],clean=[];
+  const assertCurrent = () => { if (signal?.aborted) throw signal.reason || stale(); this.assert(original); };
   for(let i=0;i<verified.length;i++){
-   const message=verified[i],content=security.redact(message.text).replace(/^\*{8}$/u,'[identity verified]'),characterId=message.characterId||'contact:'+hash(channel.id),id='dialogue-in:'+eventId+':'+i;
+   assertCurrent();
+   const message=verified[i],redacted=security.redact(message.text),content=redacted.trim()==='********'?'[identity verified]':redacted;
+   const characterId=message.characterId||'contact:'+hash(channel.id),id='dialogue-in:'+eventId+':'+i;
    const characterName=message.characterName||message.sender||channel.recipient;
+   const observedUnderGrant=priorGrantStart!==null&&(Number.isFinite(message.observedAt)?message.observedAt>=priorGrantStart:!message.visualEvidence);
+   const ownerInput=snapshot.owner&&(observedUnderGrant||authenticate&&i>=authenticationIndex)&&message.actualNew!==false&&message.origin!=='bunny';
    if(this.memory?.ready){
-    const result=await this.memory.addMessageOnce(id,'user',content,{scene:snapshot.scene,channel:channel.application,channelId:channel.id,conversationId:channel.id,characterId,characterName,verifiedOwner:snapshot.owner,ownerOnly:snapshot.owner,allowSensitive:true,perception:message.perception});
+    const result=await this.memory.addMessageOnce(id,'user',content,{scene:ownerInput?snapshot.scene:ordinaryScene(this.getScene()),channel:channel.application,channelId:channel.id,conversationId:channel.id,characterId,characterName,verifiedOwner:ownerInput,ownerOnly:ownerInput,allowSensitive:true,perception:message.perception});
     if(!result?.record)throw Error('渠道消息未能保存');ids.push(id);
    }
-   clean.push({...message,text:content,characterId,characterName});
+   clean.push({...message,text:content,characterId,characterName,ownerInput});
   }
-  channel.seen=[...channel.seen,eventId].slice(-128);await this.save(channel);
-  if(this.memory?.ready)await this.memory.write([{id:receiptId,kind:'state',ts:this.clock(),domain:snapshot.scene,visibilityFloor:rank(snapshot.scene),value:{origin:'dialogue-event-v1',ownerOnly:snapshot.owner,channelId:channel.id,messages:clean,sourceIds:ids,sources:ids,authenticated:authenticate}}]);
-  return {snapshot,messages:clean,sourceIds:ids,authenticated:authenticate,...(authenticate?{authenticationMethod}:{})};
+  assertCurrent();
+  staged.seen=[...channel.seen,eventId].slice(-128);
+  const received={messages:clean,sourceIds:ids,authenticated:authenticate,...(snapshot.owner?{ownerRevision:snapshot.revision}:{}),...(authenticate?{authenticationMethod}:{})};
+  await this.serial(this.writes, channel.id, async () => {
+   assertCurrent();
+   if(this.memory?.ready)await this.memory.write([this.channelRecord(staged),
+    {id:receiptId,kind:'state',ts:this.clock(),domain:snapshot.scene,visibilityFloor:rank(snapshot.scene),value:{origin:'dialogue-event-v1',ownerOnly:snapshot.owner,channelId:channel.id,sources:ids,...received}}]);
+   this.assert(original);
+   Object.assign(channel, staged);
+  });
+  return {...received,snapshot};
  });}
  async reviewIdentityCandidate({channel,message,candidate,signal}){
   return require('./judgment').reviewEvidence({signal,request:this.request,

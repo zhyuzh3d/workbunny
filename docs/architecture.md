@@ -1,6 +1,6 @@
 # WorkBunny 架构设计
 
-代码基线：0.24.23；核对日期：2026-11-05。本文描述当前运行结构，并明确保留的边界。产品要求见[产品需求](product-requirements.md)，对应图示见[FLOW](flows.md)。
+本文对应 0.25.0 早期 Beta，核对日期为 2026-11-06。另见[产品需求](product-requirements.md)与[执行流程](flows.md)。
 
 ## 1. 分层与依赖
 
@@ -18,12 +18,12 @@ WorkBunny 使用 Electron 主进程、隔离的 renderer/preload 和 Swift 原�
 | 摘要与统一后台整理 | [`context-compression.js`](../src/main/context-compression.js)、[`memory-maintenance.js`](../src/main/memory-maintenance.js)、[`task-experience-maintenance.js`](../src/main/task-experience-maintenance.js) |
 | 经验与资源包 | [`experience-repository.js`](../src/main/experience-repository.js)、[`experience-pack.js`](../src/main/experience-pack.js)、[`resource-zip.js`](../src/main/resource-zip.js)、[`agent-learning.js`](../src/main/agent-learning.js) |
 | 任务编排与持久化 | [`agent-service.js`](../src/main/agent-service.js)、[`agent-runtime.js`](../src/main/agent-runtime.js)、[`agent-contract.js`](../src/main/agent-contract.js)、[`agent-journal.js`](../src/main/agent-journal.js) |
-| 动作、进度、恢复与保活 | [`action-lifecycle.js`](../src/main/action-lifecycle.js)、[`action-progress.js`](../src/main/action-progress.js)、[`self-repair.js`](../src/main/self-repair.js)、[`task-keepalive.js`](../src/main/task-keepalive.js) |
+| 动作、操作账本、恢复与保活 | [`action-lifecycle.js`](../src/main/action-lifecycle.js)、[`operation-ledger.js`](../src/main/operation-ledger.js)、[`action-progress.js`](../src/main/action-progress.js)、[`self-repair.js`](../src/main/self-repair.js)、[`task-keepalive.js`](../src/main/task-keepalive.js) |
 | 动态上下文 | [`context-assembler.js`](../src/main/context-assembler.js)、[`conversation-recall.js`](../src/main/conversation-recall.js)、[`context-budget.js`](../src/main/context-budget.js) |
 | 桌面执行与资源 | [`desktop-service.js`](../src/main/desktop-service.js)、[`desktop-native.js`](../src/main/desktop-native.js)、[`gui-lease.js`](../src/main/gui-lease.js)、[`gui-admission.js`](../src/main/gui-admission.js)、[`native/desktop.swift`](../native/desktop.swift) |
 | 感知和证据解释 | [`perception.js`](../src/main/perception.js)、[`screen-evidence.js`](../src/main/screen-evidence.js)、[`judgment.js`](../src/main/judgment.js) |
 | WorkBuddy 制作、监督和交付 | [`software-task-skill.js`](../src/main/software-task-skill.js)、[`workbuddy-observation.js`](../src/main/workbuddy-observation.js)、[`monitor.js`](../src/main/monitor.js)、[`secretary.js`](../src/main/secretary.js)、[`result-delivery.js`](../src/main/result-delivery.js) |
-| 模型请求、目录与校验传输 | [`llm.js`](../src/main/llm.js)、[`model-catalog.js`](../src/main/model-catalog.js)、[`verification-transport.js`](../src/main/verification-transport.js) |
+| 模型请求、响应与校验传输 | [`llm.js`](../src/main/llm.js)、[`workbuddy.js`](../src/main/workbuddy.js)、[`chat-response.js`](../src/main/chat-response.js)、[`model-catalog.js`](../src/main/model-catalog.js)、[`verification-transport.js`](../src/main/verification-transport.js) |
 | 语音与打断 | [`asr.js`](../src/main/asr.js)、[`voice-turns.js`](../src/main/voice-turns.js)、[`speaker-filter.js`](../src/main/speaker-filter.js)、[`tts.js`](../src/main/tts.js)、[`tts-session.js`](../src/main/tts-session.js) |
 
 ## 2. 对话、渠道与权限
@@ -31,6 +31,8 @@ WorkBunny 使用 Electron 主进程、隔离的 renderer/preload 和 Swift 原�
 本地渠道为 `local`。外部渠道由应用、账号与收件对象确定稳定标识，记录人物、场景、修订、已消费事件及临时主人授权。人物不是权限凭证；群聊可以有多个人物，但授权属于整个渠道。
 
 `DialogueChannels` 负责输入去重、实际消息认证、渠道历史、Summary、权限快照和待发送回复引用。任务提供可信渠道定位，模型接收事实后判断内容；模型输出不能改写渠道绑定。
+
+同一渠道的消息按序处理，各渠道可以独立等待视觉证据和模型判断。渠道状态与事件回执在同一 Vault 写事务中保存，提交后才公开新权限。撤权同步递增渠道修订，随即安排持久化，迟到的识别结果会重新核对修订。
 
 外部代发标识 `［ᕱᕱ］` 在 [`shared/external-message.js`](../src/shared/external-message.js) 中统一定义，供主进程的消息/附件处理和设置界面共同引用。标识幂等添加，原样进入发送正文和效果回执，不参与身份授权；不为旧标识增加迁移或兼容逻辑。
 
@@ -56,13 +58,15 @@ WorkBunny 使用 Electron 主进程、隔离的 renderer/preload 和 Swift 原�
 
 ## 4. Task 与编排器
 
-当前契约为 `bunny.task/v3`，主要字段为目标、验收条件、对象、调度周期、完成方式、授权、来源、场景、上下文、事件队列、Action 记录、Operation 账本和结果。
+当前契约为 `bunny.task/v4`，主要字段为目标、验收条件、对象、调度周期、完成方式、授权、来源、场景、上下文、事件队列、Action 记录、Operation 账本和结果。0.25.0 按新资料库验收，任务恢复使用当前契约及其索引。
 
-`AgentService` 装配执行器、工具、渠道、学习、恢复和结果回传；`AgentRuntime` 负责准入、原每秒调度、事件选择、worker、取消、状态保存与恢复。`SkillRegistry` 当前名称仍在代码中使用，其含义是 `conversation.manage/system.operate/work.delegate` 等**任务执行协议**，不是另一套经验技能知识库。
+`AgentService` 装配执行器、工具、渠道、学习、恢复和结果回传。`AgentRuntime` 管理准入、到期调度、事件选择、worker、取消、状态保存与恢复。`SkillRegistry` 登记 `conversation.manage/system.operate/work.delegate` 等任务执行协议。
 
 Task 状态为 `queued/ready/running/waiting/waiting_permission/paused/needs_attention/stopping/completed/stopped/expired`。当前最多启动五个占用名额的任务，队列需要显式启动，不是自动无限补位。任务持久化共享加密 Vault，但运行状态由编排器拥有。
 
 事件具有稳定 key 与对象 scope。入队、已消费和溢出合并分别记录，历史消息基线与实际新消息分开；观察任务不能因重启或滚动把历史反复当新消息。不同对象可有独立 Action，同对象的冲突事件按声明策略处理。
+
+任务保存按任务 ID 排队，只有事务成功才发布事件入队或目标修改。目标更新保留在途 Operation 的记录，旧 worker 取消后仍能保存已经核实的回执。接续 WorkBuddy 会话时，原任务退场与新任务准入共享同一次写事务。
 
 监听是执行器按 Task 的周期或实际事件进行检查，支持截图区域和其他工具检查；它不等于一个全局“画面变化才能继续”开关。变化产生事件后，后续静止帧不撤销已触发 Action 或有效模型结果。模型回传时如需最终核查，单独取得当前证据并判断。
 
@@ -82,6 +86,8 @@ Operation 账本区分三种事实：
 | `not_dispatched` | 明确未发令，可重新规划；同逻辑步骤的新参数形成新尝试并保留替代关系 |
 | `confirmed` | 取得工具实际结果，保存回执；写入重试复用该记录，不重新执行 |
 
+`OperationLedger` 在进入异步授权前预留逻辑操作标识，并一次保存发令意图和初始阶段。权限或期限变化会在工具发令前复核。微信发令、草稿处理和发送核对共用同一条桌面会话执行队列。
+
 工具回执确认不等于业务目标已完成。Bunny 按任务目标取得页面、消息、文件或数据证据，自主决定 Action/Task 完成。程序只验证协议、对象、权限、来源、文件稳定性和真实调用事实。
 
 通用视觉 Action 可基于关联的提交前后证据返回 `not_applied`，说明依据及草稿状态后回到准备阶段。必须对应原 Task、窗口与会话；其它联系人画面不能解除未知发送。仍不确定则继续核对，保留账本，不自动重发。
@@ -94,7 +100,7 @@ Operation 账本区分三种事实：
 
 响应体过大应缩减本轮输出/推理预算，输出截断可扩大输出额度，两者分开处理。只读模型规划尚未产生 Operation 时可以请求级恢复，避免为纯传输问题重开整个任务。已确认和未知写入继续遵守效果账本。
 
-`TaskKeepalive` 复用每秒 tick，没有额外定时器。活动工作空闲一分钟且没有 worker、模型请求或有效等待时，按原 Task/Action 上下文提醒继续思考；每个作用对象只保留一条在途提醒。暂停、权限等待、结束、无事件监听和未知写入不被强行唤醒。提醒不是业务进展，也不清零无进展累计时间。
+`AgentRuntime` 用一个定时器选择最近的检查、到期或保活时刻，空队列和结束态无需周期唤醒。达到指定时长会取消正在运行的 worker 并保留写入证据。`TaskKeepalive` 在工作空闲一分钟且没有 worker、模型请求或有效等待时，按原 Task/Action 上下文提醒继续思考，每个作用对象只保留一条在途提醒。提醒的计时与业务进展计时分开。
 
 GUI 准入在未持有资源时检查连续空闲五秒及 lease；动作已持有 GUI 后不再用 HID 空闲时间判断“人正在干扰”，因为自己的输入也会更新时间。桌面输入串行，语义工作及无冲突动作独立推进；屏幕采集连接复用并有界缓存。
 
@@ -121,6 +127,8 @@ GUI 准入在未持有资源时检查连续空闲五秒及 lease；动作已持�
 ## 8. 记忆与统一经验仓库
 
 `MemoryService` 管理同一加密 Vault，`VaultDB` 通过 Swift 访问 SQLite；正文加密、检索 token 使用 HMAC。记忆记录带来源、场景、可见范围、版本及状态；自我理解使用自己的修订与锁定机制。钥匙串辅助程序保持签名身份和真实父进程核验。
+
+任务保存由 Vault 写入层一次读取并核实来源的存在、活跃状态与可见范围。任务恢复通过当前任务索引分页读取正文，响应按最大记录体积限页。Operation 检查点经任务视图推送，减少对话历史和记忆面板的重复刷新。
 
 Doze 按渠道和场景压缩。统一 `MemoryMaintenance` 负责 Dream/Deepdream 的预算、排队、取消与增量处理，轮流处理对话、任务结果和经验来源，避免某类积压永久饿死其它来源。显式资源导入可以只整理该来源，不强行处理私聊历史。
 
@@ -153,11 +161,19 @@ manifest 声明稳定包 `id/version/title`、`experiences/tools/resources`。�
 
 微信适配器负责可见窗口与对话定位、新消息游标、语音线索和证据；通用视觉 Action 负责实际操作、判断、等待与恢复。禁止微信 API、辅助功能控制树、内部数据库或协议，也不自动退出、重启或登录微信。窗口或登录异常保留现场并说明。
 
+微信会话代管在打开、转写、另存和回复时携带当前渠道快照。宿主限制允许的界面操作，在键鼠发出前检查权限、窗口和视觉目标。右键菜单项绑定到本次操作打开的微信弹出窗口，附件只保存到独立接收目录并核对文件回执。来自认证渠道的交办绑定实际新消息，通用微信输入再次核对该授权。界面证据与行为由离线夹具覆盖，真实微信的菜单识别仍需独立验收。
+
 WorkBuddy 使用已绑定会话监控、允许的应用适配与通用桌面操作。制作条件、原始请求及最终交付分别保存；`collectDeliveryEvidence` 提供实际文件与读取缺口，`verifyDelivery` 由 Bunny 决定完成、修订或需要主人。文件变化是证据失效，重新读取，不由文件类型推测直接否决业务结果。
+
+常驻关注和委派跟进复用一个 WorkBuddy 会话监控器。目录枚举和增量文件读取异步执行，单次扫描按批限制 I/O。候选答复需等待读到日志尾部且当前行完整，随后按既有静默规则判断交付。
 
 角色与表现属于 UI。VRM/VRMA 保持现有资源库；数据形象包 `.wbavatar` 使用 `workbunny.avatar-pack` v1，清单、角色、动作、图、交互及资源整体校验与替换。包不执行脚本、着色器或网络代码；`declarative-3d-v1` 与 `soft-surface-v1` 声明实际宿主能力。具体字段以 [`avatar-pack-manifest.js`](../src/main/avatar-pack-manifest.js)、[`avatar-pack-reader.js`](../src/main/avatar-pack-reader.js) 及相关 Schema 为准。形象包与经验工具包的执行能力不同，不能混用。
 
+角色加载完成后统一替换当前场景，并释放原有几何、纹理、材质和骨骼资源。VRMA 按需绑定到当前骨骼，保留动作原始数据复用。角色或窗口隐藏时暂停 WebGL 绘制，语音播放和动作状态继续运行。
+
 模型请求支持 WorkBuddy 及已配置的直接 API，使用同一对话协议、上下文预算、取消与来源规则；工具调用循环和真实模型传输分离。模型目录提供实际可用性与能力，后台免费调用的选择不自动扩大到付费模型。执行器使用哪种模型、校验使用哪种模型分别记录，避免将校验回退说成更换了正式执行模型。
+
+两个模型入口共享响应解析和工具调用校验。直接 API 使用整个请求的绝对时限与响应大小上限，WorkBuddy 在本地代理完成身份握手后才发请求。桌面、Vault、ASR 和本地代理共享有字节上限的 JSONL 组帧器，完整行只合并一次。
 
 语音采集由原生 ASR 辅助程序负责，端侧持续识别与旧系统分段识别走同一轮次/取消机制；文字与语音均进入基础对话。TTS 会话管理合成、播放结束、打断与角色表现，支持系统、本地和远程引擎；播放失败不能用生成了文件冒充实际朗读。主人声音筛选只提供本机声学近似，不参与主人身份认证。HTTP 语音配置是受限数据模板，示例在 [`examples/tts-profiles`](../examples/tts-profiles/)，不执行配置中的代码。
 

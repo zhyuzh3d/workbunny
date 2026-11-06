@@ -11,8 +11,8 @@ function taskStatus(dir = path.join(os.homedir(), '.workbuddy/projects')) {
       note: e.code === 'ENOENT' ? '等待 WorkBuddy 产生第一项任务' : '任务目录不可读取，请检查权限' };
   }
 }
-function ticketIdentity() {
-  return require('crypto').createHash('sha256').update(require('./workbuddy').discovery().ticket).digest('hex');
+function ticketIdentity(endpoint = require('./workbuddy').discovery()) {
+  return require('crypto').createHash('sha256').update(endpoint.ticket).digest('hex');
 }
 class WorkBuddyConnection extends EventEmitter {
   constructor({ open = () => require('./workbuddy').openApplication(),

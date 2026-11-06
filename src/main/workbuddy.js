@@ -7,6 +7,8 @@ const path = require('path');
 const net = require('net');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+const { JsonLines } = require('./json-lines');
+const { parseChatBody, sanitizeUsage } = require('./chat-response');
 let readiness = () => true, disconnected = () => {}, recoverConnection = null, connectionVersion = () => 0;
 function configureConnection({ ready, onDisconnect, recover, version }) { readiness = ready; disconnected = onDisconnect; recoverConnection = recover || null; connectionVersion = version || (() => 0); }
 function isTransientConnectionError(error) {
@@ -42,82 +44,99 @@ function proof(ticket, side, endpoint, clientNonce, serverNonce) {
   return crypto.createHmac('sha256', ticket).update(Buffer.concat(parts)).digest('base64url');
 }
 
-function request(params, { signal, timeoutMs = 55000 } = {}) {
-  if (!readiness() && !(params.method === 'GET' && params.path === '/v2/enterprises/personal/models')) return Promise.reject(new Error('请先连接 WorkBuddy 并登录账号'));
+function request(params, { signal, timeoutMs = 55000, discover = discovery } = {}) {
   return new Promise((resolve, reject) => {
-    let d;
-    try { d = discovery(); } catch (e) { reject(e); return; }
-    if (!readiness() && !(params.method === 'GET' && params.path === '/v2/enterprises/personal/models')) { reject(new Error('WorkBuddy 授权会话已变化，请重新确认连接')); return; }
-    if (signal?.aborted) { reject(new Error('aborted')); return; }
+    if (signal?.aborted) { reject(Object.assign(new Error('aborted'), { code: 'ABORT_ERR' })); return; }
+    const { endpoint, ticket } = discover();
+    if (!(params.method === 'GET' && params.path === '/v2/enterprises/personal/models') && !readiness({ endpoint, ticket })) {
+      reject(new Error('请先连接 WorkBuddy 并登录账号')); return;
+    }
+    const generation = connectionVersion();
     const clientNonce = crypto.randomBytes(16).toString('base64url');
-    const socket = net.connect(d.endpoint);
-    let buf = '', settled = false;
+    const socket = net.connect(endpoint);
+    const frames = new JsonLines(2 * 1024 * 1024);
+    let stage = 'challenge', settled = false;
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
+      frames.reset();
       socket.destroy();
-      if (error && (error.code === 'E_AUTH_SESSION' || /连接不到|连接已断开|身份验证|登录状态已变化|账号尚未就绪/.test(error.message))) disconnected();
-      error ? reject(error) : resolve(value);
+      if (error && (error.code === 'E_AUTH_SESSION' || /连接不到|连接已断开|身份验证|登录状态已变化|账号尚未就绪/.test(error.message))) {
+        try { disconnected(); } catch {}
+      }
+      if (error) reject(error);
+      else if (generation !== connectionVersion()) reject(Object.assign(new Error('WorkBuddy 授权会话已变化'), { code: 'E_AUTH_SESSION' }));
+      else resolve(value);
     };
-    const abort = () => finish(new Error('aborted'));
+    const abort = () => finish(Object.assign(new Error('aborted'), { code: 'ABORT_ERR' }));
     const timer = setTimeout(() => finish(new Error('WorkBuddy 调用超时，请检查账号和网络。')), timeoutMs);
-    const send = (v) => socket.write(JSON.stringify(v) + '\n');
+    const send = value => socket.write(JSON.stringify(value) + '\n');
+    const expect = expected => {
+      if (stage !== expected) throw new Error('WorkBuddy 身份验证或请求顺序无效');
+    };
     signal?.addEventListener('abort', abort, { once: true });
     socket.on('error', () => finish(new Error('连接不到 WorkBuddy，请确认应用已打开并登录。')));
     socket.on('close', () => { if (!settled) finish(new Error('WorkBuddy 连接已断开，请重试。')); });
     socket.on('connect', () => send({
-      type: 'session_hello', protocol_min: 1, protocol_max: 1,
-      client_nonce: clientNonce,
-      ticket_id: crypto.createHash('sha256').update(d.ticket).digest('hex').slice(0, 16),
+      type: 'session_hello', protocol_min: 1, protocol_max: 1, client_nonce: clientNonce,
+      ticket_id: crypto.createHash('sha256').update(ticket).digest('hex').slice(0, 16),
       client: { kind: 'external-app', id: 'workbunny', version: require('../../package.json').version },
     }));
-    socket.on('data', (chunk) => {
-      buf += chunk.toString('utf8');
-      if (Buffer.byteLength(buf) > 2 * 1024 * 1024) { finish(new Error('WorkBuddy 返回内容过大')); return; }
-      let nl;
-      while (!settled && (nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-        if (!line) continue;
-        try {
-          const v = JSON.parse(line);
-          if (v.type === 'session_challenge') {
-            const expected = proof(d.ticket, 'server', d.endpoint, clientNonce, v.server_nonce);
-            const received = Buffer.from(String(v.server_proof || ''));
-            if (received.length !== expected.length || !crypto.timingSafeEqual(received, Buffer.from(expected))) throw new Error('WorkBuddy 身份验证失败');
-            send({ type: 'session_prove', client_proof: proof(d.ticket, 'client', d.endpoint, clientNonce, v.server_nonce) });
-          } else if (v.type === 'session_hello_ack') {
-            if (!v.pipes?.includes('wb.request')) throw new Error('WorkBuddy 账号尚未就绪，请在 WorkBuddy 中重新登录。');
+    socket.on('data', chunk => {
+      if (settled) return;
+      try {
+        frames.push(chunk, frame => {
+          if (frame.type === 'session_challenge') {
+            expect('challenge');
+            if (typeof frame.server_nonce !== 'string' || !frame.server_nonce || frame.server_nonce.length > 256) throw new Error('WorkBuddy 身份验证失败');
+            const expected = Buffer.from(proof(ticket, 'server', endpoint, clientNonce, frame.server_nonce));
+            const received = Buffer.from(String(frame.server_proof || ''));
+            if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) throw new Error('WorkBuddy 身份验证失败');
+            stage = 'ack';
+            send({ type: 'session_prove', client_proof: proof(ticket, 'client', endpoint, clientNonce, frame.server_nonce) });
+          } else if (frame.type === 'session_hello_ack') {
+            expect('ack');
+            if (!frame.pipes?.includes('wb.request')) throw new Error('WorkBuddy 账号尚未就绪，请在 WorkBuddy 中重新登录。');
+            stage = 'pipe';
             send({ jsonrpc: '2.0', id: 1, method: 'broker/GetPipe', params: { pipe: 'wb.request' } });
-          } else if (v.type === 'session_hello_error' || v.type === 'pipe_revoked') {
+          } else if (frame.type === 'session_hello_error' || frame.type === 'pipe_revoked') {
             throw new Error('WorkBuddy 登录状态已变化，请重新连接。');
-          } else if (v.error) {
-            const code = String(v.error.code || '未知错误');
-            const error = new Error(code === 'E_PAYLOAD_TOO_LARGE'
-              ? 'WorkBuddy 本地转发的回答超过大小限制，请缩短本轮输出或推理预算。'
-              : 'WorkBuddy 请求失败：' + code);
-            error.code = code;
-            throw error;
-          } else if (v.id === 1) {
-            if (!v.result?.methods?.includes('http.fetch')) throw new Error('此 WorkBuddy 版本不支持账号接口。');
-            send({ jsonrpc: '2.0', id: 2, method: v.result.channel + '/http.fetch', mode: 'call', params });
-          } else if (v.id === 2) {
-            const r = v.result;
-            if (!r || typeof r.body_b64 !== 'string') throw new Error('WorkBuddy 返回格式异常');
-            const body = Buffer.from(r.body_b64, 'base64').toString('utf8');
-            if (r.status < 200 || r.status >= 300) {
-              // Do not surface raw upstream responses that may contain account data.
-              const error = new Error(`WorkBuddy 账号接口返回 ${r.status}，请检查模型、账号额度或登录状态。`);
-              Object.defineProperty(error, 'responseBody', { value: body });
-              error.statusCode = r.status;
-              error.code = [401, 403].includes(r.status) ? 'E_AUTH_SESSION' : [408, 429, 500, 502, 503, 504].includes(r.status) ? 'E_UPSTREAM_TRANSIENT' : 'E_UPSTREAM';
-              if (require('./context-budget').isContextError(r.status, body)) error.code = 'E_CONTEXT_WINDOW';
-              throw error;
+          } else if (frame.id === 1 || frame.id === 2) {
+            expect(frame.id === 1 ? 'pipe' : 'result');
+            if (frame.error) {
+              const supplied = String(frame.error.code || '');
+              const code = /^(?:E_[A-Z0-9_]{1,80}|-?\d{1,10})$/u.test(supplied) ? supplied : 'E_BROKER';
+              throw Object.assign(new Error(code === 'E_PAYLOAD_TOO_LARGE'
+                ? 'WorkBuddy 本地转发的回答超过大小限制，请缩短本轮输出或推理预算。' : 'WorkBuddy 请求失败：' + code), { code });
             }
-            finish(null, { body, status: r.status, headers: r.headers || {} });
+            const result = frame.result;
+            if (frame.id === 1) {
+              if (!result?.methods?.includes('http.fetch') || typeof result.channel !== 'string') throw new Error('此 WorkBuddy 版本不支持账号接口。');
+              stage = 'result';
+              send({ jsonrpc: '2.0', id: 2, method: result.channel + '/http.fetch', mode: 'call', params });
+            } else {
+              if (!Number.isInteger(result?.status) || typeof result.body_b64 !== 'string') throw new Error('WorkBuddy 返回格式异常');
+              const body = Buffer.from(result.body_b64, 'base64').toString('utf8');
+              if (result.status < 200 || result.status >= 300) {
+                const error = new Error(`WorkBuddy 账号接口返回 ${result.status}，请检查模型、账号额度或登录状态。`);
+                Object.defineProperty(error, 'responseBody', { value: body });
+                error.statusCode = result.status;
+                error.code = [401, 403].includes(result.status) ? 'E_AUTH_SESSION' :
+                  [408, 429, 500, 502, 503, 504].includes(result.status) ? 'E_UPSTREAM_TRANSIENT' : 'E_UPSTREAM';
+                if (require('./context-budget').isContextError(result.status, body)) error.code = 'E_CONTEXT_WINDOW';
+                throw error;
+              }
+              finish(null, { body, status: result.status, headers: result.headers || {} });
+              return false;
+            }
           }
-        } catch (e) { finish(e); }
+        });
+      } catch (error) {
+        if (error.code === 'E_JSON_LINE_LIMIT') error = Object.assign(new Error('WorkBuddy 返回内容过大'), { code: 'E_PAYLOAD_TOO_LARGE' });
+        else if (error instanceof SyntaxError) error = new Error('WorkBuddy 返回格式异常');
+        finish(error);
       }
     });
   });
@@ -134,142 +153,6 @@ function chatPayload(opts) {
   return payload;
 }
 
-function sanitizeFinishReason(value) {
-  if (typeof value !== 'string') return null;
-  const safe = value.trim().toLowerCase();
-  if (!safe) return null;
-  return ['stop', 'length', 'max_tokens', 'max_output_tokens', 'content_filter', 'tool_calls', 'function_call', 'error', 'cancelled', 'timeout'].includes(safe) ? safe : 'other';
-}
-function sanitizeUsage(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const result = {};
-  for (const key of ['prompt_tokens', 'completion_tokens', 'total_tokens', 'input_tokens', 'output_tokens']) {
-    const n = value[key];
-    if (Number.isSafeInteger(n) && n >= 0) result[key] = n;
-  }
-  if (typeof value.credit === 'number' && Number.isFinite(value.credit) && value.credit >= 0) result.credit = value.credit;
-  return Object.keys(result).length ? result : null;
-}
-function hasReasoningContent(value) {
-  return !!value && typeof value === 'object' && [value.reasoning_content, value.reasoning].some(v => typeof v === 'string' && v.length > 0);
-}
-const MAX_TOOL_CALLS = 4;
-const MAX_TOOL_ARGUMENTS = 8000;
-function toolProtocolError() {
-  const error = new Error('WorkBuddy 工具调用格式无效，请重试。');
-  error.code = 'E_TOOL_PROTOCOL';
-  return error;
-}
-function appendToolCall(calls, index, fragment) {
-  if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_TOOL_CALLS ||
-      !fragment || typeof fragment !== 'object' || Array.isArray(fragment)) throw toolProtocolError();
-  let call = calls.get(index);
-  if (!call) {
-    if (calls.size >= MAX_TOOL_CALLS) throw toolProtocolError();
-    call = { id: '', type: 'function', hasType: false, name: '', arguments: '' };
-    calls.set(index, call);
-  }
-  if (fragment.id !== undefined) {
-    if (typeof fragment.id !== 'string' || call.id.length + fragment.id.length > 200) throw toolProtocolError();
-    call.id += fragment.id;
-  }
-  if (fragment.type !== undefined) {
-    if (fragment.type !== 'function') throw toolProtocolError();
-    call.hasType = true;
-  }
-  const fn = fragment.function;
-  if (fn !== undefined) {
-    if (!fn || typeof fn !== 'object' || Array.isArray(fn)) throw toolProtocolError();
-    if (fn.name !== undefined) {
-      if (typeof fn.name !== 'string' || call.name.length + fn.name.length > 128) throw toolProtocolError();
-      call.name += fn.name;
-    }
-    if (fn.arguments !== undefined) {
-      if (typeof fn.arguments !== 'string' || call.arguments.length + fn.arguments.length > MAX_TOOL_ARGUMENTS)
-        throw toolProtocolError();
-      call.arguments += fn.arguments;
-    }
-  }
-}
-function collectCompleteToolCalls(fragments) {
-  if (!Array.isArray(fragments) || fragments.length > MAX_TOOL_CALLS) throw toolProtocolError();
-  const calls = new Map();
-  fragments.forEach((fragment, i) => appendToolCall(calls, i, fragment));
-  return finishToolCalls(calls);
-}
-function finishToolCalls(calls) {
-  const result = [];
-  for (const [index, call] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
-    if (index !== result.length || !call.hasType ||
-        typeof call.id !== 'string' || !call.id || !/^[A-Za-z0-9_.:-]{1,200}$/.test(call.id) ||
-        typeof call.name !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(call.name) ||
-        typeof call.arguments !== 'string' || !call.arguments || call.arguments.length > MAX_TOOL_ARGUMENTS)
-      throw toolProtocolError();
-    let parsed;
-    try { parsed = JSON.parse(call.arguments); } catch { throw toolProtocolError(); }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw toolProtocolError();
-    result.push({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } });
-  }
-  if (result.length > MAX_TOOL_CALLS) throw toolProtocolError();
-  return result;
-}
-function parseChatBody(body, model = 'hy3') {
-  let raw = '', usedModel = model, usage = null, finishReason = null, hasReasoning = false;
-  const streamedCalls = new Map();
-  let completeCalls = null;
-  let object;
-  try { object = JSON.parse(body); } catch { /* Older brokers may still return SSE. */ }
-  if (object) {
-    const data = object.data?.choices ? object.data : object;
-    usedModel = data.model || model;
-    usage = sanitizeUsage(data.usage);
-    const choice = data.choices?.[0];
-    finishReason = sanitizeFinishReason(choice?.finish_reason ?? choice?.finishReason);
-    hasReasoning = hasReasoningContent(choice?.message);
-    const content = choice?.message?.content;
-    raw = typeof content === 'string' ? content : '';
-    if (choice?.message?.tool_calls !== undefined) completeCalls = collectCompleteToolCalls(choice.message.tool_calls);
-  } else for (const line of body.split('\n')) {
-    if (!line.startsWith('data:')) continue;
-    const text = line.slice(5).trim();
-    if (!text || text === '[DONE]') continue;
-    let event;
-    try { event = JSON.parse(text); } catch {
-      if (/"tool_calls"|"function"|"arguments"/u.test(text)) throw toolProtocolError();
-      continue;
-    }
-    const data = event.data?.choices ? event.data : event;
-    if (data.model) usedModel = data.model;
-    if (data.usage) usage = sanitizeUsage(data.usage);
-    const choice = data.choices?.[0];
-    if (choice?.finish_reason !== undefined && choice.finish_reason !== null) finishReason = sanitizeFinishReason(choice.finish_reason);
-    const delta = choice?.delta;
-    if (hasReasoningContent(delta)) hasReasoning = true;
-    if (typeof delta?.content === 'string') raw += delta.content;
-    if (delta?.tool_calls !== undefined) {
-      if (!Array.isArray(delta.tool_calls)) throw toolProtocolError();
-      for (const fragment of delta.tool_calls) appendToolCall(streamedCalls, fragment?.index, fragment);
-    }
-    if (choice?.message?.tool_calls !== undefined) {
-      if (completeCalls) throw toolProtocolError();
-      completeCalls = collectCompleteToolCalls(choice.message.tool_calls);
-    }
-  }
-  let toolCalls = completeCalls || (streamedCalls.size ? finishToolCalls(streamedCalls) : null);
-  if (finishReason === 'tool_calls' && !toolCalls?.length) throw toolProtocolError();
-  if (toolCalls?.length) raw = ''; // Do not surface model preambles beside tool requests.
-  if (!raw.trim()) {
-    if (toolCalls?.length) return { raw: '', model: usedModel, usage, finishReason, hasReasoning, toolCalls };
-    const limited = ['length', 'max_tokens', 'max_output_tokens', 'token_limit'].includes(String(finishReason || '').toLowerCase());
-    const error = new Error(limited ? 'WorkBuddy 输出达到 token 上限，整理结果不完整。' : 'WorkBuddy 没有返回可用回答，请重试。');
-    error.code = limited ? 'E_OUTPUT_LIMIT' : 'E_EMPTY_RESPONSE';
-    error.finishReason = finishReason;
-    error.usage = usage;
-    error.hasReasoning = hasReasoning;
-    throw error;
-  }
-  return { raw, model: usedModel, usage, finishReason, hasReasoning, ...(toolCalls?.length ? { toolCalls } : {}) };
-}
 async function chatWithTransport(opts, transport) {
   opts = require('./context-budget').fitRequest({ ...opts, provider: 'workbuddy' });
   const { model = 'hy3', signal, onDelta, onSentence } = opts;

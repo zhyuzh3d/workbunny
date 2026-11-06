@@ -204,7 +204,7 @@ test('a unique complete text remains locatable when neighboring media recognitio
 
 test('authenticated task dispatch follows the confirmed acknowledgment and recovers without resending it',async()=>{
  const {conversationSkill,subjectKey}=require('../src/main/conversation-skill'),subject={application:'wechat',recipient:'Contact'},order=[];
- const decision={decision:'reply',reply:'I have your task and will run it.',summary:'accepted',completed:false,progress:{},unknown:[],ownerAction:{type:'task'}},event={key:'owner-task',type:'conversation.messages',subjectKey:subjectKey(subject),messages:[message('Run this actual task')]};
+ const decision={decision:'reply',reply:'I have your task and will run it.',summary:'accepted',completed:false,progress:{},unknown:[],ownerAction:{type:'task'},ownerCommand:{sequences:[1]}},event={key:'owner-task',type:'conversation.messages',subjectKey:subjectKey(subject),messages:[message('Run this actual task')]};
  const task={id:'owner-listener',parameters:{behavior:'reply'},subjects:[subject],scene:'life',completion:'manual',state:{},operations:{},schedule:{intervalSeconds:3,activeIntervalSeconds:3},inbox:[event],counters:{wakes:1}};
  const skill=conversationSkill({channelDialogue:true,canOperate:async()=>true,brain:{decide:async()=>decision}});assert(skill.capabilitiesFor(task).includes('owner.command'));
  let failAck=true,confirmed=false;
@@ -213,5 +213,5 @@ test('authenticated task dispatch follows the confirmed acknowledgment and recov
  const context={task,event,clock:Date.now,now:Date.now(),signal:new AbortController().signal,checkpoint:async()=>{},report:async()=>{},call};
  await assert.rejects(skill.run(context),/not delivered/);assert.deepEqual(order,['ack']);
  failAck=false;await skill.run(context);assert.deepEqual(order,['ack','ack','dispatch']);
- order.length=0;await skill.run({...context,completedCall:()=>({verified:true,receipt})});assert.deepEqual(order,['dispatch'],'a recovered acknowledgment proceeds through the existing dispatch ledger without sending it again');
+ order.length=0;await skill.run({...context,completedCall:(_key,tool)=>tool==='conversation.send'?{verified:true,receipt}:null});assert.deepEqual(order,['dispatch'],'a recovered acknowledgment proceeds through the existing dispatch ledger without sending it again');
 });

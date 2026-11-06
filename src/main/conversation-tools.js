@@ -5,7 +5,7 @@ function subject(value,extra=[]){
   if(value.application!=='wechat')throw new Error('当前会话技能尚未支持此应用');
   return {application:value.application,recipient:text(value.recipient,'联系人',100)};
 }
-function registerConversationTools(tools,{scene,execute,lease,canOperate=async()=>true,memoryRelated=async()=>({items:[]}),dispatchOwner=async()=>{throw new Error('主人通道执行器尚未就绪');}}){
+function registerConversationTools(tools,{scene,execute,lease,saveAttachment,canOperate=async()=>true,memoryRelated=async()=>({items:[]}),dispatchOwner=async()=>{throw new Error('主人通道执行器尚未就绪');}}){
   tools.register({name:'conversation.observe',description:'以外部显示像素观察指定会话，未变化时不识别；返回标题、未读提示、完整可见消息和草稿状态。',
     effect:'read',capabilities:['conversation.read'],scope:a=>a,
     validate:v=>({...subject(v,['sampleId','force','relocate']),force:v.force===true,relocate:v.relocate===true}),execute:async(a,c)=>{await scene.assertTaskIdentity?.(c.task);const prior=c.task.state?.conversations?.[require('./conversation-skill').subjectKey(a)]?.cursor?.recent;return scene.observe(a,{force:a.force,relocate:a.relocate,repairProfile:c.task.state?.selfRepair?.profile,referenceMessages:prior?{recipient:a.recipient,messages:prior.slice(-6).map(m=>({direction:m.direction,kind:m.kind,text:String(m.text||'').slice(0,300),time:m.time||''}))}:undefined});}});
@@ -35,7 +35,14 @@ function registerConversationTools(tools,{scene,execute,lease,canOperate=async()
   tools.register({name:'memory.related',description:'只返回与本联系人有关且允许对其使用的记忆，带原始来源；不扫描微信聊天数据库。',
     effect:'read',capabilities:['memory.read'],scope:a=>a,validate:v=>({...subject(v,['query']),query:text(v.query||'','检索内容',800,true)}),execute:(a,c)=>memoryRelated(a,c.task)});
   tools.register({name:'owner.dispatch',description:'将已绑定主人通道的新交办送入同一任务解释器；普通联系人不可调用。',
-    effect:'write',capabilities:['owner.command'],scope:a=>a,validate:v=>({...subject(v,['text','eventKey']),text:text(v.text,'主人交办',6000),eventKey:text(v.eventKey,'消息标识',256)}),execute:dispatchOwner});
+    effect:'write',capabilities:['owner.command'],scope:a=>a,validate:v=>({...subject(v,['text','eventKey']),...(v.text===undefined?{}:{text:text(v.text,'主人交办',6000)}),eventKey:text(v.eventKey,'消息标识',256)}),execute:dispatchOwner});
+  if(saveAttachment)tools.register({name:'conversation.save',description:'把本轮已核实的微信原生文件附件另存到本任务接收目录，只返回保存回执。',
+    effect:'write',capabilities:['conversation.read','screen.input'],available:t=>t.skill==='conversation.manage',scope:a=>a,
+    validate:v=>{
+      const target=subject(v,['eventKey','sequence']);
+      if(!Number.isSafeInteger(v.sequence)||v.sequence<=0)throw Error('文件消息缺少有效序号');
+      return {...target,eventKey:text(v.eventKey,'消息标识',256),sequence:v.sequence};
+    },execute:saveAttachment});
   return tools;
 }
 module.exports={registerConversationTools};

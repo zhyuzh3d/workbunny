@@ -17,7 +17,7 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
   return {
     id:'conversation.manage',title:'会话代管',version:1,subjectApplications:['wechat'],description:'持续照看指定会话、按上下文回复、主动询问并跟进主人目标，或接收已绑定主人通道的交办。',
     parameters:{behavior:'notify只通知 / reply等来信再回复 / inquiry主动开口问清目标 / owner已绑定主人',questions:'可选问题列表',language:'可选交流语言',openingMessage:'可选指定开场原文',minReplySeconds:'仅主人明确要求间隔时填写10到300秒，否则省略并尽快回复'},
-    tools:['conversation.observe','conversation.open','conversation.transcribe','conversation.send','memory.related','owner.dispatch'],
+    tools:['conversation.observe','conversation.open','conversation.transcribe','conversation.send','memory.related','owner.dispatch',...(channelDialogue?['conversation.save']:[])],
     capabilities:['screen.read','screen.input','conversation.read','conversation.send','memory.read','owner.command'],
     capabilitiesFor:spec=>['screen.read','screen.input','conversation.read','memory.read',
       ...(['reply','inquiry','owner'].includes(spec.parameters.behavior)?['conversation.send']:[]),
@@ -42,7 +42,15 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
       };
       const dispatchAcknowledged=async(subject,event)=>{
         if(!channelDialogue||event.decision?.ownerAction?.type!=='task')return;
-        const accepted=await call({tool:'owner.dispatch',key:'owner:'+event.key,args:{...subject,text:require('./owner-security').redact((event.messages||[]).map(m=>event.voiceStates?.[String(m.sequence)]?.text||m.text).join('\n')),eventKey:event.key}});
+        const key='owner:'+event.key;
+        if(ctx.completedCall?.(key,'owner.dispatch')?.verified)return;
+        if(!event.decision.ownerCommand){await report('这条微信交办需要在主人渠道重新发送。','owner-source:'+event.key);return;}
+        let accepted;
+        try{accepted=await call({tool:'owner.dispatch',key,args:{...subject,eventKey:event.key}});}
+        catch(error){
+          if(error.code!=='E_CHANNEL_CHANGED'||error.dispatched!==false)throw error;
+          await report('微信渠道授权或交办来源已变化，请在主人渠道重新交办。','owner-source:'+event.key);return;
+        }
         if(!accepted.ok&&accepted.reply)await send(subject,stateFor(subject),accepted.reply,'owner-failed:'+event.key);
       };
       if(!event&&observationBlocked(task))return wait('正在进行微信界面操作，保留原消息基线，操作结束后继续监看');
@@ -101,6 +109,7 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
               if(queued){queued.voiceStates[id]={...saved,text:voice.text};await checkpoint();}
               converted.push({...message,kind:'text',text:voice.text,incomingVerified:true,fromVoice:true,perception:voice.perception||require('./perception').voiceTranscript(message.visualEvidence?.observationId)});continue;
             }
+            if(voice.blocked){converted.push(message);continue;}
             if(queued){const next=queued.voiceStates[id]??={};next.firstAttemptAt??=clock();next.phase=voice.phase||'locating';if(voice.requested)next.requestedAt=clock();await checkpoint();}
             const pending=wait(voice.reason||'正在识别语音，随后回复',false,true);
             pending.nextCheckAt=clock()+1000;
@@ -125,7 +134,7 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
               if(m.kind!=='text'||m.incomingVerified||(behavior==='owner'||selfChannel(subject))&&m.observedVerified)return m;
               const visible=require('./conversation-cursor').locateObserved(state.cursor,fresh.messages||[],m.sequence);
               if(!visible||!(visible.incomingVerified||(behavior==='owner'||selfChannel(subject))&&visible.observedVerified))return m;
-              const verified={...m,...visible,sequence:m.sequence,origin:m.origin,key:m.key};
+              const verified={...m,...visible,observedAt:m.observedAt,sequence:m.sequence,origin:m.origin,key:m.key};
               const index=queued?.messages?.findIndex(item=>item.sequence===m.sequence);if(index>=0)queued.messages[index]=verified;
               return verified;
             });await checkpoint();
@@ -137,7 +146,7 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
             return retry;
           }
         }
-        if(incoming.some(m=>m.kind!=='text')){
+        if(!incoming.some(m=>m.kind==='text'||channelDialogue&&m.kind==='file'&&m.direction==='incoming'&&m.incomingVerified&&m.fileName)){
           await report(`${subject.recipient} 有一条需要核对的非文字消息，尚未自动回复。`,event.key);
           return wait('保留会话记录，等待下一次观察');
         }
@@ -159,6 +168,22 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
           await report(`${subject.recipient} 的消息需要你处理：${decision.summary}`,event.key);return wait('已向主人汇报需要处理的事项');
         }
         if(!await canOperate(task))return waitGui('回复已排队，等待当前界面操作结束');
+        for(const sequence of decision.saveAttachments||[]){
+          try{await call({tool:'conversation.save',key:'save:'+event.subjectKey+':'+sequence,args:{...subject,eventKey:event.key,sequence}});}
+          catch(error){
+            if(error.dispatched!==false)throw error;
+            if(error.code==='E_GUI_BUSY')return waitGui('附件另存已排队，等待当前界面操作结束');
+            if(error.code==='E_CHANNEL_CHANGED'){
+              if(queued)delete queued.decision;
+              return wait('渠道权限已变化，重新组装回复',false,true);
+            }
+            if(error.code==='E_WECHAT_CONVERSATION_INPUT'){
+              await report('已收到文件附件，当前画面未能确认安全的另存入口。','save-unavailable:'+event.key+':'+sequence);
+              continue;
+            }
+            throw error;
+          }
+        }
         if(task.inbox.some(e=>e.key!==event.key&&e.type==='conversation.messages'&&e.subjectKey===event.subjectKey)){
           const pending=wait('同一会话有新消息，正在合并后回复',false,true);pending.nextCheckAt=clock();return pending;
         }
@@ -203,15 +228,24 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
         const openingPending=behavior==='inquiry'&&(!state.introduced||followupPending);
         const unseenRevision=!!view.revision&&view.revision!==state.lastSceneRevision;
         if(!view.headerMatched||view.unstable||!view.changed&&!unseenRevision&&!view.unread&&!justOpened&&state.cursor.ready&&!openingPending)continue;
-        observed=true;state.draft=!!view.draft;
-        if(view.revision)state.lastSceneRevision=view.revision;
-        const cursor=new ConversationCursor(state.cursor),delta=cursor.observe(view.messages||[],{ownerChannel,sentMessages:sentMessages(subject,task)});state.cursor=cursor.snapshot();
-        if(delta.uncertain){state.uncertainCount=(state.uncertainCount||0)+1;state.lastUncertainObservation=(view.messages||[]).slice(-12);await checkpoint();if(state.uncertainCount===3)await report(`${subject.recipient} 的来信已保留，正在带历史锚点重新识别消息顺序。`,'ambiguous:'+state.cursor.sequence);const pending=wait('消息顺序待核对，正在带历史锚点重新识别');pending.nextCheckAt=clock()+(state.uncertainCount>4?15000:3000);return pending;}
-        state.uncertainCount=0;
+        observed=true;
+        const key=subjectKey(subject),priorCursor=state.cursor,cursor=new ConversationCursor(priorCursor);
+        const delta=cursor.observe(view.messages||[],{ownerChannel,sentMessages:sentMessages(subject,task)}),nextCursor=cursor.snapshot();
+        const advance = target => {
+          const conversation = target.state.conversations?.[key];
+          if (!conversation) return;
+          conversation.cursor = structuredClone(nextCursor);
+          conversation.draft = !!view.draft;
+          if (view.revision) conversation.lastSceneRevision = view.revision;
+          conversation.uncertainCount = delta.uncertain ? (conversation.uncertainCount || 0) + 1 : 0;
+        };
+        if(delta.uncertain){advance(task);state.lastUncertainObservation=(view.messages||[]).slice(-12);await checkpoint();if(state.uncertainCount===3)await report(`${subject.recipient} 的来信已保留，正在带历史锚点重新识别消息顺序。`,'ambiguous:'+state.cursor.sequence);const pending=wait('消息顺序待核对，正在带历史锚点重新识别');pending.nextCheckAt=clock()+(state.uncertainCount>4?15000:3000);return pending;}
         if(delta.messages.length){
           // Cursor advancement and its new event are persisted in one snapshot.
-          await enqueue({key:`conversation:${subjectKey(subject)}:${state.cursor.sequence}`,subjectKey:subjectKey(subject),type:'conversation.messages',ownerChannel,messages:delta.messages});
-        }else await checkpoint();
+          const queued = await enqueue({key:`conversation:${key}:${nextCursor.sequence}`,subjectKey:key,type:'conversation.messages',ownerChannel,messages:delta.messages},
+            { advance, current: () => !signal?.aborted && task.state.conversations?.[key]?.cursor === priorCursor });
+          if (!queued?.ok) throw Error(queued?.error || '新来信尚未入队，保留观察位置');
+        } else { advance(task); await checkpoint(); }
         if(openingPending&&state.cursor.ready&&!ctx.observeOnly){
           if(!await canOperate(task))return waitGui('等待电脑空闲后开始交谈',true);
           if(view.draft)return wait('保留已有草稿，核对输入框后开始交谈');

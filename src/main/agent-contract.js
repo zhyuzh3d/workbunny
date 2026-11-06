@@ -1,6 +1,6 @@
 'use strict';
 const { normalizeScene, rank } = require('./memory-scope');
-const TASK_SCHEMA = 'bunny.task/v3';
+const TASK_SCHEMA = 'bunny.task/v4';
 const STATES = new Set(['queued','ready','running','waiting','waiting_permission','paused','needs_attention','stopping','completed','stopped','expired']);
 const TERMINAL = new Set(['completed','stopped','expired']);
 const MAX_ACTIVE_TASKS = 5;

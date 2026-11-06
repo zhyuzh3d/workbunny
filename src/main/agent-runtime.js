@@ -3,19 +3,29 @@ const crypto = require('node:crypto');
 const { TASK_SCHEMA, STATES, TERMINAL, MAX_ACTIVE_TASKS, occupiesSlot, capacityNote, taskSpec, authority, clone } = require('./agent-contract');
 const { canRead } = require('./memory-scope');
 const { scriptPlan } = require('./agent-tools');
-const {ActionLifecycle}=require('./action-lifecycle');
+const {OperationLedger}=require('./operation-ledger');
 const {ActionProgress}=require('./action-progress');
 class AgentRuntime {
   constructor({ journal, tools, skills, ready = () => true, epoch = () => 0, getScene = () => 'life', emit = () => {}, report = async () => {}, clock = Date.now, autoSchedule = true, prepare = async()=>{}, completed = async()=>{},settled=async()=>{},failed=async()=>{},authorize=async()=>{},stopTask=async()=>{},diagnoseRepair=null,observeWhileActive=null,remindIdle=null }) {
     Object.assign(this, { journal, tools, skills, ready, epoch, getScene, emit, report, clock, autoSchedule, prepare, completed,settled,failed,authorize,stopTask,diagnoseRepair,observeWhileActive });
-    this.tasks = new Map(); this.controllers = new Map(); this.actionGroups = new Map(); this.tokens = new Map(); this.closed = false; this.ticking = false; this.admissionEpoch = 0;
-    this.admissionTail=Promise.resolve();this.stops=new Map();this.actions=new ActionLifecycle();
+    this.tasks = new Map(); this.controllers = new Map(); this.actionGroups = new Map(); this.tokens = new Map(); this.closed = false; this.admissionEpoch = 0;
+    this.admissionTail=Promise.resolve();this.stops=new Map();this.pendingSaves=new Map();this.amending=new Set();
+    this.operations=new OperationLedger({tools,clock,authorize:(...args)=>this.authorize(...args),save:task=>this.save(task)});
     this.keepalive=new(require('./task-keepalive').TaskKeepalive)({clock,remind:remindIdle});
   }
   admission(action){const work=this.admissionTail.then(action);this.admissionTail=work.catch(()=>{});return work;}
   capacity(){return {limit:MAX_ACTIVE_TASKS,active:[...this.tasks.values()].filter(occupiesSlot).length,queued:[...this.tasks.values()].filter(t=>t.status==='queued').length};}
-  admit(task){
-    if(task.skill!=='task.resolve'&&this.capacity().active>=MAX_ACTIVE_TASKS){task.status='queued';task.note=capacityNote;delete task.expiresAt;return false;}
+  capabilitiesFor(skill, spec, actor) {
+    const required = skill.capabilitiesFor ? skill.capabilitiesFor(spec) : skill.capabilities;
+    const allowed = capability => !actor.capabilities || actor.capabilities.includes(capability);
+    if (required.some(capability => !allowed(capability)) || skill.requiredCapabilities?.some(capability => !allowed(capability))) {
+      throw new Error('主人入口没有此任务所需权限');
+    }
+    return [...new Set([...required, ...(skill.optionalCapabilities || []).filter(allowed)])];
+  }
+  admit(task, replacing){
+    const active = this.capacity().active - (replacing && occupiesSlot(replacing) ? 1 : 0);
+    if(task.skill!=='task.resolve'&&active>=MAX_ACTIVE_TASKS){task.status='queued';task.note=capacityNote;delete task.expiresAt;return false;}
     task.status='ready';task.nextCheckAt=this.clock();if(task.schedule.durationMinutes&&!task.expiresAt)task.expiresAt=this.clock()+task.schedule.durationMinutes*60000;return true;
   }
   list({scene=this.getScene()}={}) {
@@ -25,13 +35,17 @@ class AgentRuntime {
       observationReady:t.skill==='conversation.manage'?Object.values(t.state.conversations||{}).filter(c=>c.cursor?.ready).length===t.subjects.length:undefined,
       counters:clone(t.counters), schedule:clone(t.schedule), completion:t.completion,delivery:clone(t.state.delivery||t.delivery||null),result:t.state.result?{revision:t.state.result.revision,source:clone(t.state.result.source||null),summary:t.state.result.summary,text:String(t.state.result.text||t.state.result.summary).slice(0,12000),artifacts:clone(t.state.result.artifacts||[])}:null })).sort((a,b)=>a.createdAt-b.createdAt);
   }
-  publish() { this.emit(this.list()); }
+  publish() {
+    if (this.restoring) return;
+    try { this.emit(this.list()); }
+    catch { /* Delivery of a view does not change the durable task state. */ }
+  }
   async reportProgress(task,progress,actionId,text){
     if(!progress||progress.state.blockedReportedAt)return;
     progress.state.blockedReportedAt=this.clock();await this.save(task);
     await this.report({taskId:task.id,eventId:'progress:'+actionId,text,sources:[task.id],scene:task.scene,domain:task.domain,visibilityFloor:task.visibilityFloor,epoch:task.privacyEpoch});
   }
-  current(task, token, activeAction = false) { return !this.closed && this.ready() && this.tasks.get(task.id) === task && this.tokens.get(task.id) === token &&
+  current(task, token, activeAction = false) { return !this.closed && !this.restoring && !this.amending.has(task.id) && this.ready() && this.tasks.get(task.id) === task && this.tokens.get(task.id) === token &&
     task.privacyEpoch === this.epoch() && (canRead(this.getScene(), task)||task.authority?.channel==='authenticated-channel') && !TERMINAL.has(task.status) &&
     !['queued','stopping','paused',...(activeAction?[]:['needs_attention','waiting_permission'])].includes(task.status); }
   eventScope(event) { return typeof event?.subjectKey==='string'&&event.subjectKey ? 'subject:'+event.subjectKey : typeof event?.scope==='string'&&event.scope ? 'scope:'+event.scope : null; }
@@ -43,27 +57,58 @@ class AgentRuntime {
       return !active.length||!!scope&&active.every(a=>a.scope&&a.scope!==scope);
     });
   }
-  async save(task) {
-    task.updatedAt = this.clock();
-    const snapshot=clone(task);this.pendingSaves??=new Map();
-    const prior=this.pendingSaves.get(task.id)||Promise.resolve();
-    const write=prior.catch(()=>{}).then(()=>this.journal.put(snapshot));
-    this.pendingSaves.set(task.id,write);
-    try { await write; this.publish(); }
-    finally { if(this.pendingSaves.get(task.id)===write)this.pendingSaves.delete(task.id); }
+  cancelWorker(task) {
+    this.keepalive.cancel(task.id);
+    this.tokens.set(task.id, (this.tokens.get(task.id) || 0) + 1);
+    this.controllers.get(task.id)?.abort();
+  }
+  canControl(task) {
+    return !!task && !this.closed && !this.restoring && this.ready() && this.tasks.get(task.id) === task &&
+      task.privacyEpoch === this.epoch() && canRead(this.getScene(), task);
+  }
+  owns(task) { return this.tasks.get(task.id) === task && task.privacyEpoch === this.epoch(); }
+  async writeInOrder(tasks, commit) {
+    const ids = tasks.map(task => task.id);
+    const pending = ids.map(id => this.pendingSaves.get(id)).filter(Boolean);
+    const write = Promise.allSettled(pending).then(async () => {
+      if (!tasks.every(task => this.owns(task))) throw new Error('任务资料版本已经变化');
+      return commit();
+    });
+    for (const id of ids) this.pendingSaves.set(id, write);
+    try { return await write; }
+    finally {
+      for (const id of ids) if (this.pendingSaves.get(id) === write) this.pendingSaves.delete(id);
+    }
+  }
+  save(task) { return this.persist(task); }
+  persist(task, amend) {
+    return this.writeInOrder([task], async () => {
+      // Take the snapshot in write order. A checkpoint queued during a task
+      // amendment must include that amendment if it has committed.
+      const snapshot = clone(task);
+      const now = this.clock();
+      amend?.(snapshot, now);
+      await this.commitSnapshot(task, snapshot, now, amend);
+    });
+  }
+  async commitSnapshot(task, snapshot, now, amend) {
+    snapshot.updatedAt = now;
+    await this.journal.put(snapshot);
+    if (!this.owns(task)) throw new Error('任务资料版本已经变化');
+    amend?.(task, now);
+    task.updatedAt = now;
+    this.publish();
   }
   async start(specification, authorization, { signal, ownerRequest,ownerContext,initialState={},requestKey,authorizeAdmission=()=>{} } = {}) {
-    const admission = this.admissionEpoch;
-    if (this.closed || !this.ready()) return { ok:false, error:'请先解锁本地资料，再开始任务' };
+    const admission = this.admissionEpoch, epoch = this.epoch();
+    const live = () => !this.closed && !this.restoring && this.ready() && !signal?.aborted &&
+      admission === this.admissionEpoch && epoch === this.epoch();
+    if (!live()) return { ok:false, error:'请先解锁本地资料，再开始任务' };
     try {
       const spec = taskSpec(specification), actor = authority(authorization, authorization?.scene ?? this.getScene()), skill = this.skills.get(spec.skill);
       await skill.validate?.(spec, actor);
-      if(signal?.aborted||admission!==this.admissionEpoch)return {ok:false,error:'交办已取消，没有开始任务'};
-      const requested = skill.capabilitiesFor ? skill.capabilitiesFor(spec) : skill.capabilities;
-      const capabilities = requested.filter(c => !actor.capabilities || actor.capabilities.includes(c));
-      if (requested.some(c => !capabilities.includes(c))) throw new Error('主人入口未授权此任务需要的能力');
-      for(const capability of skill.optionalCapabilities||[])if((!actor.capabilities||actor.capabilities.includes(capability))&&!capabilities.includes(capability))capabilities.push(capability);
-      if (skill.requiredCapabilities?.some(c => !capabilities.includes(c))) throw new Error('主人入口没有此任务所需权限');
+      if(!live())return {ok:false,error:'交办已取消，没有开始任务'};
+      const capabilities = this.capabilitiesFor(skill, spec, actor);
       const now = this.clock(), task = { schema:TASK_SCHEMA, id:'agent-'+crypto.randomUUID(), ...spec,
         authority:actor, sources:actor.sources, scene:actor.scene, domain:actor.scene, visibilityFloor:actor.visibilityFloor,
         capabilities, skillVersion:skill.version, privacyEpoch:this.epoch(), createdAt:now, updatedAt:now,
@@ -72,12 +117,12 @@ class AgentRuntime {
         state:{...clone(initialState),...(requestKey?{requestKey}:{}),...(ownerContext?{ownerContext:require('./agent-contract').text(ownerContext,'主人历史交办',12000)}:{}),...(typeof ownerRequest==='string'?{ownerRequest:require('./agent-contract').text(ownerRequest,'主人原始交办',12000)}:{})}, inbox:[], eventKeys:[], operations:{}, actionRuns:{}, reports:[], counters:{ wakes:0, reads:0, writes:0, events:0 } };
       await this.prepare(task);
       return await this.admission(async()=>{
-        if(signal?.aborted||admission!==this.admissionEpoch)return {ok:false,error:'交办在启动前被取消'};
+        if(!live())return {ok:false,error:'交办在启动前被取消'};
         authorizeAdmission();
         if(requestKey){const existing=[...this.tasks.values()].find(t=>t.state.requestKey===requestKey);if(existing){if(existing.state.ownerRequest!==task.state.ownerRequest)throw Error('同一交办标识的原文不一致，未创建重复任务');return {ok:true,id:existing.id,duplicate:true};}}
         this.admit(task);await this.journal.put(clone(task));
         try{authorizeAdmission();}catch(error){task.status='stopped';task.note=error.message;await this.journal.put(clone(task));throw error;}
-        if(signal?.aborted||admission!==this.admissionEpoch){task.status='stopped';task.note='交办在启动前被取消';await this.journal.put(clone(task));return {ok:false,error:task.note};}
+        if(!live()){task.status='stopped';task.note='交办在启动前被取消';await this.journal.put(clone(task));return {ok:false,error:task.note};}
         this.tasks.set(task.id,task); this.tokens.set(task.id,0); this.publish(); this.schedule(25);
         return { ok:true, id:task.id,queued:task.status==='queued',...(task.status==='queued'?{note:capacityNote}:{}) };
       });
@@ -86,9 +131,9 @@ class AgentRuntime {
   async adopt(id,specification,authorization,{signal,live=()=>true,replaceId}={}){
     const task=this.tasks.get(id);if(!task||signal?.aborted||!live())throw Error('交办已取消');
     const spec=taskSpec(specification),actor=authority(authorization,authorization.scene),skill=this.skills.get(spec.skill);try{await skill.validate?.(spec,actor);}catch(error){error.code||='E_TASK_SPEC';throw error;}
-    const capabilities=[...(skill.capabilitiesFor?skill.capabilitiesFor(spec):skill.capabilities)];
-    if(actor.capabilities&&capabilities.some(c=>!actor.capabilities.includes(c)))throw Object.assign(Error('主人入口没有此任务所需权限'),{code:'E_TASK_AUTH'});
-    for(const capability of skill.optionalCapabilities||[])if((!actor.capabilities||actor.capabilities.includes(capability))&&!capabilities.includes(capability))capabilities.push(capability);
+    let capabilities;
+    try { capabilities = this.capabilitiesFor(skill, spec, actor); }
+    catch (error) { error.code = 'E_TASK_AUTH'; throw error; }
     if(signal?.aborted||!live())throw Error('交办已取消');
     const staged=clone(task);
     if(staged.skill==='task.resolve')for(const key of ['context','delivery','workContext','workRequest'])delete staged[key];
@@ -96,93 +141,257 @@ class AgentRuntime {
     staged.state.resolution={kind:'task',at:this.clock()};delete staged.state.selfRepair;await this.prepare(staged);if(signal?.aborted||!live())throw Error('交办已取消');
     // Publish executable state only after all preparation and persistence pass.
     // A failed adoption must leave a saved intent, never a half-prepared skill.
-    return this.admission(async()=>{
-      if(signal?.aborted||!live())throw Error('交办已取消');
-      const prior=this.tasks.get(replaceId);
-      // A continuation takes over the same slot and external conversation.
-      if(prior&&!TERMINAL.has(prior.status)){this.tokens.set(prior.id,(this.tokens.get(prior.id)||0)+1);this.controllers.get(prior.id)?.abort();prior.status='stopped';prior.note='补充要求已接续到同一工作会话';await this.save(prior);}
-      this.admit(staged);staged.updatedAt=this.clock();await this.journal.put(clone(staged));
-      if(signal?.aborted||!live()){await this.journal.put(clone(task));throw Error('交办已取消');}
-      for(const key of Object.keys(task))if(!(key in staged))delete task[key];Object.assign(task,staged);this.publish();return task;
+    return this.admission(async () => {
+      if (signal?.aborted || !live()) throw Error('交办已取消');
+      const prior = this.tasks.get(replaceId);
+      const replacing = prior && prior !== task && !TERMINAL.has(prior.status) ? prior : null;
+      if (replacing?.status === 'stopping') throw Error('上一任务正在停止，请先核对外部会话');
+      const records = replacing ? [task, replacing] : [task];
+      const put = snapshots => replacing ? this.journal.putAll(snapshots) : this.journal.put(snapshots[0]);
+      if (replacing) this.amending.add(replacing.id);
+      try {
+        return await this.writeInOrder(records, async () => {
+          if (signal?.aborted || !live()) throw Error('交办已取消');
+          this.admit(staged, replacing);
+          staged.updatedAt = this.clock();
+          const stopped = replacing && { ...clone(replacing), status: 'stopped',
+            note: '补充要求已接续到同一工作会话', updatedAt: staged.updatedAt };
+          await put(stopped ? [clone(staged), stopped] : [clone(staged)]);
+          if (signal?.aborted || !live()) {
+            if (records.every(record => this.owns(record))) await put(records.map(clone));
+            throw Error('交办已取消');
+          }
+          if (replacing) {
+            this.cancelWorker(replacing);
+            Object.assign(replacing, { status: stopped.status, note: stopped.note, updatedAt: stopped.updatedAt });
+          }
+          for (const key of Object.keys(task)) if (!(key in staged)) delete task[key];
+          Object.assign(task, staged);
+          this.publish();
+          return task;
+        });
+      } finally {
+        if (replacing) this.amending.delete(replacing.id);
+        this.schedule();
+      }
     });
   }
-  async restore() {
-    for(const controller of this.controllers.values())controller.abort();
-    this.controllers.clear();this.actionGroups.clear();this.tasks.clear();this.tokens.clear();
-    const records = await this.journal.list();
-    for (const record of records) {
-      if (record.schema !== TASK_SCHEMA) continue;
-      try {
-        this.skills.get(record.skill); const task = clone(record);
-        if (!await this.journal.authorized(task)) continue;
-        task.privacyEpoch = this.epoch();
-        if(task.status==='stopping'){task.status='needs_attention';task.note='上次停止尚未确认，请再次停止以核对外部任务';}
-        // Only the guarded automatic-reply protocol proves that preparing
-        // precedes any draft or submit. Older and other write intents remain unknown.
-        for(const op of Object.values(task.operations||{}))if(op.effect==='write'&&op.status==='intent'&&op.tool==='conversation.send'&&op.lifecycle?.policy==='newer-event'&&op.lifecycle.phase==='preparing'){
-          op.status='not_dispatched';op.lifecycle={...op.lifecycle,phase:'cancelled',reason:'restart-before-effect'};
+  restore() {
+    if (this.restoreWork) return this.restoreWork;
+    this.restoring = true;
+    this.admissionEpoch++;
+    clearTimeout(this.timer);
+    this.timer = null;
+    for (const task of this.tasks.values()) this.cancelWorker(task);
+    this.restoreWork = this.admission(async () => {
+      await Promise.allSettled(this.pendingSaves.values());
+      const epoch = this.epoch();
+      const live = () => !this.closed && this.ready() && this.epoch() === epoch;
+      const records = await this.journal.list();
+      const restored = new Map(), changed = [];
+      let active = 0;
+      for (const record of records) {
+        if (!live()) return { restored: 0 };
+        if (record.schema !== TASK_SCHEMA || !this.skills.skills.has(record.skill) || !await this.journal.authorized(record)) continue;
+        const task = clone(record);
+        task.privacyEpoch = epoch;
+        if (!TERMINAL.has(task.status) && this.restoreTask(task)) changed.push(task);
+        if (occupiesSlot(task)) {
+          if (active < MAX_ACTIVE_TASKS) active++;
+          else {
+            task.status = 'queued';
+            task.note = capacityNote;
+            delete task.expiresAt;
+            if (changed.at(-1) !== task) changed.push(task);
+          }
         }
-        for(const action of Object.values(task.actionRuns||{}))if(action.status==='running')action.status='waiting';
-        for(const op of Object.values(task.operations||{}))if(op.effect==='write'&&op.status==='intent'&&op.actionId&&task.actionRuns?.[op.actionId])task.actionRuns[op.actionId].status='needs_attention';
-        if (!TERMINAL.has(task.status) && !['queued','paused','needs_attention','waiting_permission'].includes(task.status)) {
-          const pending = Object.values(task.operations).some(op => op.effect === 'write' && op.status === 'intent');
-          task.status = pending ? 'needs_attention' : 'waiting';
-          task.note = pending ? '上次操作结果不确定；停止重发，等待核对' : '已恢复任务与待处理事件，等待重新观察';
-          task.nextCheckAt = this.clock();
+        restored.set(task.id, task);
+      }
+      if (!live()) return { restored: 0 };
+      this.controllers.clear();
+      this.actionGroups.clear();
+      this.tasks = restored;
+      this.tokens = new Map([...restored.keys()].map(id => [id, 0]));
+      for (const task of changed) {
+        try { await this.save(task); }
+        catch {
+          restored.delete(task.id);
+          this.tokens.delete(task.id);
         }
-        if(occupiesSlot(task)&&this.capacity().active>=MAX_ACTIVE_TASKS){task.status='queued';task.note=capacityNote;delete task.expiresAt;}
-        this.tasks.set(task.id,task); this.tokens.set(task.id,0); await this.save(task);
-      } catch { /* A removed skill/source never becomes an authorized task. */ }
+      }
+      return { restored: restored.size };
+    }).finally(() => {
+      this.restoring = false;
+      this.restoreWork = null;
+      this.publish();
+      this.schedule();
+    });
+    return this.restoreWork;
+  }
+
+  restoreTask(task) {
+    let changed = false;
+    if (task.status === 'stopping') {
+      task.status = 'needs_attention';
+      task.note = '上次停止尚未确认，请再次停止以核对外部任务';
+      changed = true;
     }
-    this.schedule(); return { restored:this.tasks.size };
+    for (const run of Object.values(task.actionRuns)) {
+      if (run.status === 'running') {
+        run.status = 'waiting';
+        changed = true;
+      }
+    }
+    let unknown = false;
+    for (const op of Object.values(task.operations)) {
+      if (op.effect !== 'write' || op.status !== 'intent') continue;
+      if (op.tool === 'conversation.send' && op.lifecycle?.policy === 'newer-event' && op.lifecycle.phase === 'preparing') {
+        op.status = 'not_dispatched';
+        op.lifecycle = { ...op.lifecycle, phase: 'cancelled', reason: 'restart-before-effect' };
+        changed = true;
+        continue;
+      }
+      unknown = true;
+      const run = task.actionRuns[op.actionId];
+      if (run && run.status !== 'needs_attention') {
+        run.status = 'needs_attention';
+        changed = true;
+      }
+    }
+    if (!['queued', 'paused', 'needs_attention', 'waiting_permission'].includes(task.status)) {
+      task.status = unknown ? 'needs_attention' : 'waiting';
+      task.note = unknown ? '上次操作结果不确定；停止重发，等待核对' : '已恢复任务与待处理事件，等待重新观察';
+      task.nextCheckAt = this.clock();
+      changed = true;
+    }
+    return changed;
   }
-  async enqueue(id, event) {
+  async enqueue(id, event, { advance, current } = {}) {
     const task = this.tasks.get(id);
-    if (!task || TERMINAL.has(task.status) || typeof event?.key !== 'string' || !event.key || event.key.length > 256 || Buffer.byteLength(JSON.stringify(event)) > 64000) return { ok:false };
-    if (task.eventKeys.includes(event.key)||task.overflowEvent?.key===event.key) return { ok:true, duplicate:true };
-    if (task.inbox.length >= 200 || Buffer.byteLength(JSON.stringify(task.inbox))+Buffer.byteLength(JSON.stringify(event))>300000) { if(task.overflowEvent)return {ok:false,error:'待处理事件已满，请先恢复处理积压'}; task.overflowEvent={...clone(event),at:event.at??this.clock()}; task.counters.events++; if(task.status!=='queued')task.status='needs_attention'; task.note='待处理事件已满；本次新事件也已保存，暂停观察等待处理积压'; await this.save(task); return { ok:true,overflow:true }; }
-    task.inbox.push({ ...clone(event), at:event.at ?? this.clock() }); task.eventKeys.push(event.key);
-    task.counters.events++; task.nextCheckAt=this.clock(); await this.save(task);
-    if(event.type==='conversation.messages'&&typeof event.subjectKey==='string'&&require('./conversation-cursor').hasNewInput(event))
-      this.actions.supersede({taskId:task.id,scope:task.id+':'+task.scene+':'+event.subjectKey,eventKey:event.key});
-    this.schedule(25); return { ok:true };
+    if (!task || typeof event?.key !== 'string' || !event.key || event.key.length > 256) return { ok: false };
+    try {
+      const stored = { ...clone(event), at: event.at ?? this.clock() };
+      const bytes = Buffer.byteLength(JSON.stringify(stored));
+      if (bytes > 64000) return { ok: false };
+      return await this.writeInOrder([task], async () => {
+        if (this.closed || this.restoring || TERMINAL.has(task.status) || task.status === 'stopping') return { ok: false };
+        if (task.eventKeys.includes(stored.key) || task.overflowEvent?.key === stored.key) return { ok: true, duplicate: true };
+        if (current && !current()) return { ok: false, error: '观察位置已变化，等待重新核对' };
+        const overflow = task.inbox.length >= 200 || Buffer.byteLength(JSON.stringify(task.inbox)) + bytes > 300000;
+        if (overflow && task.overflowEvent) return { ok: false, error: '待处理事件已满，请先恢复处理积压' };
+        const apply = (target, now) => {
+          advance?.(target);
+          target.counters.events++;
+          if (overflow) {
+            target.overflowEvent = clone(stored);
+            if (!TERMINAL.has(target.status) && !['queued', 'paused', 'stopping'].includes(target.status)) {
+              target.status = 'needs_attention';
+              target.note = '待处理事件已满；本次新事件也已保存，暂停观察等待处理积压';
+            }
+          } else {
+            target.inbox.push(clone(stored));
+            target.eventKeys.push(stored.key);
+            target.nextCheckAt = now;
+            if (target === task) this.operations.supersede(target, stored);
+          }
+        };
+        const snapshot = clone(task), now = this.clock();
+        apply(snapshot, now);
+        await this.commitSnapshot(task, snapshot, now, apply);
+        this.schedule();
+        return { ok: true, ...(overflow ? { overflow: true } : {}) };
+      });
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
   }
+  async stop(task) {
+    const id = task.id;
+    if (this.stops.has(id)) return this.stops.get(id);
+    const work = (async () => {
+      const started = await this.admission(async () => {
+        if (!this.canControl(task) || TERMINAL.has(task.status)) return false;
+        this.cancelWorker(task);
+        task.status = 'stopping';
+        task.note = '正在停止任务';
+        await this.save(task);
+        this.schedule();
+        return true;
+      });
+      if (!started) return { ok: false, error: '任务已结束或不可用' };
+
+      let failure;
+      try { await this.stopTask(task); }
+      catch (error) { failure = error; }
+      return this.admission(async () => {
+        if (this.tasks.get(id) !== task || task.privacyEpoch !== this.epoch()) return { ok: false, error: '任务资料已变化' };
+        task.status = failure ? 'needs_attention' : 'stopped';
+        task.note = failure ? '停止尚未确认：' + failure.message : '已停止';
+        await this.save(task);
+        this.schedule();
+        return failure ? { ok: false, error: task.note } : { ok: true };
+      });
+    })();
+    this.stops.set(id, work);
+    try { return await work; }
+    finally { if (this.stops.get(id) === work) this.stops.delete(id); }
+  }
+
   async control(action, id) {
     const task = this.tasks.get(id);
-    if (!task || !canRead(this.getScene(),task)) return { ok:false,error:'请明确要控制的任务' };
-    if (action === 'status') return { ok:true, task:this.list().find(t=>t.id===id) };
-    if (!['pause','resume','stop'].includes(action) || TERMINAL.has(task.status)) return { ok:false,error:'任务已结束或操作不合法' };
-    this.keepalive.cancel(id);
-    if (action === 'resume' && Object.values(task.operations).some(op=>op.effect==='write'&&op.status==='intent')) return { ok:false,error:'上次写入结果不确定，不能自动恢复或重发' };
-    if(action==='stop'){
-      if(this.stops.has(id))return this.stops.get(id);
-      const work=(async()=>{
-        this.tokens.set(id,(this.tokens.get(id)||0)+1);this.controllers.get(id)?.abort();task.status='stopping';task.note='正在停止任务';await this.save(task);
-        try{await this.stopTask(task);task.status='stopped';task.note='已停止';await this.save(task);return {ok:true};}
-        catch(error){task.status='needs_attention';task.note='停止尚未确认：'+error.message;await this.save(task);return {ok:false,error:task.note};}
-      })();this.stops.set(id,work);try{return await work;}finally{this.stops.delete(id);}
-    }
-    return this.admission(async()=>{
-      if(task.status==='stopping')return {ok:false,error:'正在停止，请等待确认'};
-      if(action==='resume'&&!occupiesSlot(task)&&task.skill!=='task.resolve'&&this.capacity().active>=MAX_ACTIVE_TASKS)return {ok:false,error:capacityNote};
-      const queued=task.status==='queued',group=this.actionGroups.get(id),active=!!group?.workers.size&&!group.parent.signal.aborted;
-      if(action==='pause'||!active){this.tokens.set(id,(this.tokens.get(id)||0)+1);this.controllers.get(id)?.abort();}
-      if(action==='resume'){
-        await this.skills.get(task.skill).resume?.(task);
-        for(const run of Object.values(task.actionRuns||{}))if(['needs_attention','waiting_permission'].includes(run.status))run.status='waiting';
+    if (!this.canControl(task)) return { ok: false, error: '请明确要控制的任务' };
+    if (action === 'status') return { ok: true, task: this.list().find(t => t.id === id) };
+    if (action === 'stop') return this.stop(task);
+    return this.admission(async () => {
+      if (!this.canControl(task) || !['pause', 'resume'].includes(action) || TERMINAL.has(task.status)) return { ok: false, error: '任务已结束或操作不合法' };
+      if (task.status === 'stopping') return { ok: false, error: '正在停止，请等待确认' };
+      if (action === 'resume' && Object.values(task.operations).some(op => op.effect === 'write' && op.status === 'intent')) {
+        return { ok: false, error: '上次写入结果不确定，不能自动恢复或重发' };
       }
-      task.status=action==='pause'?'paused':active?'running':'waiting';task.note=action==='pause'?'已暂停，保留待处理事项':'继续原任务与待处理事项';task.nextCheckAt=this.clock();
-      if(action==='resume'&&queued&&task.schedule.durationMinutes)task.expiresAt=this.clock()+task.schedule.durationMinutes*60000;
-      await this.save(task);if(action==='resume')this.schedule(25);return {ok:true};
+      if (action === 'resume' && !occupiesSlot(task) && task.skill !== 'task.resolve' && this.capacity().active >= MAX_ACTIVE_TASKS) {
+        return { ok: false, error: capacityNote };
+      }
+
+      const queued = task.status === 'queued', group = this.actionGroups.get(id);
+      const active = !!group?.workers.size && !group.parent.signal.aborted;
+      if (action === 'pause' || !active) this.cancelWorker(task);
+      else this.keepalive.cancel(id);
+      if (action === 'resume') {
+        const admission = this.admissionEpoch;
+        await this.skills.get(task.skill).resume?.(task);
+        if (admission !== this.admissionEpoch || !this.canControl(task) || TERMINAL.has(task.status)) return { ok: false, error: '任务状态已变化' };
+        for (const run of Object.values(task.actionRuns)) {
+          if (['needs_attention', 'waiting_permission'].includes(run.status)) run.status = 'waiting';
+        }
+      }
+      task.status = action === 'pause' ? 'paused' : active ? 'running' : 'waiting';
+      task.note = action === 'pause' ? '已暂停，保留待处理事项' : '继续原任务与待处理事项';
+      task.nextCheckAt = this.clock();
+      if (action === 'resume' && queued && task.schedule.durationMinutes) task.expiresAt = this.clock() + task.schedule.durationMinutes * 60000;
+      await this.save(task);
+      this.schedule();
+      return { ok: true };
     });
   }
   async confirmReconciled(id,operationId,result){
-    const task=this.tasks.get(id),op=task?.operations[operationId];
-    if(!task||!canRead(this.getScene(),task)||op?.effect!=='write'||op.status!=='intent'||result?.verified!==true||result?.ok!==true)return {ok:false,error:'没有可核对的未确认操作'};
-    op.status='confirmed';op.result=clone(result);op.finishedAt=this.clock();delete op.args;delete op.error;task.counters.writes++;
-    if(op.actionId&&task.actionRuns?.[op.actionId])task.actionRuns[op.actionId].status='waiting';
-    if(!TERMINAL.has(task.status)){task.status='paused';task.note='只读核对已确认本次操作，保留进展；可继续原任务';}
-    await this.save(task);return {ok:true};
+    return this.admission(async () => {
+      const task = this.tasks.get(id), op = task?.operations[operationId];
+      if (!this.canControl(task) || op?.effect !== 'write' || op.status !== 'intent' ||
+          this.operations.isRunning(task, op) || result?.verified !== true || result?.ok !== true) return { ok: false, error: '没有可核对的未确认操作' };
+      const apply = (target, now) => {
+        const entry = target.operations[operationId];
+        entry.status = 'confirmed'; entry.result = clone(result); entry.finishedAt = now;
+        delete entry.args; delete entry.error;
+        target.counters.writes++;
+        if (entry.actionId && target.actionRuns[entry.actionId]) target.actionRuns[entry.actionId].status = 'waiting';
+        if (!TERMINAL.has(target.status) && target.status !== 'stopping') {
+          target.status = 'paused'; target.note = '只读核对已确认本次操作，保留进展；可继续原任务';
+        }
+      };
+      await this.persist(task, apply);
+      this.schedule();
+      return { ok: true };
+    });
   }
   async controlAll(action,{excludeIds=[]}={}){
     if(action==='status')return {ok:true,tasks:this.list().filter(t=>!excludeIds.includes(t.id))};
@@ -193,117 +402,92 @@ class AgentRuntime {
     for(const task of targets)results.push(await this.control(action,task.id));
     return {ok:results.every(r=>r.ok),...(results.some(r=>!r.ok)?{error:'部分任务有不确定操作，需要先核对'}:{})};
   }
-  async update(id,patch,authorization){
-    const task=this.tasks.get(id);if(!task||TERMINAL.has(task.status)||task.status==='stopping'||!canRead(this.getScene(),task))return {ok:false,error:'找不到可修改的当前任务，或任务正在停止'};
-    try{
-      const actor=authority(authorization,authorization?.scene||this.getScene());
-      const allowed=['goal','criteria','policy','parameters','schedule','completion','context','delivery','workContext','workRequest'];
-      if(!patch||typeof patch!=='object'||Object.keys(patch).some(k=>!allowed.includes(k)))throw new Error('修改仅可调整当前任务目标、规则与周期');
-      const spec=taskSpec({skill:task.skill,goal:task.goal,criteria:task.criteria,subjects:task.subjects,policy:task.policy,parameters:task.parameters,completion:task.completion,context:task.context,delivery:task.delivery,workContext:task.workContext,workRequest:task.workRequest,...patch,schedule:{...task.schedule,...patch.schedule}});
-      const skill=this.skills.get(spec.skill);await skill.validate?.(spec,actor);
-      const requested=[...(skill.capabilitiesFor?skill.capabilitiesFor(spec):skill.capabilities)];
-      if(actor.capabilities&&requested.some(c=>!actor.capabilities.includes(c)))throw new Error('此主人入口未授权修改后的任务能力');
-      for(const capability of skill.optionalCapabilities||[])if((!actor.capabilities||actor.capabilities.includes(capability))&&!requested.includes(capability))requested.push(capability);
-      return await this.admission(async()=>{
-        // A cadence change is not a request to cancel an unrelated in-flight action.
-        if(Object.keys(patch).length===1&&Object.hasOwn(patch,'schedule')){
-          const amendmentSources=(actor.originSourceId?[actor.originSourceId]:actor.sources).filter(source=>source!==id);
-          task.schedule=clone(spec.schedule);task.sources=[...new Set([...task.sources,...amendmentSources])];task.visibilityFloor=Math.max(task.visibilityFloor,actor.visibilityFloor);
-          if(Object.hasOwn(patch.schedule,'durationMinutes')){if(spec.schedule.durationMinutes&&task.status!=='queued')task.expiresAt=this.clock()+spec.schedule.durationMinutes*60000;else delete task.expiresAt;}
-          await this.save(task);return {ok:true,id,queued:task.status==='queued'};
-        }
-        const staged=clone(task),priorStatus=task.status;
-        Object.assign(staged,spec);staged.capabilities=[...requested];
-        // Contextual assistant reports may already descend from this task.
-        // Amendments depend on the new owner turn, not its contextual descendants.
-        const amendmentSources=(actor.originSourceId?[actor.originSourceId]:actor.sources).filter(source=>source!==id);
-        staged.sources=[...new Set([...staged.sources,...amendmentSources])];
-        staged.visibilityFloor=Math.max(staged.visibilityFloor,actor.visibilityFloor);staged.state.goalRevision=(staged.state.goalRevision||0)+1;delete staged.state.selfRepair;delete staged.state.contextTuning;
-        for(const event of staged.inbox)delete event.decision;
-        const unknown=Object.values(staged.operations).some(op=>op.effect==='write'&&op.status==='intent');
-        staged.status=['queued','paused'].includes(priorStatus)?priorStatus:unknown?'needs_attention':'waiting';
-        staged.note=priorStatus==='queued'?'目标已更新；'+capacityNote:unknown?'目标已更新；上次操作结果仍需核对':'已更新原任务，保留已有进展';
-        staged.nextCheckAt=this.clock();if(patch.schedule&&Object.hasOwn(patch.schedule,'durationMinutes')){if(spec.schedule.durationMinutes&&priorStatus!=='queued')staged.expiresAt=this.clock()+spec.schedule.durationMinutes*60000;else delete staged.expiresAt;}
-        staged.updatedAt=this.clock();await this.journal.put(clone(staged));
-        this.tokens.set(id,(this.tokens.get(id)||0)+1);this.controllers.get(id)?.abort();for(const key of Object.keys(task))if(!(key in staged))delete task[key];Object.assign(task,staged);this.publish();this.schedule(25);return {ok:true,id,queued:task.status==='queued'};
-      });
-    }catch(error){return {ok:false,error:error.message};}
-  }
-  async call(task, skill, call, token, signal, actionId) {
-    if (!this.current(task,token,true) || signal.aborted) throw new Error('任务已停止或权限已变化');
-    let checked;try{checked=this.tools.check(call.tool,call.args,task,skill);}catch(error){error.dispatched=false;throw error;}const {tool,input}=checked;
-    if (typeof call.key !== 'string' || !call.key || call.key.length>200) throw new Error('工具调用缺少稳定操作标识');
-    let id = crypto.createHash('sha256').update(task.id+'\0'+call.key).digest('hex');
-    const argsHash=crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex');
-    let prior=task.operations[id],replaced;
-    while(prior?.replacedBy&&task.operations[prior.replacedBy]){id=prior.replacedBy;prior=task.operations[id];}
-    if (prior && (prior.tool !== tool.name || (prior.argsHash||crypto.createHash('sha256').update(JSON.stringify(prior.args)).digest('hex')) !== argsHash)) {
-      if(prior.status!=='not_dispatched')throw new Error('同一操作标识不能对应不同工具或参数；既有写入须先核对');
-      // A replan after proven non-dispatch is a new attempt, not a replay or
-      // mutation of the old receipt. Keep both in the same logical step.
-      replaced=prior;id=crypto.createHash('sha256').update(id+'\0'+tool.name+'\0'+argsHash).digest('hex');prior=undefined;
-    }
-    if (prior?.status==='confirmed' && tool.effect==='write') return clone(prior.result);
-    if (prior?.status==='intent'&&prior.effect==='write') throw new Error('此写入结果不确定，禁止重试');
-    await this.authorize(tool,input,task);
-    const operation={ id,key:call.key,tool:tool.name,effect:tool.effect,args:input,argsHash,status:'intent',at:this.clock(),...(replaced?{supersedes:replaced.id}:{}),...(actionId?{actionId}:{}) };
-    if(replaced)replaced.replacedBy=id;
-    task.operations[id]=operation;
-    const reads=Object.values(task.operations).filter(op=>op.effect==='read');
-    for(const old of reads.slice(0,Math.max(0,reads.length-32)))delete task.operations[old.id];
-    await this.save(task);
-    if (!this.current(task,token,true)||signal.aborted) { operation.status='not_dispatched';await this.save(task);throw new Error('任务已暂停，未继续调用工具'); }
-    const policy=tool.lifecycle?.(input,{task,call})||{policy:'independent'};
-    const progress=actionId?new ActionProgress(task.actionRuns[actionId].progress??={},this.clock):null;
-    const action=this.actions.start({id,taskId:task.id,scope:policy.scope,eventKey:policy.eventKey,policy:policy.policy,parentSignal:signal,progress,
-      onPhase:async phase=>{operation.lifecycle={...(operation.lifecycle||{}),phase};await this.save(task);}});
-    if(policy.policy==='newer-event'){
-      const index=task.inbox.findIndex(e=>e.key===policy.eventKey),later=index<0?[]:task.inbox.slice(index+1);
-      const fresh=later.find(e=>e.type==='conversation.messages'&&task.id+':'+task.scene+':'+e.subjectKey===policy.scope&&require('./conversation-cursor').hasNewInput(e));
-      if(fresh)this.actions.supersede({taskId:task.id,scope:policy.scope,eventKey:fresh.key});
-    }
+  async update(id, patch, authorization) {
     try {
-      operation.lifecycle={phase:'preparing',policy:policy.policy};await this.save(task);
-      if(action.signal.aborted||!this.current(task,token,true))throw Object.assign(Error('动作在执行前已停止'),{dispatched:false,...(action.superseded?{code:'E_ACTION_SUPERSEDED'}:{})});
-      let result;const maxAttempts=Math.max(1,Math.min(2,Number(policy.maxAttempts)||1));
-      for(let attempt=1;;attempt++){
-        try{
-          const execute=()=>tool.execute(input,{ task, signal:action.signal, action, operationId:id,attempt });
-          result=progress?await progress.stage('tool').measure('tool',execute):await execute();
-          if(tool.effect==='write'&&(result?.ok!==true||result?.verified!==true))throw Object.assign(new Error(result?.error||'写入结果尚未核实'),result?.code?{code:result.code}:{},result?.dispatched===false?{dispatched:false}:{});
-          break;
-        }catch(error){
-          if(attempt>=maxAttempts||error.dispatched!==false||!['preparing','protected'].includes(action.phase)||action.signal.aborted||!policy.shouldRetry?.(error))throw error;
-          operation.status='not_dispatched';operation.lifecycle={...operation.lifecycle,phase:'recovering',attempt};await this.save(task);
-          if(action.phase==='protected')await action.retryBeforeEffect();
-          await policy.recover?.({error,task,input,signal:action.signal,attempt});
-          if(action.signal.aborted||!this.current(task,token,true))throw Object.assign(Error('动作恢复前已停止'),{dispatched:false,...(action.superseded?{code:'E_ACTION_SUPERSEDED'}:{})});
-          await this.authorize(tool,input,task);operation.status='intent';operation.lifecycle={...operation.lifecycle,phase:'preparing',attempt:attempt+1};await this.save(task);
+      return await this.admission(async () => {
+        const task = this.tasks.get(id);
+        const amendable = () => this.canControl(task) && !TERMINAL.has(task.status) && task.status !== 'stopping';
+        if (!amendable()) throw new Error('找不到可修改的当前任务，或任务正在停止');
+        const actor = authority(authorization, authorization?.scene || this.getScene());
+        const allowed = ['goal', 'criteria', 'policy', 'parameters', 'schedule', 'completion', 'context', 'delivery', 'workContext', 'workRequest'];
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch) || !Object.keys(patch).length ||
+            Object.keys(patch).some(key => !allowed.includes(key))) throw new Error('修改仅可调整当前任务目标、规则与周期');
+
+        const { skill: name, goal, criteria, subjects, policy, parameters, completion, context, delivery, workContext, workRequest } = task;
+        const spec = taskSpec({ skill: name, goal, criteria, subjects, policy, parameters, completion, context, delivery, workContext, workRequest,
+          ...patch, schedule: { ...task.schedule, ...patch.schedule } });
+        const skill = this.skills.get(spec.skill);
+        await skill.validate?.(spec, actor);
+        if (!amendable()) throw new Error('任务状态已变化，请重新查看后修改');
+        const capabilities = this.capabilitiesFor(skill, spec, actor);
+        const cadenceOnly = Object.keys(patch).length === 1 && Object.hasOwn(patch, 'schedule');
+        const durationChanged = patch.schedule && Object.hasOwn(patch.schedule, 'durationMinutes');
+        // Contextual reports may descend from this task, so use the new owner turn.
+        const sources = (actor.originSourceId ? [actor.originSourceId] : actor.sources).filter(source => source !== id);
+        const apply = (target, now) => {
+          for (const key of Object.keys(patch)) {
+            if (Object.hasOwn(spec, key)) target[key] = clone(spec[key]);
+            else delete target[key];
+          }
+          target.sources = [...new Set([...target.sources, ...sources])];
+          target.visibilityFloor = Math.max(target.visibilityFloor, actor.visibilityFloor);
+          if (durationChanged) {
+            if (spec.schedule.durationMinutes && target.status !== 'queued') target.expiresAt = now + spec.schedule.durationMinutes * 60000;
+            else delete target.expiresAt;
+          }
+          if (cadenceOnly) return;
+          target.capabilities = [...capabilities];
+          target.state.goalRevision = (target.state.goalRevision || 0) + 1;
+          for (const key of ['selfRepair', 'contextTuning', 'pendingDecision', 'recoveryGuidance']) delete target.state[key];
+          for (const event of target.inbox) {
+            delete event.decision;
+            delete event.decisionAt;
+          }
+          const unknown = Object.values(target.operations).some(op => op.effect === 'write' && op.status === 'intent');
+          if (!['queued', 'paused'].includes(target.status)) target.status = unknown ? 'needs_attention' : 'waiting';
+          target.note = target.status === 'queued' ? '目标已更新；' + capacityNote : unknown ? '目标已更新；上次操作结果仍需核对' : '已更新原任务，保留已有进展';
+          target.nextCheckAt = now;
+        };
+
+        if (!cadenceOnly) this.amending.add(id);
+        try {
+          await this.persist(task, apply);
+          // An in-flight Operation still owns its receipt. Cancelling its
+          // worker prevents it from continuing under the old instructions.
+          if (!cadenceOnly) this.cancelWorker(task);
+        } finally {
+          this.amending.delete(id);
+          this.schedule(25);
         }
-      }
-      operation.status='confirmed';operation.lifecycle={...(operation.lifecycle||{}),phase:'completed'};operation.result=tool.effect==='write'?clone(result ?? {}):{ok:true};operation.finishedAt=this.clock();delete operation.args;
-      progress?.observe(tool.name,{tool:tool.name,args:input,result},{waiting:tool.name==='work.status'&&!result?.completed?'external':undefined});
-      task.counters[tool.effect==='write'?'writes':'reads']++; await this.save(task);
-      if(!this.current(task,token,true)||signal.aborted)throw new Error('实际结果已核实并保存；任务已暂停，没有继续后续操作');
-      return clone(result ?? {});
-    } catch(error) {
-      progress?.observe(tool.name,{tool:tool.name,args:input,error:error.code||error.name},{waiting:error.code==='E_GUI_BUSY'?'gui':error.code==='E_CAPTURE_BUSY'?'capture':undefined});
-      if(tool.effect==='read')error.dispatched=false;
-      if (error.dispatched===false) operation.status='not_dispatched';
-      if(action.superseded&&action.phase==='preparing'&&error.dispatched===false)error.code='E_ACTION_SUPERSEDED';
-      operation.lifecycle={...(operation.lifecycle||{}),phase:operation.status==='not_dispatched'?'cancelled':operation.status==='confirmed'?'completed':'uncertain',...(action.superseded?{reason:'newer-event'}:{})};
-      operation.error=error.message;await this.save(task);throw error;
-    } finally {action.finish();}
+        return { ok: true, id, queued: task.status === 'queued' };
+      });
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  }
+  selectWork(task) {
+    const group = this.actionGroups.get(task.id);
+    if(!group&&this.controllers.has(task.id))return;
+    if(group?.parent.signal.aborted)return;
+    const event = this.selectEvent(task, group);
+    if(!event&&(task.inbox.length||group?.workers.size||['needs_attention','waiting_permission'].includes(task.status)))return;
+    const pendingRun=Object.values(task.actionRuns).find(run=>run.status==='waiting'&&(event?run.eventKey===event.key:!run.eventKey));
+    if(this.keepalive.pending.has(this.keepalive.key(task,pendingRun)))return;
+    return { group, event };
   }
   async step(id) {
     const task=this.tasks.get(id),token=this.tokens.get(id);
     if (!task||!this.current(task,token,true))return;
-    let group=this.actionGroups.get(id),event=this.selectEvent(task,group);
-    const pendingRun=Object.values(task.actionRuns||{}).find(run=>run.status==='waiting'&&(event?run.eventKey===event.key:!run.eventKey));
-    if(this.keepalive.pending.has(this.keepalive.key(task,pendingRun)))return;
-    if(!group&&this.controllers.has(id))return;
-    if(group?.parent.signal.aborted)return;
-    if(!event&&(task.inbox.length||group?.workers.size||['needs_attention','waiting_permission'].includes(task.status)))return;
+    if (task.expiresAt && this.clock() >= task.expiresAt) {
+      this.cancelWorker(task);
+      task.status = 'expired';
+      task.note = '已达到主人指定时长';
+      await this.save(task);
+      return;
+    }
+    const selected = this.selectWork(task);
+    if (!selected) return;
+    let { group, event } = selected;
     if(!group){const parent=new AbortController();group={parent,workers:new Map()};this.actionGroups.set(id,group);this.controllers.set(id,parent);}
     const workerKey=event?.key||'__task__',scope=this.eventScope(event),controller=new AbortController();
     const cancel=()=>controller.abort(group.parent.signal.reason);group.parent.signal.addEventListener('abort',cancel,{once:true});if(group.parent.signal.aborted)cancel();
@@ -313,18 +497,18 @@ class AgentRuntime {
     try {
       if(!await this.journal.authorized(task))throw Object.assign(new Error('任务来源已失效'),{code:'E_TASK_AUTH'});
       if(!this.current(task,token,true))return;
-      if(task.expiresAt&&this.clock()>=task.expiresAt){task.status='expired';task.note='已达到主人指定时长';await this.save(task);group.parent.abort();return;}
       const skill=this.skills.get(task.skill);
       if(actionId){task.actionRuns??={};actionRun=task.actionRuns[actionId]??={id:actionId,eventKey:event?.key||null,scope,eventType:event?.type||'task.goal',createdAt:this.clock(),attempts:0};actionRun.status='running';actionRun.attempts++;actionRun.startedAt??=this.clock();progress=new ActionProgress(actionRun.progress??={},this.clock).wait(null);}
       if(!['needs_attention','waiting_permission'].includes(task.status))task.status='running';task.counters.wakes++;await this.save(task);
       if(event?.type==='conversation.messages')stopObservation=this.observeWhileActive?.(task,event,controller.signal);
-      const call=action=>this.call(task,skill,action,token,controller.signal,actionId);
+      const call=call=>this.operations.execute({task,call,signal:controller.signal,actionId,
+        isCurrent:()=>this.current(task,token,true)&&!controller.signal.aborted&&(!task.expiresAt||this.clock()<task.expiresAt)});
       const script=async plan=>{const steps=scriptPlan(plan,this.tools,task,skill),results=[];for(const action of steps)results.push(await call(action));return results;};
       const result=await skill.run({ task,progress,isLive:()=>this.current(task,token,true), event:clone(event), recovery:actionRun?.recovery,signal:controller.signal, call, script, now:this.clock(),clock:()=>this.clock(),
         availableTools:this.tools.catalog(undefined,task),validateCall:(name,args)=>this.tools.check(name,args,task),
         completedCall:(key,tool)=>{const op=Object.values(task.operations).find(o=>o.key===key&&o.tool===tool&&o.effect==='write'&&o.status==='confirmed'&&(!actionId||o.actionId===actionId));return op?clone(op.result):null;},
         checkpoint:async()=>{if(!this.current(task,token,true))throw new Error('任务已停止');await this.save(task);},
-        enqueue:e=>this.enqueue(id,e), report:async(text,key)=>{
+        enqueue:(event, options)=>this.enqueue(id,event,options), report:async(text,key)=>{
           if(typeof text!=='string'||!text.trim()||text.length>12000)throw new Error('任务汇报不合法');
           const reportId=crypto.createHash('sha256').update(id+'\0'+key).digest('hex');
           if(task.reports.includes(reportId))return;
@@ -379,7 +563,7 @@ class AgentRuntime {
         const unknown=Object.values(task.operations).some(op=>op.effect==='write'&&op.status==='intent'&&(actionId?op.actionId===actionId:!op.actionId));
         // Resource contention is an ordinary wait, not a model/tool failure.
         // Preserve the event and cached decision without repair or backoff.
-        if(['E_GUI_BUSY','E_CAPTURE_BUSY'].includes(error.code)&&error.dispatched===false&&!unknown){
+        if(['E_GUI_BUSY','E_CAPTURE_BUSY','E_OPERATION_BUSY'].includes(error.code)&&error.dispatched===false&&!unknown){
           if(actionRun){actionRun.status='waiting';actionRun.note=error.message;}
           const blocked=Object.values(task.actionRuns||{}).map(a=>a.status);
           task.status=blocked.includes('needs_attention')?'needs_attention':blocked.includes('waiting_permission')?'waiting_permission':'waiting';
@@ -436,22 +620,65 @@ class AgentRuntime {
       if(!group.workers.size&&this.actionGroups.get(id)===group){
         this.actionGroups.delete(id);if(this.controllers.get(id)===group.parent)this.controllers.delete(id);
         if(this.tasks.get(id)===task&&task.status==='running'){task.status='waiting';await this.save(task).catch(()=>{});}
-        if(this.tasks.get(id)===task&&task.status==='waiting'&&task.inbox.length)this.schedule(25);
       }
+      this.schedule();
     }
   }
   async tick(id) {
-    if(this.closed||!this.ready())return;
-    const due=[...this.tasks.values()].filter(task=>(!id||task.id===id)&&(id||task.nextCheckAt<=this.clock()));
-    const work=Promise.all(due.map(task=>this.step(task.id)));this.keepalive.inspect(this);await work;
+    if (this.closed || this.restoring || !this.ready()) return;
+    const now = this.clock();
+    const due = id ? [id] : [...this.tasks.values()]
+      .filter(task => task.nextCheckAt <= now || task.expiresAt && task.expiresAt <= now)
+      .map(task => task.id);
+    const work = Promise.all(due.map(task => this.step(task)));
+    this.keepalive.inspect(this);
+    this.schedule();
+    await work;
   }
-  schedule(delay=1000){if(this.closed||!this.autoSchedule)return;clearTimeout(this.timer);this.timer=setTimeout(()=>{this.schedule();void this.tick().catch(()=>{});},delay);this.timer.unref?.();}
-  async invalidate(reason='资料或运行状态发生变化'){
-    this.keepalive.cancel();
-    for(const task of this.tasks.values())if(!TERMINAL.has(task.status)&&task.status!=='queued'){
-      this.tokens.set(task.id,(this.tokens.get(task.id)||0)+1);this.controllers.get(task.id)?.abort();task.status='paused';task.note=reason;
-    }this.publish();
+  schedule() {
+    if (this.closed || this.restoring || !this.autoSchedule) return;
+    const now = this.clock();
+    let next = Infinity;
+    for (const task of this.tasks.values()) {
+      if (!this.current(task, this.tokens.get(task.id), true)) continue;
+      if (task.expiresAt) next = Math.min(next, task.expiresAt);
+      if (this.selectWork(task)) next = Math.min(next, task.nextCheckAt);
+      next = Math.min(next, this.keepalive.nextWake(this, task, now));
+    }
+    const wakeAt = Math.max(now + 25, next);
+    if (this.timer && this.wakeAt === wakeAt) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+    if (!Number.isFinite(wakeAt)) return;
+    this.wakeAt = wakeAt;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.tick().catch(() => this.schedule());
+    }, Math.min(2_147_483_647, wakeAt - now));
+    this.timer.unref?.();
   }
-  async close(){this.closed=true;this.keepalive.close();clearTimeout(this.timer);for(const c of this.controllers.values())c.abort();}
+  async invalidate(reason = '资料或运行状态发生变化') {
+    this.admissionEpoch++;
+    const writes = [];
+    for (const task of this.tasks.values()) {
+      if (TERMINAL.has(task.status) || ['queued', 'stopping', 'paused'].includes(task.status)) continue;
+      this.cancelWorker(task);
+      task.status = 'paused';
+      task.note = reason;
+      if (task.privacyEpoch === this.epoch()) writes.push(this.save(task));
+    }
+    this.publish();
+    this.schedule();
+    await Promise.allSettled(writes);
+  }
+  async close() {
+    this.closed = true;
+    this.admissionEpoch++;
+    this.keepalive.close();
+    clearTimeout(this.timer);
+    this.timer = null;
+    for (const controller of this.controllers.values()) controller.abort();
+    await Promise.allSettled(this.pendingSaves.values());
+  }
 }
 module.exports={ AgentRuntime };

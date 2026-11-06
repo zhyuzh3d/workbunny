@@ -3,6 +3,7 @@
 const path = require('path');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
+const { JsonLines, MAX_NATIVE_LINE_BYTES } = require('./json-lines');
 const displayBridges=new Map();
 const DISPLAY_OPS=new Set(['capture','visualSample','visualCommit','visualForget']);
 
@@ -20,9 +21,9 @@ class DesktopNative extends EventEmitter {
     this.spawnProcess = options.spawn || spawn;
     this.shareDisplay=options.sharedDisplay??!options.spawn;
     this.displayBridge=null;
-    this.maxResponseLineBytes = options.maxResponseLineBytes || 64 * 1024 * 1024;
+    this.maxResponseLineBytes = options.maxResponseLineBytes || MAX_NATIVE_LINE_BYTES;
     this.proc = null;
-    this.buffer = Buffer.alloc(0);
+    this.responses = new JsonLines(this.maxResponseLineBytes);
     this.pending = new Map();
     this.nextId = 1;
     this.closed = false;
@@ -37,29 +38,22 @@ class DesktopNative extends EventEmitter {
     if (this.proc && this.closed) throw new Error('桌面原生模块正在退出');
     if (this.proc && !this.closed) return;
     this.closed = false;
-    this.buffer = Buffer.alloc(0);
+    this.responses.reset();
     let child;
     try { child = this.spawnProcess(this.binaryPath, [], { stdio: ['pipe', 'pipe', 'pipe'] }); }
     catch (error) { throw new Error(`桌面原生模块启动失败：${error.message}`); }
     this.proc = child;
-    child.stdout.on('data', chunk => this._onData(chunk));
-    child.stdout.on('error', error => {
-      this.closed = true;
-      this._failAll(new Error(`桌面原生 stdout 错误：${error.message}`));
-      try { child.kill('SIGKILL'); } catch {}
-    });
+    child.stdout.on('data', chunk => { if (this.proc === child && !this.closed) this._onData(chunk); });
+    child.stdout.on('error', error => this._break(child, new Error(`桌面原生 stdout 错误：${error.message}`)));
     child.stderr.on('data', chunk => this.emit('stderr', String(chunk).trim()));
     child.stderr.on('error', error => this.emit('stderrError', error));
-    child.stdin.on('error', error => {
-      this.closed = true;
-      this._failAll(new Error(`桌面原生 stdin 错误：${error.message}`));
-      try { child.kill('SIGKILL'); } catch {}
-    });
-    child.on('error', error => this._failAll(new Error(`桌面原生模块启动失败：${error.message}`)));
+    child.stdin.on('error', error => this._break(child, new Error(`桌面原生 stdin 错误：${error.message}`)));
+    child.on('error', error => this._break(child, new Error(`桌面原生模块启动失败：${error.message}`)));
     child.on('close', (code, signal) => {
       if (this.proc === child) {
         this.proc = null;
         this.closed = true;
+        this.responses.reset();
         this._failAll(new Error(`桌面原生模块已退出（code=${code}, signal=${signal || ''}）`));
       }
       this.emit('close', { code, signal });
@@ -67,30 +61,32 @@ class DesktopNative extends EventEmitter {
   }
 
   _onData(chunk) {
-    this.buffer = Buffer.concat([this.buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
-    let index;
-    while ((index = this.buffer.indexOf(0x0a)) >= 0) {
-      if (index > this.maxResponseLineBytes) return this._protocolOverflow();
-      const line = this.buffer.subarray(0, index).toString('utf8').trim();
-      this.buffer = this.buffer.subarray(index + 1);
-      if (!line) continue;
-      let response;
-      try { response = JSON.parse(line); }
-      catch { this.emit('protocolError', line.slice(0, 300)); continue; }
-      const pending = this.pending.get(response.id);
-      if (!pending) continue;
-      clearTimeout(pending.timer);
-      this.pending.delete(response.id);
-      if (response.ok) pending.resolve(response.result);
-      else { const error = new Error(response.error || '桌面原生请求失败'); if (typeof response.code === 'string') error.code = response.code; pending.reject(error); }
+    try {
+      this.responses.push(chunk, response => {
+        if (!Number.isSafeInteger(response.id) || typeof response.ok !== 'boolean') throw new Error('Invalid desktop response');
+        const pending = this.pending.get(response.id);
+        if (!pending) return;
+        this.pending.delete(response.id);
+        clearTimeout(pending.timer);
+        if (response.ok) pending.resolve(response.result);
+        else {
+          const error = new Error(response.error || '桌面原生请求失败');
+          if (typeof response.code === 'string') error.code = response.code;
+          pending.reject(error);
+        }
+      });
+    } catch (error) {
+      this._break(this.proc, new Error(error.code === 'E_JSON_LINE_LIMIT'
+        ? '桌面原生模块响应行超过 64 MiB' : '桌面原生模块返回无效响应'));
     }
-    if (this.buffer.length > this.maxResponseLineBytes) this._protocolOverflow();
   }
 
-  _protocolOverflow() {
+  _break(child, error) {
+    if (this.proc !== child || this.closed) return;
     this.closed = true;
-    this._failAll(new Error('桌面原生模块响应行超过 64 MiB'));
-    try { this.proc?.kill('SIGKILL'); } catch {}
+    this.responses.reset();
+    this._failAll(error);
+    try { child.kill('SIGKILL'); } catch {}
   }
 
   _failAll(error) {
@@ -106,6 +102,12 @@ class DesktopNative extends EventEmitter {
       if(this.terminal)throw new Error('桌面原生客户端已关闭');
       if(!this.displayBridge){
         const key=path.resolve(this.binaryPath);let bridge=displayBridges.get(key);
+        if (bridge?.closing) {
+          const generation = this.recoveryGeneration;
+          await bridge.closing;
+          if (generation !== this.recoveryGeneration) throw new Error('截图请求已取消');
+          return this.request(op, payload, timeoutMs);
+        }
         if(!bridge){bridge={native:new DesktopNative(this.binaryPath,{sharedDisplay:false,spawn:this.spawnProcess,maxResponseLineBytes:this.maxResponseLineBytes}),clients:new Set(),tail:Promise.resolve(),key};displayBridges.set(key,bridge);}
         bridge.clients.add(this);this.displayBridge=bridge;
       }
@@ -199,9 +201,24 @@ class DesktopNative extends EventEmitter {
   async close() {
     this.recoveryGeneration++;
     this.terminal = true;
-    await this._stop('close');
-    if(this.displayBridge){const bridge=this.displayBridge;this.displayBridge=null;bridge.clients.delete(this);
-      if(!bridge.clients.size){displayBridges.delete(bridge.key);await bridge.native.close();}
+    try {
+      await this._stop('close');
+    } finally {
+      const bridge = this.displayBridge;
+      if (bridge) {
+        this.displayBridge = null;
+        bridge.clients.delete(this);
+        if (!bridge.clients.size) {
+          const remove = () => { if (displayBridges.get(bridge.key) === bridge) displayBridges.delete(bridge.key); };
+          // Leave the closing bridge registered until its display lease has
+          // actually been released by process exit.
+          bridge.closing = bridge.native.close().finally(() => {
+            if (!bridge.native.proc) remove();
+            else bridge.native.once('close', remove);
+          });
+          await bridge.closing;
+        }
+      }
     }
   }
 

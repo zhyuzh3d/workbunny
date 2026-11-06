@@ -52,6 +52,49 @@ test('capture clients share one serialized display bridge, and closing one leave
  child.kill=()=>{queueMicrotask(()=>child.emit('close',0));};await b.client.close();
 });
 
+test('a new capture client waits until the old helper releases its display lease', async () => {
+  const a = fixture({ sharedDisplay: true }), b = fixture({ sharedDisplay: true });
+  const first = a.client.request('capture');
+  await new Promise(resolve => setImmediate(resolve));
+  const old = a.children[0];
+  old.stdout.write(JSON.stringify({ id: JSON.parse(old.lines[0]).id, ok: true, result: {} }) + '\n');
+  await first;
+  const closing = a.client.close();
+  await new Promise(resolve => setImmediate(resolve));
+  const next = b.client.request('capture');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(b.children.length, 0);
+  old.emit('close', 0);
+  await closing;
+  await new Promise(resolve => setImmediate(resolve));
+  const current = b.children[0];
+  current.stdout.write(JSON.stringify({ id: JSON.parse(current.lines[0]).id, ok: true, result: { frame: 2 } }) + '\n');
+  assert.deepEqual(await next, { frame: 2 });
+  current.kill = () => queueMicrotask(() => current.emit('close', 0));
+  await b.client.close();
+});
+
+test('fragmented native replies preserve UTF-8, and malformed frames settle pending requests', async () => {
+  const { client, children } = fixture();
+  const first = client.request('permissions'), second = client.request('frontmost');
+  const [child] = children;
+  const [a, b] = child.lines.map(JSON.parse);
+  const bytes = Buffer.from(JSON.stringify({ id: a.id, ok: true, result: '窗口' }) + '\n' +
+    JSON.stringify({ id: b.id, ok: true, result: 123 }) + '\n');
+  const split = bytes.indexOf(Buffer.from('窗口')) + 1;
+  child.stdout.write(bytes.subarray(0, split));
+  child.stdout.write(bytes.subarray(split));
+  assert.equal(await first, '窗口');
+  assert.equal(await second, 123);
+
+  const pending = client.request('permissions');
+  child.kill = () => queueMicrotask(() => child.emit('close', 0));
+  child.stdout.write('null\n');
+  await assert.rejects(pending, /无效响应/);
+  assert.equal(client.pending.size, 0);
+  await client.close();
+});
+
 test('native failures reject and invalid timeout is refused before spawning', async () => {
   const { client, children } = fixture();
   await assert.rejects(client.request('capture', {}, 0), /timeoutMs/);

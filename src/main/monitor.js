@@ -27,10 +27,11 @@
  * 事件：update（汇总）/ taskStart / taskDone / taskLong / taskStall（都带单个会话的 snap）
  */
 const fs = require('fs');
+const { open, lstat, readdir } = require('node:fs/promises');
 const path = require('path');
 const { EventEmitter } = require('events');
-const { StringDecoder } = require('string_decoder');
 const { createHash } = require('crypto');
+const { JsonLines } = require('./json-lines');
 
 const SCAN_MS = 1200;          // 读文件增量的频率
 const FULL_SCAN_MS = 6000;     // 全树找"有没有新会话"的频率（这个贵）
@@ -41,6 +42,8 @@ const LONG_MS = 6 * 60e3;      // 一个任务超过这么久 = 长任务，值�
 const LONG_MS2 = 20 * 60e3;    // 再久一次
 const ABANDON_MS = 25 * 60e3;  // 一直在跑却连答复都没有、也没动静 → 当它已经放下了
 const TAIL_ON_ATTACH = 1500 * 1024;  // 首次接入回看的字节数（要够看到最近几个任务）
+const MAX_EVENT_BYTES = 16 * 1024 * 1024;
+const STAT_BATCH = 16;
 
 /* 多会话的边界 */
 const MAX_SESSIONS = 6;              // 同时跟几个会话（再多也没意义，界面也放不下）
@@ -153,8 +156,8 @@ class Monitor extends EventEmitter {
     this.scanTimer = null;
     this.seq = 0;
     this.fullScanAt = 0;
-    this.dirCache = null;
-    this.dirCacheAt = 0;
+    this.generation = 0;
+    this.scanning = null;
     this.lastSig = '';
   }
 
@@ -193,142 +196,155 @@ class Monitor extends EventEmitter {
   }
 
   start(root) {
-    this.root = root;
+    this.stop();
     this.enabled = true;
-    this.scan();
-    this.scanTimer = setInterval(() => this.scan(), SCAN_MS);
+    this.lastSig = '';
+    if (this.root !== root) {
+      this.sessions.clear();
+      this.fullScanAt = 0;
+      this.publish();
+    }
+    this.root = root;
+    const generation = this.generation;
+    const cycle = async () => {
+      try { await this.scan(); }
+      finally {
+        if (this.enabled && generation === this.generation) {
+          this.scanTimer = setTimeout(() => { void cycle().catch(() => {}); }, SCAN_MS);
+          this.scanTimer.unref?.();
+        }
+      }
+    };
+    return cycle();
   }
 
   stop() {
     this.enabled = false;
-    if (this.scanTimer) clearInterval(this.scanTimer);
+    this.generation++;
+    clearTimeout(this.scanTimer);
     this.scanTimer = null;
   }
 
-  /** 定时器做三件事：全树找会话（贵，低频）；读每个文件的增量（便宜）；逐会话跑状态机 */
   scan() {
-    if (!this.enabled) return;
-    const now = Date.now();
-    if (!this.dirCache || now - this.fullScanAt > FULL_SCAN_MS) {
-      this.fullScanAt = now;
-      this.walk();
-    }
-    for (const e of this.sessions.values()) this.readNew(e);
-    for (const e of this.sessions.values()) this.tick(e.snap);
-    this.publish();
+    if (!this.enabled) return Promise.resolve();
+    const generation = this.generation;
+    if (this.scanning?.generation === generation) return this.scanning.work;
+    const live = () => this.enabled && generation === this.generation;
+    const work = this.scanOnce(live).finally(() => {
+      if (this.scanning?.work === work) this.scanning = null;
+    });
+    this.scanning = { generation, work };
+    return work;
   }
 
-  /** 全树扫一遍 jsonl（跨所有项目）。目录列表缓存 30 秒，别每次都 readdir */
-  walk() {
-    if (!this.dirCache || Date.now() - this.dirCacheAt > 30000) {
-      try {
-        this.dirCache = fs
-          .readdirSync(this.root, { withFileTypes: true })
-          .filter((d) => d.isDirectory())
-          .map((d) => path.join(this.root, d.name));
-        this.dirCacheAt = Date.now();
-      } catch {
-        return;
-      }
-    }
-    const found = [];
-    for (const dir of this.dirCache) {
-      let files;
-      try {
-        files = fs.readdirSync(dir);
-      } catch {
-        continue;
-      }
-      for (const n of files) {
-        if (!n.endsWith('.jsonl')) continue;
-        const p = path.join(dir, n);
-        let st;
-        try {
-          st = fs.statSync(p);
-        } catch {
-          continue;
-        }
-        found.push({ file: p, size: st.size, mtime: st.mtimeMs });
-      }
-    }
+  async scanOnce(live) {
     const now = Date.now();
-    // 只接最近动过的，且只接前 MAX_SESSIONS 个（同一秒里改过的都算）
-    const live = found
-      .filter((f) => now - f.mtime < ATTACH_WINDOW_MS)
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, MAX_SESSIONS);
-    for (const f of live) {
-      if (!this.sessions.has(f.file)) this.attach(f);
+    if (now - this.fullScanAt >= FULL_SCAN_MS) {
+      this.fullScanAt = now;
+      await this.walk(live, now);
     }
-    // 退场：文件已经不在活跃名单里、手上没有在跑的任务、而且静了很久
-    const liveSet = new Set(live.map((f) => f.file));
-    for (const [file, e] of this.sessions) {
-      if (liveSet.has(file)) continue;
-      const t = e.snap.task;
-      if (t && t.status === 'running') continue;         // 在跑的绝不丢
-      if (now - (e.snap.lastEventAt || 0) < KEEP_DONE_MS) continue;
+    for (const entry of this.sessions.values()) {
+      if (!live()) return;
+      const caughtUp = await this.readNew(entry, live);
+      if (live()) this.tick(entry.snap, caughtUp);
+    }
+    if (live()) this.publish();
+  }
+
+  async walk(live, now) {
+    const projects = await readdir(this.root, { withFileTypes: true }).catch(() => []);
+    const found = [];
+    for (const project of projects) {
+      if (!live()) return;
+      if (!project.isDirectory()) continue;
+      const dir = path.join(this.root, project.name);
+      const files = (await readdir(dir, { withFileTypes: true }).catch(() => []))
+        .filter(file => file.isFile() && file.name.endsWith('.jsonl'));
+      for (let start = 0; start < files.length; start += STAT_BATCH) {
+        if (!live()) return;
+        await Promise.all(files.slice(start, start + STAT_BATCH).map(async entry => {
+          const file = path.join(dir, entry.name);
+          const stat = await lstat(file).catch(() => null);
+          if (stat?.isFile() && now - stat.mtimeMs < ATTACH_WINDOW_MS) found.push({ file, stat });
+        }));
+      }
+    }
+    if (!live()) return;
+    const newest = found.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs).slice(0, MAX_SESSIONS);
+    for (const { file, stat } of newest) {
+      if (!this.sessions.has(file)) this.attach({ file, size: stat.size, ino: stat.ino });
+    }
+    const liveFiles = new Set(newest.map(entry => entry.file));
+    for (const [file, entry] of this.sessions) {
+      if (liveFiles.has(file) || entry.snap.task?.status === 'running' || now - entry.snap.lastEventAt < KEEP_DONE_MS) continue;
       this.sessions.delete(file);
     }
   }
 
-  /** 接上一个会话文件：从头查台账，但只回看尾部，别一次性灌几 MB */
-  attach(f) {
-    const e = { file: f.file, offset: 0, buf: '', decoder: new StringDecoder('utf8'), snap: this.blank(), priming: true };
-    e.snap.sessionId = path.basename(f.file, '.jsonl');
-    if (f.size > TAIL_ON_ATTACH) e.offset = f.size - TAIL_ON_ATTACH;
-    this.sessions.set(f.file, e);
-    this.readNew(e);                 // priming=true：只建台账，不发声
-    e.priming = false;
+  attach({ file, size, ino }) {
+    const entry = { file, reader: new JsonLines(MAX_EVENT_BYTES) };
+    this.resetTail(entry, size, ino);
+    this.sessions.set(file, entry);
+    return entry;
   }
 
-  readNew(e) {
-    if (!e.file) return;
-    let fd, reset = false;
-    const wasPriming = e.priming;
-    try {
-      const st = fs.statSync(e.file);
-      if (st.size < e.offset || (e.ino !== undefined && e.ino !== st.ino)) {
-        e.offset = 0; e.buf = ''; e.decoder = new StringDecoder('utf8');
-        e.snap = this.blank(); e.snap.sessionId = path.basename(e.file, '.jsonl');
-        e.priming = true; reset = true;
-      }
-      e.ino = st.ino;
-      if (st.size <= e.offset) return;
-      fd = fs.openSync(e.file, 'r');
-      const len = Math.min(st.size - e.offset, TAIL_ON_ATTACH);
-      const b = Buffer.alloc(len);
-      const count = fs.readSync(fd, b, 0, len, e.offset);
-      e.offset += count;
-      e.decoder ||= new StringDecoder('utf8');
-      e.buf += e.decoder.write(b.subarray(0, count));
-    } catch {
-      return;
-    } finally {
-      if (fd !== undefined) try { fs.closeSync(fd); } catch {}
-      if (reset && !e.buf) e.priming = wasPriming;
-    }
+  resetTail(entry, size, ino) {
+    entry.ino = ino;
+    entry.offset = Math.max(0, size - TAIL_ON_ATTACH);
+    entry.primeUntil = size;
+    entry.primeTail = false;
+    entry.priming = false;
+    entry.reader.reset();
+    entry.snap = this.blank();
+    entry.snap.sessionId = path.basename(entry.file, '.jsonl');
+  }
 
-    let nl;
-    while ((nl = e.buf.indexOf('\n')) >= 0) {
-      const line = e.buf.slice(0, nl).trim();
-      e.buf = e.buf.slice(nl + 1);
-      if (!line) continue;
-      let o;
-      try {
-        o = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      try {
-        this.handleEvent(o, e);
-      } catch {}
+  async readNew(entry, live = () => true) {
+    let file;
+    try {
+      const current = await lstat(entry.file);
+      if (!live() || !current.isFile()) return false;
+      if (current.ino === entry.ino && current.size === entry.offset) return entry.reader.atBoundary;
+      file = await open(entry.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      const stat = await file.stat();
+      if (!live() || !stat.isFile()) return false;
+      const rotated = entry.ino !== undefined && entry.ino !== stat.ino || stat.size < entry.offset;
+      const offset = rotated ? Math.max(0, stat.size - TAIL_ON_ATTACH) : entry.offset;
+      const primeUntil = rotated ? stat.size : entry.primeUntil;
+      const historical = offset < primeUntil;
+      const limit = historical ? Math.min(stat.size, primeUntil) : stat.size;
+      const length = Math.min(limit - offset, TAIL_ON_ATTACH);
+      const data = Buffer.allocUnsafe(length);
+      const { bytesRead } = length ? await file.read(data, 0, length, offset) : { bytesRead: 0 };
+      if (!live()) return false;
+
+      if (rotated) this.resetTail(entry, stat.size, stat.ino);
+      entry.ino = stat.ino;
+      entry.offset = offset + bytesRead;
+      entry.reader.push(data.subarray(0, bytesRead), event => {
+        entry.priming = historical || entry.primeTail;
+        entry.primeTail = false;
+        try { this.handleEvent(event, entry); } catch {}
+        return live();
+      }, () => {
+        // A lost event may be the tool call that invalidates an apparent answer.
+        if (entry.snap.task) entry.snap.task.candidateAt = 0;
+        entry.primeTail = false;
+      });
+      if (historical) entry.primeTail = entry.reader.bytes > 0;
+      return entry.offset >= stat.size && entry.reader.atBoundary;
+    } catch {
+      return false;
+    } finally {
+      entry.priming = false;
+      await file?.close().catch(() => {});
     }
-    if (reset) e.priming = wasPriming;
   }
 
   handleEvent(o, e) {
     const t = o.type;
     const s = e.snap;
+    s.revision = (s.revision || 0) + 1;
     // 行里自带真实时间，回放历史时不会假装"刚刚发生"
     const ts = Number(o.timestamp) || Date.parse(String(o.timestamp)) || Date.now();
 
@@ -362,7 +378,6 @@ class Monitor extends EventEmitter {
           s.assistantText = txt;
           if(txt.trim()==='Interrupted by user'){s.task.summary='';this.finishTask('owner-stopped',ts,s);}
           else{s.task.summary = txt;s.task.candidateAt = ts;}
-          if (!e.priming) this.emit('update', s);
         }
       }
       if (!e.priming && ['user', 'assistant'].includes(o.role)) {
@@ -391,7 +406,6 @@ class Monitor extends EventEmitter {
         s.task.candidateAt = 0;
         s.task.steps += 1;
         s.phase = 'running';
-        if (!e.priming) this.emit('update', s);
       }
       return;
     }
@@ -420,8 +434,7 @@ class Monitor extends EventEmitter {
     s.assistantText = '';
     s.phase = 'running';
     if (!(e && e.priming)) {
-      this.emit('taskStart', s);
-      this.emit('update', s);
+      this.emit('taskStart', { ...s, task: { ...s.task }, history: [...s.history] });
     }
   }
 
@@ -431,6 +444,7 @@ class Monitor extends EventEmitter {
     if(!task||task.id!==taskId||messageKey&&task.messageKey!==messageKey)throw Error('工作轮次已经变化');
     if(task.status!=='running')return;
     this.finishTask('owner-stopped',Date.now(),snap);
+    this.publish();
   }
   finishTask(reason, atTs, s) {
     const t = s.task;
@@ -469,11 +483,10 @@ class Monitor extends EventEmitter {
 
     // 只有"正常交付"才值得播报；被新指令顶掉/超时的旧任务不必打扰主人
     if (reason === 'done') this.emit('taskDone', s);
-    this.emit('update', s);
   }
 
   /** 每轮扫描后检查：该收工了吗？是不是拖太久了？是不是卡住了？（逐会话） */
-  tick(s) {
+  tick(s, caughtUp = true) {
     const t = s.task;
     if (!t || t.status !== 'running') return;
     const now = Date.now();
@@ -481,7 +494,7 @@ class Monitor extends EventEmitter {
     const elapsed = now - t.startedAt;
 
     // 1) 交付判定：有候选最终答复 + 真静下来了
-    if (t.candidateAt && idle > IDLE_MS) {
+    if (caughtUp && t.candidateAt && idle > IDLE_MS) {
       this.finishTask('done', undefined, s);
       return;
     }
@@ -528,16 +541,16 @@ class Monitor extends EventEmitter {
     const primary = running[0] || done[0] || null;
     this.snap = primary || this.blank();
     this.file = primary ? this.primaryFileOf(primary) : null;
-    const view = { primary, running, done: done.slice(0, 4), count: running.length };
-    this.view = view;
-
     const sig = JSON.stringify([
-      running.map((s) => [s.sessionId, s.task.id, s.task.steps, s.task.candidateAt > 0]),
-      done.slice(0, 4).map((s) => [s.sessionId, s.task.id, s.task.status]),
+      running.map(s => [s.sessionId, s.task.id, s.revision]),
+      done.slice(0, 4).map(s => [s.sessionId, s.task.id, s.task.status, s.revision]),
     ]);
     if (sig !== this.lastSig) {
       this.lastSig = sig;
-      this.emit('update', view);
+      const snapshot = s => ({ ...s, task: { ...s.task }, history: [...s.history] });
+      const active = running.map(snapshot), recent = done.slice(0, 4).map(snapshot);
+      this.view = { primary: active[0] || recent[0] || null, running: active, done: recent, count: active.length };
+      this.emit('update', this.view);
     }
   }
 

@@ -21,7 +21,7 @@ function assertAnchorFront(front,anchor){
  const window=front.windows.find(w=>w.windowId===anchor.windowId&&w.pid===anchor.pid);
  if(front.application?.bundleId!==anchor.bundleId||front.application?.pid!==anchor.pid||!window||['x','y','width','height'].some(k=>Math.abs(window.rect[k]-(anchor.windowRect||anchor.rect)[k])>=1))throw Object.assign(Error('目标窗口改变，重新观察定位'),{dispatched:false});
 }
-function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async()=>true,applications,observe,sensitivePolicy=require('./sensitive-policy').createSensitivePolicy()}){
+function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async()=>true,applications,observe,assertWeChatInput=()=>{},sensitivePolicy=require('./sensitive-policy').createSensitivePolicy()}){
  const scope=a=>({application:a.application,...(a.recipient?{recipient:a.recipient}:{})});
  tools.register({name:'screen.activate',description:'打开已授权的目标软件并切到前台；微信只激活已运行进程，不启动或登录。随后重新观察。',effect:'read',capabilities:['screen.input'],scope,
  validate:v=>{fields(v,['application'],'激活应用');if(!applications[v.application])throw Error('没有该软件适配');return v;},
@@ -42,7 +42,9 @@ function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async(
    if(v.action==='key'&&((v.modifiers.includes('cmd')&&['q','w'].includes(v.key.toLowerCase()))||!dialog&&['enter','return'].includes(v.key.toLowerCase())))throw Error('微信此处禁止关闭或直接发送，改用对应会话工具');
 
   }return v;},
+ available:task=>task.skill!=='conversation.manage',
  execute:async(a,c)=>{
+  if(c.task.skill==='conversation.manage')throw Object.assign(Error('微信会话请使用对应的收发操作'),{dispatched:false});
   if(a.action==='type'&&['wechat','workbuddy'].includes(a.application))await sensitivePolicy.check({target:a.application,recipient:a.recipient,text:a.text,ownership:'unknown'});
   const anchor=c.task.state.screenAnchors?.[a.application];if(!anchor||anchor.frameId!==a.frameId||Date.now()-anchor.at>30000)throw Object.assign(Error('画面定位失效，先重新观察'),{dispatched:false});
   if(!await canOperate(c.task))throw Object.assign(Error('等待电脑空闲后操作'),{code:'E_GUI_BUSY',dispatched:false});
@@ -87,6 +89,7 @@ function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async(
    const current=await native.request('frontmost');assertAnchorFront(current,anchor);
    if(['click','scroll'].includes(a.action))actionWindow(anchor,current.windows,{x:payload.x,y:payload.y});
    if(c.signal?.aborted)throw Object.assign(Error('任务已暂停'),{dispatched:false});
+   if(a.application==='wechat')assertWeChatInput(c.task,anchor);
    inputStarted=true;const result=await native.request(a.action,payload,8000);delete c.task.state.screenAnchors[a.application];
    const response={ok:result.performed===true,verified:result.performed===true,receipt:{inputPerformed:true,application:a.application,frameId:a.frameId,...(a.label?{targetLabel:a.label}:{}),point:result.point,at:Date.now(),businessResult:'输入已发出，业务结果待自主判断'}};
    // Return the actual resulting scene in the same tool lifecycle. The next

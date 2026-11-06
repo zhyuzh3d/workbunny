@@ -8,21 +8,21 @@ const publicTask=t=>({...t,presentation:taskPresentation(t)});
 test('a physical desktop operation cannot hide any of six ongoing monitors',()=>{
  const tasks=Array.from({length:6},(_,i)=>publicTask(monitor('Alice'+i)));
  const rows=taskActivity({agent:{tasks},desktop:{running:true,task:{id:'send-1',status:'running',recipient:'文件传输助手',sources:['Alice0']}},now});
- assert.equal(rows.length,6);assert(rows.every(r=>r.text.includes('持续监看')));assert(rows.every(r=>!r.terminal));
+ assert.equal(rows.length,6);assert(rows.every(r=>r.text.includes('持续监看')));assert(rows.every(r=>!r.terminal));assert(rows.every(r=>r.icon==='bunny'));
  assert.equal(taskActivity({agent:{tasks},desktop:{running:true,task:{id:'other',status:'running',recipient:'文件传输助手'}},now}).length,7);
 });
 test('one delegated WorkBuddy job has one row while independent WorkBuddy jobs stay visible',()=>{
  const task=publicTask({id:'logical',skill:'work.delegate',goal:'制作项目周报',status:'waiting',workJobId:'job',state:{job:{}},createdAt:1});
  const work={tasks:[{bunnyTaskId:'job',sessionId:'session',taskId:1,status:'running',name:'内部执行名'},{sessionId:'manual',taskId:2,status:'running',name:'主人自己布置的任务'}]};
  const rows=taskActivity({agent:{tasks:[task]},desktop:{task:{id:'job',status:'monitoring',sources:['logical']}},work,now});
- assert.equal(rows.length,2);assert(rows.some(r=>r.taskId==='logical'));assert(rows.some(r=>r.source==='workbuddy'&&r.text.includes('主人自己布置')));
+ assert.equal(rows.length,2);assert(rows.some(r=>r.taskId==='logical'));assert(rows.some(r=>r.icon==='workbuddy'&&r.text.includes('主人自己布置')));assert(rows.every(r=>r.icon==='workbuddy'));
 });
 test('paused follow-up preserves actual external running state; stopped follow-up does not hide the job',()=>{
  const task=publicTask({id:'logical',skill:'work.delegate',goal:'制作周报',status:'paused',workJobId:'job',state:{job:{}}});
  const work={tasks:[{bunnyTaskId:'job',sessionId:'session',taskId:1,status:'running',name:'制作周报'}]};
  assert.match(taskActivity({agent:{tasks:[task]},work,now})[0].text,/暂停跟进.*仍在执行/u);
  const rows=taskActivity({agent:{tasks:[{...task,status:'stopped'}]},desktop:{task:{id:'job',target:'workbuddy',status:'monitoring'}},work,now});
- assert.equal(rows.length,1);assert.match(rows[0].text,/WorkBuddy/u);assert.equal(rows[0].terminal,false);
+ assert.equal(rows.length,1);assert.match(rows[0].text,/WorkBuddy/u);assert.equal(rows[0].terminal,false);assert.equal(rows[0].icon,'workbuddy');
 });
 test('completed logical work deduplicates executor receipts and expires without new task events',()=>{
  const task=publicTask({id:'logical',skill:'work.delegate',goal:'制作周报',status:'completed',updatedAt:now-500,workJobId:'job',state:{result:{summary:'完成'}}});

@@ -11,11 +11,12 @@ test('all motions start enabled, the final idle cannot be removed, and disabled 
 });
 test('the real playback gateway and slot resolver replace disabled, empty and missing actions with an enabled idle',()=>{
  const s=fs.readFileSync(path.join(__dirname,'../src/renderer/app.js'),'utf8');
- const playback=s.slice(s.indexOf('function playMotion('),s.indexOf('const AWAY_MS ='));
+ const playback=s.slice(s.indexOf('function clipFor('),s.indexOf('const AWAY_MS ='));
  const idle=s.slice(s.indexOf('let idleKey = IDLE;'),s.indexOf('/* ═══════════ 表情'));
  const played=[];
  const actions=new Map(config.MOTIONS.map(m=>[m.key,{enabled:true,setEffectiveTimeScale(){},setEffectiveWeight(){},setLoop(loop){this.loop=loop},reset(){return this},play(){played.push({key:m.key,loop:this.loop});return this},crossFadeFrom(){}}]));
  const context={loading:false,motionCore:require('../src/shared/motion-core'),motionActions:new Set(),activeTransition:null,bodyPosture:'standing',crossFadeMotionAction(next){next.reset().play()},cfg:{motions:{disabled:config.MOTIONS.filter(m=>m.key!=='idle_pose').map(m=>m.key)}},MOTIONS:config.MOTIONS,clips:new Map(config.MOTIONS.map(m=>[m.key,m])),mixer:{clipAction:m=>actions.get(m.key)},THREE:{LoopRepeat:1,LoopOnce:0},currentAction:null,currentMotion:'',FADE:.2,IDLE:'idle_loop',phase:'idle',paintMotionActive(){},pet:{log(){}},Math};
+ context.rawAnims=new Map(context.clips);
  vm.createContext(context);vm.runInContext(playback+idle,context);
  for(const key of ['','cheer','cheer_joy','work_maid','not-a-motion']){assert.equal(vm.runInContext(`resolveMotion(${JSON.stringify(key)})`,context),'idle_pose');vm.runInContext(`playMotion(${JSON.stringify(key)})`,context);}
  vm.runInContext('toIdle();rotateIdle()',context);

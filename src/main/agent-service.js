@@ -32,12 +32,18 @@ class AgentService{
   }});
   if(channels&&this.scene.verifyLiteralInput&&!channels.verifyInput)channels.verifyInput=(m,o)=>this.scene.verifyLiteralInput(m,o);
   if(channels&&this.scene.readLiteralInput&&!channels.readInput)channels.readInput=(m,o)=>this.scene.readLiteralInput(m,o);
-  registerConversationTools(this.tools,{scene:this.scene,lease:desktop?.lease,canOperate:t=>this.canOperateForTask(t),execute:a=>this.executeConversation(a),memoryRelated:(a,t)=>this.relatedMemory(a,t),dispatchOwner:(a,c)=>this.dispatchOwner(a,c)});
+  registerConversationTools(this.tools,{scene:this.scene,lease:desktop?.lease,canOperate:t=>this.canOperateForTask(t),execute:a=>this.executeConversation(a),memoryRelated:(a,t)=>this.relatedMemory(a,t),dispatchOwner:(a,c)=>this.dispatchOwner(a,c),...(channels?{saveAttachment:(a,c)=>this.saveConversationAttachment(a,c)}:{})});
   registerWorkTools(this.tools,{submit:(t,s,a)=>this.submitWork(t,s,a),status:(id,t,s)=>this.workStatus(id,t,s),deliver:(m,t,s)=>this.deliverWork(m,t,s)});
   require('./result-delivery').registerResultTools(this.tools,{deliver:(m,t,s,index,operationId)=>this.deliverWork(m,t,s,index,operationId)});
   require('./system-tools').registerSystemTools(this.tools,{directory:taskDirectory,checkpoint:t=>this.runtime.save(t)});
   require('./file-tools').registerFileTools(this.tools,{directory:taskDirectoryFallback(this),sensitivePolicy:this.sensitivePolicy,checkpoint:t=>this.runtime.save(t)});
-  registerScreenTools(this.tools,{native:this.scene.native,imageResize,wechatScene:this.scene,lease:desktop?.lease,sensitivePolicy:desktop?.sensitivePolicy,canOperate:t=>this.canOperateForTask(t)});
+  registerScreenTools(this.tools,{native:this.scene.native,imageResize,wechatScene:this.scene,lease:desktop?.lease,sensitivePolicy:desktop?.sensitivePolicy,canOperate:t=>this.canOperateForTask(t),
+    assertWeChatInput:(task,anchor)=>{
+      if(task.authority?.channel!=='authenticated-channel'||!this.channels)return;
+      const origin=task.state.returnTo?.channelSnapshot;
+      if(!origin?.owner||origin.account!==anchor.pid+':'+anchor.windowId)throw require('./dialogue-channels').stale();
+      this.channels.assert(origin);
+    }});
   require('./context-assembler').registerExperienceTool(this.tools,{memory});
   require('./judgment').registerJudgment(this.tools,{request});
   require('./task-memory-tools').registerTaskMemoryTools(this.tools,{memory,isCurrent:t=>this.runtime?.tasks.get(t.id)===t&&!['paused','stopping','stopped','expired','completed'].includes(t.status)});
@@ -51,13 +57,13 @@ class AgentService{
   this.softwarePackages=require('./software-skill-package').loadSoftwarePackages();
   this.learning=new AgentLearning({memory,skills:this.skills,packages:this.softwarePackages,request});if(memory)memory.agentLearning=this.learning;registerLearning(this.tools,this.skills,this.learning);
   this.runtime=new AgentRuntime({journal:journal||createAgentJournal(memory),tools:this.tools,skills:this.skills,ready,epoch,getScene,autoSchedule,prepare:async t=>{if(await this.sensitivePolicy.isSensitive(JSON.stringify([t.goal,t.context,t.state.ownerRequest,t.state.ownerContext])))t.state.sensitiveContext=true;await this.learning.prepare(t);if(t.parameters.sourceTaskId&&t.skill==='work.delegate'){const source=this.runtime.tasks.get(t.parameters.sourceTaskId);if(!source?.state.job||!this.runtime.list().some(r=>r.id===source.id))throw Error('没有可继续的原工作任务');t.state.priorJob=clone(source.state.job);t.state.resultRevision=(source.state.result?.revision||0)+1;t.sources=[...new Set([...t.sources,source.id])];t.visibilityFloor=Math.max(t.visibilityFloor,source.visibilityFloor); }if(t.skill==='result.forward'){const source=this.runtime.tasks.get(t.parameters.sourceTaskId);if(!source?.state.result||!this.runtime.list().some(r=>r.id===source.id))throw Error('没有可读取的已回收成果');t.state.result=clone(source.state.result);t.sources=[...new Set([...t.sources,source.id])];t.visibilityFloor=Math.max(t.visibilityFloor,source.visibilityFloor); }if(t.parameters.behavior==='owner'){const binding=this.bindings.get(bindingKey(t.subjects[0],t.scene));if(binding?.wechatIdentity)t.state.sceneIdentity={wechat:clone(binding.wechatIdentity)};}},completed:t=>this.learning.completed(t),settled:(t,r)=>this.learning.settled(t,r),failed:(t,e)=>this.learning.failed(t,e),
-    emit:()=>this.emit(this.status()),report:r=>this.routeReport(r),authorize:(tool,args,task)=>this.authorization?.check(tool,args,task),stopTask:t=>this.stopTask(t),observeWhileActive:(task,event,signal)=>{const subject=task.skill==='conversation.manage'&&task.subjects.find(s=>subjectKey(s)===event.subjectKey);return subject?this.startConversationObservation(task,subject,{signal}):undefined;},diagnoseRepair:args=>require('./self-repair').advise({...args,request}),remindIdle:args=>this.continueIdle(args,request)});
+    emit:tasks=>this.emit(this.status(tasks)),report:r=>this.routeReport(r),authorize:(tool,args,task)=>this.authorization?.check(tool,args,task),stopTask:t=>this.stopTask(t),observeWhileActive:(task,event,signal)=>{const subject=task.skill==='conversation.manage'&&task.subjects.find(s=>subjectKey(s)===event.subjectKey);return subject?this.startConversationObservation(task,subject,{signal}):undefined;},diagnoseRepair:args=>require('./self-repair').advise({...args,request}),remindIdle:args=>this.continueIdle(args,request)});
   this.interpreter=new AgentInterpreter({skills:this.skills,request});
   this.skills.register({id:'task.resolve',title:'理解交办',version:1,internal:true,description:'保存主人交办并在统一队列中理解、恢复、交给软件技能执行。',tools:[],capabilities:['owner.command'],run:ctx=>this.resolveCommand(ctx)});this.conversationTail=Promise.resolve();
  }
  ownMessages(subject,task){return [...(this.runtime?.tasks.values()||[])].filter(t=>t.privacyEpoch===task.privacyEpoch&&require('./memory-scope').canRead(task.scene,t)).flatMap(t=>t.state.outboundMessages||[]).filter(m=>m.recipient===subject.recipient&&m.at>=task.createdAt&&m.status!=='not_dispatched').map(m=>({id:m.id,text:m.message,messageKey:m.messageKey,kind:m.kind}));}
  subjects(){return (this.runtime?.list()||[]).filter(t=>!TERMINAL.has(t.status)).flatMap(t=>[...t.subjects,...(t.delivery?.channel==='wechat'?[{application:'wechat',recipient:t.delivery.recipient}]:[])]);}
- status(){return {restoring:!!this.restorePromise,capacity:this.runtime?.capacity(),tasks:this.runtime?.list()||[],skills:this.skills.catalog(),learnedSkills:this.learning?.catalog(this.getScene())||[],softwarePackages:this.softwarePackages.map(({id,version,methods})=>({id,version,methods})),wechatAccountOwnership:this.getWeChatOwnership(),vision:{...this.scene.metrics},circuit:this.scene.circuit||this.lastCircuit||null};}
+ status(tasks=this.runtime?.list()||[]){return {restoring:!!this.restorePromise,capacity:this.runtime?.capacity(),tasks,skills:this.skills.catalog(),learnedSkills:this.learning?.catalog(this.getScene())||[],softwarePackages:this.softwarePackages.map(({id,version,methods})=>({id,version,methods})),wechatAccountOwnership:this.getWeChatOwnership(),vision:{...this.scene.metrics},circuit:this.scene.circuit||this.lastCircuit||null};}
  interactiveConflict(task){
   if(!task||!['conversation.manage','screen.watch'].includes(task.skill))return false;
   const owner=this.desktop?.lease?.owner;if(!owner)return false;
@@ -72,6 +78,10 @@ class AgentService{
   const sources=[...new Set(physical.sources)];
   if(this.memory?.ready&&this.memory.db){const rows=await require('./memory-evidence').readRecords(this.memory,sources);if(rows.length!==sources.length||rows.some(r=>r.state!=='active'))throw Error('原动作的资料来源已失效');}
   let scene=task.scene;
+  if(this.channels&&task.skill==='conversation.manage'){
+   if(!physical.channelAuthorization)throw require('./dialogue-channels').stale();
+   physical.channelConversation=true;
+  }
   if(physical.channelAuthorization){
    const channel=await this.channels?.ensure({application:'wechat',recipient:physical.recipient},physical.scope||this.scene.knownWindow);
    if(!channel)throw require('./dialogue-channels').stale();
@@ -315,11 +325,16 @@ class AgentService{
   const key=subjectKey(subject),state=task.state.conversations?.[key];if(!state?.cursor?.ready||!['running','needs_attention','waiting_permission'].includes(task.status)||signal?.aborted)return false;
   const view=providedView||await this.scene.observe(subject,{force,repairProfile:task.state.selfRepair?.profile});
   if(signal?.aborted||!['running','needs_attention','waiting_permission'].includes(task.status)||this.runtime.tasks.get(task.id)!==task||!view.headerMatched||view.unstable||view.unavailable)return false;
-  const cursor=new (require('./conversation-cursor').ConversationCursor)(state.cursor),delta=cursor.observe(view.messages||[],{ownerChannel:task.parameters.behavior==='owner'||subject.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',sentMessages:this.ownMessages(subject,task)});
+  const priorCursor=state.cursor;
+  const cursor=new (require('./conversation-cursor').ConversationCursor)(priorCursor),delta=cursor.observe(view.messages||[],{ownerChannel:task.parameters.behavior==='owner'||subject.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',sentMessages:this.ownMessages(subject,task)});
   if(delta.uncertain||!delta.messages.length)return false;
-  const prior=state.cursor;state.cursor=cursor.snapshot();
-  const result=await this.runtime.enqueue(task.id,{key:`conversation:${key}:${state.cursor.sequence}`,subjectKey:key,type:'conversation.messages',ownerChannel:task.parameters.behavior==='owner'||subject.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',messages:delta.messages});
-  if(!result.ok)state.cursor=prior;
+  const nextCursor=cursor.snapshot();
+  const result=await this.runtime.enqueue(task.id,{key:`conversation:${key}:${nextCursor.sequence}`,subjectKey:key,type:'conversation.messages',ownerChannel:task.parameters.behavior==='owner'||subject.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',messages:delta.messages}, {
+    current: () => !signal?.aborted && task.state.conversations?.[key]?.cursor === priorCursor,
+    advance: target => {
+      if (target.state.conversations?.[key]) target.state.conversations[key].cursor = clone(nextCursor);
+    },
+  });
   return result.ok;
  }
  // A read-only observer runs independently of model planning and GUI actions.
@@ -341,10 +356,15 @@ class AgentService{
   if(held&&!held.snapshot.owner&&await this.sensitivePolicy.isSensitive(held.decision.reply))held.decision.reply='这涉及主人的隐私，我不能提供。';
   if(held)args={...args,message:held.decision.reply,channelAuthorization:held.snapshot};
   const ownership=this.getWeChatOwnership();args={...args,wechatOwnership:ownership,...(args.operation==='send'?{message:require('./wechat-identity').markedMessage(args.message,ownership)}:{})};
+  const channelConversation=!!this.channels&&args.task?.skill==='conversation.manage';
   const execute=async()=>{
     if(args.signal?.aborted)return {ok:false,dispatched:false,error:'任务已暂停，未执行输入'};
     await this.scene.assertHealthy();
-    if(this.channels&&!args.channelAuthorization&&args.operation==='send'){const channel=await this.channels.ensure({application:'wechat',recipient:args.recipient},this.scene.knownWindow);args={...args,channelAuthorization:this.channels.snapshot(channel)};}
+    if(this.channels&&!args.channelAuthorization&&(channelConversation||args.operation==='send')){
+      const channel=await this.channels.ensure({application:'wechat',recipient:args.recipient},args.task.state.sceneIdentity?.wechat||this.scene.knownWindow);
+      args={...args,channelAuthorization:this.channels.snapshot(channel)};
+    }
+    if(channelConversation)this.channels.assert(args.channelAuthorization);
     if(!await this.canOperateForTask(args.task))return {ok:false,dispatched:false,code:'E_GUI_BUSY',error:'等待电脑空闲后再操作，消息已保留'};
     const service=this.conversationDesktop;
     if(!service||service.running)return {ok:false,dispatched:false,code:'E_GUI_BUSY',error:'桌面操作正在进行，稍后继续'};
@@ -362,7 +382,7 @@ class AgentService{
     };
     try{
       if(held)this.channels.assert(held.snapshot);
-      const result=await service.start({target:'wechat',recipient,operation,readRequest:args.readRequest,message,attachment,wechatOwnership,channelAuthorization:args.channelAuthorization,
+      const result=await service.start({target:'wechat',recipient,operation,readRequest:args.readRequest,message,attachment,wechatOwnership,channelAuthorization:args.channelAuthorization,channelConversation,
         goal:args.goal||(attachment?`只向「${recipient}」发送本任务真实附件 ${message} 一次，type purpose:task将触发文件粘贴；确认预览后发送。不能输入文件名充当附件。`:operation==='send'?`只向「${recipient}」发送本任务message字段的完整原文一次。`:`打开微信会话「${recipient}」，核对顶部标题，并显示该会话的最新消息；若有“新消息”按钮可点击，或在聊天内容区向下滚动到末尾。允许搜索该联系人，type必须标记purpose:navigation；禁止输入消息正文、修改草稿或发送。`),
         criteria:args.criteria||(operation==='send'?'本次新增完整右侧已发送气泡，输入框清空；不能只是历史或草稿。':'顶部标题精确匹配指定联系人，聊天内容位于最新消息，未留下新消息跳转提示。'),
         origin:'agent',inputSource:'text',scene:held?.snapshot.scene||args.channelAuthorization?.scene||task.scene,visibilityFloor:Math.max(task.visibilityFloor,args.channelAuthorization?require('./memory-scope').rank(args.channelAuthorization.scene):0),sources:[task.id,...(held?.sources||[])],privacyEpoch:task.privacyEpoch,
@@ -390,6 +410,11 @@ class AgentService{
         if(resumed.ok){const until=Date.now()+110000;while(service.running&&!signal?.aborted&&Date.now()<until)await sleep(200);if(service.running)await service.stop('只读核对达到时限，禁止重发');current=service.task;}
       }
       if(/(?:截图|原生请求).*超时|目标窗口已关闭/u.test(current.note||''))await this.scene.trip(current.note+'；已停止微信相关输入，等待重新核对');
+      if(args.readRequest?.kind==='attachment-save'){
+        const saved=await require('./file-tools').savedFile(args.readRequest.destination);
+        if(saved)return {ok:true,verified:true,receipt:saved};
+        return {ok:false,dispatched:current.saveAttemptedAt?undefined:false,error:current.note||'未在指定目录核实另存文件',...(current.errorCode?{code:current.errorCode}:{})};
+      }
       const draftMayExist=!!current.draftInserted||(current.steps||[]).some(step=>step.action==='type'&&step.purpose!=='navigation'&&['intent','input-sent'].includes(step.state));
       if(current.channelRevoked&&!current.submitAttemptedAt&&(!draftMayExist||current.supersededCleanup?.state==='cleared'))return {ok:false,dispatched:false,code:'E_CHANNEL_CHANGED',error:'渠道权限已变化，未发送旧回复'};
       if(current.status!=='review'){
@@ -408,7 +433,41 @@ class AgentService{
       return {ok:true,verified:true,...(operation==='read'?{text:current.readText}:{}),receipt:{operationId:current.id,recipient,submittedAt:current.submitAttemptedAt,verifiedAt:Date.now(),sentText:replyRef||current.message||message,...(replyRef?{messageKey:require('./conversation-cursor').messageKey({direction:'outgoing',kind:'text',text:current.message||message})}:{}),...(current.attachmentDelivered?{kind:"file",transferComplete:true}:{}),wechatOwnership,backend:service.screenshot?.captureSource}};
     }finally{if(service.actionControl===action){service.actionControl=null;service.beforeReplyInput=null;}if(service.actionStopPromise===stopPromise)service.actionStopPromise=null;signal?.removeEventListener('abort',stop);}
   };
-  const result=this.conversationTail.then(execute);this.conversationTail=result.catch(()=>{});return result;
+  return this.serialConversation(execute);
+ }
+ serialConversation(run) {
+  const result = this.conversationTail.then(run);
+  this.conversationTail = result.catch(() => {});
+  return result;
+ }
+ async saveConversationAttachment(args,{task,operationId,signal,action}){
+  const {application,recipient,eventKey,sequence}=args;
+  const event=task.inbox.find(item=>item.key===eventKey&&item.type==='conversation.messages'&&item.subjectKey===subjectKey(args));
+  const message=event?.messages.find(item=>item.sequence===sequence);
+  if(task.skill!=='conversation.manage'||!event?.decision?.saveAttachments?.includes(sequence)||message?.kind!=='file'||
+     message.direction!=='incoming'||!message.incomingVerified||!message.fileName){
+    throw Object.assign(Error('缺少可核实的本轮微信文件附件'),{dispatched:false});
+  }
+  let destination,held;
+  try{
+    held=this.channels.reply(event.decision.channelReply);
+    const files=require('./file-tools'),fileName=files.fileNameOf(message.fileName);
+    await this.scene.assertTaskIdentity(task);
+    destination=await files.prepareDestination(taskDirectoryFallback(this),task,'wb-'+operationId.slice(0,16),fileName);
+    task.state.fileDestinations??=[];
+    const previous=task.state.fileDestinations.find(d=>d.operationId===operationId);
+    if(previous&&previous.expectedPath!==destination.expectedPath)throw Error('本次另存目标已经改变');
+    if(!previous){
+      task.state.fileDestinations.push({...destination,operationId});
+      await this.runtime.save(task);
+    }
+    const saved=await files.savedFile(destination);
+    if(saved)return {ok:true,verified:true,receipt:saved};
+  }catch(error){throw Object.assign(error,{dispatched:false});}
+  return this.executeConversation({application,recipient,task,signal,action,operationId,channelAuthorization:held.snapshot,operation:'read',
+    readRequest:{kind:'attachment-save',fileName:destination.fileName,sequence,timeHint:message.time||'',destination},
+    goal:'在指定微信会话中另存本轮收到的原生文件附件。根据文件名与消息位置核对来源，保存到宿主提供的独立目录。',
+    criteria:'确认微信原生另存为完成，并在指定接收目录核对文件。'});
  }
  async relatedMemory(subject,task){
   if(!this.memory?.ready)return {items:[]};
@@ -432,9 +491,15 @@ class AgentService{
  async dispatchOwner(args,context){
   const {task,signal,operationId}=context,binding=this.bindings.get(bindingKey(args,task.scene)),requestKey='owner-dispatch:'+task.id+':'+(operationId||crypto.createHash('sha256').update(subjectKey(args)+'\0'+args.eventKey).digest('hex'));
   if(this.channels){
-   const channel=await this.channels.ensure(args,task.state.sceneIdentity?.wechat||this.scene.knownWindow),snapshot=this.channels.snapshot(channel);if(!snapshot.owner)throw Object.assign(Error('Channel has no current owner authorization'),{dispatched:false});
+   const channel=await this.channels.ensure(args,task.state.sceneIdentity?.wechat||this.scene.knownWindow);
+   const event=task.inbox?.find(item=>item.type==='conversation.messages'&&item.key===args.eventKey&&item.subjectKey===subjectKey(args));
+   const proof=event?.decision?.ownerCommand,snapshot=proof?.snapshot;
+   if(!snapshot?.owner||snapshot.channelId!==channel.id||event.decision.ownerAction?.type!=='task')throw require('./dialogue-channels').stale();
+   this.channels.assert(snapshot);
+   const request=require('./owner-security').redact(event.messages.filter(m=>proof.sequences.includes(m.sequence)).map(m=>event.voiceStates?.[String(m.sequence)]?.text||m.text).join('\n'));
+   if(!request||crypto.createHash('sha256').update(request).digest('hex')!==proof.textHash)throw require('./dialogue-channels').stale();
    const actor={role:'owner',verified:true,channel:'authenticated-channel',sources:[task.id],scene:snapshot.scene,visibilityFloor:require('./memory-scope').rank(snapshot.scene)};
-   const result=await this.command(args.text,actor,{signal,requestKey,context:'Current verified owner request; no private history.',channelAuthorization:snapshot,returnTo:{taskId:task.id,subjectKey:subjectKey(args),channelSnapshot:snapshot}});
+   const result=await this.command(request,actor,{signal,requestKey,context:'Current verified owner request; no private history.',channelAuthorization:snapshot,returnTo:{taskId:task.id,subjectKey:subjectKey(args),channelSnapshot:snapshot}});
    return {ok:result.ok,verified:true,reply:result.ok?'':result.text,taskId:result.id||null};
   }
   if(task.parameters.behavior!=='owner'||!this.isOwner(args,task.authority)||!binding?.enabled)throw Object.assign(new Error('消息不是已绑定主人入口的交办'),{dispatched:false});
@@ -451,27 +516,41 @@ class AgentService{
   const received=phase==='incoming'?await this.channels.ingest(channel,eventKey,incoming,{signal}):{snapshot:this.channels.snapshot(channel),messages:incoming,sourceIds:[]};
   let snapshot=received.snapshot;
   if(received.expired)return this.channels.holdReply(channel,snapshot,eventKey,{decision:'reply',reply:'Owner verification expired. Please verify again to continue this request.',summary:'Owner authorization expired',completed:false,progress:{},unknown:[]},[]);
-  const context=await this.channels.context(channel,snapshot,received.messages.map(m=>m.text).join('\n'));
+  const currentText=snapshot.owner&&phase==='incoming'
+    ?received.messages.filter(m=>received.ownerRevision===snapshot.revision&&m.ownerInput===true)
+    :received.messages;
+  const ownerInput=snapshot.owner&&phase==='incoming'?currentText.filter(m=>Number.isSafeInteger(m.sequence)&&m.sequence>0&&m.text.trim()&&m.text!=='[identity verified]'):[];
+  const attachments=phase==='incoming'?incoming.filter(m=>m.kind==='file'&&m.direction==='incoming'&&m.incomingVerified&&m.fileName&&Number.isSafeInteger(m.sequence)&&m.sequence>0):[];
+  const currentInput=[...currentText,...attachments].sort((a,b)=>a.sequence-b.sequence);
+  const context=await this.channels.context(channel,snapshot,currentText.map(m=>m.text).join('\n'));
   context.authentication={enabled:this.channels.security?.enabled===true,configured:!!this.channels.security?.key};
-  if(received.authenticated&&snapshot.owner)context.authenticationEvent={type:'owner-authenticated',credentialOnly:received.messages.length>0&&received.messages.every(m=>m.text==='[identity verified]'),replayed:received.duplicate===true,expiresAt:snapshot.expiresAt};
+  if(received.authenticated&&snapshot.owner&&received.ownerRevision===snapshot.revision)context.authenticationEvent={type:'owner-authenticated',credentialOnly:!ownerInput.length,replayed:received.duplicate===true,expiresAt:snapshot.expiresAt};
   if(snapshot.owner){
    const scope={scene:snapshot.scene,excludeTaskId:task.id};context.taskOverview=this.context(scope).text;
    const recall=this.memory?.ready?require('./conversation-recall').createRecallSession(this.memory,{scene:snapshot.scene,allowSensitive:true,isCurrent:()=>this.channels.current(snapshot)&&!signal?.aborted,scopeEpoch:()=>channel.revision}):null;
    context.recallSession=recall;context.contextSession=require('./context-assembler').createContextSession({fragments:[...this.contextModules(scope),...(recall?[require('./conversation-recall').recallFragment(recall)]:[])],signal,isCurrent:()=>this.channels.current(snapshot)});
   }
   let replySources=[...new Set([...(received.sourceIds||[]),...(context.sourceIds||[])])];
-  let decision;try{decision=await this.brain.decide({...args,incoming:received.messages,conversation:{...args.conversation,summary:'',progress:{},cursor:{recent:[]}},channelContext:{...context,permission:snapshot}});}catch(error){this.channels.assert(snapshot);throw error;}
+  let decision;try{decision=await this.brain.decide({...args,incoming:currentInput,conversation:{...args.conversation,summary:'',progress:{},cursor:{recent:[]}},channelContext:{...context,permission:snapshot}});}catch(error){this.channels.assert(snapshot);throw error;}
   this.channels.assert(snapshot);
   if(context.contextSession)await context.contextSession.verify();if(context.recallSession){if(!await context.recallSession.verify())throw Error('本轮回忆依据已变化');replySources=[...new Set([...replySources,...context.recallSession.sourceIds])];}
   this.channels.assert(snapshot);
   if(decision.ownerAction&&!snapshot.owner)throw Object.assign(Error('普通渠道不能交办新任务或更改场景'),{code:'E_CHANNEL_AUTH',dispatched:false});
+  if(decision.ownerAction&&!ownerInput.length){
+   delete decision.ownerAction;
+   decision.reply=context.authenticationEvent?'已验证主人身份，请在这次对话中发送要交办的事项。':'请在这次对话中发送要交办的事项。';
+   decision.decision='reply';
+  }
   if(decision.ownerAction?.type==='scene'){
    snapshot=await this.channels.setScene(channel,decision.ownerAction.scene);replySources=[];
    decision.reply='已切换这个对话渠道到'+require('./memory-scope').LABELS[snapshot.scene]+'。';decision.decision='reply';
   }
   // Task admission uses the existing owner.dispatch tool after conversation.send
   // is confirmed. The same event and operation ledger survive retries.
-  if(decision.ownerAction?.type!=='task')delete decision.ownerAction;
+  if(decision.ownerAction?.type==='task'){
+   const request=ownerInput.map(m=>m.text).join('\n');
+   decision.ownerCommand={snapshot,sequences:ownerInput.map(m=>m.sequence),textHash:crypto.createHash('sha256').update(request).digest('hex')};
+  }else delete decision.ownerAction;
   return this.channels.holdReply(channel,snapshot,eventKey,decision,replySources);
  }
  async revealArtifact(id,index){
@@ -490,7 +569,9 @@ class AgentService{
   if(returnTo&&this.runtime.tasks.has(returnTo.taskId)&&!TERMINAL.has(this.runtime.tasks.get(returnTo.taskId).status)){
     let text=report.text;
     if(returnTo.channelSnapshot){const channel=this.channels.channels.get(returnTo.channelSnapshot.channelId);text=this.channels.holdReply(channel,returnTo.channelSnapshot,'report:'+report.eventId,{decision:'reply',reply:report.text,summary:'主人任务回报',completed:false,progress:{},unknown:[]},[report.taskId]).reply;}
-    await this.runtime.enqueue(returnTo.taskId,{key:'task-report:'+report.eventId,type:'task.report',subjectKey:returnTo.subjectKey,text});if(!returnTo.channelSnapshot)await this.acknowledgeReport(report.eventId);
+    const queued = await this.runtime.enqueue(returnTo.taskId,{key:'task-report:'+report.eventId,type:'task.report',subjectKey:returnTo.subjectKey,text});
+    if (!queued.ok) throw Error(queued.error || '任务回报尚未入队，保留待发送记录');
+    if(!returnTo.channelSnapshot)await this.acknowledgeReport(report.eventId);
   }else {
     if(this.memory?.ready){await this.memory.addMessageOnce('agent-report-'+report.eventId,'assistant',report.text,{delivery:'task-receipt',taskId:report.taskId,sources:report.sources,scene:report.scene,domain:report.domain,visibilityFloor:report.visibilityFloor});report={...report,persisted:true};}
     await this.report(report);
@@ -505,7 +586,7 @@ class AgentService{
      const child=[...this.runtime.tasks.values()].find(t=>t.state.requestKey==='owner-dispatch:'+task.id+':'+op.id);
      if(child){const checked=await this.runtime.confirmReconciled(task.id,op.id,{ok:true,verified:true,taskId:child.id,reply:'',receipt:{taskAdmitted:true}});if(checked.ok)await this.runtime.control('resume',task.id);}continue;
     }
-    if(!['conversation.send','result.deliver','result.attach'].includes(op.tool)||!await this.canOperate())continue;
+    if(op.tool!=='conversation.save'&&(!['conversation.send','result.deliver','result.attach'].includes(op.tool)||!await this.canOperate()))continue;
     task.state.reconciliation??={};const prior=task.state.reconciliation[op.id]||{count:0,at:0};
     const delay=Math.min(300000,5000*2**Math.min(prior.count,6));if(prior.at&&Date.now()-prior.at<delay)continue;
     task.state.reconciliation[op.id]={count:prior.count+1,at:Date.now()};await this.runtime.save(task);
@@ -515,13 +596,28 @@ class AgentService{
   }}finally{this.recovering=false;}
  }
  async reconcile(id,{resumeDraft=false}={}){
-  const task=this.runtime.tasks.get(id),service=this.conversationDesktop;
+  const task=this.runtime.tasks.get(id);
   if(!this.runtime.list().some(t=>t.id===id))return {ok:false,error:'找不到当前可见任务'};
   const op=Object.values(task.operations).find(o=>o.effect==='write'&&o.status==='intent');
   if(!op){await this.runtime.tick(id);return {ok:true};}
+  if(op.tool==='conversation.save'){
+   const destination=task.state.fileDestinations?.find(d=>d.operationId===op.id);
+   const receipt=destination&&await require('./file-tools').savedFile(destination).catch(()=>null);
+   return receipt
+    ?this.runtime.confirmReconciled(task.id,op.id,{ok:true,verified:true,receipt})
+    :{ok:false,error:'原目录中暂未核实文件，保留另存操作等待核对'};
+  }
+  return this.serialConversation(() => this.reconcileConversation(task, op, resumeDraft));
+ }
+ async reconcileConversation(task, op, resumeDraft) {
+  const { id } = task, service = this.conversationDesktop;
+  const live = () => this.runtime.canControl(task) && !TERMINAL.has(task.status) && task.status !== 'stopping' &&
+    task.operations[op.id] === op && op.status === 'intent' && !this.runtime.operations.isRunning(task, op);
+  if (!live()) return { ok: false, error: '任务或原操作已变化，未继续核对' };
   if(!service)return {ok:false,error:'微信操作服务暂不可用，稍后继续核对'};
   let physical=service.task;const physicalId=op.physicalId||task.state.conversationOperationId;
   if(physicalId&&physical?.id!==physicalId&&this.memory?.ready){const row=(await this.memory.db.request('get',{ids:[physicalId]})).rows[0];if(row?.state==='active')physical=this.memory.decode(row).value;}
+  if (!live()) return { ok: false, error: '任务已变化，未继续核对' };
   if(physicalId&&physical?.id!==physicalId)return {ok:false,error:'本次操作记录暂不可用，保留待核对状态'};
   if(physical?.proofBefore)service.wechatBeforeSubmit=physical.proofBefore;
   if(physical?.sources?.includes(id))task.state.conversationProgress={recipient:physical.recipient,phase:physical.submitAttemptedAt?'submitted':physical.draftInserted?'draft':'opening',at:Date.now()};
@@ -545,6 +641,7 @@ class AgentService{
     if(this.runtime.controllers.has(id)||service.running||!await this.canOperate())return {ok:false,error:'等待电脑空闲后核对输入状态'};
     await this.scene.assertTaskIdentity?.(task);
     const view=await this.scene.observe({application:'wechat',recipient},{force:true});
+    if (!live()) return { ok: false, error: '任务已变化，未继续核对' };
     const normalize=s=>String(s||'').normalize('NFKC').replace(/\s+/gu,'');
     const visibleOutgoing=Array.isArray(view.messages)&&view.messages.some(m=>m.direction==='outgoing'&&normalize(m.text)===normalize(physical.message));
     if(view.headerMatched&&!view.unstable&&!view.unavailable&&view.latestPending===false&&view.draft===''&&Array.isArray(view.messages)&&!visibleOutgoing){
@@ -575,7 +672,7 @@ class AgentService{
       const view=await this.scene.observe({application:'wechat',recipient},{force:true});
       if(view.headerMatched&&view.draft===physical.message)physical.draftInserted=true;
     }
-    if(this.runtime.controllers.has(id)||!['needs_attention','paused'].includes(task.status))return {ok:false,error:'等待其他动作完成后替换旧草稿'};
+    if(!live()||this.runtime.controllers.has(id)||!['needs_attention','paused'].includes(task.status))return {ok:false,error:'等待其他动作完成后替换旧草稿'};
     const controller=new AbortController();this.runtime.controllers.set(id,controller);this.runtime.publish();
     const stop=()=>{void service.stop('替换旧回复已停止').catch(()=>{});};controller.signal.addEventListener('abort',stop,{once:true});
     try{
@@ -592,7 +689,7 @@ class AgentService{
       }
       task.status='paused';task.note='旧回复草稿已核对并清除，正在合并新消息';await this.runtime.save(task);return {ok:true,staleDraftCleared:true};
     }catch(error){return {ok:false,error:error.message};}
-    finally{controller.signal.removeEventListener('abort',stop);if(this.runtime.controllers.get(id)===controller)this.runtime.controllers.delete(id);this.runtime.publish();}
+    finally{controller.signal.removeEventListener('abort',stop);if(this.runtime.controllers.get(id)===controller)this.runtime.controllers.delete(id);this.runtime.publish();this.runtime.schedule();}
   }
   if(resumeDraft&&!physical.submitAttemptedAt&&!physical.draftInserted&&!physical.attachment&&
       contentSteps.some(step=>['intent','input-sent'].includes(step.state))&&
@@ -609,7 +706,7 @@ class AgentService{
     if(physical.submitAttemptedAt)try{await this.scene.observe({application:'wechat',recipient},{force:true});}catch{}
     return {ok:false,error:'缺少本次发送前的画面，已尝试观察并保留待核对状态；不会自动重发'};
   }
-  if(this.runtime.controllers.has(id)||service.running||!await this.canOperate())return {ok:false,error:'请等待当前操作结束或电脑空闲后核对'};
+  if(!await this.canOperate()||!live()||this.runtime.controllers.has(id)||service.running)return {ok:false,error:'请等待当前操作结束或电脑空闲后核对'};
   const controller=new AbortController();this.runtime.controllers.set(id,controller);this.runtime.publish();
   const stop=()=>{void service.stop('只读核对已停止').catch(()=>{});};controller.signal.addEventListener('abort',stop,{once:true});
   try{
@@ -623,7 +720,7 @@ class AgentService{
     if(sent?.channelReply){const info=sent.channelReply,channel=this.channels.channels.get(info.channelId);await this.channels.recordReply(channel,info.snapshot,info.key,physical.message,info.sources,true);if(info.key.startsWith('report:'))await this.acknowledgeReport(info.key.slice(7));}
     return this.runtime.confirmReconciled(id,op.id,{ok:true,verified:true,receipt:{operationId:physical.id,recipient:physical.recipient,submittedAt:physical.submitAttemptedAt,verifiedAt:Date.now(),sentText:reference?rawMessage:physical.message,...(reference?{messageKey:outgoingEntry.messageKey}:{}),wechatOwnership:physical.wechatOwnership,reconciled:true,continuedDraft:continuingDraft}});
   }catch(error){return {ok:false,error:error.message};}
-  finally{controller.signal.removeEventListener('abort',stop);if(this.runtime.controllers.get(id)===controller)this.runtime.controllers.delete(id);this.runtime.publish();}
+  finally{controller.signal.removeEventListener('abort',stop);if(this.runtime.controllers.get(id)===controller)this.runtime.controllers.delete(id);this.runtime.publish();this.runtime.schedule();}
  }
  async continueWork(task,signal){
   const service=this.desktop,id=task.state.priorJob.jobId;

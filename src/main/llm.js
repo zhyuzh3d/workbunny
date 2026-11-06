@@ -6,6 +6,7 @@
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
+const { ChatResponse } = require('./chat-response');
 
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 4 });
 const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 4 });
@@ -25,22 +26,20 @@ function extractTags(raw) {
 }
 
 /** Keep short spoken replies as well; never consume and discard “好。” / “嗯。” */
-const SENT_RE = /[^。！？!?\n…]*[。！？!?\n…]+/g;
-
 function makeSentenceSplitter(onSentence) {
   let buf = '';
+  const separators = /[。！？!?\n…]+/g;
   return {
     push(delta) {
-      buf += delta;
-      let last = 0;
-      let m;
-      SENT_RE.lastIndex = 0;
-      while ((m = SENT_RE.exec(buf))) {
-        const s = m[0].trim();
-        last = SENT_RE.lastIndex;
-        if (s) onSentence(s);
+      let start = 0;
+      separators.lastIndex = 0;
+      while (separators.exec(delta)) {
+        const sentence = (buf + delta.slice(start, separators.lastIndex)).trim();
+        start = separators.lastIndex;
+        buf = '';
+        if (sentence) onSentence(sentence);
       }
-      if (last > 0) buf = buf.slice(last);
+      buf += delta.slice(start);
     },
     flush() {
       const s = buf.trim();
@@ -66,130 +65,120 @@ function chatUnfiltered(opts) {
   if (opts.transport === 'apikey' && !String(opts.apiKey || '').trim()) return Promise.reject(new Error('请先在智力设置中填写 API Key'));
   // Fit once the recall/search layer has attached its rules and tool schemas.
   opts = require('./context-budget').fitRequest(opts, { retainLanes: true });
-  const {
-    baseURL, apiKey, model, messages,
-    temperature = 0.8, maxTokens = 220, timeoutMs = 30000,
-    onDelta, onSentence, signal,
-    // 思考强度：只有明确支持的服务商才发这个字段（doubao 用 thinking:{type}，
-    // nemotron 用 chat_template_kwargs.thinking）。auto = 什么都不发，让服务方自己定。
-    extraBody = {},
-  } = opts;
+  return requestHTTP(opts);
+}
 
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_ERROR_BYTES = 8192;
+
+function responseError(status, body) {
+  const error = new Error(`模型接口返回 HTTP ${status}，请检查密钥、所选模型、额度或请求频率`);
+  if (status === 400 && /does not support parameter reasoningEffort|unsupported.{0,80}reasoning[_ ]?effort|reasoning[_ ]?effort.{0,80}(?:not supported|unsupported)/i.test(body)) {
+    error.message = '所选模型不支持当前思考参数，请更新模型配置或应用';
+    error.code = 'E_MODEL_PARAMETER';
+  }
+  if (require('./context-budget').isContextError(status, body)) error.code = 'E_CONTEXT_WINDOW';
+  return error;
+}
+
+function requestHTTP({ baseURL, apiKey, model, messages, maxTokens = 220, timeoutMs = 30000, provider,
+  onDelta, onSentence, signal, extraBody = {} }) {
   return new Promise((resolve, reject) => {
-    let u;
-    try {
-      u = new URL(baseURL.replace(/\/$/, '') + '/chat/completions');
-    } catch (e) {
-      return reject(new Error('baseURL 非法: ' + baseURL));
-    }
-    const isHttps = u.protocol === 'https:';
+    const aborted = () => Object.assign(new Error('aborted'), { name: 'AbortError', code: 'ABORT_ERR' });
+    if (signal?.aborted) { reject(aborted()); return; }
+    let url;
+    try { url = new URL(baseURL.replace(/\/$/, '') + '/chat/completions'); }
+    catch { reject(new Error('模型接口地址无效')); return; }
+    if (!['https:', 'http:'].includes(url.protocol)) { reject(new Error('模型接口须使用 HTTP 或 HTTPS')); return; }
+
     const payload = JSON.stringify({
-      model,
-      messages: messages.map(require('./context-budget').wire),
-      ...(opts.provider === 'openai' ? { max_completion_tokens: maxTokens } : { max_tokens: maxTokens }),
-      stream: true,
-      // 部分网关认这个；不认的会忽略
+      ...(provider === 'openai' ? { max_completion_tokens: maxTokens } : { max_tokens: maxTokens }),
       stream_options: { include_usage: true },
       ...extraBody,
+      model,
+      messages: messages.map(require('./context-budget').wire),
+      stream: true,
     });
-
-    const req = (isHttps ? https : http).request(
-      {
-        protocol: u.protocol,
-        hostname: u.hostname,
-        port: u.port || (isHttps ? 443 : 80),
-        path: u.pathname + u.search,
+    const secure = url.protocol === 'https:';
+    let request, response, settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      if (error) {
+        response?.destroy();
+        request?.destroy();
+        reject(error);
+      } else resolve(result);
+    };
+    const abort = () => finish(aborted());
+    // The deadline includes socket queueing and slow streaming responses.
+    const timer = setTimeout(() => finish(Object.assign(new Error(`LLM 超时 ${timeoutMs}ms`), { code: 'E_MODEL_TIMEOUT' })), timeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      request = (secure ? https : http).request(url, {
         method: 'POST',
-        agent: isHttps ? keepAliveHttps : keepAliveHttp,
+        agent: secure ? keepAliveHttps : keepAliveHttp,
         headers: {
           'Content-Type': 'application/json',
           Accept: 'text/event-stream',
           'Content-Length': Buffer.byteLength(payload),
           Authorization: 'Bearer ' + apiKey,
         },
-      },
-      (res) => {
+      }, res => {
+        response = res;
+        res.setEncoding('utf8');
+        res.on('error', finish);
         if (res.statusCode !== 200) {
-          // Upstream errors may echo credentials or prompts; keep them out of UI/logs.
           let errorBody = '';
-          res.on('data', part => { if (errorBody.length < 8192) errorBody += String(part).slice(0, 8192 - errorBody.length); });
-          res.on('end', () => {
-            const error = new Error(`模型接口返回 HTTP ${res.statusCode}，请检查密钥、所选模型、额度或请求频率`);
-            if (res.statusCode === 400 && /does not support parameter reasoningEffort|unsupported.{0,80}reasoning[_ ]?effort|reasoning[_ ]?effort.{0,80}(?:not supported|unsupported)/i.test(errorBody)) {
-              error.message = '所选模型不支持当前思考参数，请更新模型配置或应用'; error.code = 'E_MODEL_PARAMETER';
-            }
-            if (require('./context-budget').isContextError(res.statusCode, errorBody)) error.code = 'E_CONTEXT_WINDOW';
-            reject(error);
+          res.on('data', chunk => {
+            errorBody += chunk.slice(0, MAX_ERROR_BYTES - errorBody.length);
+            if (errorBody.length >= MAX_ERROR_BYTES) finish(responseError(res.statusCode, errorBody));
           });
-          res.on('error', reject);
+          res.on('end', () => finish(responseError(res.statusCode, errorBody)));
           return;
         }
-        res.setEncoding('utf8');
-        let text = '';
-        let usage = null;
-        const tools = new Map();
-        const splitter = makeSentenceSplitter((s) => onSentence && onSentence(s));
-        let buf = '';
 
-        res.on('data', (chunk) => {
-          buf += chunk;
-          let nl;
-          while ((nl = buf.indexOf('\n')) >= 0) {
-            const line = buf.slice(0, nl).trim();
-            buf = buf.slice(nl + 1);
-            if (!line.startsWith('data:')) continue;
-            const p = line.slice(5).trim();
-            if (p === '[DONE]') continue;
-            let d;
-            try {
-              d = JSON.parse(p);
-            } catch {
-              continue;
-            }
-            if (d.usage) usage = d.usage;
-            const ch = (d.choices && d.choices[0]) || null;
-            if (!ch) continue;
-            const delta = ch.delta || {};
-            for (const part of delta.tool_calls || []) {
-              const index = part.index || 0, prior = tools.get(index) || { id: '', type: 'function', function: { name: '', arguments: '' } };
-              if (part.id) prior.id = part.id;
-              if (part.function?.name) prior.function.name += part.function.name;
-              if (part.function?.arguments) prior.function.arguments += part.function.arguments;
-              tools.set(index, prior);
-            }
-            // 推理模型的思考过程不进正文
-            if (delta.content) {
-              text += delta.content;
-              if (onDelta) onDelta(delta.content);
-              splitter.push(delta.content);
-            }
+        const isJSON = /application\/(?:[\w.+-]*\+)?json/i.test(res.headers['content-type'] || '');
+        const splitter = onSentence && makeSentenceSplitter(onSentence);
+        const chat = new ChatResponse(model, { onDelta: delta => { onDelta?.(delta); splitter?.push(delta); } });
+        let bytes = 0, tail = '';
+        const json = [];
+        res.on('data', chunk => {
+          if (settled) return;
+          bytes += Buffer.byteLength(chunk);
+          if (bytes > MAX_RESPONSE_BYTES) {
+            finish(Object.assign(new Error('模型回答超过大小限制'), { code: 'E_PAYLOAD_TOO_LARGE' }));
+            return;
+          }
+          if (isJSON) { json.push(chunk); return; }
+          const lines = chunk.split('\n');
+          if (lines.length === 1) { tail += chunk; return; }
+          lines[0] = tail + lines[0];
+          tail = lines.pop();
+          try { for (const line of lines) chat.line(line.trimStart()); }
+          catch (error) { finish(error); }
+        });
+        res.on('end', () => {
+          if (settled) return;
+          try {
+            if (isJSON) chat.event(JSON.parse(json.join('')));
+            else if (tail) chat.line(tail.trimStart());
+            const result = chat.result();
+            if (result.toolCalls) { finish(null, { ...result, text: '' }); return; }
+            splitter?.flush();
+            const { clean, motions, emos } = extractTags(result.raw);
+            if (!clean.trim()) throw Object.assign(new Error('模型没有返回回答正文，请检查所选模型和思考设置'), { code: 'E_EMPTY_RESPONSE' });
+            finish(null, { ...result, text: clean.trim(), motions, emos });
+          } catch (error) {
+            finish(error instanceof SyntaxError ? Object.assign(new Error('模型接口返回无效 JSON'), { code: 'E_MODEL_PROTOCOL' }) : error);
           }
         });
-
-        res.on('end', () => {
-          splitter.flush();
-          if (tools.size) { resolve({ raw: '', text: '', model, usage, toolCalls: [...tools.values()] }); return; }
-          const { clean, motions, emos } = extractTags(text);
-          if (!clean.trim()) { reject(new Error('模型没有返回回答正文，请检查所选模型和思考设置')); return; }
-          resolve({ text: clean.trim(), raw: text, motions, emos, usage, model });
-        });
-        res.on('error', reject);
-      }
-    );
-
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`LLM 超时 ${timeoutMs}ms`));
-    });
-    req.on('error', (e) => {
-      if (signal && signal.aborted) return reject(new Error('aborted'));
-      reject(e);
-    });
-    const abort = () => req.destroy(new Error('aborted'));
-    if (signal?.aborted) { abort(); return; }
-    if (signal) signal.addEventListener('abort', abort, { once: true });
-    req.on('close', () => signal?.removeEventListener('abort', abort));
-    req.write(payload);
-    req.end();
+      });
+      request.on('error', finish);
+      request.end(payload);
+    } catch (error) { finish(error); }
   });
 }
 

@@ -10,7 +10,14 @@ export function createBubbleController(bubble, textElement, { setTimeoutFn = set
   let streamText = '';
   let streaming = false;
   let hideAfterMs = 9000;
+  let measuredHeight, placedTop;
   const holdReasons = new Set();
+  if (typeof ResizeObserver === 'function') {
+    const observer = new ResizeObserver(([entry]) => {
+      measuredHeight = entry.borderBoxSize?.[0]?.blockSize ?? bubble.offsetHeight;
+    });
+    observer.observe(bubble);
+  }
 
   const clearHideTimer = () => {
     if (timer) clearTimeoutFn(timer);
@@ -67,6 +74,7 @@ export function createBubbleController(bubble, textElement, { setTimeoutFn = set
     const oldScrollTop = bubble.scrollTop;
     textElement.textContent = text;
     bubble.classList.remove('hidden');
+    measuredHeight = undefined;
     if (keepScroll) bubble.scrollTop = oldScrollTop;
     else bubble.scrollTop = 0;
     if (animate) {
@@ -117,9 +125,13 @@ export function createBubbleController(bubble, textElement, { setTimeoutFn = set
       streaming = false; streamText = '';
     },
     place(anchorY, viewportHeight) {
-      const height = bubble.offsetHeight;
-      bubble.style.top = `${clampBubbleTop(anchorY, height, viewportHeight)}px`;
-      bubble.style.bottom = 'auto';
+      measuredHeight ??= bubble.offsetHeight;
+      const top = Math.round(clampBubbleTop(anchorY, measuredHeight, viewportHeight));
+      if (top !== placedTop) {
+        if (placedTop === undefined) bubble.style.bottom = 'auto';
+        placedTop = top;
+        bubble.style.top = `${top}px`;
+      }
     },
     get streaming() { return streaming; },
   };

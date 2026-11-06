@@ -49,13 +49,13 @@ async function checkStatusWidth() {
     win.webContents.send('pet:ev', { type: 'monitor', tasks: [{ sessionId: 'short', taskId: 1, name: '整理', status: 'running' }] });
     await until(async () => (await measure()).text.includes('整理'), 'short task status');
     await until(async () => (await measure()).logoFilter === 'none', 'busy logo settles to original color');
-    const short = await measure(); assert(short.width > idle.width && short.width < short.rowWidth, 'task content determines width');
+    const short = await measure(); assert(short.width > idle.width && short.width < short.rowWidth && !short.clipped, 'short task fits at its natural width');
     assert.equal(short.logoFilter, 'none', 'busy uses the original colored logo');
     if (width === 420 && process.env.WORKBUNNY_STATUS_SHOTS) fs.writeFileSync(path.join(process.env.WORKBUNNY_STATUS_SHOTS, 'busy.png'), (await win.webContents.capturePage()).toPNG());
     win.webContents.send('pet:ev', { type: 'monitor', tasks: [{ sessionId: 'long', taskId: 2, name: '检查并整理这份很长的合成资料'.repeat(12), status: 'running' }] });
     await until(async () => (await measure()).text.includes('合成资料'), 'long task status');
     const long = await measure();
-    assert(long.width <= long.rowWidth + 1 && long.width > short.width, 'long status is capped at the existing UI column');
+    assert(long.width <= long.rowWidth + 1 && long.width > short.width, 'long status is capped at the existing UI column: ' + JSON.stringify({ width, short, long }));
     assert(long.clipped && long.doneRight <= long.right, 'long text truncates while the done button stays visible');
     win.webContents.send('pet:ev', { type: 'monitor', tasks: [] });
     await until(async () => (await measure()).text === '空闲中', 'status shrinks again');

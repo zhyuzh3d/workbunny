@@ -1,6 +1,6 @@
 # WorkBunny 架构与执行 FLOW
 
-基线：0.24.23；更新：2026-11-05。图中表示逻辑责任与主要路径，不表示每个框都需要额外一轮模型，也不将示意图当作固定操作配方。数据字段和实现边界见[架构设计](architecture.md)。
+流程对应 0.25.0 早期 Beta，更新日期为 2026-11-06。图示记录逻辑责任与主要路径。数据字段和实现边界见[架构设计](architecture.md)。
 
 ## 1. 系统总览
 
@@ -38,7 +38,7 @@ sequenceDiagram
     participant Model as Bunny LLM
     participant Runtime as 统一任务运行时
     Person->>Channel: 实际新消息与来源
-    Channel->>Channel: 去重、认证、取得当前快照
+    Channel->>Channel: 去重、认证、原子保存权限和事件回执
     Channel->>Chat: 绑定渠道、人物、场景与授权
     Chat->>Assembler: 必要规则、当前消息、摘要和极简任务概况
     Assembler-->>Model: 本轮上下文与可选模块目录
@@ -69,7 +69,7 @@ flowchart TD
     Enabled -->|"否"| Ordinary["普通渠道；最高生活，不产生新任务授权"]
     Enabled -->|"是"| Source["核实实际输入来源；视觉内容独立读取"]
     Source --> Exact{"完全匹配？"}
-    Exact -->|"是"| Grant["渠道获得一小时主人权限；递增修订"]
+    Exact -->|"是"| Grant["持久化当前渠道权限及回执，随后公布一小时授权"]
     Exact -->|"否"| Similar{"来源绑定候选超过60%？"}
     Similar -->|"否"| Ordinary
     Similar -->|"是"| Judge["Bunny 综合实际来信和感知偏差判断"]
@@ -174,7 +174,7 @@ flowchart TD
     Active["活动 Task / Action"] --> Health{"当前运行事实"}
     Health -->|"工具或模型仍执行；有效等待"| Continue["原超时与等待协议继续负责"]
     Health -->|"调用异常或重复证据无进展"| Diagnose["按错误类型提供最简上下文、耗时与回执"]
-    Health -->|"真正空闲一分钟"| Reminder["原每秒 tick 发起一条内部继续思考提醒"]
+    Health -->|"到达一分钟空闲期限"| Reminder["任务调度器发起一条内部继续思考提醒"]
     Reminder --> Original["仍使用同一 Task / Action 的上下文和权限"]
     Original --> Decide["Bunny 判断下一步"]
     Diagnose --> Decide

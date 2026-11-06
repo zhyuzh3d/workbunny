@@ -30,14 +30,15 @@ test('sensitive task titles are replaced with a generic warning without losing f
  const f=fixture();f.cfg.monitor.speakOnDone=true;f.snap.task.status='failed';f.snap.task.userText='fixture-secret';
  await f.ctx.refreshSupervision();assert.equal(f.spoken.length,1);assert(!f.spoken[0].text.includes('fixture-secret'));assert.match(f.spoken[0].text,/未能完成/);
 });
-test('actual monitor input carries a completed WorkBuddy round through scoped history to supervision',t=>{
+test('actual monitor input carries a completed WorkBuddy round through scoped history to supervision',async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'bunny-supervision-monitor-')),dir=path.join(root,'project');fs.mkdirSync(dir);
- const file=path.join(dir,'session.jsonl');fs.writeFileSync(file,'');const monitor=new Monitor();monitor.start(root);
+ const file=path.join(dir,'session.jsonl');fs.writeFileSync(file,'');const monitor=new Monitor();
  t.after(()=>{monitor.stop();fs.rmSync(root,{recursive:true,force:true})});
  const now=Date.now(),write=(role,content,at)=>fs.appendFileSync(file,JSON.stringify({type:'message',role,content:[{type:'text',text:content}],timestamp:at})+'\n');
- write('user','请检查第一项',now);monitor.scan();write('assistant','第一项已经有结果。',now+1);monitor.scan();
+ await monitor.start(root);
+ write('user','请检查第一项',now);await monitor.scan();write('assistant','第一项已经有结果。',now+1);await monitor.scan();
  const snap=[...monitor.sessions.values()][0].snap;monitor.finishTask('done',undefined,snap);
- write('user','请继续第二项',now+2);monitor.scan();
+ write('user','请继续第二项',now+2);await monitor.scan();
  const scoped=scopedMonitorContext(monitor.view,{scene:'private',bootAt:now-1,ready:true}).view;
  const supervision=new TaskSupervision({clock:()=>now+3,bootAt:now-1});supervision.observe([...scoped.running,...scoped.done]);
  assert.equal(scoped.running.length,1);assert.equal(supervision.peek()?.kind,'done');assert.match(supervision.peek().text,/第一项/);

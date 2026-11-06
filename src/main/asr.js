@@ -11,8 +11,10 @@
  */
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
+const { JsonLines } = require('./json-lines');
 
 const AUTH_TIMEOUT_MS = 25000;
+const MAX_ASR_LINE_BYTES = 512 * 1024;
 
 class Asr extends EventEmitter {
   constructor(binPath, log = () => {}, spawnProcess = spawn) {
@@ -70,7 +72,7 @@ class Asr extends EventEmitter {
     this.lastCaptureAt = 0;
     this.installing = false;
     this.log(`[asr] spawn ${this.bin} ${args.join(' ')} pid=${p.pid}`);
-    let buf = '';
+    const messages = new JsonLines(MAX_ASR_LINE_BYTES);
     let sawAuth = false;
 
     // 超时守门：没 auth 也没 ready，就认为权限/设备出了问题
@@ -82,24 +84,23 @@ class Asr extends EventEmitter {
       }
     }, AUTH_TIMEOUT_MS);
 
-    p.stdout.setEncoding('utf8');
     p.stdout.on('data', (chunk) => {
       if (this.proc !== p || this.discarded.has(p)) return;
-      buf += chunk;
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        let m;
-        try {
-          m = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (m.t === 'auth') sawAuth = true;
-        this.onMessage(m, p);
+      try {
+        messages.push(chunk, message => {
+          if (this.proc !== p) return false;
+          if (message.t === 'auth') sawAuth = true;
+          this.onMessage(message, p);
+        });
+      } catch {
+        this.emit('error', '语音模块返回无效响应，正在重连');
+        if (this.proc === p) this.kill();
       }
+    });
+    p.stdin.on?.('error', error => {
+      if (this.proc !== p) return;
+      this.log('[asr] stdin error ' + error.code);
+      this.kill();
     });
 
     p.stderr.setEncoding('utf8');
@@ -302,16 +303,11 @@ function probeAccess(binPath, { timeoutMs = 5000, requestMic = false, lang = 'zh
     } catch (e) {
       return resolve({ speech: -1, mic: false, error: e.message });
     }
-    let buf = '';
-    p.stdout.setEncoding('utf8');
-    p.stdout.on('data', (c) => {
-      buf += c;
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        try {
-          const m = JSON.parse(line);
+    const messages = new JsonLines(MAX_ASR_LINE_BYTES);
+    p.stdout.on('data', chunk => {
+      if (done) return;
+      try {
+        messages.push(chunk, m => {
           if (m.t === 'auth') {
             finish({
               speech: m.speech,
@@ -323,10 +319,13 @@ function probeAccess(binPath, { timeoutMs = 5000, requestMic = false, lang = 'zh
             });
           }
           if (m.t === 'error') finish({ speech: -1, mic: false, error: m.v });
-        } catch {}
+          return !done;
+        });
+      } catch {
+        finish({ speech: -1, mic: false, error: '语音模块返回无效响应' });
       }
     });
-    p.on('exit', (code, sig) => finish({ speech: -1, mic: false, error: `exit code=${code} sig=${sig}` }));
+    p.on('close', (code, sig) => finish({ speech: -1, mic: false, error: `exit code=${code} sig=${sig}` }));
     p.on('error', (e) => finish({ speech: -1, mic: false, error: 'spawn ' + e.message }));
     timer = setTimeout(() => finish({ speech: 0, mic: false, timedOut: true }), timeoutMs);
   });
