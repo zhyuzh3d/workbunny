@@ -2,7 +2,8 @@ const terminal=new Set(['completed','stopped','expired']);
 const activeDesktop=new Set(['starting','running','awaiting','monitoring','verifying','review']);
 const short=value=>String(value||'').replace(/\s+/gu,' ').slice(0,34);
 export function taskActivity({agent={},desktop={},work={},now=Date.now(),seen=new Set(),recentUntil=0,selectedKey=null}={}){
- const logical=(agent.tasks||[]).filter(task=>task.status!=='queued'&&(!terminal.has(task.status)||(task.status==='completed'&&now-task.updatedAt<7000)||selectedKey==='agent#'+task.id)),rows=[],linked=new Set(logical.map(task=>task.workJobId).filter(Boolean));
+ const archivedJobs=new Set(agent.archivedWorkJobIds||[]),archivedTasks=new Set(agent.archivedTaskIds||[]);
+ const logical=(agent.tasks||[]).filter(task=>!task.listArchived&&task.status!=='queued'&&(!terminal.has(task.status)||task.stopRequest?.phase==='pending'||(['completed','stopped'].includes(task.status)&&now-task.updatedAt<7000)||selectedKey==='agent#'+task.id)),rows=[],linked=new Set([...archivedJobs,...logical.map(task=>task.workJobId).filter(Boolean)]);
  for(const task of logical){
   const key='agent#'+task.id;
   if(terminal.has(task.status)&&seen.has(key)&&selectedKey!==key)continue;
@@ -10,11 +11,12 @@ export function taskActivity({agent={},desktop={},work={},now=Date.now(),seen=ne
   let label=p.statusLabel;const physical=desktop.task;
   if(task.status==='paused'&&((physical?.id===task.workJobId&&activeDesktop.has(physical.status))||(work.tasks||[]).some(w=>w.bunnyTaskId===task.workJobId&&w.status==='running')))label='暂停跟进 · WorkBuddy仍在执行';
   const isWorkBuddy=task.skill==='work.delegate'||task.workJobId||task.subjects?.some(subject=>subject.application==='workbuddy');
-  rows.push({key,text:label+' · '+short(p.title),icon:isWorkBuddy?'workbuddy':'bunny',record:task,terminal:terminal.has(task.status),action:task.status==='completed'?'dismiss':terminal.has(task.status)||task.status==='stopping'?null:'stop',ref:{source:'agent',id:task.id},taskId:task.id,attention:['waiting_permission','needs_attention'].includes(task.status),at:task.createdAt||0,...(task.status==='completed'&&selectedKey!==key?{expiresAt:task.updatedAt+7000}:{})});
+  const unresolvedStop=task.stopRequest?.phase==='pending';
+  rows.push({key,text:label+' · '+short(p.title),icon:isWorkBuddy?'workbuddy':'bunny',record:task,terminal:terminal.has(task.status),action:task.status==='completed'?'dismiss':terminal.has(task.status)?'archive':task.status==='stopping'?null:'stop',ref:{source:'agent',id:task.id},taskId:task.id,attention:unresolvedStop||['waiting_permission','needs_attention'].includes(task.status),at:task.createdAt||0,...(['completed','stopped'].includes(task.status)&&!unresolvedStop&&selectedKey!==key?{expiresAt:task.updatedAt+7000}:{})});
  }
  const physical=desktop.task;let shownPhysicalId;
  if(physical){
-  const owned=logical.some(t=>t.workJobId===physical.id||physical.sources?.includes(t.id));
+  const owned=archivedJobs.has(physical.id)||physical.sources?.some(id=>archivedTasks.has(id))||logical.some(t=>t.workJobId===physical.id||physical.sources?.includes(t.id));
   const active=desktop.running||activeDesktop.has(physical.status),recent=!active&&(now<recentUntil||selectedKey==='desktop#'+physical.id);
   if(!owned&&(active||recent)){
    const key='desktop#'+physical.id,isWorkBuddy=physical.target==='workbuddy';if(!seen.has(key)||active){shownPhysicalId=physical.id;rows.push({key,text:(isWorkBuddy?'WorkBuddy · ':'')+(active?'正在操作 · ':'操作结束 · ')+short(physical.recipient||physical.goal||'软件任务'),icon:isWorkBuddy?'workbuddy':'bunny',record:{...physical,presentation:{title:short(physical.recipient||physical.goal||'软件任务'),statusLabel:active?'正在操作':physical.status==='accepted'?'已完成':'已停止'}},terminal:!active,action:active?'stop':physical.status==='accepted'?'dismiss':null,ref:{source:'desktop',id:physical.id},attention:physical.status==='failed',at:physical.startedAt||0,...(!active&&selectedKey!==key?{expiresAt:recentUntil}:{})});}

@@ -113,8 +113,57 @@ async function testToolCallProducesNoSpeechCallbacks() {
   assert.equal(requests, 1);
   assert.equal(result.text, '');
   assert.equal(result.raw, '');
+  assert.equal(result.finishReason, 'tool_calls');
   assert.deepEqual(result.toolCalls, calls);
   assert.deepEqual(callbacks, [], 'tool requests do not enter speech or sentence callbacks');
+}
+
+async function testCompletionDiagnosticsUseActualWirePayload() {
+  const privateCanaries = ['private-response-body', 'private-reasoning-body', 'private-tool-arguments', 'private-usage-field'];
+  for (const [code, finishReason, withTools] of [['E_OUTPUT_LIMIT', 'length', true], ['E_EMPTY_RESPONSE', 'stop', false]]) {
+    let requests = 0, captured;
+    await assert.rejects(chatWithTransport({ model: 'fixture-request-model', messages: [{ role: 'user', content: 'private-input-body' }],
+      maxTokens: 8192, maxOutputTokens: 1536, extraBody: { model: 'fixture-wire-model' } }, async params => {
+      requests++;
+      captured = JSON.parse(Buffer.from(params.body_b64, 'base64').toString('utf8'));
+      assert.equal(captured.model, 'fixture-wire-model');
+      assert.equal(captured.max_tokens, 1536, 'context/model output ceiling is applied before transport');
+      return { body: JSON.stringify({ model: 'fixture-upstream-model', choices: [{ message: {
+        content: withTools ? privateCanaries[0] : '', reasoning_content: privateCanaries[1],
+        ...(withTools ? { tool_calls: [{ id: 'call_fixture', type: 'function', function: { name: 'fixture_tool', arguments: JSON.stringify({ query: privateCanaries[2] }) } }] } : {}),
+      }, finish_reason: finishReason }], usage: { prompt_tokens: 20, completion_tokens: 1536, total_tokens: 1556, private_field: privateCanaries[3] } }) };
+    }), error => {
+      assert.equal(error.code, code);
+      assert.deepEqual(error.diagnostic.completion, { model: captured.model, maxOutputTokens: captured.max_tokens,
+        finishReason, hasReasoning: true, usage: { prompt_tokens: 20, completion_tokens: 1536, total_tokens: 1556 } });
+      const diagnostic = JSON.stringify(error.diagnostic);
+      for (const value of [...privateCanaries, 'private-input-body', 'fixture-upstream-model']) assert(!diagnostic.includes(value));
+      return true;
+    });
+    assert.equal(requests, 1, 'completion diagnostics do not retry inference');
+  }
+  let captured;
+  await assert.rejects(chatWithTransport({ model: 'fixture-request-model', messages: [], maxTokens: 8192, maxOutputTokens: 1536,
+    extraBody: { model: 'fixture-wire-model', max_tokens: 777 } }, async params => {
+    captured = JSON.parse(Buffer.from(params.body_b64, 'base64').toString('utf8'));
+    return { body: JSON.stringify({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }) };
+  }), error => error.diagnostic.completion.model === captured.model && error.diagnostic.completion.maxOutputTokens === 777 && captured.max_tokens === 777);
+  const catalog = require('../src/main/model-catalog'), originalGet = catalog.get;
+  try {
+    catalog.get = () => ({ models: [{ id: 'fixture-capped-model', maxOutputTokens: 512, contextWindow: 32768, maxInputTokens: 32768 }] });
+    await assert.rejects(chatWithTransport({ model: 'fixture-capped-model', messages: [{ role: 'user', content: 'fixture request' }], maxTokens: 4096 }, async params => {
+      captured = JSON.parse(Buffer.from(params.body_b64, 'base64').toString('utf8'));
+      assert.equal(captured.max_tokens, 512, 'actual model capacity clamps the wire output budget');
+      return { body: JSON.stringify({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }) };
+    }), error => error.diagnostic.completion.model === 'fixture-capped-model' && error.diagnostic.completion.maxOutputTokens === captured.max_tokens);
+  } finally { catalog.get = originalGet; }
+  for (const finishReason of ['stop', null]) {
+    const result = await chatWithTransport({ model: 'fixture-request-model', messages: [{ role: 'user', content: 'fixture request' }], maxTokens: 8192, maxOutputTokens: 1536 }, async () => ({
+      body: JSON.stringify({ choices: [{ message: { content: 'fixture answer' }, ...(finishReason ? { finish_reason: finishReason } : {}) }] }),
+    }));
+    assert.equal(result.finishReason, finishReason, 'success keeps the parsed finish reason without inventing one');
+    assert(result.contextBudget && typeof result.contextBudget === 'object', 'success retains context budgeting evidence');
+  }
 }
 
 async function testNoFreeModelHasStableCodeWithoutPaidFallback() {
@@ -148,11 +197,72 @@ async function testBrokerCannotReceiveRequestsWithoutProof() {
   }
 }
 
+async function testSafeTransportOriginsWithoutConnections() {
+  const net = require('node:net'), crypto = require('node:crypto'), { EventEmitter } = require('node:events');
+  const originalConnect = net.connect, endpoint = 'fixture-origin-endpoint', ticket = 'synthetic-fixture-ticket';
+  async function rejectProtocol({ id = 2, error, oversized = false, requestPath='/fixture' }) {
+    net.connect = () => {
+      const socket = new EventEmitter();
+      socket.destroy = () => {};
+      const emit = frame => socket.emit('data', Buffer.isBuffer(frame) ? frame : Buffer.from(JSON.stringify(frame) + '\n'));
+      socket.write = wire => queueMicrotask(() => {
+        const frame = JSON.parse(wire);
+        if (frame.type === 'session_hello') {
+          const serverNonce = 'synthetic-server-nonce', parts = [];
+          for (const value of ['wbipc-s', '1', endpoint, frame.client_nonce, serverNonce]) {
+            const bytes = Buffer.from(value), length = Buffer.alloc(4); length.writeUInt32BE(bytes.length); parts.push(length, bytes);
+          }
+          emit({ type: 'session_challenge', server_nonce: serverNonce, server_proof: crypto.createHmac('sha256', ticket).update(Buffer.concat(parts)).digest('base64url') });
+        } else if (frame.type === 'session_prove') emit({ type: 'session_hello_ack', pipes: ['wb.request'] });
+        else if (frame.id === 1 && id === 2) emit({ id: 1, result: { channel: 'fixture', methods: ['http.fetch'] } });
+        else if (oversized) emit(Buffer.alloc(2 * 1024 * 1024 + 1, 120));
+        else emit({ id, error });
+      });
+      queueMicrotask(() => socket.emit('connect'));
+      return socket;
+    };
+    try { await require('../src/main/workbuddy').request({ method: 'POST', path: requestPath }, { discover: () => ({ endpoint, ticket }), timeoutMs: 1000 }); }
+    catch (failure) { return failure; }
+    finally { net.connect = originalConnect; }
+    assert.fail('synthetic protocol must reject');
+  }
+  const privateValue = 'private-upstream-error-canary';
+  for (const [frame, expected] of [
+    [{ id: 2, requestPath:'/v2/chat/completions', error: { code: 'E_PAYLOAD_TOO_LARGE', message: 'response exceeds inline limit of 655360 bytes', data: { private: privateValue } } }, { source: 'broker', stage: 'http-response', limitBytes: 655360,requestKind:'model-completion' }],
+    [{ id: 1, error: { code: 'E_PAYLOAD_TOO_LARGE', message: privateValue, data: { limitBytes: 1234, private: privateValue } } }, { source: 'broker', stage: 'pipe-discovery', limitBytes: 1234 }],
+    [{ id: 2, error: { code: 'E_PAYLOAD_TOO_LARGE', message: 'response exceeds inline limit of 655360 bytes ' + privateValue, data: { limitBytes: -1 } } }, { source: 'broker', stage: 'http-response' }],
+    [{ id: 2, error: { code: 'E_PAYLOAD_TOO_LARGE', message: privateValue, data: { limitBytes: '655360' } } }, { source: 'broker', stage: 'http-response' }],
+    [{ id: 2, error: { code: 'E_PAYLOAD_TOO_LARGE', message: 'response exceeds inline limit of 9007199254740992 bytes' } }, { source: 'broker', stage: 'http-response' }],
+    [{ id: 2, oversized: true }, { source: 'local-jsonl', stage: 'frame', limitBytes: 2 * 1024 * 1024 }],
+  ]) {
+    const failure = await rejectProtocol(frame);
+    assert.equal(failure.code, 'E_PAYLOAD_TOO_LARGE');
+    assert.deepEqual(failure.diagnostic.transport, expected);
+    for (const secret of [privateValue, ticket, endpoint]) assert(!JSON.stringify(failure).includes(secret));
+  }
+  const rejected = await rejectProtocol({ id: 2, error: { code: 'E_PAYLOAD_TOO_LARGE', message: 'response exceeds inline limit of 655360 bytes' } });
+  let captured, requests = 0;
+  await assert.rejects(chatWithTransport({ model: 'fixture-model', messages: [{ role: 'user', content: privateValue }], maxTokens: 4096 }, async params => {
+    requests++; captured = JSON.parse(Buffer.from(params.body_b64, 'base64').toString('utf8')); throw rejected;
+  }), error => {
+    assert.equal(error, rejected);
+    assert.deepEqual(error.diagnostic.transport, { source: 'broker', stage: 'http-response', limitBytes: 655360 });
+    assert.deepEqual(error.diagnostic.completion, { model: captured.model, maxOutputTokens: captured.max_tokens });
+    assert(error.diagnostic.budget && Number.isSafeInteger(error.diagnostic.budget.output));
+    for (const key of ['finishReason', 'usage', 'hasReasoning']) assert(!Object.hasOwn(error.diagnostic.completion, key), 'unreceived completion metadata must remain absent');
+    assert(!JSON.stringify(error.diagnostic).includes(privateValue));
+    return true;
+  });
+  assert.equal(requests, 1);
+}
+
 (async () => {
   await testFreeMemoryExtractionUsesOneBoundedFreeCall();
   await testToolCallProducesNoSpeechCallbacks();
+  await testCompletionDiagnosticsUseActualWirePayload();
   await testNoFreeModelHasStableCodeWithoutPaidFallback();
   await testBrokerCannotReceiveRequestsWithoutProof();
+  await testSafeTransportOriginsWithoutConnections();
   assert.throws(() => require('../src/main/workbuddy-free').parseObject(''), error => error.code === 'E_EMPTY_RESPONSE');
   console.log('WorkBuddy transport response checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

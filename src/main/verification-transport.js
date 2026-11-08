@@ -6,22 +6,26 @@ const FLASH = 'deepseek-v4.1-flash';
 
 // Read-only checking may retry once after the broker's inline-response cap or
 // an exhausted reasoning budget. Never retry a GUI action or pick a paid model.
-async function requestVerification({ messages, signal, vision = false, maxTokens, budgetScale,extraBody }, { chat = wb.chat, selectFree = freeModel } = {}) {
-  const invoke = async (model, maxTokens) => {
+async function requestVerification({ messages, signal, vision = false, maxTokens, budgetScale,inputBudgetTokens,extraBody,singleAttempt=false,recoveryReason }, { chat = wb.chat, selectFree = freeModel } = {}) {
+  const invoke = async (model, maxTokens, body=extraBody) => {
     if (signal?.aborted) throw new Error('交付检查已取消');
-    const response = await chat({ model, thinking: 'low', maxTokens, budgetScale, signal, messages, timeoutMs:25000,
-      extraBody: { ...extraBody,reasoning_effort: 'low', response_format: { type: 'json_object' } } });
+    const response = await chat({ model, thinking: 'low', maxTokens, budgetScale,inputBudgetTokens, signal, messages, timeoutMs:25000,
+      extraBody: { ...body,reasoning_effort: 'low', response_format: { type: 'json_object' } } });
     if (response.model && response.model !== model) throw new Error('验收模型与所选模型不符');
     return response;
   };
-  const requested=Math.min(8192,Math.max(0,Number(maxTokens)||0));
-  try { return { response: await invoke(FLASH, Math.max(requested,vision ? 4096 : 2048)), model: FLASH }; }
+  const requested=maxTokens===undefined?(vision?4096:2048):Math.min(8192,Math.max(1,Number(maxTokens)||1));
+  const recovering=singleAttempt&&['E_PAYLOAD_TOO_LARGE','E_EMPTY_RESPONSE','E_OUTPUT_LIMIT'].includes(recoveryReason);
+  const selected=recovering?await selectFree({vision,signal}):FLASH;
+  if(recovering&&selected!=='hy3')throw new Error('当前目录未确认免费 Hy3，保留结果等待核对，没有切换付费模型。');
+  try { return { response: await invoke(selected,requested), model:selected }; }
   catch (error) {
-    if (signal?.aborted || !['E_PAYLOAD_TOO_LARGE', 'E_EMPTY_RESPONSE', 'E_OUTPUT_LIMIT'].includes(error.code)) throw error;
+    if (singleAttempt || signal?.aborted || !['E_PAYLOAD_TOO_LARGE', 'E_EMPTY_RESPONSE', 'E_OUTPUT_LIMIT'].includes(error.code)) throw error;
     const model = await selectFree({ vision, signal });
     if (signal?.aborted) throw new Error('交付检查已取消');
     if (model !== 'hy3') throw new Error('当前目录未确认免费 Hy3，保留结果等待核对，没有切换付费模型。');
-    return { response: await invoke(model, Math.max(requested,4096)), model, fallbackReason: error.code };
+    const repaired=require('./self-repair').responseRecovery({maxTokens:requested,extraBody},error);
+    return { response: await invoke(model,repaired?.maxTokens??requested,repaired?.extraBody??extraBody), model, fallbackReason: error.code };
   }
 }
 

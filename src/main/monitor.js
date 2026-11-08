@@ -291,6 +291,7 @@ class Monitor extends EventEmitter {
   resetTail(entry, size, ino) {
     entry.ino = ino;
     entry.offset = Math.max(0, size - TAIL_ON_ATTACH);
+    entry.integrityUnknown = entry.offset > 0;
     entry.primeUntil = size;
     entry.primeTail = false;
     entry.priming = false;
@@ -318,22 +319,24 @@ class Monitor extends EventEmitter {
       const { bytesRead } = length ? await file.read(data, 0, length, offset) : { bytesRead: 0 };
       if (!live()) return false;
 
-      if (rotated) this.resetTail(entry, stat.size, stat.ino);
+      if (rotated) { this.resetTail(entry, stat.size, stat.ino); entry.integrityUnknown = true; }
       entry.ino = stat.ino;
       entry.offset = offset + bytesRead;
       entry.reader.push(data.subarray(0, bytesRead), event => {
         entry.priming = historical || entry.primeTail;
         entry.primeTail = false;
-        try { this.handleEvent(event, entry); } catch {}
+        try { this.handleEvent(event, entry); } catch { entry.integrityUnknown = true; }
         return live();
       }, () => {
         // A lost event may be the tool call that invalidates an apparent answer.
+        entry.integrityUnknown = true;
         if (entry.snap.task) entry.snap.task.candidateAt = 0;
         entry.primeTail = false;
       });
       if (historical) entry.primeTail = entry.reader.bytes > 0;
       return entry.offset >= stat.size && entry.reader.atBoundary;
     } catch {
+      entry.integrityUnknown = true;
       return false;
     } finally {
       entry.priming = false;

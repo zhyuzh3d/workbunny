@@ -29,7 +29,7 @@ class ActionProgress{
   if(typeof facts.draft==='string')s.facts.draftPresent=!!facts.draft;
   if(/^E_[A-Z_]+$/u.test(String(facts.error||'')))s.facts.errorCode=facts.error;
   // A new opinion about the same facts is not new external evidence.
-  if(evidence?.result?.trust==='interpretation-not-authorization'){s.repeats++;return false;}
+  if(evidence?.result?.trust==='interpretation-not-authorization'||evidence?.error||evidence?.result?.ok===false){s.repeats++;return false;}
   if(!s.evidence.includes(key)){
    if(s.waitSince!=null){s.waitMs=(s.waitMs||0)+Math.max(0,this.clock()-s.waitSince);s.waitSince=this.clock();}
    s.evidence=[...s.evidence.slice(-7),key];s.lastProgressAt=this.clock();s.repeats=0;s.reviews=0;delete s.lastReviewAt;delete s.blockedReportedAt;

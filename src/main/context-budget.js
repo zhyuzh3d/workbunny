@@ -1,6 +1,10 @@
 'use strict';
 // Token estimates share the same units as model limits. They intentionally
 // overestimate ordinary prose; provider context errors still get one shrink retry.
+const MAX_INPUT_TOKENS = 256000;
+const DEFAULT_CONTEXT_TOKENS = 32768;
+const PROTOCOL_RESERVE_TOKENS = 1024;
+const IMAGE_ESTIMATE_TOKENS = 16384;
 const plainBytes = value => Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value ?? ''), 'utf8');
 function textTokens(value, cache) {
   const text = typeof value === 'string' ? value : JSON.stringify(value ?? '');
@@ -21,12 +25,29 @@ function textTokens(value, cache) {
   }
   cache?.set(text,total); return total;
 }
+// Optional excerpts only. Convert a token allowance to a Unicode-safe prefix
+// by measuring its content, never by assuming tokens equal characters/bytes.
+function textPrefixWithinBudget(text, tokenBudget) {
+  if(typeof text!=='string'||!Number.isSafeInteger(tokenBudget)||tokenBudget<0)throw new TypeError('可选文本额度须为非负整数token');
+  if(textTokens(text)<=tokenBudget)return text;
+  const characters=Array.from(text);let low=0,high=characters.length;
+  while(low<high){const mid=Math.ceil((low+high)/2);if(textTokens(characters.slice(0,mid).join(''))<=tokenBudget)low=mid;else high=mid-1;}
+  return characters.slice(0,low).join('');
+}
 function contentCost(content, cache) {
   if (!Array.isArray(content)) return textTokens(content,cache);
-  return content.reduce((n, part) => n + (part?.type === 'image_url' ? 16384 : textTokens(part,cache)), 0);
+  return content.reduce((n, part) => n + (part?.type === 'image_url' ? IMAGE_ESTIMATE_TOKENS : textTokens(part,cache)), 0);
 }
 function cost(messages, extraBody = {}, cache) {
   return messages.reduce((n, m) => { const other = wire(m); delete other.content; return n + 48 + contentCost(m.content,cache) + textTokens(other,cache); }, 0) + textTokens(extraBody,cache);
+}
+function diagnostic(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const result = {};
+  for (const key of ['context','output','inputLimit','inputBudget','requestedInputBudget','maximumInputBudget','protocolReserve','uncertaintyReserve','estimate','messageCount','mandatoryCount','imageCount','imageEstimate','textEstimate','requestBytes','systemEstimate']) {
+    if (Number.isSafeInteger(value[key]) && value[key] >= 0) result[key] = value[key];
+  }
+  return Object.keys(result).length ? result : undefined;
 }
 function wire(message) {
   return Object.fromEntries(Object.entries(message).filter(([k]) => ['role', 'content', 'name', 'tool_calls', 'tool_call_id', 'reasoning_content'].includes(k)));
@@ -34,11 +55,20 @@ function wire(message) {
 function limits(options) {
   let capability = {};
   try { capability = require('./model-catalog').get(options.provider || (options.transport === 'workbuddy' ? 'workbuddy' : '')).models.find(m => m.id === options.model) || {}; } catch {}
-  const context = Number(options.contextWindow || capability.contextWindow || capability.maxInputTokens || 32768);
-  const input = Number(options.maxInputTokens || capability.maxInputTokens || context);
-  const output = Math.max(256, Math.min(Number(options.maxTokens || 4096), Number(capability.maxOutputTokens || 128000)));
-  const available = Math.floor(Math.min(input, context - output) * .85) - 1024;
-  return { context, output, inputBudget: Math.max(512, Math.min(64000, available) * (options.budgetScale === .5 ? .5 : 1)), mode: 'conservative-multilingual-token-estimate' };
+  const positive=value=>Number.isSafeInteger(Number(value))&&Number(value)>0?Number(value):undefined;
+  const context = positive(options.contextWindow) || positive(capability.contextWindow) || positive(capability.maxInputTokens) || DEFAULT_CONTEXT_TOKENS;
+  const input = positive(options.maxInputTokens) || positive(capability.maxInputTokens) || context;
+  const output = Math.min(positive(options.maxTokens)||4096,positive(options.maxOutputTokens)||positive(capability.maxOutputTokens)||128000);
+  const requestedInputBudget=options.inputBudgetTokens===undefined?MAX_INPUT_TOKENS:options.inputBudgetTokens;
+  if(!Number.isSafeInteger(requestedInputBudget)||requestedInputBudget<512||requestedInputBudget>MAX_INPUT_TOKENS)throw Object.assign(new Error('输入额度须为512至256000之间的整数，单位为token'),{code:'E_CONTEXT_CONFIGURATION'});
+  // Count protocol/tool content in cost(); keep extra room for tokenization
+  // uncertainty, chat framing, and the complete requested output separately.
+  const usable=Math.max(0,Math.min(input,context-output));
+  const uncertaintyReserve=Math.ceil(usable*.15),protocolReserve=PROTOCOL_RESERVE_TOKENS;
+  const maximumInputBudget=Math.max(0,Math.min(MAX_INPUT_TOKENS,usable-uncertaintyReserve-protocolReserve));
+  const inputBudget=Math.floor(Math.min(requestedInputBudget,maximumInputBudget)*(options.budgetScale===.5?.5:1));
+  return {context,output,inputLimit:input,inputBudget,requestedInputBudget,maximumInputBudget,protocolReserve,uncertaintyReserve,
+    unit:'tokens',mode:'conservative-multilingual-token-estimate'};
 }
 function fitRequest(options, { retainLanes = false } = {}) {
   if (!Array.isArray(options.messages) || !options.messages.length) return options;
@@ -76,16 +106,23 @@ function fitRequest(options, { retainLanes = false } = {}) {
     messages.splice(start, end - start); omitted += end - start;
   }
   const estimate = currentCost();
+  const imageCount = messages.reduce((n,m) => n + (Array.isArray(m.content) ? m.content.filter(p => p?.type === 'image_url').length : 0), 0);
+  const measured={...cap,estimate,messageCount:messages.length,mandatoryCount:mandatory.size,
+    imageCount,imageEstimate:imageCount*IMAGE_ESTIMATE_TOKENS,textEstimate:estimate-imageCount*IMAGE_ESTIMATE_TOKENS,
+    requestBytes:plainBytes({messages:messages.map(wire),extraBody:options.extraBody||{}}),
+    systemEstimate:messages.filter(m=>['system','developer'].includes(m.role)).reduce((n,m)=>n+contentCost(m.content,cache),0)};
   if (estimate > cap.inputBudget) {
-    const e = new Error('这次内容超出单轮处理预算，原文已保留。请指定其中一部分，或分段发送。');
-    e.budget = { ...cap, estimate, messageCount:messages.length, mandatoryCount:mandatory.size };
+    const e = new Error('当前模型请求超出可用上下文预算；原始资料已保留，需要核对模型容量或减少附加上下文后继续。');
+    e.budget = measured;
+    e.diagnostic = { operation:'model-request',method:'context-budget',
+      ...(typeof options.model === 'string' && /^[a-zA-Z0-9_.:-]{1,80}$/u.test(options.model) ? {model:options.model}:{}),budget:diagnostic(e.budget) };
     e.code = 'E_CONTEXT_BUDGET'; throw e;
   }
-  return { ...options, ...(options.maxTokens === undefined ? {} : { maxTokens: cap.output }), messages: messages.map(m => ({ ...wire(m), ...(retainLanes && m._contextLane ? { _contextLane: m._contextLane } : {}) })), contextBudget: { ...cap, estimate, omitted } };
+  return { ...options, maxTokens:cap.output, messages: messages.map(m => ({ ...wire(m), ...(retainLanes && m._contextLane ? { _contextLane: m._contextLane } : {}) })), contextBudget: { ...measured, omitted } };
 }
 function isContextError(status, body) {
   if (![400, 413, 422].includes(Number(status))) return false;
   const text = typeof body === 'string' ? body.slice(0, 8192) : '';
   return /context_length_exceeded|context_window_exceeded|maximum context length|exceeds.{0,30}(?:context|input token)|prompt.{0,20}too long|max_input_tokens|上下文.{0,12}(?:超|长)/iu.test(text);
 }
-module.exports = { isContextError, fitRequest, limits, cost, contentCost, textTokens, wire };
+module.exports = { MAX_INPUT_TOKENS, DEFAULT_CONTEXT_TOKENS, IMAGE_ESTIMATE_TOKENS, isContextError, fitRequest, limits, cost, contentCost, textTokens, textPrefixWithinBudget, wire, diagnostic };

@@ -42,7 +42,10 @@ async function main(){
  merge({memory:{scene:'private'}}); await delay(350);
  assert.equal(await evaluate('document.body.classList.contains("private-scene")'),true);
  await evaluate('document.getElementById("ear").classList.add("on")'); await delay(350);
- (await colors()).forEach((color,i)=>assert.notEqual(color,original[i],ids[i]+' has a private-scene background'));
+ (await colors()).forEach((color,i)=>{
+  if(ids[i]==='sendBtn')assert.equal(color,original[i],'the primary action keeps the shared theme across scenes');
+  else assert.notEqual(color,original[i],ids[i]+' has a private-scene background');
+ });
  await evaluate('document.getElementById("ear").classList.remove("on")');
  merge({memory:{scene:'life'}}); await delay(350);
  assert.equal(await evaluate('document.body.classList.contains("private-scene")'),false);

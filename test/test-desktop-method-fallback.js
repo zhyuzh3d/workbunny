@@ -1,0 +1,112 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');
+const {EventEmitter}=require('node:events');
+const {PassThrough,Writable}=require('node:stream');
+const {DesktopService}=require('../src/main/desktop-service');
+const {DesktopNative}=require('../src/main/desktop-native');
+const pause=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(check){const deadline=Date.now()+5000;while(!check()&&Date.now()<deadline)await pause(5);assert(check(),'fixture deadline exceeded');}
+function fixture({proofMode='valid',draftConflict=false,unknownSubmit=false,unknownInput=false,holdProof=false,throwLog=false,inspectError=false,proofDraftConflict=false}={}){
+ const calls=[],logs=[],inputs=[];let visualHome=false,draft=draftConflict?'preserved fixture draft':'',submitted=0,releaseProof,proofPending=false;
+ const rect={x:0,y:0,width:1000,height:800},bundleId='com.tencent.workbuddy.mac';
+ const diagnostic={operation:'newTask',candidateCount:2,method:'background-ax'};
+ const native={cancel:async()=>{},close:async()=>{},request:async(op,a={})=>{
+  calls.push({op,operation:a.operation,background:a.background});
+  if(op==='permissions')return {accessibilityTrusted:true,screenCaptureAllowed:true,postEventAllowed:true};
+  if(op==='workbuddyCapabilities')return {backgroundAX:true};
+  if(op==='activate')return {activated:true};
+  if(op==='frontmost')return {application:{bundleId,pid:123,name:'fixture'},windows:[{bundleId,pid:123,windowId:7,layer:0,rect}]};
+  if(op==='workbuddyNavigate'){
+   if(inspectError&&visualHome&&a.operation==='inspect')throw Object.assign(Error('fixture unavailable AX observation'),{code:'E_GUI_LOCATE_UNAVAILABLE',dispatched:false,diagnostic:{operation:'inspect',method:'foreground-ax'}});
+   if(a.operation==='inspect')return {homeReady:false,pickerAvailable:false,workspacePicker:{candidateCount:0}};
+   throw Object.assign(Error('fixture localization failure'),{code:'E_GUI_LOCATE_AMBIGUOUS',dispatched:false,diagnostic:{...diagnostic,method:a.background?'background-ax':'foreground-ax'}});
+  }
+  if(op==='workbuddyInspect'){
+   if(holdProof&&visualHome&&!draft){proofPending=true;await new Promise(r=>{releaseProof=r;});}
+   return {available:true,homeReady:visualHome&&!!draft,scanComplete:true,editorCount:1,draftEmpty:!(draft||proofDraftConflict&&visualHome),draftMatchesRequest:!!draft&&draft===a.text};
+  }
+  if(op==='capture')return {pngBase64:Buffer.from(visualHome?'fixture home':'fixture old conversation').toString('base64'),desktopRect:rect,width:1000,height:800};
+  if(op==='recognize')return {texts:[{text:'DeepSeek-V4.1-Flash',confidence:1,x:.6,y:.8,width:.3,height:.03}]};
+  if(op==='click'){visualHome=true;return {clicked:true};}
+  if(op==='type'){assert(visualHome);assert(!draft);draft=a.text;inputs.push(a.text);if(unknownInput)throw Object.assign(Error('fixture lost input receipt'),{code:'E_GUI_INPUT_UNKNOWN',dispatched:true});return {typed:true};}
+  if(op==='key'){assert.equal(a.key,'enter');submitted++;if(unknownSubmit)throw Object.assign(Error('fixture lost send receipt'),{code:'E_GUI_SEND_UNKNOWN',dispatched:true});draft='';return {pressed:true};}
+  throw Error('unexpected fake native operation '+op);
+ }};
+ let planned=0;
+ const service=new DesktopService({native,persist:async()=>{},imageResize:x=>x,log:value=>{logs.push(value);if(throwLog)throw Error('fixture logger unavailable');},
+  planner:async(_goal,_shot,_signal,task)=>{
+   planned++;
+   if(!visualHome)return {action:'click',x:.1,y:.1,reason:'open the visible new composer'};
+   if(draft)return {action:'key',key:'enter',purpose:'submit',reason:'submit this draft once'};
+   const required=task.inputPrerequisites;
+   let inputEvidence={observationId:required.observationId,checks:required.checks.map(c=>({id:c.id,observed:c.expected,basis:'fixture screenshot shows '+c.id}))};
+   if(proofMode==='missing')inputEvidence=undefined;
+   if(proofMode==='partial')inputEvidence.checks.pop();
+   if(proofMode==='stale')inputEvidence.observationId='0'.repeat(24);
+   if(proofMode==='wrong')inputEvidence.checks[0].observed='other-project';
+   return {action:'type',purpose:'task',text:'host replaces this',inputEvidence};
+  },observeWorkBuddy:async()=>submitted&&!unknownSubmit?{sessionId:'fixture-session',taskId:1,messageKey:'fixture-message',status:'ok',summary:'fixture actual result'}:null});
+ return {service,calls,logs,inputs,submitted:()=>submitted,planned:()=>planned,proofPending:()=>proofPending,releaseProof:()=>releaseProof?.(),draft:()=>draft};
+}
+async function start(h){assert((await h.service.start({target:'workbuddy',goal:'private-goal-canary',workModel:'deepseek-v4.1-flash',workContext:{mode:'none'}})).ok);return {id:h.service.task.id,outbound:h.service.task.outboundText,marker:h.service.task.associationMarker};}
+test('pre-dispatch AX localization failure changes methods and submits the same task once with current visual evidence',async()=>{
+ for(const inspectError of [false,true]){const h=fixture({throwLog:true,inspectError});try{
+  const original=await start(h);await until(()=>!h.service.running);
+  assert.equal(h.service.task.status,'review');assert.equal(h.service.task.id,original.id);assert.equal(h.service.task.associationMarker,original.marker);
+  assert.deepEqual(h.inputs,[original.outbound]);assert.equal(h.submitted(),1);assert.equal(h.planned(),3);
+  assert(h.calls.some(c=>c.op==='activate'));assert(h.calls.some(c=>c.op==='capture'));
+  assert(h.logs.some(e=>e.method==='background-ax'&&e.candidateCount===2));assert(h.logs.some(e=>e.method==='foreground-ax'));
+  assert(!JSON.stringify(h.logs).includes('private-goal-canary'));assert(!JSON.stringify(h.logs).includes('fixture localization failure'));
+  assert.equal(h.service.task.workRoute.method,'visual');assert.equal(h.service.task.workRoute.inputEvidence.target.windowId,7);
+  assert.equal(h.service.task.progress.version,1);assert(h.service.task.progress.spent.tool>=0);
+ }finally{await h.service.close();}}
+});
+test('unproved, partial, stale or mismatching visual preconditions never allow task input',async()=>{
+ for(const proofMode of ['missing','partial','stale','wrong']){
+  const h=fixture({proofMode});try{await start(h);await until(()=>!h.service.running);assert.equal(h.inputs.length,0);assert.equal(h.submitted(),0);assert.equal(h.service.task.errorCode,'E_WORKBUDDY_ROUTE_UNVERIFIED');assert(!h.service.task.draftInserted);}finally{await h.service.close();}
+ }
+});
+test('a readable draft conflict stops before fallback navigation and preserves the draft',async()=>{
+ const h=fixture({draftConflict:true});try{await start(h);await until(()=>!h.service.running);assert.equal(h.service.task.errorCode,'E_WORKBUDDY_DRAFT_CONFLICT');assert.equal(h.draft(),'preserved fixture draft');assert(!h.calls.some(c=>c.op==='activate'||c.op==='click'||c.op==='type'));}finally{await h.service.close();}
+});
+test('an actual work-position conflict cannot be overridden by a visual claim',async()=>{
+ const h=fixture();try{
+  const s=h.service;s.task={id:'conflict',scene:'life',domain:'life',visibilityFloor:1,workContext:{mode:'none'},steps:[]};s.running=true;s.generation=1;s.controller=new AbortController();
+  const shot=s.screenshot={at:Date.now(),revision:1,rect:{x:0,y:0,width:1000,height:800},preview:'fixture'};
+  s.native.request=async()=>({homeReady:true,pickerAvailable:true,workspace:'different-project',workspacePicker:{candidateCount:1}});
+  await assert.rejects(s.verifyWorkBuddyRoute({bundleId:'com.tencent.workbuddy.mac',pid:123,windowId:7},1,{shot,proof:{observationId:'0'.repeat(24),checks:[]}}),{code:'E_WORKBUDDY_ROUTE_UNVERIFIED',dispatched:false});
+  assert.equal(s.task.workRoute.prepared,false);
+ }finally{await h.service.close();}
+});
+test('a newly readable draft conflict overrides otherwise complete visual input evidence',async()=>{
+ const h=fixture({proofDraftConflict:true});try{await start(h);await until(()=>!h.service.running);assert.equal(h.service.task.errorCode,'E_WORKBUDDY_DRAFT_CONFLICT');assert.equal(h.inputs.length,0);assert.equal(h.submitted(),0);}finally{await h.service.close();}
+});
+test('an unknown submit retains the same task and never submits again on resume',async()=>{
+ const h=fixture({unknownSubmit:true});try{
+  const original=await start(h);await until(()=>!h.service.running);assert(h.service.task.submitAttemptedAt);assert.equal(h.submitted(),1);
+  h.service.ensureWorkBuddyMonitor=async()=>{h.service.running=false;return true;};assert((await h.service.resume()).ok);await until(()=>!h.service.running);
+  assert.equal(h.submitted(),1);assert.equal(h.inputs.length,1);assert.equal(h.service.task.id,original.id);assert.equal(h.service.task.outboundText,original.outbound);
+ }finally{await h.service.close();}
+});
+test('an unknown input retains its intent and cannot be treated as an empty pre-dispatch failure',async()=>{
+ const h=fixture({unknownInput:true});try{
+  const original=await start(h);await until(()=>!h.service.running);assert(h.service.task.draftInserted);assert.equal(h.inputs.length,1);assert.equal(h.submitted(),0);
+  assert.equal(h.service.task.steps.find(s=>s.action==='type').state,'intent');
+  assert((await h.service.resume()).ok);await until(()=>!h.service.running);assert.equal(h.inputs.length,1);assert.equal(h.submitted(),0);assert.equal(h.service.task.id,original.id);assert.equal(h.service.task.outboundText,original.outbound);
+ }finally{await h.service.close();}
+});
+test('cancellation while checking input evidence releases ownership and rejects a late callback',async()=>{
+ const h=fixture({holdProof:true});try{
+  await start(h);await until(h.proofPending);await h.service.stop('fixture stop');assert.equal(h.service.running,false);assert.equal(h.service.guiLeaseHeld,false);
+  h.releaseProof();await pause(20);assert.equal(h.inputs.length,0);assert.equal(h.submitted(),0);assert.equal(h.service.task.status,'stopped');
+ }finally{h.releaseProof();await h.service.close();}
+});
+test('JSONL bridge preserves only structural location diagnostics',async()=>{
+ const child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();let message;
+ child.stdin=new Writable({write(chunk,_encoding,done){message=JSON.parse(String(chunk));done();}});child.kill=()=>queueMicrotask(()=>child.emit('close',0));
+ const client=new DesktopNative('/fixture/desktop',{spawn:()=>child});try{
+  const pending=client.request('workbuddyNavigate');
+  child.stdout.write(JSON.stringify({id:message.id,ok:false,code:'E_GUI_LOCATE_MISSING',dispatched:false,error:'fixture',diagnostic:{operation:'newTask',candidateCount:0,method:'background-ax',label:'private-label-canary',goal:'private-goal-canary',guardChecks:{draftMatched:true,sendEnabled:false,privateText:'private-draft-canary'}}})+'\n');
+  await assert.rejects(pending,e=>{assert.equal(e.code,'E_GUI_LOCATE_MISSING');assert.equal(e.dispatched,false);assert.deepEqual(e.diagnostic,{operation:'newTask',candidateCount:0,method:'background-ax',guardChecks:{draftMatched:true,sendEnabled:false}});assert(!JSON.stringify(e.diagnostic).includes('private-'));return true;});
+ }finally{await client.close();}
+});

@@ -9,7 +9,7 @@ const stage=path.join(root,'dist',`workbunny-${version}-source`),archive=stage+'
 fs.rmSync(stage,{recursive:true,force:true});fs.mkdirSync(stage,{recursive:true});const files=new Set(built.files.map(f=>f.path));
 // Use the reviewed Git inventory; ignored/local experiments are never swept in.
 const maintained=cp.execFileSync('git',['ls-files','-z','--','tools','test','native','docs','licenses','.github','examples'],{cwd:root,encoding:'utf8'}).split('\0').filter(Boolean);
-for(const p of maintained)if(/\.(js|cjs|mjs|py|sh|command|swift|json|md|txt|html|css)$/.test(p))files.add(p);
+for(const p of maintained)if(/\.(js|cjs|mjs|py|sh|command|swift|c|h|modulemap|json|md|txt|html|css)$/.test(p)||/^native\/vendor\/.*\/(AUTHORS|LICENSE|PATENTS)$/.test(p))files.add(p);
 for(const p of ['README.md','docs/images/readme-hero.webp','res/README.md','package-lock.json','resources-manifest.json','.gitignore'])files.add(p);
 const inventory=[];
 for(const p of [...files].sort()){

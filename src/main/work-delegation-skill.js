@@ -2,7 +2,7 @@
 const {fields}=require('./agent-contract');
 function registerWorkTools(tools,{submit,status,deliver}){
  tools.register({name:'work.submit',description:'把主人正式工作交给WorkBuddy，确认真实绑定会话后返回回执；不在Bunny聊天中冒充交付。',effect:'write',capabilities:['work.delegate'],scope:a=>({application:a.application}),
-  validate:v=>{fields(v,['application','goal','criteria','context','workContext'],'工作委派');for(const key of ['goal','criteria','context'])if(v[key]!==undefined&&(typeof v[key]!=='string'||v[key].length>(key==='context'?12000:3000)))throw Error('工作步骤内容不合法');if(v.workContext!==undefined)require('./agent-contract').taskSpec({skill:'work.delegate',goal:'scope',subjects:[{application:'workbuddy'}],workContext:v.workContext});if(v.application!=='workbuddy')throw new Error('尚未支持此工作执行者');return v;},execute:(a,c)=>submit(c.task,c.signal,a)});
+  validate:v=>{fields(v,['application','goal','criteria','context','workContext'],'工作委派');for(const key of ['goal','criteria','context'])if(v[key]!==undefined&&(typeof v[key]!=='string'||v[key].length>(key==='context'?12000:3000)))throw Error('工作步骤内容不合法');if(v.workContext!==undefined)require('./agent-contract').taskSpec({skill:'work.delegate',goal:'scope',subjects:[{application:'workbuddy'}],workContext:v.workContext});if(v.application!=='workbuddy')throw new Error('尚未支持此工作执行者');return v;},execute:(a,c)=>submit(c.task,c.signal,{...a,operationId:c.operationId})});
  tools.register({name:'work.status',description:'读取本任务已绑定的WorkBuddy实际进展，并在交付后核验结果。',effect:'read',capabilities:['work.read'],scope:a=>({application:a.application}),
   validate:v=>{fields(v,['application','jobId'],'工作进展');if(v.application!=='workbuddy'||typeof v.jobId!=='string')throw new Error('缺少已绑定工作ID');return v;},execute:(a,c)=>status(a.jobId,c.task,c.signal)});
 

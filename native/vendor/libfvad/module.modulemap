@@ -1,0 +1,4 @@
+module CLibfvad {
+  header "include/fvad.h"
+  export *
+}

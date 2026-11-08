@@ -6,7 +6,14 @@ test('continuing a result-derived owner conversation creates an acyclic round re
  const memory=new MemoryService({dir,bin:path.resolve('bin/vault'),openKey:async()=>Buffer.from(key),getSettings:()=>({enabled:true,extract:false,scene:'life'})});let agent;
  try{
   await memory.init();assert(memory.ready,memory.error);const persist=createTaskJournal(memory);let followed=0;
-  const desktop={running:false,task:null,journal(){return persist(this.task);},async followUp(){followed++;this.task.status='monitoring';await this.journal();return {ok:true};}};
+  const desktop={running:false,task:null,journal(){return persist(this.task);},async followUp(){
+   followed++;const physical=this.task;
+   Object.assign(physical,{followUpRound:physical.followUpRound+1,followUpAwaitingMonitor:true,followUpPending:{state:'sent'},submittedAt:Date.now(),status:'awaiting'});await this.journal();
+   const row={id:2,bunnyTaskId:physical.id,messageKey:'new-round-message',startedAt:physical.submittedAt,status:'running'};
+   const record=require('../src/main/workbuddy-observation').observeWorkBuddy({sessions:new Map([['fixture',{snap:{sessionId:physical.sessionId,task:row,lastEventAt:physical.submittedAt}}]])},physical);
+   assert(record,'the continuation fixture must provide an actual new-round observation, not only a click acknowledgement');
+   Object.assign(physical,{monitorTaskId:record.taskId,monitorMessageKey:record.messageKey,followUpAwaitingMonitor:false,followUpPending:{state:'observed'},status:'monitoring'});await this.journal();return {ok:true};
+  }};
   agent=new AgentService({desktop,memory,scene:{metrics:{},native:{request:async()=>({})},close:async()=>{}},epoch:()=>memory.generation,ready:()=>true,autoSchedule:false});
   const source=await memory.addMessage('user','制作 Cedar 文件',{scene:'life'}),actor={role:'owner',verified:true,sources:[source.id],scene:'life'};
   const first=await agent.start({skill:'work.delegate',goal:'制作 Cedar 文件',subjects:[{application:'workbuddy'}]},actor);assert(first.ok,first.error);

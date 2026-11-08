@@ -52,3 +52,16 @@ test('successful local synthesis retains selection; unrelated model check does n
   f.session.useSystem('local check failed', 'qwen', 'Tingting');
   assert.equal(f.getConfig().tts.engine, 'remote'); assert.equal(f.events.length, 0);
 });
+
+test('cancellation before or during synthesis never persists a late fallback', async () => {
+  let complete, calls = 0;
+  const f = fixture(() => { calls++; return new Promise(resolve => { complete = resolve; }); });
+  const cancelled = new AbortController(); cancelled.abort();
+  await assert.rejects(f.session.synthesize('old', undefined, { signal: cancelled.signal }), { name: 'AbortError' });
+  assert.equal(calls, 0);
+  const controller = new AbortController();
+  const pending = f.session.synthesize('old', undefined, { signal: controller.signal });
+  controller.abort(); complete(fallback);
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(f.getConfig().tts.engine, 'qwen'); assert.equal(f.events.length, 0);
+});

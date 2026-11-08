@@ -396,7 +396,8 @@ class ContextCompression {
       if (!excerpt || typeof excerpt.sourceId !== 'string' || typeof excerpt.quote !== 'string' ||
           excerpt.quote.length < MIN_EXCERPT_CHARS || excerpt.quote.length > MAX_EXCERPT_CHARS || SECRET.test(excerpt.quote)) throw new Error('上下文摘要引文格式无效');
       const source = sourceMap.get(excerpt.sourceId);
-      if (!source || !source.includes(excerpt.quote)) throw new Error('上下文摘要引文来源校验失败');
+      if (typeof source !== 'string') throw Object.assign(new Error('上下文摘要引文来源校验失败'), { code: 'E_CONTEXT_QUOTE_SOURCE_MISSING' });
+      if (!source.includes(excerpt.quote)) throw Object.assign(new Error('上下文摘要引文原文校验失败'), { code: 'E_CONTEXT_QUOTE_MISMATCH' });
       const key = `${excerpt.sourceId}\n${excerpt.quote}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -693,7 +694,10 @@ class ContextCompression {
           const overlap = (await this.query('message', 4, { scene, sort: 'ingestion', order: 'desc', beforeSeq: cursorSeq + 1 })).reverse().filter(r => !SECRET.test(r.value.content));
           batch = [...overlap, ...batch];
           const planned = await require('./semantic-plan').planBatch(this.memory, { mode: 'doze', scope: { domain: scene, visibilityFloor: rank(scene) },
-            rows: batch, generate: this.summarize, signal: controller, force, afterSeq: cursorSeq, reserveModelCall });
+            rows: batch, generate: this.summarize, signal: controller, force, afterSeq: cursorSeq, reserveModelCall,
+            validateResult: (result, { consumed, sourceRows }) => {
+              if (consumed.length) this.validateSummary(result, sourceRows.filter(row => row.ingestionSeq <= consumed.at(-1).ingestionSeq).map(actors.inputRow));
+            } });
           if (planned.status !== 'done') return outcome(planned.status);
           if (!planned.consumed.length) return outcome('deferred', '未完话题保留原文，等待后续');
           processed = planned.consumed;

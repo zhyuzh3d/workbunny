@@ -1,9 +1,9 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {ActionLifecycle}=require('../src/main/action-lifecycle');
-test('an explicit not-applied judgment reopens preparation, while a newer target event still cancels it',async()=>{
- const lifecycle=new ActionLifecycle(),a=lifecycle.start({id:'a',taskId:'task',scope:'target',eventKey:'one',policy:'newer-event'});await a.commit();await assert.rejects(a.reconcile({observed:'unknown',basis:'unknown'}));assert.equal(a.phase,'committed');
- await a.reconcile({observed:'not_applied',basis:'本次调用明确没有发生实际效果'});assert.equal(a.phase,'preparing');lifecycle.supersede({taskId:'task',scope:'target',eventKey:'two'});assert(a.signal.aborted);a.finish();
+test('a narrative judgment cannot reopen a committed write or make a newer event replay it',async()=>{
+ const lifecycle=new ActionLifecycle(),a=lifecycle.start({id:'a',taskId:'task',scope:'target',eventKey:'one',policy:'newer-event'});await a.commit();assert.equal(a.reconcile,undefined);await assert.rejects(a.retryBeforeEffect(),/只有确认未发令/);assert.equal(a.phase,'committed');
+ lifecycle.supersede({taskId:'task',scope:'target',eventKey:'two'});assert.equal(a.signal.aborted,false);assert.equal(a.phase,'committed');a.finish();
 });
 test('only a newer event for the same declared scope supersedes a preparing action',()=>{
  const manager=new ActionLifecycle(),a=manager.start({id:'a',taskId:'1',scope:'wechat:alice',eventKey:'a1',policy:'newer-event'}),b=manager.start({id:'b',taskId:'2',scope:'wechat:bob',eventKey:'b1',policy:'newer-event'}),independent=manager.start({id:'c',taskId:'3',scope:'wechat:alice',policy:'independent'});

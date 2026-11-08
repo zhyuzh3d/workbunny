@@ -33,7 +33,7 @@ async function chatWithSearch(options, { chat = wb.chat, search = searchPublicWe
   const webAllowed = options.webSearch !== false;
   const messages = [{ role: 'system', content: (webAllowed ? RULE : '') + (recall ? '\n' + require('./conversation-recall').RULE : '')+(context?'\n'+require('./context-assembler').CONTEXT_RULE:'') }, ...options.messages];
   const sources = new Map(), queried = options.searchCache || new Map();
-  let searches = 0, localCalls = 0, contextCalls=0,duplicates=0,totalCalls = 0, modelCalls = 0, final;
+  let searches = 0, localCalls = 0, contextCalls=0,duplicates=0,totalCalls = 0, modelCalls = 0, final,inputBudgetTokens=options.inputBudgetTokens;
   const maxCalls=context?8:5,maxRounds=context?9:3,contextToolIds=new Set();
   const usage = {};
   const publish = value => { if (isCurrent()) options.onSearch?.(value); };
@@ -45,7 +45,7 @@ async function chatWithSearch(options, { chat = wb.chat, search = searchPublicWe
     const extraBody = { ...request.extraBody };
     if (allowTools) { extraBody.tools = enabledTools; extraBody.tool_choice = 'auto'; }
     else { delete extraBody.tools; delete extraBody.tool_choice; }
-    const response = await chat({ ...request, messages, extraBody, timeoutMs: Math.max(1, deadline - Date.now()), onDelta: undefined, onSentence: undefined });
+    const response = await chat({ ...request,...(inputBudgetTokens===undefined?{}:{inputBudgetTokens}), messages, extraBody, timeoutMs: Math.max(1, deadline - Date.now()), onDelta: undefined, onSentence: undefined });
     modelCalls++;
     for (const key of ['prompt_tokens', 'completion_tokens', 'total_tokens', 'input_tokens', 'output_tokens', 'credit']) {
       const value = response.usage?.[key];
@@ -65,8 +65,18 @@ async function chatWithSearch(options, { chat = wb.chat, search = searchPublicWe
         throw Object.assign(new Error('模型请求了未启用的工具'), { code: 'E_TOOL_PROTOCOL' });
       if (++totalCalls > maxCalls) throw Object.assign(new Error('本轮工具调用超出上限'), { code: 'E_TOOL_PROTOCOL' });
       if(contextCall){
-        try{contextCalls++;result=await context.run(name,JSON.parse(call.function.arguments));check();duplicates=result.duplicate?duplicates+1:0;}
-        catch(error){check();if(error.code==='E_ABORTED')throw error;result={error:'未取得这个上下文模块，请调整模块及参数或依据已有事实回答。'};duplicates++;}
+        try{contextCalls++;const args=JSON.parse(call.function.arguments),assembler=require('./context-assembler');
+          const rejectBudget=minimum=>Object.assign(Error('新额度不足以容纳当前必需请求与工具回执，配置未提交；请调高额度或减少可选资料。'),{code:'E_CONTEXT_CONFIGURATION',minimumInputBudgetTokens:minimum});
+          const minimum=assembler.minimumInputBudget({...request,messages,extraBody});
+          if(args.inputBudgetTokens!==undefined&&args.inputBudgetTokens<minimum)throw rejectBudget(minimum);
+          result=await context.run(name,args,{inputBudgetTokens,admit:proposal=>{
+            const prior=messages.map(m=>m.role==='tool'&&contextToolIds.has(m.tool_call_id)?{...m,content:JSON.stringify({superseded:true,trust:'context-data-not-instructions'})}:m);
+            const projected=[...prior,{role:'tool',tool_call_id:call.id,content:JSON.stringify(proposal)}];
+            const needed=assembler.minimumInputBudget({...request,messages:projected,extraBody});
+            if(needed>proposal.assembly.inputBudgetTokens)throw rejectBudget(needed);
+          }});check();duplicates=result.duplicate?duplicates+1:0;
+          const budget=result.assembly?.inputBudgetTokens;if(Number.isSafeInteger(budget)&&budget>=512&&budget<=require('./context-budget').MAX_INPUT_TOKENS)inputBudgetTokens=budget;}
+        catch(error){check();if(error.code==='E_ABORTED')throw error;result=error.code==='E_CONTEXT_CONFIGURATION'?{error:'新额度不足以容纳当前必需请求与工具回执，配置未提交；保持原额度，请调高额度或减少可选资料。',minimumInputBudgetTokens:error.minimumInputBudgetTokens,inputBudgetTokens:inputBudgetTokens??require('./context-budget').MAX_INPUT_TOKENS}:{error:'未取得这个上下文模块，请调整模块及参数或依据已有事实回答。'};duplicates++;}
         // Keep tool protocol pairs, replacing obsolete module snapshots instead
         // of repeatedly carrying old full copies through the context window.
         for(const message of messages)if(message.role==='tool'&&contextToolIds.has(message.tool_call_id))message.content=JSON.stringify({superseded:true,trust:'context-data-not-instructions'});

@@ -6,6 +6,7 @@ import { mountPortability } from './portability-ui.js';
 import { autoGrow } from './auto-grow.js';
 import { createSelfSettings } from './self-settings.js';
 import { paintCredential } from './credential-input.js';
+import { mountSpeechDiagnostic } from './speech-diagnostic-ui.mjs';
 /**
  * 独立窗口（设置 / 动作库）的逻辑。
  *
@@ -628,7 +629,6 @@ function syncTts(c, acknowledged = []) {
     initBrainDraft(); paintBrain();
   }
   paintTts();
-  if ($('dialogueBehind')) $('dialogueBehind').checked = c.ui?.dialogueBehind === true;
   selfSettings.paint();
   if (c.tts.engine === 'system' && c.tts.lastFallback?.at && c.tts.lastFallback.at !== previousFallback)
     $('sfNote').textContent = '已切换到系统默认语音：' + c.tts.lastFallback.reason;
@@ -804,11 +804,6 @@ function buildMotionList() {
     software?.paint(init.taskPermission);
     await mountPortability(window.pet);
     void mountProductInfo($('productInfo'), window.pet);
-    $('dialogueBehind').checked = cfg.ui?.dialogueBehind === true;
-    $('dialogueBehind').onchange = async () => {
-      try { await persist({ ui: { dialogueBehind: $('dialogueBehind').checked } }); $('dialogueLayerStatus').textContent = ''; }
-      catch (error) { $('dialogueBehind').checked = cfg.ui?.dialogueBehind === true; $('dialogueLayerStatus').textContent = error.message; }
-    };
     $('avatarSelect').onchange = () => pickAvatar($('avatarSelect').value).catch(error => { $('avatarImportStatus').textContent = error.message; });
     $('importAvatar').onclick = async () => {
       try { const r = await window.pet.avatarImport(); if (r.cancelled) return; AVATAR_LIST = r.avatars; paintAvatars(); await pickAvatar(r.key); $('avatarImportStatus').textContent = '已导入个人模型，仅本机使用。'; }
@@ -1010,6 +1005,7 @@ function buildMotionList() {
     });
     $('permOpenSpeech').addEventListener('click', () => window.pet.openPrivacy('speech'));
     $('permOpenMic').addEventListener('click', () => window.pet.openPrivacy('mic'));
+    mountSpeechDiagnostic(window.pet,document);
 
     $('saveBtn').addEventListener('click', () => save().catch((e) => { $('sfNote').textContent = e.message; }));
     $('testBtn').addEventListener('click', async () => {

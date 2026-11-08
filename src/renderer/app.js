@@ -13,7 +13,10 @@ import { createBodyAvoidance } from './body-avoidance.mjs';
 import { createPCMPlayer } from './pcm-player.mjs';
 import { taskActivity } from './task-activity.mjs';
 import { taskCard, refreshTaskClock } from './task-card.mjs';
+import { createTaskControls } from './task-controls.mjs';
+import { observeInputRegions } from './window-input-regions.mjs';
 import { createBubbleController } from './bubble-ui.mjs';
+import { renderResultText } from './result-links.mjs';
 import { characterText } from './character-name.mjs';
 import { createAvatarLighting } from './avatar-lighting.mjs';
 import { lightingForAvatar } from './avatar-lighting-profiles.mjs';
@@ -927,6 +930,7 @@ function characterRect() {
   return { x0: minX - pad, x1: maxX + pad, y0: minY - pad, y1: maxY + pad, headY };
 }
 
+observeInputRegions({publish:value=>pet.inputRegions?.(value)});
 let lastHit = null;
 let interactiveState = false, taskHitState=false;
 function updateHit(e) {
@@ -940,7 +944,7 @@ function updateHit(e) {
   const taskUi=!!e.target?.closest?.("#activity, #activityDetails");
   if (inside !== interactiveState || taskUi!==taskHitState) {
     interactiveState = inside;
-    taskHitState=taskUi;pet.hit(inside,taskUi);
+    taskHitState=taskUi;pet.hit(inside,taskUi,overUi);
   }
 }
 
@@ -1728,7 +1732,7 @@ function wire() {
       case 'chat':
         document.getElementById('bubble').classList.remove('notice');
         if (ev.role === 'user') { clearWebSources(); noteMaster(); showBubble(ev.text, 3000); }
-        else if (ev.role === 'assistant') bubbleController.finish(ev.text, 9000);
+        else if (ev.role === 'assistant') {bubbleController.finish(ev.text, 9000);if(ev.taskId&&ev.links?.length)renderResultText(document.getElementById('bubbleText'),ev.text,ev.links,index=>pet.agentResultLink(ev.taskId,index));}
         break;
       case 'recall':
         paintRecallButton(ev.entries);
@@ -1923,7 +1927,7 @@ let actExpiryTimer = null;
 let actTextMode = false;  // 临时提示语抢占时暂停轮播
 /* ✓ 只收起已结束的提示，正在执行或监看的任务始终可见。 */
 const actSeen = new Set();
-const activityStopPending=new Set(),activityActionMessages=new Map();
+const activityControls=createTaskControls({changed:()=>{activityCardSignature='';paintActivity(lastWorkSnap||{});}}),activityStopPending=activityControls.pending,activityActionMessages=activityControls.messages;
 let activityExpandedKey=null,activityCardSignature='';
 
 const actTextEl = () => document.getElementById('activityText');
@@ -1955,12 +1959,14 @@ function setActLine(txt) {
   if (!el) return;
   el.textContent = txt;
   const row=actLines[actIdx%Math.max(1,actLines.length)],icon=activity.querySelector('.workbuddy-logo');
+  if(!actTextMode&&row&&activityActionMessages.has(row.key))el.textContent=activityActionMessages.get(row.key)+' · '+row.text;
+  if(!actTextMode&&row?.record?.stopRequest?.phase==='pending'&&(row.record.resources?.some(r=>r.kind!=='controller'&&!['ended','stopped','preserved'].includes(r.phase))||row.record.workJobId)){const seconds=Math.max(0,Math.ceil((row.record.stopRequest.deadlineAt-Date.now())/1000));el.textContent='Bunny 已停止 · 外部停止中 '+seconds+' 秒 · '+row.record.presentation?.title;}
   if (icon) {
     const isWorkBuddy = !actTextMode && row?.icon === 'workbuddy';
     icon.src = isWorkBuddy ? './assets/icons/workbuddy-logo.png' : '../../res/trayTemplate.svg';
     icon.alt = isWorkBuddy ? 'WorkBuddy' : 'Bunny';
   }
-  const button=document.getElementById('actDone');button.hidden=actTextMode||!row?.action;button.textContent=row?.action==='stop'?'×':'✓';button.title=row?.action==='stop'?'停止这项任务':'收起已完成任务';button.setAttribute('aria-label',button.title);button.disabled=activityStopPending.has(row?.key);
+  const button=document.getElementById('actDone');button.hidden=actTextMode||!row?.action;button.textContent=row?.action==='dismiss'?'✓':'×';button.title=row?.action==='stop'?'停止这项任务':row?.action==='archive'?'移出任务列表（保留记录）':'收起已完成任务';button.setAttribute('aria-label',button.title);button.disabled=activityStopPending.has(row?.key);
   activity.title=txt+(row?' · 点击展开任务详情':'');
   paintActivityCard();
 }
@@ -1982,6 +1988,7 @@ function slideLine(txt, up = true) {
     );
   };
 }
+setInterval(()=>{const row=actLines[actIdx%Math.max(1,actLines.length)];if(!actTextMode&&row?.record?.stopRequest?.phase==='pending')setActLine(row.text);},1000);
 
 /* 鼠标停在状态条上 = 主人正在读这一条：立刻停住，别在他眼皮底下把字滚走。
  * 移开之后不是接着滚，而是重新等满一个周期 —— 他可能只是顺手划过去看看。 */
@@ -2079,15 +2086,12 @@ function paintActivityCard(){
  const record=row.record||{},status=['ready','running','waiting'].includes(record.status)?'active':record.status,signature=JSON.stringify([row.key,status,record.note,record.presentation,record.queuedEvents,record.result,record.delivery,record.schedule,activityStopPending.has(row.key),activityActionMessages.get(row.key)]);
  if(signature===activityCardSignature){refreshTaskClock(body,record);return;}activityCardSignature=signature;
  const scroll=body.scrollTop,open=[...body.querySelectorAll('details[open]')].map(d=>d.dataset.detailsKey);
- const card=taskCard(record,{external:row.ref.source!=='agent',pending:activityStopPending.has(row.key),message:activityActionMessages.get(row.key)||'',onAction:operation=>void runActivityAction(row,operation),onArtifact:(id,index)=>pet.agentArtifact(id,index).catch(error=>{activityActionMessages.set(row.key,error.message);activityCardSignature='';paintActivityCard();})});
+ const card=taskCard(record,{external:row.ref.source!=='agent',pending:activityStopPending.has(row.key),message:activityActionMessages.get(row.key)||'',onAction:operation=>void runActivityAction(row,operation),onResultLink:(id,index)=>pet.agentResultLink(id,index),onArtifact:(id,index)=>pet.agentArtifact(id,index).catch(error=>{activityActionMessages.set(row.key,error.message);activityCardSignature='';paintActivityCard();})});
  body.replaceChildren(card);for(const d of body.querySelectorAll('details'))if(open.includes(d.dataset.detailsKey))d.open=true;body.scrollTop=scroll;
 }
 async function runActivityAction(row,operation){
  if(operation==='details'){const d=document.querySelector('#activityTaskCard [data-details-key="reason"]');if(d)d.open=true;return;}
- if(activityStopPending.has(row.key))return;activityStopPending.add(row.key);activityActionMessages.delete(row.key);activityCardSignature='';paintActivityCard();
- try{const result=await pet.activityControl(operation,row.ref);if(!result?.ok)throw Error(result?.error||'操作尚未确认');if(result.message)activityActionMessages.set(row.key,result.message);}
- catch(error){activityActionMessages.set(row.key,error.message);}
- finally{activityStopPending.delete(row.key);activityCardSignature='';paintActivity(lastWorkSnap||{});}
+ return activityControls.run(row.key,operation,()=>pet.activityControl(operation,row.ref));
 }
 for(const [id,delta]of [['activityPrevious',-1],['activityNext',1]])document.getElementById(id).onclick=()=>switchActivityCard(delta);
 document.getElementById('activityCollapse').onclick=()=>closeActivityCard();
@@ -2098,12 +2102,8 @@ addEventListener('keydown',event=>{if(event.key==='Escape'&&activityExpandedKey)
 async function dismissCurrent() {
   if (!actLines.length) return;
   const cur = actLines[actIdx % actLines.length];
-  if(cur.action==='stop'){
-    if(activityStopPending.has(cur.key))return;activityStopPending.add(cur.key);setActLine(actTextEl().textContent);
-    try{const result=await pet.activityStop(cur.ref);if(!result?.ok)throw Error(result?.error||'停止尚未确认');}
-    catch(error){if(activityExpandedKey===cur.key){activityActionMessages.set(cur.key,error.message);activityCardSignature='';paintActivityCard();}else paintActivityText(error.message);}
-    finally{activityStopPending.delete(cur.key);if(!actTextMode)paintActivity(lastWorkSnap||{});}return;
-  }
+  if(cur.action==='stop')return runActivityAction(cur,'stop');
+  if(cur.action==='archive'||cur.action==='dismiss'&&cur.ref.source==='agent')return runActivityAction(cur,'archive');
   if(cur.action!=='dismiss')return;
   if(activityExpandedKey===cur.key)closeActivityCard(false);
   actSeen.add(cur.key);

@@ -151,6 +151,8 @@ class MemoryService {
     this.knowledge = createMemoryKnowledge({ memory: this, clock });
     this.experiences = createExperienceMemory({ memory: this, clock });
     this.experienceRepository = new (require('./experience-repository').ExperienceRepository)({memory:this,clock});
+    this.innateExperiences = new (require('./innate-experience').InnateExperienceRepository)({memory:this,clock});
+    this.imports = new (require('./memory-import').MemoryImportRepository)({memory:this,clock});
     this.affect = new CompanionAffect({ clock });
     this.cognition = new CognitionRepository({ memory: this, clock, onChange: () => { this.selfRevisionChanged?.(); void this.notifyChange(); } });
     this.growth = new (require('./companion-growth').CompanionGrowth)({ memory: this, clock });
@@ -229,6 +231,7 @@ class MemoryService {
         (record.kind === 'memory' && record.value.sensitive === true ? 'bunny_sensitive_content ' : '') +
         (record.kind === 'state' && record.value.origin === 'message-block-v1' ? 'bunny_message_block ' : '') +
         (record.kind === 'state' && record.value.origin === 'task-experience-queue-v1' && record.value.status === 'pending' ? 'bunny_task_experience_pending ' : '') +
+        (record.kind === 'state' && record.value.schema === 'bunny.memory-import/v1' && record.value.type === 'batch' ? 'bunny_memory_import_batch ' + (require('./memory-import').PENDING.has(record.value.status) ? 'bunny_memory_import_pending ' : '') : '') +
         (record.kind === 'state' && record.value.schema === 'growth-entry/v1' ? `bunny_growth_entry ${record.value.entryId} ` : '') +
         (record.kind === 'memory' && record.value.origin === 'deepdream-merged-v1' ? 'bunny_memory_merged ' : '') +
         (record.kind === 'state' && ['context-head-v2', 'context-current-v2'].includes(record.value.origin) ? 'bunny_context_head ' : '') +
@@ -282,7 +285,7 @@ class MemoryService {
     }
     const result = await this.db.request('write', { epoch, ...(restoreSequence ? { restoreSequence: true } : {}), records: records.map(r => this.encode(r, restoreSequence)) });
     this.epoch = result.epoch;
-    if (notify && records.some(r => ['memory', 'message', 'summary', 'persona', 'task'].includes(r.kind) || knowledge.typeOf(r) || r.value.schema === 'growth-entry/v1')) await this.notifyChange();
+    if (notify && records.some(r => ['memory', 'message', 'summary', 'persona', 'task'].includes(r.kind) || knowledge.typeOf(r) || r.value.schema === 'growth-entry/v1' || r.value.schema === 'bunny.memory-import/v1'&&r.value.type==='batch')) await this.notifyChange();
     return records;
   }
   markerTokens(markers = []) {
@@ -460,6 +463,7 @@ class MemoryService {
         ...(cognitive ? { cognition: cognitive } : {}),
         ...(turnId ? { turnId } : {}),
         ...(role === 'assistant' && ['generated', 'task-receipt'].includes(safeDetails.delivery) ? { delivery: safeDetails.delivery } : {}),
+        ...(role==='assistant'&&safeDetails.delivery==='task-receipt'&&meta.taskId&&Array.isArray(safeDetails.resultLinks)?{resultLinks:require('./result-links').normalizeResultLinks(safeDetails.resultLinks)}:{}),
         ...(role === 'assistant' && Array.isArray(safeDetails.webSources) ? { webSources: safeDetails.webSources.slice(0, 6)
           .flatMap(item => { const url = require('./workbuddy-search').publicURL(item?.url);
             return url && typeof item.title === 'string' ? [{ url, title: item.title.slice(0, 180) }] : []; }) } : {}),
@@ -514,6 +518,7 @@ class MemoryService {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ...(cognitive ? { cognition: cognitive } : {}),
         ...(role === 'assistant' && ['generated', 'task-receipt'].includes(safeDetails.delivery) ? { delivery: safeDetails.delivery } : {}),
+        ...(role==='assistant'&&safeDetails.delivery==='task-receipt'&&meta.taskId&&Array.isArray(safeDetails.resultLinks)?{resultLinks:require('./result-links').normalizeResultLinks(safeDetails.resultLinks)}:{}),
         ...(actors.isOwner(meta) ? { userOrdinal: this.userMessagesSeen + 1 } : {}),
         sources: actors.isOwner(meta) ? [] : sources };
       const existing = (await this.db.request('get', { ids: [recordId] })).rows[0];
@@ -522,7 +527,7 @@ class MemoryService {
         const prior = this.decode(existing).value;
         const sameSources = JSON.stringify([...(prior.sources || [])].sort()) === JSON.stringify([...value.sources].sort());
         if ((prior.channelId||'local')!==meta.channelId||!!prior.ownerOnly!==!!meta.ownerOnly||!!prior.verifiedOwner!==!!meta.verifiedOwner||actors.character(prior) !== meta.characterId || prior.role !== value.role || prior.content !== value.content || prior.delivery !== value.delivery || !sameSources ||
-            JSON.stringify(prior.cognition || null) !== JSON.stringify(value.cognition || null) || (prior.turnId || null) !== (value.turnId || null)) {
+            JSON.stringify(prior.resultLinks||null)!==JSON.stringify(value.resultLinks||null)||JSON.stringify(prior.cognition || null) !== JSON.stringify(value.cognition || null) || (prior.turnId || null) !== (value.turnId || null)) {
           throw new Error('幂等消息 ID 已存在，但内容或来源不一致');
         }
         return { record: { ...existing, body: undefined, value: prior }, inserted: false };
@@ -724,7 +729,7 @@ class MemoryService {
     const compression = !internal && this.compression ? await this.compression.snapshot(scene) : null;
     const visibleRecent = conversationMessages(await this.query('message', 80, { scene, channelId:'local', sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse();
     const recentIds = new Set(recentMessages(visibleRecent, { count: this.getSettings().recentMessages || 20, budget: Math.floor(charBudget * .5),includeSensitive:allowSensitive }).rows.map(row => row.id));
-    let memories = [], episodes = [], doubts = [], tentative = [];
+    let memories = [], episodes = [], doubts = [], tentative = [], imported = [];
     const knowledgeContext = !internal ? await this.knowledge.context(userText, { scene, budget: 1000 }) : { text: '', sourceIds: [], suppressedIds: [] };
     if (!internal) {
       doubts = await this.relevantConflicts(userText, { scene });
@@ -740,6 +745,7 @@ class MemoryService {
       const seen = new Set();
       const corrections = await this.knowledge.applyResolutions(found, { scene });
       const effective = await this.knowledge.projectMemories([...corrections.facts, ...found.filter(r => r.kind === 'memory'), ...pinned, ...dated], { scene });
+      imported = effective.filter(r => r.kind === 'memory' && r.value.status === 'pending' && r.value.origin === 'imported-memory-v1' && (r.score || 0) > 0 && (!r.expiresAt || r.expiresAt > now)).slice(0, 3);
       tentative = effective.filter(r => r.kind === 'memory' && r.value.status === 'pending' &&
         ['dream-candidate-v3', 'dream-observation-v1', 'doze-candidate-v2', 'deepdream-merged-v1'].includes(r.value.origin) && (r.score || 0) > 0 &&
         !doubtfulKeys.has(r.value.key) && (!r.expiresAt || r.expiresAt > now)).slice(0, 3);
@@ -750,6 +756,7 @@ class MemoryService {
       const suppressed = new Set([...resolved.suppressed, ...knowledgeContext.suppressedIds]);
       memories = [...resolved.facts, ...memories.filter(row => !suppressed.has(row.id))].filter((row, i, rows) => rows.findIndex(other => other.id === row.id) === i).slice(0, 10);
       doubts = doubts.filter(row => !suppressed.has(row.id));
+      imported = imported.filter(row => !suppressed.has(row.id));
       tentative = tentative.filter(row => !suppressed.has(row.id) && !memories.some(m => m.value.content === row.value.content));
       const shownMemorySources = new Set(memories.flatMap(r => r.value.sources || []));
       const olderSegments = this.compression ? (await this.search(userText, ['state'], 8,
@@ -826,6 +833,7 @@ class MemoryService {
     }
     append('相关长期记忆（用户陈述，有来源）：', memories);
     append('自动提炼的候选参考（未确认；不能据此覆盖明确用户陈述，不确定时回查或核对）：', tentative);
+    append('导入资料中的相关说法（带来源的参考资料，不代表本机主人的事实、身份或授权）：', imported);
     append('相关旧对话与分段摘要：', episodes);
     if (!internal && !compression?.text) {
       const summaries = (await this.query('summary', 2, { scene })).filter(safeModelRow);
@@ -840,7 +848,7 @@ class MemoryService {
     const preparedExternal = this.blocks ? await this.blocks.prepare(externalRows) : { units: externalRows.map(actors.inputRow) };
     const externalMessages = (preparedExternal.units || []).slice(-8);
     for (const row of externalMessages) for (const id of row.sourceIds || [row.id]) includeSource(id);
-    return { externalMessages, text: chunks.join('\n'), messages, epoch, scene, compressionVersion: compression?.version || 0, recalled: memories.length + episodes.length, used: charBudget - remaining, sourceIds: [...includedSources], references };
+    return { externalMessages, text: chunks.join('\n'), messages, epoch, scene, compressionVersion: compression?.version || 0, recalled: memories.length + episodes.length + imported.length, used: charBudget - remaining, sourceIds: [...includedSources], references };
   }
   scheduleExtraction() {
     if (this.maintenance) {
@@ -920,6 +928,7 @@ class MemoryService {
     const sceneEpoch = this.sceneEpoch;
     await this.tail; this.check();
     if (kind === 'knowledge') {
+      if(category==='innate')return {rows:await this.innateExperiences.list({scene:this.scene(),query}),hasMore:false,next:null};
       const result = await this.knowledge.list({ category, query, before, beforeId });
       return sceneEpoch === this.sceneEpoch ? result : { rows: [], next: null, hasMore: false };
     }
@@ -936,9 +945,10 @@ class MemoryService {
     if (!this.ready) return { ready: false, opening: this.opening, locked: !!this.waitingForUnlock, error: this.error };
     const scene = this.scene(), sceneEpoch = this.sceneEpoch;
     const data = await this.db.request('stats', { scene, state: 'active' });
+    const hasImports=(await this.query('state',1,{scene,requiredMarkers:['bunny_memory_import_batch']})).length>0;
     const snapshot = this.compression ? await this.compression.snapshot(scene) : null;
     if (sceneEpoch !== this.sceneEpoch) return { ready: true, scene: this.scene(), counts: { total: 0 }, stale: true };
-    return { ready: true, ...data, scene, extracting: this.extracting,
+    return { ready: true, ...data, hasImports, scene, extracting: this.extracting,
       compression: { version: snapshot?.version || 0, updatedAt: snapshot?.updatedAt || null, coveredThrough: snapshot?.coveredThrough || null },
       state: { mood: '平静', energy: this.state.energy, warmth: this.state.warmth } };
   }
@@ -964,6 +974,7 @@ class MemoryService {
     }
   }
   updateMemory(recordId, content) {
+    if(require('./innate-experience').isInnate(recordId))return Promise.reject(Error('先天经验由安装包维护，不能修改'));
     this.cancelExtraction(); this.generation++; clearTimeout(this.extractTimer); this.extractTimer = null;
     return this.serial(async () => {
       if (typeof content !== 'string' || !content.trim() || content.length > 1000) throw new Error('请填写 1–1000 字的记忆');
@@ -1007,11 +1018,13 @@ class MemoryService {
     });
   }
   remove(recordId) {
+    if(require('./innate-experience').isInnate(recordId))return Promise.reject(Error('先天经验由安装包维护，不能删除'));
     this.cancelExtraction(); this.generation++; clearTimeout(this.extractTimer); this.extractTimer = null;
     return this.serial(async () => {
       const row = (await this.db.request('get', { ids: [recordId], scene: this.scene() })).rows[0];
       if (!row) throw new Error('当前场景不可见或记录已不存在');
       const decoded = row ? this.decode(row) : null;
+      if(require('./innate-experience').isInnate(decoded))throw Error('先天经验由安装包维护，不能删除');
       if (decoded?.value.origin === 'deepdream-merged-v1' && !(await verifySnapshots(this, decoded.value.analysisSnapshots, { scene: this.scene() })).ok) throw new Error('归并依据已变化，请刷新后再删除');
       const sourceIds = decoded?.kind === 'memory' && Array.isArray(decoded.value.sources) ? [...new Set(decoded.value.sources)] : [];
       const sourceRows = sourceIds.length ? (await this.db.request('get', { ids: sourceIds })).rows : [];
@@ -1040,7 +1053,7 @@ class MemoryService {
   }
   clear() {
     this.cancelExtraction(); this.generation++; clearTimeout(this.extractTimer); this.extractTimer = null;
-    return this.serial(async () => { this.epoch = (await this.db.request('clear')).epoch; await this.write([{ id: require('./cognition-repository').HEAD, kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2, value: { schema: 'self-head/v1', revision: 1, locked: false, entries: [], locks: [], removed: [], pendingSettings: false, sources: [] } }]); this.recent = []; this.userMessagesSeen = 0; this.lastExtractCount = 0; this.lastMaintenanceQueued = 0; this.moodSourceId = null; this.affect = new CompanionAffect({ clock: this.clock }); this.state = { mood: '平静', energy: 0.7, warmth: 0.7, updatedAt: this.clock(), interactions: 0 }; await this.notifyChange(); return { ok: true }; });
+    return this.serial(async () => { const innate=await this.innateExperiences.snapshot();this.epoch = (await this.db.request('clear')).epoch; await this.innateExperiences.restoreSnapshot(innate);await this.write([{ id: require('./cognition-repository').HEAD, kind: 'state', ts: 0, domain: 'private', visibilityFloor: 2, value: { schema: 'self-head/v1', revision: 1, locked: false, entries: [], locks: [], removed: [], pendingSettings: false, sources: [] } }]); this.recent = []; this.userMessagesSeen = 0; this.lastExtractCount = 0; this.lastMaintenanceQueued = 0; this.moodSourceId = null; this.affect = new CompanionAffect({ clock: this.clock }); this.state = { mood: '平静', energy: 0.7, warmth: 0.7, updatedAt: this.clock(), interactions: 0 }; await this.notifyChange(); return { ok: true }; });
   }
   async export(passphrase) {
     return this.serial(async () => {
@@ -1089,14 +1102,16 @@ class MemoryService {
     // Restore only into an empty vault. The user need not risk replacing current records on partial failure.
     return this.serial(async () => {
       const currentCounts = (await this.db.request('stats')).counts;
-      if (['message', 'memory', 'summary', 'task'].some(kind => (currentCounts[kind] || 0) > 0)) throw new Error('请先导出并清空当前记忆，再恢复备份');
+      if (['message', 'memory', 'summary', 'task'].some(kind => (currentCounts[kind] || 0) > 0)||(await this.query('state',1,{scene:null,requiredMarkers:['bunny_memory_import_batch']})).length) throw new Error('请先导出并清空当前记忆，再恢复备份');
       await this.experienceRepository.restoreResources(data.records,data.experienceResources);
+      const innate=await this.innateExperiences.snapshot();
       if ((currentCounts.total || 0) > 0) this.epoch = (await this.db.request('clear')).epoch; // Fresh-install persona/state may be replaced by the verified backup.
       try {
         await this.db.request('begin_restore');
         for (const batch of restoreBatches) await this.write(batch, this.epoch, { notify: false, restoreSequence: true });
         await this.db.request('end_restore');
-      } catch (e) { this.epoch = (await this.db.request('clear')).epoch; throw e; }
+      } catch (e) { this.epoch = (await this.db.request('clear')).epoch;await this.innateExperiences.restoreSnapshot(innate); throw e; }
+      await this.innateExperiences.restoreSnapshot(innate);
       await this.experienceRepository.reindexAliases(data.records);
       this.generation++; this.recent = conversationMessages(await this.query('message', 40)).reverse();
       const restoredState = (await this.db.request('get', { ids: ['companion-state'] })).rows.map(r => this.decode(r))[0]?.value;

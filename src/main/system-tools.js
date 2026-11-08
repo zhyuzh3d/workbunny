@@ -11,24 +11,31 @@ function terminalArgs(v){
  const seconds=v.timeoutSeconds??30;if(!Number.isInteger(seconds)||seconds<1||seconds>300)throw Error('命令时限应为1到300秒');
  return {...v,command,purpose:text(v.purpose,'操作目的',600),timeoutSeconds:seconds,...(v.cwd?{cwd:text(v.cwd,'工作目录',2000)}:{})};
 }
-async function executeTerminal(args,{task,signal,directory}){
- if(signal?.aborted)throw Object.assign(Error('任务已暂停'),{dispatched:false});
+async function executeTerminal(args,{task,signal,directory,resources,operationId}){
+ const assertLive=()=>{if(signal?.aborted)throw Object.assign(Error('任务已停止，未执行命令'),{dispatched:false});};assertLive();
  const cwd=args.cwd||path.join(directory,task.id);if(!args.cwd)await fs.mkdir(cwd,{recursive:true,mode:0o700});
- const actual=await fs.realpath(cwd);const env=Object.fromEntries(['PATH','HOME','LANG','LC_ALL','TMPDIR'].filter(k=>process.env[k]).map(k=>[k,process.env[k]]));
+ const actual=await fs.realpath(cwd),env=Object.fromEntries(['PATH','HOME','LANG','LC_ALL','TMPDIR'].filter(k=>process.env[k]).map(k=>[k,process.env[k]]));
+ let cleanup=async()=>({verified:true,reason:'命令尚未启动'});
+ const handle=await resources?.register({id:'process:'+(operationId||require('node:crypto').randomUUID()),kind:'process',label:'命令 '+path.basename(args.command),ownership:'owned',phase:'starting'},(cancel)=>cleanup(cancel));assertLive();
  return new Promise((resolve,reject)=>{
-  let child,output='',errorOutput='',bytes=0,timer,killTimer,cancelled=false;
-  const stop=()=>{cancelled=true;try{process.kill(-child.pid,'SIGTERM');}catch{}killTimer=setTimeout(()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}},700);};
+  let child,output='',errorOutput='',bytes=0,timer,killTimer,cancelled=false,closed=false,binding=Promise.resolve();
+  const alive=()=>{try{process.kill(-child.pid,0);return true;}catch(error){return error.code!=='ESRCH';}};
+  const stop=()=>{if(cancelled||closed||child.exitCode!==null)return;cancelled=true;try{process.kill(-child.pid,'SIGTERM');}catch{}killTimer=setTimeout(()=>{if(closed||child.exitCode!==null)return;try{process.kill(-child.pid,'SIGKILL');}catch{}},700);};
   try{child=spawn(args.command,args.args,{cwd:actual,env,shell:false,detached:true,stdio:['ignore','pipe','pipe']});}catch(error){reject(Object.assign(error,{dispatched:false}));return;}
+  cleanup=async cancel=>{if(alive()&&(closed||child.exitCode!==null))return {verified:false,reason:'原命令已退出，组内进程的当前归属不能重新确认，已保留'};stop();const until=Date.now()+3000;while(alive()&&Date.now()<until&&!cancel?.aborted)await new Promise(r=>setTimeout(r,50));return {verified:!alive(),reason:alive()?'已取消命令，进程组结束尚未确认':'本任务命令进程组已结束'};};
+  child.once('spawn',()=>{if(resources)binding=resources.identifyProcess(child.pid).then(identity=>handle.update({identity,phase:closed&&!alive()?'ended':'running'})).catch(()=>{stop();});});
   const take=(chunk,isError)=>{bytes+=chunk.length;if(bytes>96*1024){stop();return;}if(isError)errorOutput+=chunk.toString();else output+=chunk.toString();};
   child.stdout.on('data',c=>take(c,false));child.stderr.on('data',c=>take(c,true));
-  child.once('error',error=>{clearTimeout(timer);clearTimeout(killTimer);signal?.removeEventListener('abort',stop);reject(Object.assign(error,{dispatched:false}));});
-  child.once('close',(exitCode,termSignal)=>{clearTimeout(timer);clearTimeout(killTimer);signal?.removeEventListener('abort',stop);
+  child.once('error',error=>{closed=true;clearTimeout(timer);clearTimeout(killTimer);signal?.removeEventListener('abort',stop);void handle?.update({phase:'ended',verified:true,reason:'程序未启动'}).catch(()=>{});reject(Object.assign(error,{dispatched:false}));});
+  child.once('close',async(exitCode,termSignal)=>{closed=true;clearTimeout(timer);if(!alive())clearTimeout(killTimer);signal?.removeEventListener('abort',stop);
+   try{await binding;await handle?.update({phase:alive()?'running':'ended',liveHandleEnded:true,verified:!alive(),reason:alive()?'主命令已退出，组内仍有进程':'命令进程组已结束'});}catch{}
    const redact=s=>require('./conversation-input').containsSecret(s)?'[输出含凭据，留在本机处理]':s.slice(-12000);
    resolve({ok:true,verified:true,exitCode,signal:termSignal,cancelled,stdout:redact(output),stderr:redact(errorOutput),cwd:actual});
   });
   timer=setTimeout(stop,args.timeoutSeconds*1000);signal?.addEventListener('abort',stop,{once:true});if(signal?.aborted)stop();
  });
 }
+
 const command=(file,args)=>new Promise((resolve,reject)=>execFile(file,args,{timeout:10000,maxBuffer:128*1024},(error,stdout,stderr)=>error?reject(error):resolve(stdout)));
 function preferenceArgs(v){
  fields(v,['application','domain','key','type','value'],'用户偏好');

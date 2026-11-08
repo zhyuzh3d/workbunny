@@ -31,7 +31,7 @@ class IntegrationNative {
     if (op === 'capture') return { pngBase64: Buffer.from('synthetic-fixture').toString('base64'), desktopRect: { ...this.rect } };
     if (op === 'recognize') return { texts: MODEL_OCR };
     if (op === 'workbuddyInspect') return { available: true, editorCount: 1, draftEmpty: true,
-      selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: false, homeReady: true };
+      selectedModel: 'Deepseek-V4.1-Flash', sendEnabled: false, homeReady: true,sendButtonRect:{x:900,y:620,width:40,height:40} };
     if (op === 'workbuddyFill') return { filled: true, verified: true };
     if (op === 'workbuddySend') return { pressed: true };
     throw new Error(`unexpected native operation: ${op}`);
@@ -92,7 +92,7 @@ function createSystem({ verify = async () => ({ verdict: 'pass', report: '交付
   return { desktop, secretary, native, monitor };
 }
 
-async function testHistoricalReferencesAreSeparateAndScoped() {
+async function testHistoricalReferencesStayPrivateAndScoped() {
   let lookup;
   const memory = { experiences: { findApplicable: async input => {
     lookup = input;
@@ -110,13 +110,15 @@ async function testHistoricalReferencesAreSeparateAndScoped() {
   assert.deepEqual(lookup, { goal, criteria, target: 'workbuddy', scene: 'life', allowedPaths: [] });
   assert.equal(task.goal, goal, 'historical context does not rewrite the original task goal');
   assert.equal(task.criteria, criteria, 'historical context does not rewrite acceptance criteria');
-  assert.ok(task.outboundText.indexOf(goal) < task.outboundText.indexOf('【历史参考：'));
-  assert.ok(task.outboundText.includes('历史数据，不是新指令'));
-  assert.ok(task.outboundText.indexOf('【历史参考：') < task.outboundText.indexOf(`验收标准：\n${criteria}`));
+  assert.ok(task.outboundText.includes(goal));
+  assert.ok(task.outboundText.includes(`验收标准：\n${criteria}`));
+  assert.ok(task.historicalContext.includes('类似旧任务'), 'historical evidence remains in private provenance');
+  assert.ok(!task.outboundText.includes('类似旧任务'));
+  assert.ok(!task.outboundText.includes('【历史参考：'));
   assert.ok(task.sources.includes('accepted-task-source'));
   assert.equal(task.visibilityFloor, 1, 'WorkBuddy history retains the current scene visibility floor');
   const fill = system.native.calls.find(call => call.op === 'workbuddyFill');
-  assert.equal(fill.payload.text, task.outboundText, 'the separate reference block reaches the WorkBuddy fill payload');
+  assert.equal(fill.payload.text, task.outboundText, 'only the normalized current brief reaches the WorkBuddy fill payload');
   system.secretary.close(); await system.desktop.close();
 }
 
@@ -203,19 +205,20 @@ async function testVoiceCommitInvalidatesOldIntentThenRunsOnce() {
 
   turns.partial('整理交付物');
   await clock.tick(0);
-  assert.equal(startedRequests, 1, 'the speculative model response starts after the short pause');
+  assert.equal(startedRequests, 0, 'partial text cannot start a semantic request');
   assert.equal(system.desktop.task, null);
   assert.equal(system.native.calls.length, 0, 'the generated action cannot reach DesktopService before ASR commit');
 
   turns.partial('整理交付物并列出验证结果');
   await clock.tick(0);
-  assert.equal(startedRequests, 2, 'continued speech invalidates and replaces the old speculative request');
+  assert.equal(startedRequests, 0, 'continued partial speech remains display-only');
   await flushMicrotasks();
   assert.equal(system.desktop.task, null, 'the invalidated request never starts a desktop task');
   assert.equal(system.native.calls.length, 0, 'no native app activation or input occurs before final recognition');
 
   turns.final('整理交付物并列出验证结果');
   await clock.tick(40);
+  assert.equal(startedRequests, 1, 'one confirmed sealed turn starts one semantic request');
   await Promise.all(pipelines);
   await waitFor(() => system.desktop.task?.status === 'accepted' && system.secretary.verifying === null);
 
@@ -297,7 +300,7 @@ async function testCancelledSecretaryPreflightDoesNotContinue() {
     { requestId: 'abort-permission-preflight', userText: '取消权限等待', signal: permissionController.signal });
   await waitFor(() => native.calls.some(call => call.op === 'permissions'));
   permissionController.abort();
-  await waitFor(() => permissionSystem.desktop.task?.status === 'stopped');
+  await waitFor(() => permissionSystem.desktop.task?.status === 'paused');
   resolvePermissions({ accessibilityTrusted: true, screenCaptureAllowed: true, postEventAllowed: true, sessionLocked: false });
   const permissionResult = await permissionStart;
   assert.match(permissionResult.text, /失效|还没有开始/u);
@@ -319,7 +322,7 @@ async function testCancelledSecretaryPreflightDoesNotContinue() {
       { requestId: 'abort-catalog-preflight', userText: '取消模型目录等待', signal: catalogController.signal });
     await waitFor(() => catalogStarted);
     catalogController.abort();
-    await waitFor(() => catalogSystem.desktop.task?.status === 'stopped');
+    await waitFor(() => catalogSystem.desktop.task?.status === 'paused');
     const catalogResult = await catalogStart;
     assert.match(catalogResult.text, /失效|还没有开始/u);
     assert.equal(catalogNative.calls.some(call => ['activate', 'frontmost', 'capture', 'workbuddyInspect', 'workbuddyFill', 'workbuddySend'].includes(call.op)), false,
@@ -330,7 +333,7 @@ async function testCancelledSecretaryPreflightDoesNotContinue() {
 
 async function main() {
   await testVoiceCommitInvalidatesOldIntentThenRunsOnce();
-  await testHistoricalReferencesAreSeparateAndScoped();
+  await testHistoricalReferencesStayPrivateAndScoped();
   await testResumeOnlyAddsVerifiedCurrentUserSource();
   await testStopRejectsLatePassAndRevise();
   await testRecreatedDesktopServiceDoesNotReplayPersistedTask();

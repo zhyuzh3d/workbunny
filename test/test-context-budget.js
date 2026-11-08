@@ -16,7 +16,7 @@ test('a legacy Grok cache gets documented capacity without a network call; long 
   catalog.setPath(file);
   const options=request(1000),original=JSON.stringify(options),fitted=budget.fitRequest(options);
   assert.equal(fitted.contextBudget.context,1000000);
-  assert.equal(fitted.contextBudget.inputBudget,64000,'keep a local spending ceiling instead of filling the million-token window');
+  assert.equal(fitted.contextBudget.inputBudget,256000,'keep the authorized token ceiling without filling the million-token window');
   assert(Buffer.byteLength(JSON.stringify(options))>64000,'would fail even the old 64KB byte ceiling');
   assert.equal(fitted.messages.at(-1).content,options.messages.at(-1).content);
   assert.equal(fitted.messages[0].content,fixedRules);
@@ -32,7 +32,7 @@ test('unknown models keep a conservative fallback but no longer count UTF8 bytes
   assert.equal(budget.textTokens('x'.repeat(100)),100,'opaque text is never discounted as prose');
 });
 test('genuinely oversized current input still fails without losing originals or leaking content into diagnostics',()=>{
-  const options=request(6000),original=JSON.stringify(options);
+  const options=request(24000),original=JSON.stringify(options);
   assert.throws(()=>budget.fitRequest(options),e=>e.code==='E_CONTEXT_BUDGET'&&e.budget.estimate>e.budget.inputBudget&&!JSON.stringify(e.budget).includes('中文测试'));
   assert.equal(JSON.stringify(options),original);
 });

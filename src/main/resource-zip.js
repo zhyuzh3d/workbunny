@@ -35,7 +35,7 @@ function nameOf(bytes,validatePath) {
 // Reads files into memory without extracting paths to disk. Only ordinary,
 // single-disk stored/deflated ZIPs are supported; malformed headers, links,
 // duplicate paths and oversized entries fail before their contents are used.
-function readResourceZip(bytes,{validatePath=resourcePath,allowRootFolder=false,maxFiles=MAX_FILES,maxFileBytes=MAX_FILE_BYTES,maxTotalBytes=MAX_TOTAL_BYTES,maxArchiveBytes=MAX_ARCHIVE}={}) {
+function readResourceZip(bytes,{validatePath=resourcePath,allowRootFolder=false,manifestOptional=false,maxFiles=MAX_FILES,maxFileBytes=MAX_FILE_BYTES,maxTotalBytes=MAX_TOTAL_BYTES,maxArchiveBytes=MAX_ARCHIVE}={}) {
   check(Buffer.isBuffer(bytes) && bytes.length >= 22 && bytes.length <= maxArchiveBytes, 'invalid archive size');
   let end = -1;
   for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
@@ -86,7 +86,12 @@ function readResourceZip(bytes,{validatePath=resourcePath,allowRootFolder=false,
     check(data.length === entry.size && crc32(data) === entry.crc, 'invalid archive entry checksum');
     if (!entry.directory) files.set(entry.name, data);
   }
-  if(allowRootFolder&&!files.has('manifest.json')){const roots=[...files.keys()].filter(n=>/^[^/]+\/manifest\.json$/u.test(n)&&!metadata(n));check(roots.length===1,'missing pack manifest');const prefix=roots[0].slice(0,-'manifest.json'.length);check([...files.keys()].every(n=>n.startsWith(prefix)||metadata(n)),'multiple pack roots');for(const [n,data]of [...files]){files.delete(n);if(n.startsWith(prefix))files.set(n.slice(prefix.length),data);}}
+  if(allowRootFolder&&!files.has('manifest.json')){const roots=[...files.keys()].filter(n=>/^[^/]+\/manifest\.json$/u.test(n)&&!metadata(n));if(roots.length===1){const prefix=roots[0].slice(0,-'manifest.json'.length);check([...files.keys()].every(n=>n.startsWith(prefix)||metadata(n)),'multiple pack roots');for(const [n,data]of [...files]){files.delete(n);if(n.startsWith(prefix))files.set(n.slice(prefix.length),data);}}else if(!manifestOptional)throw Error('missing pack manifest');}
+  if(manifestOptional&&!files.has('manifest.json')){
+    const ordinary=[...files.keys()].filter(n=>!metadata(n)),roots=new Set(ordinary.map(n=>n.includes('/')?n.split('/')[0]:null));
+    if(allowRootFolder&&roots.size===1&&!roots.has(null)){const prefix=ordinary[0].split('/')[0]+'/';for(const [name,data]of [...files]){files.delete(name);if(name.startsWith(prefix))files.set(name.slice(prefix.length),data);}}
+    return {manifest:null,files};
+  }
   check(files.has('manifest.json'),'missing pack manifest');
   const manifestBytes = files.get('manifest.json'); files.delete('manifest.json');
   let manifest;

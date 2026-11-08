@@ -29,6 +29,10 @@ assert.equal(observeWorkBuddy(monitor([['wrong-monitor-task', snap('session-exac
 assert.equal(observeWorkBuddy(monitor([['too-old', snap('session-exact', row({ startedAt: submittedAt - 3000 }))]]), task), null,
   'a task starting before the submission window is rejected');
 assert.equal(observeWorkBuddy(monitor([['no-time', snap('session-exact', row({ startedAt: NaN }))]]), task), null);
+const repeated={...task,submittedAt:submittedAt+22000,steps:[{action:'click',purpose:'submit',state:'input-sent',at:submittedAt},{action:'click',purpose:'submit',state:'input-sent',at:submittedAt+22000}]};
+assert.equal(observeWorkBuddy(monitor([['first-attempt-receipt',snap('session-exact',row())]]),repeated)?.taskId,'task-exact','a later legacy attempt cannot hide an exact positive receipt for the first unresolved attempt');
+assert.equal(observeWorkBuddy(monitor([['old-round',snap('session-exact',row())]]),{...repeated,followUpRound:1,followUpPending:{state:'sent'}}),null,'follow-up time boundaries do not widen to old submissions');
+assert.equal(observeWorkBuddy(monitor([['never-dispatched',snap('session-exact',row())]]),{...repeated,steps:repeated.steps.map(s=>({...s,state:'not-dispatched'}))}),null,'known rejected steps cannot widen the receipt correlation window');
 
 const marker = `[workbunny:${uuid}]`;
 const longOutbound = `${'用户原文'.repeat(1500)}\n\n验收条件\n\n${marker}`;

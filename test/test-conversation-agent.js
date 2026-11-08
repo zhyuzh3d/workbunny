@@ -178,7 +178,7 @@ test('a reply from a delayed decision executes once even if subsequent samples a
 test('an exhausted model output budget retries the same observation with a bounded larger budget',async()=>{
  const calls=[],{checkedJSON}=require('../src/main/agent-json');
  const result=await checkedJSON({messages:[{role:'user',content:'fixture'}]},value=>value,{request:async options=>{calls.push(options);if(calls.length===1)throw Object.assign(Error('limited'),{code:'E_OUTPUT_LIMIT'});return {response:{text:'{"ok":true}'}};}});
- assert.equal(result.value.ok,true);assert.equal(calls.length,2);assert.equal(calls[1].maxTokens,4096);assert.deepEqual(calls[1].messages,calls[0].messages);
+ assert.equal(result.value.ok,true);assert.equal(calls.length,2);assert.equal(calls[1].maxTokens,8192);assert.deepEqual(calls[1].messages,calls[0].messages);
 });
 
 test('a repeated voice around an old timeline never causes the old timeline to be enqueued again',()=>{

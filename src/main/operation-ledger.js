@@ -60,7 +60,7 @@ class OperationLedger {
       if (prior?.status === 'confirmed' && tool.effect === 'write') return clone(prior.result);
       if (prior?.status === 'intent' && prior.effect === 'write') throw beforeDispatch('此写入结果不确定，禁止重试');
     }
-    let permission = await this.authorize(tool, input, task);
+    let permission = await this.authorize(tool, input, task,{signal,isCurrent});
     if (!isCurrent()) throw beforeDispatch('任务已暂停，未继续调用工具');
 
     const policy = tool.lifecycle?.(input, { task, call }) || { policy: 'independent' };
@@ -102,11 +102,11 @@ class OperationLedger {
             assertCanDispatch();
             if (typeof permission === 'function') permission();
             mayHaveDispatched = true;
-            return tool.execute(input, { task, signal: action.signal, action, operationId: id, attempt });
+            return tool.execute(input, { task, signal: action.signal, action, operationId: id, attempt,resources:this.resources?.forTask(task,{signal:action.signal,isCurrent}) });
           };
           result = progress ? await progress.stage('tool').measure('tool', execute) : await execute();
           if (tool.effect === 'write' && (result?.ok !== true || result?.verified !== true)) {
-            throw Object.assign(new Error(result?.error || '写入结果尚未核实'), { code: result?.code, dispatched: result?.dispatched });
+            throw Object.assign(new Error(result?.error || '写入结果尚未核实'), { code: result?.code, dispatched: result?.dispatched,...(result?.diagnostic?{diagnostic:result.diagnostic}:{}) });
           }
           break;
         } catch (error) {
@@ -119,7 +119,7 @@ class OperationLedger {
           if (action.phase === 'protected') await action.retryBeforeEffect();
           await policy.recover?.({ error, task, input, signal: action.signal, attempt });
           assertCanDispatch();
-          permission = await this.authorize(tool, input, task);
+          permission = await this.authorize(tool, input, task,{signal,isCurrent});
           assertCanDispatch();
           operation.status = 'intent';
           Object.assign(operation.lifecycle, { phase: 'preparing', attempt: attempt + 1 });
@@ -144,7 +144,7 @@ class OperationLedger {
         if (action.superseded && action.phase === 'preparing' && error.dispatched === false) error.code = 'E_ACTION_SUPERSEDED';
         operation.lifecycle.phase = operation.status === 'not_dispatched' ? 'cancelled' : 'uncertain';
         if (action.superseded) operation.lifecycle.reason = 'newer-event';
-        operation.error = error.message;
+        operation.error = error.message;const diagnostic=require('./self-repair').diagnostic(error.diagnostic);if(diagnostic)operation.errorDiagnostic=diagnostic;
         progress?.observe(tool.name, { tool: tool.name, args: input, error: error.code || error.name },
           { waiting: error.code === 'E_GUI_BUSY' ? 'gui' : error.code === 'E_CAPTURE_BUSY' ? 'capture' : undefined });
         await this.save(task);

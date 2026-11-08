@@ -1,21 +1,10 @@
+@import url("./theme.css");
+
 /* workbunny · 桌面伙伴
    角色使用完整画布；UI 在中心窄列中排列：输入框、任务状态、在听与声音设置。
 */
 
 :root {
-  --ink: #23262b;
-  --ink-soft: #4a5058;
-  --muted: #8a9099;
-  --paper: #fffdfa;
-  --line: rgba(30, 24, 18, .09);
-  --accent: #c25a3a;
-  --accent-soft: #f6e4dc;
-  --ok: #3e8a5c;
-  --ok-soft: #e3f1e7;
-  --bad: #b3453a;
-  --shadow: 0 10px 34px rgba(28, 22, 16, .16), 0 1px 2px rgba(28, 22, 16, .07);
-  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
-
   --status-h: 26px;
   --listen-bottom: 0px;
   --task-bottom: calc(var(--listen-bottom) + var(--status-h) + 8px);
@@ -77,7 +66,7 @@ html, body {
   min-width: 92px;
   padding: 11px 15px 12px;
   border-radius: 17px;
-  background: rgba(255, 253, 250, .975);
+  background: var(--floating-ground);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
   color: var(--ink);
@@ -111,12 +100,12 @@ html, body {
   padding: 4px 8px;
   border: 1px solid rgba(35, 38, 43, .18);
   border-radius: 99px;
-  background: #f1eee8;
+  background: var(--surface);
   color: var(--ink-soft);
-  font-size: 10px;
+  font-size: var(--text-xs);
   line-height: 1.2;
 }
-.memory-basis:hover { background: #e3dfd7; color: var(--ink); }
+.memory-basis:hover { background: var(--accent-soft); color: var(--ink); }
 .memory-basis.hidden { display: none; }
 .web-sources {
   display: flex;
@@ -150,15 +139,15 @@ html, body {
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #46576b;
+  color: var(--ink-soft);
   font: inherit;
-  font-size: 10px;
+  font-size: var(--text-xs);
   line-height: 1.25;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.web-source-link:hover { background: #e3dfd7; color: #23262b; }
+.web-source-link:hover { background: var(--accent-soft); color: var(--ink); }
 #bubbleTail {
   position: absolute;
   left: 50%;
@@ -166,7 +155,7 @@ html, body {
   width: 12px;
   height: 12px;
   margin-left: -6px;
-  background: rgba(255, 253, 250, .975);
+  background: var(--floating-ground);
   border-right: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   transform: rotate(45deg);
@@ -196,14 +185,14 @@ html, body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 #loadingTxt {
-  font-size: 11px;
+  font-size: var(--text-sm);
   color: var(--ink-soft);
-  background: rgba(255, 253, 250, .92);
+  background: var(--floating-ground);
   border: 1px solid var(--line);
   padding: 4px 10px;
-  border-radius: 9px;
+  border-radius: var(--control-radius);
   white-space: nowrap;
-  box-shadow: 0 4px 14px rgba(28, 22, 16, .09);
+  box-shadow: var(--shadow-floating);
 }
 
 /* 任务状态下面：在听字幕与声音、设置按钮共用一行。 */
@@ -234,10 +223,10 @@ html, body {
   gap: 6px;
   padding: 0 9px 0 8px;
   border-radius: 11px;
-  background: rgba(255, 253, 250, .92);
+  background: var(--floating-ground);
   border: 1px solid var(--line);
-  box-shadow: 0 4px 16px rgba(28, 22, 16, .1);
-  font-size: 11px;
+  box-shadow: var(--shadow-floating);
+  font-size: var(--text-sm);
   line-height: 1;
   color: var(--ink-soft);
   z-index: 15;
@@ -245,14 +234,14 @@ html, body {
 }
 #activity.hidden { display: none; }
 #activityDetails[hidden] { display:none; }
-#activityDetails {position:fixed;left:var(--ui-gutter);bottom:calc(var(--task-bottom) + var(--status-h) + 6px);width:var(--ui-width);max-height:calc(100vh - var(--task-bottom) - var(--status-h) - 20px);display:flex;flex-direction:column;background:var(--paper);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);z-index:60;overflow:hidden;backdrop-filter:blur(12px);animation:task-card-open .16s ease-out;}
-.activity-details-nav {flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line);font-size:10px;color:var(--muted);}
+#activityDetails {position:fixed;left:var(--ui-gutter);bottom:calc(var(--task-bottom) + var(--status-h) + 6px);width:var(--ui-width);max-height:calc(100vh - var(--task-bottom) - var(--status-h) - 20px);display:flex;flex-direction:column;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-dialog);box-shadow:var(--shadow);z-index:60;overflow:hidden;backdrop-filter:blur(12px);animation:task-card-open .16s ease-out;}
+.activity-details-nav {flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line);font-size:var(--text-xs);color:var(--muted);}
 .activity-details-nav>div {display:flex;gap:5px;align-items:center;}
 .activity-details-nav button {min-width:24px;min-height:24px;border:0;background:transparent;color:var(--ink-soft);padding:3px 6px;border-radius:5px;font:inherit;font-size:14px;}
 .activity-details-nav button:disabled {opacity:.25;}
-.activity-details-nav button:hover:not(:disabled) {background:#eee9e1;}
+.activity-details-nav button:hover:not(:disabled) {background:var(--accent-soft);}
 #activityTaskCard {flex:1 1 auto;min-height:0;overflow:auto;padding:13px 14px;scrollbar-width:thin;overscroll-behavior:contain;}
-#activityAllTasks {flex:none;align-self:flex-start;margin:0 14px 12px;padding:0;border:0;background:none;color:var(--muted);font-size:10px;}
+#activityAllTasks {flex:none;align-self:flex-start;margin:0 14px 12px;padding:0;border:0;background:none;color:var(--muted);font-size:var(--text-xs);}
 @keyframes task-card-open {from {opacity:0;transform:translateY(9px);}to {opacity:1;transform:translateY(0);}}
 #activity.desktop-openable { cursor: pointer; }
 #activity.desktop-openable:hover { border-color: rgba(60, 70, 80, .28); }
@@ -268,15 +257,15 @@ html, body {
 /* ✓：这条我看过了 —— 点掉当前显示的那条 */
 #activity #actDone {
   flex: 0 0 auto;
-  width: 17px; height: 17px; margin-left: 1px;
+  width: 24px; height: 24px; margin-left: 1px;
   display: grid; place-items: center;
-  border: 0; border-radius: 6px; padding: 0;
+  border: 0; border-radius: var(--radius-small); padding: 0;
   background: rgba(60, 50, 40, .07);
   color: var(--ink-soft);
   cursor: pointer;
   transition: background .14s, color .14s, transform .1s;
 }
-#activity #actDone:hover { background: var(--ink); color: #fff; }
+#activity #actDone:hover { background: var(--accent); color: var(--on-accent); }
 #activity #actDone:active { transform: scale(.9); }
 #activity #actDone[hidden] { display: none; }
 /* 空闲使用灰色标志，任务存在时恢复品牌原色。 */
@@ -317,15 +306,15 @@ html, body {
   display: grid; place-items: center;
   border-radius: 50%;
   border: 1px solid var(--line);
-  background: rgba(255, 253, 250, .92);
+  background: var(--floating-ground);
   color: var(--ink-soft);
   cursor: pointer;
   backdrop-filter: blur(10px);
   /* 和状态条同一个阴影：三处浮在画面上的东西必须像同一套东西 */
-  box-shadow: 0 4px 16px rgba(28, 22, 16, .1);
+  box-shadow: var(--shadow-floating);
   transition: background .14s, color .14s, transform .1s, box-shadow .14s;
 }
-#fab button:hover { background: #fff; color: var(--ink); }
+#fab button:hover { background:var(--paper); color: var(--ink); }
 #fab button:active { transform: scale(.92); }
 #fab button.muted { color: var(--bad); }
 
@@ -345,11 +334,11 @@ html, body {
   background: var(--paper);
   box-shadow: var(--shadow);
   color: var(--ink-soft);
-  font-size: 11px;
+  font-size: var(--text-sm);
   white-space: nowrap;
 }
 #voicePopover[hidden] { display: none; }
-#voiceVolumeValue { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+#voiceVolumeValue { font-size: var(--text-body); font-weight: 600; font-variant-numeric: tabular-nums; }
 #voiceVolume {
   appearance: none;
   writing-mode: vertical-lr;
@@ -362,8 +351,8 @@ html, body {
 }
 #voiceVolume::-webkit-slider-runnable-track {
   width: 5px;
-  border-radius: 6px;
-  background: linear-gradient(to top, var(--accent) var(--voice-level, 100%), rgba(30, 24, 18, .12) var(--voice-level, 100%));
+  border-radius: var(--radius-small);
+  background: linear-gradient(to top, var(--accent) var(--voice-level, 100%), var(--line) var(--voice-level, 100%));
 }
 #voiceVolume::-webkit-slider-thumb {
   appearance: none;
@@ -373,14 +362,14 @@ html, body {
   border-radius: 50%;
   border: 1px solid var(--accent);
   background: var(--paper);
-  box-shadow: 0 1px 4px rgba(28, 22, 16, .18);
+  box-shadow: var(--shadow-thumb);
 }
 #voiceControl :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #fab #voiceMuteToggle {
   width: 100%;
   height: 24px;
   padding: 0;
-  border-radius: 8px;
+  border-radius: var(--control-radius);
   box-shadow: none;
   font: inherit;
 }
@@ -398,11 +387,11 @@ html, body {
   gap: 6px;
   padding: 0 9px 0 8px;
   border-radius: 11px;
-  background: rgba(255, 253, 250, .92);
+  background: var(--floating-ground);
   border: 1px solid var(--line);
-  box-shadow: 0 4px 16px rgba(28, 22, 16, .1);
+  box-shadow: var(--shadow-floating);
   backdrop-filter: blur(10px);
-  font-size: 11px;
+  font-size: var(--text-sm);
   line-height: 1;
   color: var(--muted);
   cursor: pointer;
@@ -416,18 +405,18 @@ html, body {
 #ver {
   display: none;
 }
-#ear:hover { background: rgba(255, 253, 250, .99); box-shadow: 0 5px 20px rgba(28, 22, 16, .14); }
+#ear:hover { background: var(--floating-ground); box-shadow: var(--shadow-floating); }
 /* 圆钮悬停时阴影抬一点，和状态条一个手感。 */
-#fab button:hover { box-shadow: 0 5px 20px rgba(28, 22, 16, .14); }
+#fab button:hover { box-shadow: var(--shadow-floating); }
 /* 字幕只使用按钮左侧的剩余空间；长文字在 earWin 内滚动。 */
 #ear.expand { min-width: 0; }
 /* 在听：整条转成中性墨色，点灯是绿的 */
-#ear.on { color: var(--ink-soft); border-color: rgba(62, 138, 92, .34); background: rgba(250, 253, 250, .95); }
-#ear.off { color: #b3aa9a; }
-#ear.warn { color: var(--accent); border-color: rgba(194, 90, 58, .32); }
+#ear.on { color: var(--ink-soft); border-color: var(--ok-ring); background: var(--ok-soft); }
+#ear.off { color: var(--muted); }
+#ear.warn { color: var(--accent-text); border-color: var(--accent-ring); }
 
 #ear .earDot {
-  width: 20px; height: 22px; border-radius: 6px;
+  width: 20px; height: 22px; border-radius: var(--radius-small);
   margin-left: -6px; margin-right: -7px;
   padding: 0; border: 0; background: transparent;
   display: grid; place-items: center; cursor: pointer;
@@ -435,7 +424,7 @@ html, body {
 }
 #ear .earDot::before {
   content: ''; width: 7px; height: 7px; border-radius: 50%;
-  background: #cbc3b4;
+  background: var(--switch-off);
   transition: background .22s;
 }
 #ear .earDot:hover { background: rgba(90, 98, 90, .1); }
@@ -465,7 +454,7 @@ html, body {
 #ear .bars i:nth-child(3) { height: calc(3px + var(--lvl, 0) * 9px); }
 #ear .bars i:nth-child(4) { height: calc(3px + var(--lvl, 0) * 6px); }
 /* 声音够大：条子转暖色，主人一眼看出"它听见我了" */
-#ear.loud .bars i { background: #d0744f; }
+#ear.loud .bars i { background: var(--warn); }
 
 /* 文字窗口：撑满剩余宽度，超出就在里面横向滚动 */
 #ear .earWin {
@@ -481,7 +470,7 @@ html, body {
   white-space: nowrap;
   will-change: transform;
 }
-#ear.skip #earTxt { color: #b3aa9a; }
+#ear.skip #earTxt { color: var(--muted); }
 
 /* ── 输入框：只负责打字，听的状态已经交给脚下那条 ── */
 #dock {
@@ -495,7 +484,7 @@ html, body {
   width: min(calc(var(--ui-width) - 16px), 286.4px);
   padding: 6px;
   border-radius: 19px;
-  background: rgba(255, 253, 250, .96);
+  background: var(--floating-ground);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
   backdrop-filter: blur(16px) saturate(1.08);
@@ -515,7 +504,7 @@ html, body {
   outline: 0;
   background: transparent;
   font-family: var(--font);
-  font-size: 13px;
+  font-size: var(--text-body);
   color: var(--ink);
   padding: 6px 2px 6px 6px;
   -webkit-user-select: text;
@@ -528,25 +517,23 @@ html, body {
   width: 30px; height: 30px;
   display: grid; place-items: center;
   border: 0;
-  border-radius: 12px;
-  background: #f3efe8;
+  border-radius: var(--radius-card);
+  background: var(--surface);
   color: var(--ink-soft);
   cursor: pointer;
   transition: background .14s, color .14s, transform .1s;
 }
-.iconBtn:hover { background: #ebe5db; color: var(--ink); }
+.iconBtn:hover { background: var(--accent-soft); color: var(--ink); }
 .iconBtn:active { transform: scale(.93); }
-.iconBtn.primary { background: var(--ink); color: #fff; }
-.iconBtn.primary:hover { background: #3a3e44; color: #fff; }
+.iconBtn.primary { background: var(--accent); color: var(--on-accent); }
+.iconBtn.primary:hover { background: var(--accent-hover); color: var(--on-accent); }
 
 /* 私聊时，底部各个独立控件使用同一组粉色背景。 */
 body.private-scene :is(#activity, #ear, #ear.on, #fab button, #dock, #voicePopover) {
-  background: rgba(255, 222, 232, .96);
+  background: var(--private-ground);
 }
-body.private-scene :is(#ear:hover, #fab button:hover) { background: #ffeaf0; }
-body.private-scene #fab #dialogueBtn[data-mode]:not([data-mode="avatar"]) { background: #f7bdcf; }
-body.private-scene #dock .iconBtn.primary { background: #c75e80; }
-body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
+body.private-scene :is(#ear:hover, #fab button:hover) { background: var(--private-hover); }
+body.private-scene #fab #dialogueBtn[data-mode]:not([data-mode="avatar"]) { background: var(--private-selected); }
 
 /* ── 首次提示 ── */
 #hint {
@@ -554,13 +541,13 @@ body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
   left: 50%;
   bottom: calc(var(--dock-bottom) + 52px);
   transform: translateX(-50%);
-  font-size: 11px;
+  font-size: var(--text-sm);
   color: var(--ink-soft);
-  background: rgba(255, 253, 250, .9);
+  background: var(--floating-ground);
   border: 1px solid var(--line);
   padding: 5px 11px;
   border-radius: 11px;
-  box-shadow: 0 4px 16px rgba(28, 22, 16, .1);
+  box-shadow: var(--shadow-floating);
   z-index: 16;
   white-space: nowrap;
   animation: hintIn .5s ease .4s both;
@@ -579,9 +566,9 @@ body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
   display: flex;
   flex-direction: column;
   border-radius: 16px;
-  background: rgba(255, 253, 250, .975);
+  background: var(--floating-ground);
   border: 1px solid var(--line);
-  box-shadow: 0 16px 50px rgba(28, 22, 16, .24);
+  box-shadow: var(--shadow-dialog);
   backdrop-filter: blur(20px);
   overflow: hidden;
   z-index: 40;
@@ -617,19 +604,19 @@ body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
   display: flex; align-items: center; justify-content: space-between;
   padding: 11px 12px;
   border-bottom: 1px solid var(--line);
-  font-size: 12.5px;
+  font-size: var(--text-ui);
 }
 .panel .ph button {
-  border: 0; background: #f3efe8; width: 22px; height: 22px; border-radius: 7px;
-  cursor: pointer; color: var(--ink-soft); font-size: 12px; padding: 0;
+  border: 0; background: var(--surface); width: 22px; height: 22px; border-radius: 7px;
+  cursor: pointer; color: var(--ink-soft); font-size: var(--text-ui); padding: 0;
   transition: background .14s, color .14s;
 }
-.panel .ph button:hover { background: var(--ink); color: #fff; }
+.panel .ph button:hover { background: var(--accent); color: var(--on-accent); }
 
-#settings .sb { flex: 1 1 auto; min-height: 0; padding: 10px 12px 14px; overflow-y: auto; font-size: 11.5px; }
+#settings .sb { flex: 1 1 auto; min-height: 0; padding: 10px 12px 14px; overflow-y: auto; font-size: var(--text-sm); }
 #settings .group {
   margin: 12px 0 6px;
-  font-size: 10.5px;
+  font-size: var(--text-xs);
   letter-spacing: .06em;
   text-transform: uppercase;
   color: var(--muted);
@@ -645,38 +632,38 @@ body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
 #settings .row > textarea {
   flex: 1 1 auto; min-width: 0;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--control-radius);
   padding: 5px 8px;
   font-family: var(--font);
-  font-size: 11.5px;
-  background: #fbf8f3;
+  font-size: var(--text-sm);
+  background: var(--paper);
   color: var(--ink);
   outline: 0;
   -webkit-user-select: text; user-select: text;
 }
 #settings .row > input:focus, #settings .row > textarea:focus {
-  background: #fff;
+  background:var(--paper);
 }
 #settings .row > input[type="checkbox"] { width: 15px; height: 15px; }
 #settings .actions { display: flex; gap: 7px; margin-top: 12px; }
 #settings button.wide {
   flex: 1 1 0;
   border: 1px solid var(--line);
-  background: #f3efe8;
+  background: var(--surface);
   color: var(--ink-soft);
-  border-radius: 10px;
+  border-radius: var(--control-radius);
   padding: 8px 0;
-  font-size: 12px;
+  font-size: var(--text-ui);
   cursor: pointer;
   font-family: var(--font);
 }
-#settings button.wide.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+#settings button.wide.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 #settings button.wide:hover { filter: brightness(.96); }
 #probeOut {
   margin: 9px 0 0;
   padding: 9px;
-  border-radius: 9px;
-  background: #f7f4ee;
+  border-radius: var(--control-radius);
+  background: var(--panel-ground);
   border: 1px solid var(--line);
   font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap;
@@ -691,7 +678,7 @@ body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
   flex: 0 0 auto;
   padding: 2px 12px 12px;
   border-top: 1px solid var(--line);
-  background: linear-gradient(to bottom, rgba(255,253,250,.4), rgba(255,253,250,.99) 30%);
+  background: linear-gradient(to bottom, rgba(255,253,250,.4), var(--floating-ground) 30%);
 }
 #settings .sf .actions { margin-top: 9px; }
 #settings .sf #probeOut { max-height: 150px; margin-bottom: 4px; }
@@ -700,29 +687,29 @@ body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
 #settings .permBox {
   border: 1px solid var(--line);
   border-radius: 11px;
-  background: #fbf8f3;
+  background: var(--paper);
   padding: 9px 10px 10px;
 }
 #settings .permLine {
   display: flex; align-items: center; justify-content: space-between;
-  font-size: 11.5px; color: var(--ink-soft); padding: 2px 0;
+  font-size: var(--text-sm); color: var(--ink-soft); padding: 2px 0;
 }
 #settings .pill {
-  font-size: 10.5px; font-weight: 600; padding: 1px 8px; border-radius: 99px;
-  background: #efe9df; color: #8a8272;
+  font-size: var(--text-xs); font-weight: 600; padding: 1px 8px; border-radius: 99px;
+  background: var(--surface); color: var(--muted);
 }
-#settings .pill.ok { background: #e2f1e2; color: #3f7a45; }
-#settings .pill.bad { background: #fbe4e0; color: #a9453a; }
-#settings .pill.wait { background: #fdf1d8; color: #96712a; }
+#settings .pill.ok { background: var(--ok-soft); color: var(--ok); }
+#settings .pill.bad { background: var(--danger-soft); color: var(--danger); }
+#settings .pill.wait { background: var(--warn-soft); color: var(--warn); }
 #settings .permBtns { display: flex; gap: 6px; margin-top: 8px; }
 #settings button.mini {
-  flex: 1 1 0; border: 1px solid var(--line); background: #f3efe8;
-  color: var(--ink-soft); border-radius: 8px; padding: 6px 0;
-  font-size: 11px; cursor: pointer; font-family: var(--font);
+  flex: 1 1 0; border: 1px solid var(--line); background: var(--surface);
+  color: var(--ink-soft); border-radius: var(--control-radius); padding: 6px 0;
+  font-size: var(--text-sm); cursor: pointer; font-family: var(--font);
 }
 #settings button.mini:hover { filter: brightness(.96); color: var(--ink); }
 #settings .permTip {
-  margin-top: 7px; font-size: 10.5px; line-height: 1.5; color: #8a8272;
+  margin-top: 7px; font-size: var(--text-xs); line-height: 1.5; color: var(--muted);
 }
 #settings .permTip.hidden { display: none; }
 
@@ -730,9 +717,9 @@ body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
 #settings .segRow {
   display: flex;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--control-radius);
   overflow: hidden;
-  background: #f3efe8;
+  background: var(--surface);
 }
 #settings .segRow button {
   flex: 1 1 0;
@@ -741,28 +728,28 @@ body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
   background: transparent;
   color: var(--ink-soft);
   font-family: var(--font);
-  font-size: 11px;
+  font-size: var(--text-sm);
   padding: 7px 0;
   cursor: pointer;
   transition: background .14s, color .14s;
 }
 #settings .segRow button:last-child { border-right: 0; }
-#settings .segRow button:hover { background: #ece6db; color: var(--ink); }
-#settings .segRow button.on { background: var(--ink); color: #fff; }
+#settings .segRow button:hover { background: var(--accent-soft); color: var(--ink); }
+#settings .segRow button.on { background: var(--accent); color: var(--on-accent); }
 
 /* ── 形象切换 ── */
 #settings .avRow { display: flex; gap: 6px; flex-wrap: wrap; }
 #settings .avRow button {
   flex: 0 1 auto; max-width: 100%;
-  border: 1px solid var(--line); background: #f3efe8;
-  color: var(--ink-soft); border-radius: 8px; padding: 7px 10px;
-  font-size: 11px; cursor: pointer; font-family: var(--font);
+  border: 1px solid var(--line); background: var(--surface);
+  color: var(--ink-soft); border-radius: var(--control-radius); padding: 7px 10px;
+  font-size: var(--text-sm); cursor: pointer; font-family: var(--font);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   transition: background .14s, color .14s, border-color .14s;
 }
 #settings .avRow button:hover { filter: brightness(.97); }
 #settings .avRow button.on {
-  background: var(--ink); color: #fff; border-color: var(--ink);
+  background: var(--accent); color: var(--on-accent); border-color: var(--accent);
 }
 #settings .avRow button:disabled { opacity: .55; cursor: default; }
 
@@ -774,7 +761,7 @@ body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
   padding: 8px 9px 12px;
 }
 #motionList .mGroup {
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: .08em;
   color: var(--muted);
   margin: 10px 0 5px 1px;
@@ -786,39 +773,39 @@ body.private-scene #dock .iconBtn.primary:hover { background: #b84f71; }
   margin-bottom: 4px;
   padding: 6px 8px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #f6f2ec;
+  border-radius: var(--control-radius);
+  background: var(--panel-ground);
   color: var(--ink-soft);
   font-family: var(--font);
-  font-size: 11px;
+  font-size: var(--text-sm);
   line-height: 1.25;
   text-align: left;
   cursor: pointer;
   transition: background .13s, color .13s, border-color .13s, transform .08s;
 }
-#motionList button.mItem:hover { background: #efe9df; color: var(--ink); }
+#motionList button.mItem:hover { background: var(--surface); color: var(--ink); }
 #motionList button.mItem:active { transform: scale(.98); }
-#motionList button.mItem.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+#motionList button.mItem.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 /* 循环动作：右侧一个小 ↻，表示"点了就一直演，直到换掉" */
 #motionList button.mItem .lp { font-size: 9px; opacity: .55; flex: 0 0 auto; }
 #motionList button.mBack {
   width: 100%;
   margin-bottom: 9px;
   padding: 7px 8px;
-  border: 1px dashed rgba(30, 24, 18, .18);
-  border-radius: 8px;
+  border: 1px dashed var(--line);
+  border-radius: var(--control-radius);
   background: transparent;
   color: var(--ink-soft);
   font-family: var(--font);
-  font-size: 11px;
+  font-size: var(--text-sm);
   cursor: pointer;
 }
-#motionList button.mBack:hover { background: #f6f2ec; color: var(--ink); }
+#motionList button.mBack:hover { background: var(--panel-ground); color: var(--ink); }
 
 /* 滚动条：细一点，别像个系统控件杵在娃娃旁边 */
 .panel .sb::-webkit-scrollbar, #motions .pb::-webkit-scrollbar { width: 6px; }
 .panel .sb::-webkit-scrollbar-thumb, #motions .pb::-webkit-scrollbar-thumb {
-  background: rgba(60, 50, 40, .16); border-radius: 3px;
+  background: var(--scrollbar); border-radius: 3px;
 }
 .panel .sb::-webkit-scrollbar-track, #motions .pb::-webkit-scrollbar-track { background: transparent; }
 

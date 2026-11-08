@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const { DesktopService } = require('../src/main/desktop-service');
 const rect = { x: 0, y: 0, width: 1000, height: 700 };
-async function scenario({ occupied = false, typeFails = false, sendFails = false } = {}) {
+async function scenario({ occupied = false, typeFails = false, sendFails = false, readbackFails = false } = {}) {
   const calls = [], journal = [], outcomes = [];
   const marker = '[workbunny:visual-test]';
   let draft = '', submissions = 0;
@@ -10,7 +10,10 @@ async function scenario({ occupied = false, typeFails = false, sendFails = false
   const native = { async request(op, payload = {}) {
     calls.push(op);
     if (op === 'frontmost') return { application: { bundleId: 'com.tencent.workbuddy.mac', pid: 5 }, windows: [{ pid: 5, windowId: 7, layer: 0, rect }] };
-    if (op === 'workbuddyInspect') throw new Error('AX unavailable');
+    if (op === 'workbuddyInspect') {
+      if(draft&&!readbackFails)return {scanComplete:true,childrenFetchErrors:0,editorCount:1,conversationReady:true,associationMarkerPresent:true,draftEmpty:false,draftMatchesRequest:draft===payload.text};
+      throw new Error('AX unavailable');
+    }
     if (op === 'capture') return { pngBase64: Buffer.from('fixture').toString('base64'), desktopRect: rect };
     if (op === 'recognize') return { texts: [row(marker, .3), row('DeepSeek-V4.1-Flash', .1), row(draft || (occupied ? 'existing draft' : '输入消息'), .75)] };
     if (op === 'type') { draft = payload.text; if (typeFails) throw new Error('type acknowledgement lost'); }
@@ -32,11 +35,12 @@ async function scenario({ occupied = false, typeFails = false, sendFails = false
 (async () => {
   const ok = await scenario();
   assert.equal(ok.result.ok, true, ok.result.error);
-  assert.deepEqual(ok.calls.filter(x => ['workbuddyInspect', 'capture', 'click', 'type', 'key'].includes(x)), ['workbuddyInspect', 'workbuddyInspect', 'capture', 'click', 'type', 'capture', 'key']);
+  assert.deepEqual(ok.calls.filter(x => ['workbuddyInspect', 'capture', 'click', 'type', 'key'].includes(x)), ['workbuddyInspect', 'workbuddyInspect', 'capture', 'click', 'type', 'capture', 'workbuddyInspect', 'key']);
   assert.equal(ok.submissions, 1);
   assert.equal(ok.desktop.task.previousMonitorMessageKey, 'old');
   assert(ok.journal.some(t => t.followUpPending?.state === 'unknown' && t.followUpRound === 1));
   assert.deepEqual(ok.outcomes, ['failed']);
+  const unreadable=await scenario({readbackFails:true});assert.equal(unreadable.result.ok,false);assert.equal(unreadable.submissions,0);assert.equal(unreadable.desktop.task.followUpPending.state,'draft-unknown');
   const occupied = await scenario({ occupied: true });
   assert.equal(occupied.result.ok, false); assert(!occupied.calls.includes('type'));
   const unknown = await scenario({ typeFails: true });

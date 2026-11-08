@@ -168,8 +168,8 @@ const TTS_ENGINES = [
 const DEFAULTS = {
   version: 2,
   ui: { dialogueVisible: false, dialogueBehind: false, avatarHidden: false },
-  memory: { enabled: true, extract: true, scene: 'life', recentRounds: 8, recentMessages: 20 },
-  software: { systemConfiguration: false, terminal: false, wechatAccountOwnership:'owner' },
+  memory: { enabled: true, extract: true, useInnateExperience: true, scene: 'life', recentRounds: 8, recentMessages: 20 },
+  software: { systemConfiguration: true, terminal: true, wechatAccountOwnership:'owner' },
   motions: { disabled: [] },
   avatar: 'builtin_soft_bunny',
   avatarDescriptions: {},

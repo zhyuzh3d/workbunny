@@ -12,8 +12,11 @@ function createTTSSession({ getConfig, saveConfig, synthesize, onFallback }) {
     onFallback?.(config, { reason });
   }
   async function speak(text, requested = getConfig().tts, options = {}) {
+    const check = () => { if (options.signal?.aborted) throw Object.assign(new Error('语音已停止'), { name: 'AbortError', code: 'ABORT_ERR' }); };
+    check();
     const startedAt = revision;
     const result = await synthesize(text, requested, options);
+    check();
     if (result.degraded && result.engine === 'system' && revision === startedAt &&
         getConfig().tts.engine === requested.engine) {
       useSystem(result.reason, requested.engine, result.voice);

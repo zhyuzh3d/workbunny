@@ -399,15 +399,15 @@ test('restoring preserves manual-start tasks and updates do not accidentally lau
  const id=starts.at(-1).id;assert((await h.runtime.update(id,{goal:'Revised queued task'},owner)).ok);assert.equal(h.runtime.tasks.get(id).status,'queued');
  await h.runtime.close();const restored=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await restored.restore();assert.equal(restored.tasks.get(id).status,'queued');assert.equal(restored.capacity().active,5);await restored.close();
 });
-test('stop interrupts tools immediately but holds the slot until the external stop is verified',async()=>{
+test('stop ends local scheduling immediately while external termination is checked separately',async()=>{
  const h=setup(async()=>({status:'waiting'}));let release,stops=0;const gate=new Promise(r=>release=r);h.runtime.stopTask=async()=>{stops++;await gate;};
  const {id}=await h.runtime.start(spec,owner),stopping=h.runtime.control('stop',id),again=h.runtime.control('stop',id);await new Promise(r=>setImmediate(r));
- assert.equal(h.runtime.tasks.get(id).status,'stopping');assert.equal(h.runtime.capacity().active,1);await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).counters.wakes,0);
+ assert.equal(h.runtime.tasks.get(id).status,'stopped');assert.equal(h.runtime.capacity().active,0);await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).counters.wakes,0);
  release();assert((await stopping).ok);assert((await again).ok);assert.equal(stops,1);assert.equal(h.runtime.capacity().active,0);
 });
-test('a failed external stop remains actionable and cannot be presented as stopped',async()=>{
+test('a failed external stop preserves the local stop and exposes a separate retry receipt',async()=>{
  const h=setup(async()=>({status:'waiting'}));h.runtime.stopTask=async()=>{throw Error('visible stop button unavailable');};const {id}=await h.runtime.start(spec,owner);
- assert.equal((await h.runtime.control('stop',id)).ok,false);assert.equal(h.runtime.tasks.get(id).status,'needs_attention');assert.equal(h.runtime.capacity().active,1);
+ assert.equal((await h.runtime.control('stop',id)).cleanupVerified,false);assert.equal(h.runtime.tasks.get(id).status,'stopped');assert.equal(h.runtime.tasks.get(id).state.stopRequest.phase,'failed');assert.equal(h.runtime.capacity().active,0);
 });
 test('an amendment that cannot be persisted leaves the live task and provenance unchanged',async()=>{
  const h=setup(async()=>({status:'waiting'}));const {id}=await h.runtime.start(spec,owner),before=structuredClone(h.runtime.tasks.get(id));
@@ -452,4 +452,48 @@ test('a repeating action keeps its event and timing while Bunny decides recovery
  assert.equal(diagnoses.length,3);assert.equal(diagnoses[0].kind,'stall');assert(diagnoses[0].progress.elapsedMs>=120000);assert.equal(task.inbox[0].key,'one-event');
  assert.equal(task.status,'needs_attention');assert.equal(run.recovery.action,'ask_owner');assert.equal(task.state.recoveryGuidance.eventKey,'one-event');assert.match(task.note,/需要主人补充/);assert.equal(run.startedAt,run.createdAt,'retries keep the original start time');
  await h.runtime.close();
+});
+
+test('stop detaches running callbacks: no mutation, report, event, effect, completion or revival after cancellation',async()=>{
+ let entered,release,signalSeen,reports=0,completions=0;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
+ const h=setup(async({task,signal,report,call,enqueue})=>{signalSeen=signal;entered();await gate;task.status='waiting';task.state.result={summary:'late'};await report('late result','late');assert.equal((await enqueue({key:'late-event'})).ok,false);await assert.rejects(call(send),/停止|取消/);return {status:'completed'};});
+ h.runtime.report=async()=>{reports++;};h.runtime.completed=async()=>{completions++;};let finishStop;h.runtime.stopTask=()=>new Promise(r=>finishStop=r);
+ const {id}=await h.runtime.start(spec,owner),running=h.runtime.tick(id);await at;const old=h.runtime.tasks.get(id),stopping=h.runtime.control('stop',id);
+ const stopped=h.runtime.tasks.get(id);assert.notEqual(stopped,old);assert.equal(stopped.status,'stopped');assert.equal(signalSeen.aborted,true);assert.equal(h.runtime.capacity().active,0);
+ await new Promise(r=>setImmediate(r));release();await running;assert.equal(stopped.status,'stopped');assert.equal(stopped.state.result,undefined);assert.equal(stopped.inbox.length,0);assert.equal(reports,0);assert.equal(completions,0);assert.equal(h.calls.length,0);
+ finishStop();assert.equal((await stopping).ok,true);assert.equal(h.records.get(id).status,'stopped');await h.runtime.close();
+ const restored=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await restored.restore();await restored.tick(id);assert.equal(restored.tasks.get(id).status,'stopped');assert.equal((await restored.control('resume',id)).ok,false);await restored.close();
+});
+test('a stop persisted during external checking remains stopped after restart, with retryable external uncertainty',async()=>{
+ const h=setup(async()=>({status:'waiting'}));const {id}=await h.runtime.start(spec,owner);let release;h.runtime.stopTask=()=>new Promise(r=>release=r);const work=h.runtime.control('stop',id);await new Promise(r=>setImmediate(r));
+ const snapshot=structuredClone(h.records.get(id));assert.equal(snapshot.status,'stopped');assert.equal(snapshot.state.stopRequest.phase,'pending');
+ const restored=new AgentRuntime({journal:{...h.journal,list:async()=>[snapshot]},tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await restored.restore();assert.equal(restored.tasks.get(id).status,'stopped');assert.equal(restored.tasks.get(id).state.stopRequest.phase,'failed');await restored.tick(id);assert.equal(restored.tasks.get(id).counters.wakes,0);
+ release();await work;await h.runtime.close();await restored.close();
+});
+test('storage failures cannot prevent immediate cancellation and must return an explicit failed persistence result',async()=>{
+ const h=setup(async()=>({status:'waiting'}));const {id}=await h.runtime.start(spec,owner);let cancelled=0;h.runtime.stopTask=async()=>{cancelled++;};h.journal.put=async()=>{throw Error('disk unavailable');};
+ const work=h.runtime.control('stop',id);assert.equal(h.runtime.tasks.get(id).status,'stopped');const result=await work;assert.equal(cancelled,1);assert.equal(result.ok,true);assert.equal(result.localStopped,true);assert.equal(result.persistenceVerified,false);assert.match(result.message,/保存失败/);assert.equal(h.runtime.tasks.get(id).status,'stopped');await h.runtime.close();
+});
+test('stop-all ends every local task before waiting for the first external cleanup',async()=>{
+ const h=setup(async()=>({status:'waiting'})),a=await h.runtime.start(spec,owner),b=await h.runtime.start({...spec,goal:'second'},owner);const releases=[];h.runtime.stopTask=()=>new Promise(r=>releases.push(r));const work=h.runtime.controlAll('stop');assert.equal(h.runtime.tasks.get(a.id).status,'stopped');assert.equal(h.runtime.tasks.get(b.id).status,'stopped');assert.equal(h.runtime.capacity().active,0);await new Promise(r=>setImmediate(r));for(const release of releases)release();assert.equal((await work).ok,true);await h.runtime.close();
+});
+test('cleanup total timeout returns a successful local stop with per-resource errors; late completion cannot revive it',async()=>{
+ const h=setup(async()=>({status:'waiting'})),{id}=await h.runtime.start(spec,owner);h.runtime.stopTimeoutMs=20;h.runtime.tasks.get(id).state.resources={process:{id:'process',kind:'process',label:'owned command',phase:'running'}};let release;h.runtime.stopTask=()=>new Promise(r=>release=r);const stopping=h.runtime.control('stop',id);assert.equal(h.runtime.tasks.get(id).status,'stopped');const next=await h.runtime.start({...spec,goal:'new independent task'},owner);assert.equal(next.ok,true);const result=await stopping;assert.equal(result.ok,true);assert.equal(result.cleanupVerified,false);assert.match(result.cleanupErrors[0],/总时限/);assert.equal(h.runtime.tasks.get(id).state.resources.process.phase,'unknown');assert.equal(h.runtime.tasks.get(id).state.cleanupLog.length,1);release();await new Promise(r=>setImmediate(r));assert.equal(h.runtime.tasks.get(id).status,'stopped');assert.equal(h.runtime.capacity().active,1);await h.runtime.close();
+});
+
+test('expiration shares the terminal barrier and cleanup without accepting late execution callbacks',async()=>{
+ let entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r),h=setup(async({task,report})=>{entered();await gate;task.status='waiting';await report('late expired result','late');return {status:'completed'};});let reports=0;h.runtime.report=async()=>reports++;
+ const {id}=await h.runtime.start({...spec,schedule:{durationMinutes:1}},owner),running=h.runtime.tick(id);await at;h.advance();const expiry=h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).status,'expired');assert.equal(h.runtime.capacity().active,0);await expiry;release();await running;assert.equal(h.runtime.tasks.get(id).status,'expired');assert.equal(reports,0);assert.equal(h.records.get(id).status,'expired');await h.runtime.close();
+});
+test('adopted replacement durably retires the prior snapshot so its stale callback cannot revive it',async()=>{
+ let entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r),h=setup(async({task})=>{if(task.goal==='prior'){entered();await gate;task.status='waiting';}return {status:'waiting'};});h.journal.putAll=async tasks=>{for(const task of tasks)await h.journal.put(task);};
+ const first=await h.runtime.start({...spec,goal:'prior'},owner),second=await h.runtime.start({...spec,goal:'replacement'},owner),running=h.runtime.tick(first.id);await at;const old=h.runtime.tasks.get(first.id);await h.runtime.adopt(second.id,{...spec,goal:'replacement'},owner,{replaceId:first.id});assert.notEqual(h.runtime.tasks.get(first.id),old);assert.equal(h.records.get(first.id).state.stopRequest.externalDisposition,'transferred');release();await running;assert.equal(h.runtime.tasks.get(first.id).status,'stopped');assert.equal(h.records.get(first.id).status,'stopped');await h.runtime.close();
+});
+test('legacy stop-failure notes migrate into a durable terminal barrier before unknown writes can recover',async()=>{
+ const h=setup(async()=>({status:'waiting'})),{id}=await h.runtime.start(spec,owner),record=structuredClone(h.records.get(id));record.status='needs_attention';record.note='停止尚未确认：原轮次不唯一';record.operations.pending={id:'pending',key:'old-write',effect:'write',tool:'conversation.send',status:'intent'};h.records.set(id,record);await h.runtime.close();const restored=new AgentRuntime({journal:h.journal,tools:h.tools,skills:h.skills,epoch:()=>1,autoSchedule:false});await restored.restore();assert.equal(restored.tasks.get(id).status,'stopped');assert.equal(restored.tasks.get(id).state.stopRequest.phase,'failed');await restored.tick(id);assert.equal(restored.tasks.get(id).counters.wakes,0);assert.equal((await restored.control('resume',id)).ok,false);assert.equal(h.records.get(id).status,'stopped');await restored.close();
+});
+
+test('a stuck storage and admission queue cannot hold the stop acknowledgement or block real cancellation forever',async()=>{
+ const h=setup(async()=>({status:'waiting'})),{id}=await h.runtime.start(spec,owner);h.runtime.stopTimeoutMs=20;h.runtime.stopAckTimeoutMs=20;let release,stops=0;const gate=new Promise(r=>release=r);h.journal.put=async task=>{await gate;h.records.set(task.id,structuredClone(task));};void h.runtime.admission(()=>gate);h.runtime.stopTask=async()=>{stops++;};
+ const work=h.runtime.control('stop',id);assert.equal(h.runtime.tasks.get(id).status,'stopped');const result=await work;assert.equal(stops,1);assert.equal(result.ok,true);assert.equal(result.persistenceVerified,false);assert.match(result.message,/保存失败或未确认/);assert.equal(h.runtime.capacity().active,0);release();await new Promise(r=>setImmediate(r));assert.equal(h.runtime.tasks.get(id).status,'stopped');assert.equal(h.records.get(id).status,'stopped');await h.runtime.close();
 });

@@ -9,11 +9,13 @@ const { DesktopNative, defaultBinary } = require('../src/main/desktop-native');
 const nativeTestBinary = () => process.env.WORKBUNNY_NATIVE_TEST_BINARY || defaultBinary();
 test('display ownership excludes another process and is released automatically after a crash',async t=>{
  const binary=nativeTestBinary();if(!fs.existsSync(binary))return t.skip('native bridge is not built');
- const owner=spawn(binary,['--self-test-display-lease'],{stdio:['pipe','pipe','pipe']});t.after(()=>owner.kill('SIGKILL'));
+ const directory=fs.mkdtempSync(require('node:path').join(require('node:os').tmpdir(),'bunny-display-lease-'));t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+ const env={...process.env,WORKBUNNY_TEST_DISPLAY_LEASE_DIR:directory};
+ const owner=spawn(binary,['--self-test-display-lease'],{env,stdio:['pipe','pipe','pipe']});t.after(()=>owner.kill('SIGKILL'));
  const first=await new Promise((resolve,reject)=>{let text='';const timer=setTimeout(()=>reject(Error('capture lease probe timed out')),5000);owner.stdout.on('data',b=>{text+=b;if(text.includes('\n')){clearTimeout(timer);resolve(JSON.parse(text.trim().split('\n')[0]));}});owner.once('error',reject);});
- assert.equal(first.held,true);const blocked=spawnSync(binary,['--self-test-display-lease'],{input:'\n',encoding:'utf8',timeout:5000});assert.equal(blocked.status,1);assert.equal(JSON.parse(blocked.stdout.trim()).code,'E_CAPTURE_BUSY');
+ assert.equal(first.held,true);const blocked=spawnSync(binary,['--self-test-display-lease'],{env,input:'\n',encoding:'utf8',timeout:5000});assert.equal(blocked.status,1);assert.equal(JSON.parse(blocked.stdout.trim()).code,'E_CAPTURE_BUSY');
  const exited=new Promise(r=>owner.once('close',r));owner.kill('SIGKILL');await exited;
- const recovered=spawnSync(binary,['--self-test-display-lease'],{input:'\n',encoding:'utf8',timeout:5000});assert.equal(recovered.status,0);assert.equal(JSON.parse(recovered.stdout.trim()).held,true);
+ const recovered=spawnSync(binary,['--self-test-display-lease'],{env,input:'\n',encoding:'utf8',timeout:5000});assert.equal(recovered.status,0);assert.equal(JSON.parse(recovered.stdout.trim()).held,true);
 });
 
 function fixture(options = {}) {
@@ -206,7 +208,7 @@ test('rectFrom accepts CGWindowBounds casing and preserves dimension validation'
   assert.match(source, /w < 100_000, h < 100_000/);
 });
 
-test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bounded controls', () => {
+test('WorkBuddy semantic path retains exact identity and draft guards with bounded foreground fallbacks', () => {
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   const context = source.slice(source.indexOf('func workBuddyControls('), source.indexOf('func workBuddyInspect('));
   assert.ok(context.indexOf('validateWorkBuddyContext(request)') < context.indexOf('AXUIElementCreateApplication'));
@@ -248,16 +250,18 @@ test('WorkBuddy AX path is app-locked, geometry-bound, and exposes only three bo
   assert.doesNotMatch(textMatch, /trimmingCharacters/);
   assert.doesNotMatch(source, /func canonicalWorkBuddyText/);
   assert.match(source, /makeInputPlan\(text, lineBreak: "shiftEnter"\)/);
-  assert.match(source, /func postUnicodeText\(_ units: \[UInt16\]\)/);
-  assert.match(source, /func postShiftReturn\(\)/);
+  assert.match(source, /func postUnicodeText\(_ units: \[UInt16\], targetPID: pid_t\? = nil\)/);
+  assert.match(source, /func postShiftReturn\(targetPID: pid_t\? = nil\)/);
+  assert.match(source, /if let targetPID \{ event.postToPid\(targetPID\) \} else \{ event.post\(tap: \.cghidEventTap\) \}/);
   assert.match(source, /AXUIElementSetAttributeValue\(editor, kAXFocusedAttribute/);
   assert.match(source, /kAXFocusedUIElementAttribute/);
   assert.match(source, /waitDeadline = DispatchTime\.now\(\)\.uptimeNanoseconds \+ 800_000_000/);
   assert.doesNotMatch(source, /AXUIElementSetAttributeValue\(editor, kAXValueAttribute[^\n]*text/);
   const send = source.slice(source.indexOf('func workBuddySend('), source.indexOf('func unicodeChunks('));
-  assert.doesNotMatch(send, /AXUIElementPerformAction/);
-  assert.match(send, /workBuddySendPoint\(buttonRect: buttonRect, windowRect: context\.rect\)/);
-  assert.match(send, /rectsMatch\(buttonRect, currentButtonRect\)/);
+  assert.match(send, /if background \{\s+let result = AXUIElementPerformAction\(button/);
+  assert.ok(send.indexOf('workBuddyTextMatches(controls.draft, expected: text)') < send.indexOf('AXUIElementPerformAction'));
+  assert.match(send, /approvedWorkBuddySendPoint\(request, buttonRect: buttonRect, windowRect: context\.rect\)/);
+  assert.match(send, /approvedWorkBuddySendPoint\(request, buttonRect: currentButtonRect, windowRect: context\.rect\)/);
   assert.match(send, /kAXFocusedWindowAttribute/);
   assert.match(send, /rectsMatch\(focusedRect, context\.rect\)/);
   assert.match(send, /CGPreflightPostEventAccess\(\)/);

@@ -71,12 +71,28 @@ test('a restored task keeps its repair profile and resumes the same event',async
 });
 test('local budget overflow reduces optional content without shrinking the usable input ceiling',()=>{
  const local=repair.applyAction({},'compact_context',{code:'E_CONTEXT_BUDGET'}),remote=repair.applyAction({},'compact_context',{code:'E_CONTEXT_WINDOW'});
- assert.equal(local.contextLevel,1);assert.equal(local.budgetScale,undefined);assert.equal(remote.budgetScale,.5);
+ assert.equal(local.contextLevel,1);assert.equal(local.budgetScale,undefined);assert.equal(remote.budgetScale,undefined);
 });
 
 test('broker response caps shrink the request while output truncation can expand it',()=>{
  assert.equal(repair.category({code:'E_PAYLOAD_TOO_LARGE'}),'response');assert.equal(repair.category({code:'E_OUTPUT_LIMIT'}),'output');
  const messages=[{role:'user',content:JSON.stringify({goal:'keep goal',tools:[{name:'keep tool'}],confirmedEffects:[{id:'keep receipt'}]})}],options={messages,thinking:'high',maxTokens:8192};
- const compact=repair.applyProfile(options,repair.applyAction({},'compact_response'));assert.equal(compact.thinking,'low');assert.equal(compact.maxTokens,2048);assert.equal(compact.budgetScale,.5);assert.deepEqual(compact.messages,messages);
+ const compact=repair.applyProfile(options,repair.applyAction({},'compact_response'));assert.equal(compact.thinking,'low');assert.equal(compact.maxTokens,2048);assert.equal(compact.budgetScale,undefined);assert.deepEqual(compact.messages,messages);
  assert.equal(repair.applyProfile(options,repair.applyAction({},'increase_output')).maxTokens,8192);
+});
+test('an unchanged failure stops execution after its repair budget, retains pending work, and reports attention',async()=>{
+ let executions=0,diagnoses=0;const reports=[],h=harness(async({task})=>{executions++;task.state.stepSequence=(task.state.stepSequence||0)+1;throw Object.assign(Error('route evidence unavailable'),{code:'E_WORKBUDDY_ROUTE_UNVERIFIED'});},async()=>{diagnoses++;return {action:'retry',source:'llm'};});h.runtime.report=async r=>reports.push(r);
+ const {id}=await h.start();await h.runtime.enqueue(id,{key:'pending',text:'preserve this request'});
+ for(let i=0;i<8;i++)await h.runtime.tick(id);
+ const task=h.runtime.tasks.get(id);assert.equal(executions,3);assert.equal(diagnoses,2);assert.equal(task.status,'needs_attention');assert.equal(task.state.selfRepair.status,'exhausted');assert.equal(task.inbox[0].key,'pending');assert.equal(reports.length,1);assert.match(task.note,/必要信息|恢复/);
+ assert((await h.runtime.control('resume',id)).ok);await h.runtime.tick(id);assert.equal(executions,4);await h.runtime.close();
+});
+test('diagnostic defer permits bounded reobservation before escalating the unchanged failure',async()=>{
+ let executions=0;const h=harness(async()=>{executions++;throw Error('missing observation');},async()=>({action:'defer',source:'llm'}));const {id}=await h.start();for(let i=0;i<4;i++)await h.runtime.tick(id);assert.equal(executions,3);assert.equal(h.runtime.tasks.get(id).status,'needs_attention');assert.equal(h.runtime.tasks.get(id).state.selfRepair.status,'exhausted');await h.runtime.close();
+});
+test('new external facts permit a new recovery decision while repeated errors do not reset its budget',async()=>{
+ let phase=0,diagnoses=0;const h=harness(async({progress})=>{progress.observe('observe',{actualPage:phase});progress.observe('failed-method',{error:'E_REPEATED'});throw Error('same failure');},async()=>{diagnoses++;return {action:'retry',source:'llm'};});
+ const {id}=await h.start();await h.runtime.tick(id);await h.runtime.tick(id);assert.equal(diagnoses,2);
+ phase=1;await h.runtime.tick(id);assert.equal(diagnoses,3);assert.equal(h.runtime.tasks.get(id).status,'waiting');assert.equal(h.runtime.tasks.get(id).state.selfRepair.attempts,1);
+ await h.runtime.close();
 });

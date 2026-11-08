@@ -43,6 +43,7 @@
         </div>
         <div class="setting-row"><div><strong>使用记忆</strong><p>保存聊天并参考历史记忆；关闭后只保留当前临时对话</p></div><label class="switch"><input id="memoryEnabled" type="checkbox" role="switch"><span></span></label></div>
         <div class="setting-row"><div><strong>整理新记忆</strong><p>空闲时将近期对话交给 WorkBuddy 免费模型整理</p></div><label class="switch"><input id="memoryExtract" type="checkbox" role="switch"><span></span></label></div>
+        <div class="setting-row"><div><strong>使用先天经验</strong><p>参考随安装包提供的只读经验；升级自动更新，不影响自己积累和导入的经验</p></div><label class="switch"><input id="memoryInnate" type="checkbox" role="switch" aria-label="使用先天经验"><span></span></label></div>
         <div id="memoryConfigNote" class="inline-note" role="status"></div>
       </div>
 
@@ -59,25 +60,35 @@
         <div class="button-row"><button id="maintenanceDoze" class="button quiet">Doze 小憩</button><button id="maintenanceDream" class="button quiet">Dream 梦境</button><button id="maintenanceDeepdream" class="button quiet">Deepdream 深梦</button></div>
       </section>
 
+      <section id="experienceImportSection" class="card experience-import-card" hidden aria-labelledby="experienceImportHeading">
+        <h2 id="experienceImportHeading">导入记忆与经验</h2>
+        <p class="inline-note">选择 ZIP 或文件夹即可。Bunny 自动识别记忆、经验和工具，分析合并后给出结果报告；无需预先分类，不会写入先天经验。</p>
+        <div class="button-row"><button id="experienceImportZip" class="button quiet">选择 ZIP 文件</button><button id="experienceImportFolder" class="button quiet">选择经验文件夹</button></div>
+        <p id="experienceImportNote" class="inline-note" role="status"></p>
+      </section>
+      <section id="memoryImportsCard" class="card" hidden aria-labelledby="memoryImportsHeading"><h2 id="memoryImportsHeading">资料吸收进度与结果</h2><div id="memoryImportReports" class="records" aria-live="polite"></div></section>
       <div class="tabs" id="memoryTabs" role="tablist" aria-label="记忆内容">
         <button class="tab active" data-kind="memory" role="tab" aria-selected="true">长期记忆</button>
         <button class="tab" data-kind="message" role="tab" aria-selected="false">聊天</button>
         <button class="tab" data-kind="summary" role="tab" aria-selected="false">摘要</button>
         <button class="tab" data-kind="knowledge" role="tab" aria-selected="false">整理与经验</button>
+        <button class="tab" data-kind="innate" role="tab" aria-selected="false">先天经验</button>
       </div>
       <div id="knowledgeFilters" class="knowledge-filters" hidden>
-        <label class="inline-note" for="knowledgeCategory">分类</label>
-        <select id="knowledgeCategory" aria-label="整理与经验分类">
+        <label class="inline-note" for="knowledgeCategory">查看内容</label>
+        <select id="knowledgeCategory" aria-label="查看整理与经验">
           <option value="all">全部</option>
-          <option value="relation">相关陈述</option>
-          <option value="doubt">待核对</option>
-          <option value="experience">经验</option>
+          <option value="relation">记忆关联</option>
+          <option value="doubt">记忆疑问</option>
+          <option value="experience">习得与导入经验</option>
           <option value="tool">工具</option>
         </select>
       </div>
+      <p id="knowledgeCategoryNote" class="inline-note" hidden></p>
+      <p id="innateExperienceNote" class="inline-note" hidden>安装包自带的先天经验。用户和 Bunny 均不可编辑、删除或导入覆盖，只能随安装包更新；使用开关仅控制是否参考。</p>
       <div class="search-row"><input id="memorySearch" type="search" placeholder="搜索内容" aria-label="搜索记忆内容"><button id="memorySearchBtn" class="button quiet">搜索</button></div>
-      <div class="button-row"><button id="experienceImportZip" class="button quiet">导入经验 ZIP</button><button id="experienceImportFolder" class="button quiet">导入经验文件夹</button><span id="experienceImportNote" class="inline-note" role="status"></span></div>
-      <p class="inline-note">编辑会保留原始聊天并更正事实；彻底遗忘会移除证据原话及其派生记录。</p>
+
+      <p id="memoryEditingNote" class="inline-note">编辑会保留原始聊天并更正事实；彻底遗忘会移除证据原话及其派生记录。</p>
       <div id="memoryList" class="records" aria-live="polite"></div>
       <div class="more-row"><span id="memoryListNote" class="inline-note"></span><button id="memoryMore" class="button quiet" hidden>更早内容</button></div>
 
@@ -112,7 +123,7 @@
         <div class="button-row"><button id="agentSubmit" class="button primary">交办</button></div>
         <p id="agentCommandNote" class="inline-note" role="status"></p>
       </section>
-      <section class="card"><div class="section-heading tracking-heading"><h2>正在跟进</h2><div class="tracking-tools"><button id="agentRefresh" class="button quiet">刷新</button><button id="agentPauseAll" class="button quiet">全部暂停</button></div></div>
+      <section class="card"><div class="section-heading tracking-heading"><h2>正在跟进</h2><div class="tracking-tools"><button id="agentRefresh" class="button quiet">刷新</button><button id="agentPauseAll" class="button quiet">全部暂停</button><button id="agentClearList" class="button quiet">清空任务列表</button><button id="agentRestoreList" class="button quiet" hidden>恢复已清理任务</button></div></div>
         <div id="agentCircuit" class="inline-note bad-text" hidden></div><button id="agentReconnect" class="button quiet" hidden>重新核对微信</button>
         <div id="agentTaskList" class="watch-list" aria-live="polite"></div>
       </section>

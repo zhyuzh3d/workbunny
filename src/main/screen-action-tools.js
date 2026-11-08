@@ -21,14 +21,18 @@ function assertAnchorFront(front,anchor){
  const window=front.windows.find(w=>w.windowId===anchor.windowId&&w.pid===anchor.pid);
  if(front.application?.bundleId!==anchor.bundleId||front.application?.pid!==anchor.pid||!window||['x','y','width','height'].some(k=>Math.abs(window.rect[k]-(anchor.windowRect||anchor.rect)[k])>=1))throw Object.assign(Error('目标窗口改变，重新观察定位'),{dispatched:false});
 }
-function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async()=>true,applications,observe,assertWeChatInput=()=>{},sensitivePolicy=require('./sensitive-policy').createSensitivePolicy()}){
+function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async()=>true,applications,resolveApplication=(application)=>applications[application],observe,assertWeChatInput=()=>{},sensitivePolicy=require('./sensitive-policy').createSensitivePolicy()}){
  const scope=a=>({application:a.application,...(a.recipient?{recipient:a.recipient}:{})});
- tools.register({name:'screen.activate',description:'打开已授权的目标软件并切到前台；微信只激活已运行进程，不启动或登录。随后重新观察。',effect:'read',capabilities:['screen.input'],scope,
- validate:v=>{fields(v,['application'],'激活应用');if(!applications[v.application])throw Error('没有该软件适配');return v;},
- execute:async(a,c)=>{if(!await canOperate(c.task))throw Object.assign(Error('等待电脑空闲后切换'),{code:'E_GUI_BUSY',dispatched:false});if(a.application==='wechat')await wechatScene.assertHealthy();const owner=leaseOwner(c);await lease?.acquire(owner,c.signal);try{const result=await native.request('activate',{bundleId:applications[a.application],requireRunning:a.application==='wechat'},8000);await pause(700);return result;}finally{lease?.release(owner);}}
+ tools.register({name:'screen.activate',description:'打开已授权的目标软件并切到前台；微信只激活已运行进程，不启动或登录。随后重新观察。',effect:'read',capabilities:['screen.input'],scope,available:task=>task.subjects.some(s=>!['system','bunny'].includes(s.application)&&resolveApplication(s.application,task)),
+ validate:v=>{fields(v,['application'],'激活应用');if(typeof v.application!=='string'||!v.application)throw Error('缺少目标软件');return v;},
+ execute:async(a,c)=>{if(!await canOperate(c.task))throw Object.assign(Error('等待电脑空闲后切换'),{code:'E_GUI_BUSY',dispatched:false});if(a.application==='wechat')await wechatScene.assertHealthy();const owner=leaseOwner(c);await lease?.acquire(owner,c.signal);try{
+  const bundleId=resolveApplication(a.application,c.task),handle=await c.resources?.register({id:'application:'+bundleId,kind:'application',label:a.application,ownership:'unknown',phase:'starting'});
+  if(c.signal?.aborted)throw Object.assign(Error('任务已停止，未启动软件'),{dispatched:false});
+  const result=await native.request('activate',{bundleId,requireRunning:a.application==='wechat'},8000);await handle?.update({identity:result.application,ownership:result.launched===true?'owned':'shared',phase:'running'});if(!c.signal?.aborted)await pause(700);return result;
+ }finally{lease?.release(owner);}}
  });
  tools.register({name:'screen.action',description:'执行一个Operation。Bunny可选择observeAfter=true在同次调用带回新画面；无需中间检查时省略或false，由Bunny按Action需要决定。文字优先提供实际OCR标签label；OCR遗漏或错读时，可给实际可见label、targetType=text和预览图pixelX/pixelY进行视觉定位。无文字目标用targetType=icon/region及像素坐标，右键和滚动也用像素坐标。Task与Action完成须自主核查，Operation不必逐次检查；微信正文统一用conversation.send。',effect:'write',capabilities:['screen.input'],scope,
- validate:v=>{fields(v,['application','recipient','frameId','action','pixelX','pixelY','text','key','modifiers','deltaY','purpose','button','label','targetType','observeAfter'],'屏幕动作');if(v.observeAfter!==undefined&&typeof v.observeAfter!=='boolean')throw Error('observeAfter须为布尔值');if(!applications[v.application]||!['click','type','key','scroll'].includes(v.action)||v.button!==undefined&&!['left','right'].includes(v.button)||v.targetType!==undefined&&!['text','icon','region'].includes(v.targetType))throw Error('屏幕动作无效');text(v.frameId,'当前画面ID',160);
+ validate:v=>{fields(v,['application','recipient','frameId','action','pixelX','pixelY','text','key','modifiers','deltaY','purpose','button','label','targetType','observeAfter'],'屏幕动作');if(v.observeAfter!==undefined&&typeof v.observeAfter!=='boolean')throw Error('observeAfter须为布尔值');if(typeof v.application!=='string'||!v.application||!['click','type','key','scroll'].includes(v.action)||v.button!==undefined&&!['left','right'].includes(v.button)||v.targetType!==undefined&&!['text','icon','region'].includes(v.targetType))throw Error('屏幕动作无效');text(v.frameId,'当前画面ID',160);
   if(v.label!==undefined){text(v.label,'可见文字标签',160);if(destructiveLabel(v.label))throw Error('此动作工具仅用于非破坏性操作，不能点击该控件');}
   if(v.action==='click'&&v.button!=='right'&&!v.label&&!['icon','region'].includes(v.targetType))throw Error('文字按钮或菜单必须提供label；仅无文字图标或空白区域使用targetType及坐标');
   if((v.action==='scroll'||v.action==='click'&&(v.button==='right'||!v.label))&&(![v.pixelX,v.pixelY].every(n=>Number.isInteger(n)&&n>=0&&n<32768)))throw Error('需要预览图中的整数pixelX/pixelY像素坐标，不进行归一化');
@@ -42,7 +46,7 @@ function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async(
    if(v.action==='key'&&((v.modifiers.includes('cmd')&&['q','w'].includes(v.key.toLowerCase()))||!dialog&&['enter','return'].includes(v.key.toLowerCase())))throw Error('微信此处禁止关闭或直接发送，改用对应会话工具');
 
   }return v;},
- available:task=>task.skill!=='conversation.manage',
+ available:task=>task.skill!=='conversation.manage'&&task.subjects.some(s=>!['system','bunny'].includes(s.application)&&resolveApplication(s.application,task)),
  execute:async(a,c)=>{
   if(c.task.skill==='conversation.manage')throw Object.assign(Error('微信会话请使用对应的收发操作'),{dispatched:false});
   if(a.action==='type'&&['wechat','workbuddy'].includes(a.application))await sensitivePolicy.check({target:a.application,recipient:a.recipient,text:a.text,ownership:'unknown'});

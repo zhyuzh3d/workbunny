@@ -1,7 +1,7 @@
 {
   "schema": "bunny.software-skill/v1",
   "id": "wechat",
-  "version": 7,
+  "version": 8,
   "skills": [
     "conversation.manage",
     "conversation.send",
@@ -15,7 +15,7 @@
   "resources": [
     {
       "path": "guide.md",
-      "sha256": "3e7e58cddd2242a65acf6bbef0f6515eea8091d96de0a33d4182e37ec36b7ada"
+      "sha256": "da9f97028b42ac3c4f3ebd7c2bb37096d2257beb52fd3c6dc02773199a02f681"
     }
   ],
   "toolProtocol": "bunny.screen/v2"

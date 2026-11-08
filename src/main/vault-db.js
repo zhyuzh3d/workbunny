@@ -5,6 +5,15 @@ const { JsonLines, MAX_NATIVE_LINE_BYTES } = require('./json-lines');
 // An encoded SQLite row can carry up to 2 MiB before JSON framing.
 const VAULT_PAGE_SIZE = 24;
 
+const NATIVE_VAULT_CODES=new Set(['checkpoint_busy','database_in_use','database_moved_snapshot','database_open_failed','database_operation_failed','database_permissions_failed','database_version_newer','invalid_record','invalid_request','invalid_source','restore_requires_empty_database','sequence_exhausted','stale_epoch','unknown_operation']);
+const VAULT_OPERATIONS=new Set(['begin_restore','checkpoint','clear','end_restore','get','memory_sample','query','remove','search','stats','write']);
+function vaultErrorDiagnostic(error){
+ const result={};if(NATIVE_VAULT_CODES.has(error?.code))result.nativeCode=error.code;
+ if(VAULT_OPERATIONS.has(error?.vaultOperation))result.operation=error.vaultOperation;
+ if(Number.isSafeInteger(error?.requestId)&&error.requestId>0)result.requestId=error.requestId;
+ return Object.keys(result).length?result:null;
+}
+
 class VaultDB {
   constructor({ bin, file, timeoutMs = 30000 } = {}) {
     if (!bin || !file) throw new TypeError('VaultDB requires bin and file paths');
@@ -64,7 +73,7 @@ class VaultDB {
         else {
           const error = new Error(`Vault request failed: ${result.error || 'unknown_error'}`);
           error.code = result.error || 'unknown_error';
-          error.requestId = id;
+          error.requestId = id;error.vaultOperation=pending.op;
           pending.reject(error);
         }
       });
@@ -109,9 +118,9 @@ class VaultDB {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(Object.assign(new Error(`Vault request timed out: ${op}`), { code: 'E_VAULT_TIMEOUT', requestId: id }));
+        reject(Object.assign(new Error(`Vault request timed out: ${op}`), { code: 'E_VAULT_TIMEOUT', requestId: id,vaultOperation:op }));
       }, this.timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer,op });
       const writeFailed = error => {
         if (!error || !this.pending.delete(id)) return;
         clearTimeout(timer);
@@ -144,4 +153,4 @@ class VaultDB {
   }
 }
 
-module.exports = { VaultDB, VAULT_PAGE_SIZE };
+module.exports = { VaultDB, VAULT_PAGE_SIZE,vaultErrorDiagnostic };

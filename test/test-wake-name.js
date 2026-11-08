@@ -14,11 +14,12 @@ test('the actual utterance handler rejects unnamed speech before LLM, memory or 
   const file=path.resolve('src/main/index.js'),source=fs.readFileSync(file,'utf8'),requests=[],events=[];
   const ctx={require:require('node:module').createRequire(file),asr:{wakeHit:text=>text.startsWith('芊芊')},config:{load:()=>({buddy:{name:'倩倩'},asr:{wakeOnly:true,judge:true}})},
     inputAdmission:{containsSecret:()=>false},worthJudging:()=>true,recentEcho:()=>false,speaking:false,Date,send:(...args)=>events.push(args),log(){},lastHeardAt:0,turnT0:0,autonomy:null,taskNotifications:null,QUIET_WORDS:/安静/,nameHit:null,
-    think:async opts=>{requests.push(opts);return{text:'你好'};}};
+    traceSpeech(){},voiceMetadata(){},think:async opts=>{requests.push(opts);return{text:'你好'};}};
   vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function nameHit('),source.indexOf('/** 每听到一句')),ctx);
   vm.runInContext(source.slice(source.indexOf('async function handleUtterance('),source.indexOf('/** 主动要权限')),ctx);
-  let skips=0;await ctx.handleUtterance('旁边的人说请安静',{skip:()=>skips++});assert.equal(skips,1);assert.equal(requests.length,0);assert(!events.some(e=>e[0]==='chat'));
-  await ctx.handleUtterance('芊芊，帮我看看',{isCurrent:()=>true});assert.equal(requests.length,1);assert(requests[0].judge);
+  const turn={accepted:true,isCurrent:()=>true,canCommit:()=>true,heardAt:Date.now()};
+  let skips=0;await ctx.handleUtterance('旁边的人说请安静',{...turn,skip:()=>skips++});assert.equal(skips,1);assert.equal(requests.length,0);assert(!events.some(e=>e[0]==='chat'));
+  await ctx.handleUtterance('芊芊，帮我看看',turn);assert.equal(requests.length,1);assert(requests[0].judge);
 });
 test('tray text input and visibility labels toggle with actual state; clicking the icon never hides the pet',()=>{
  const source=fs.readFileSync(path.resolve('src/main/index.js'),'utf8');let shown=0,hidden=0,focused=0,interactive=false,visible=true,icon;

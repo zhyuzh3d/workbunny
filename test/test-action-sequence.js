@@ -27,15 +27,15 @@ test('an uncertain submit in a continuous sequence retains the intent instead of
  const f=fixture({failSubmit:true});await assert.rejects(f.service.runOwned(f.service.generation,f.taskScope),/acknowledgement/);
  assert.equal(f.events.filter(e=>e.op==='key').length,1);assert(f.service.task.submitAttemptedAt);assert.equal(f.service.task.steps.find(s=>s.purpose==='submit').state,'intent');await f.service.close();
 });
-test('Bunny can reconcile an ineffective submit and correct the same Action without losing attempt evidence',async()=>{
+test('a planner opinion cannot clear the submit barrier or replay the same Action',async()=>{
  const f=fixture();let planned=0,reviews=0;f.service.actionControl.reconcile=async review=>{reviews++;assert.equal(review.observed,'not_applied');};
  f.service.planner=async()=>{planned++;if(planned===1||planned===3)return {action:'type',text:'hello',purpose:'task',focus:{x:.6,y:.88},then:[{action:'key',key:'enter',purpose:'submit',modifiers:[],afterMs:1}]};if(planned===2)return {action:'done',completed:false,receipt:{observed:'not_applied',draft:'absent',basis:'对照本次前后画面，输入未落入编辑区；当前最新消息区域无本次消息，编辑区为空'}};return {action:'done',completed:true,evidence:'重新定位后本次消息已出现',receipt:{observed:'delivered',basis:'新增本人气泡和实际原文均已核对'}};};
- await f.service.runOwned(f.service.generation,f.taskScope);assert.equal(f.service.task.sendState,'confirmed');assert.equal(reviews,1);assert.equal(f.service.task.effectReviews.length,1);assert.equal(f.events.filter(e=>e.op==='key').length,2);assert.equal(f.service.task.steps.filter(s=>s.purpose==='submit').length,2,'both attempt receipts remain');await f.service.close();
+ await assert.rejects(f.service.runOwned(f.service.generation,f.taskScope),{code:'E_SUBMISSION_UNCERTAIN'});assert.equal(reviews,0);assert.equal(f.service.task.effectReviews.length,1);assert.equal(f.service.task.effectReviews[0].verified,false);assert(f.service.task.submitAttemptedAt);assert.equal(f.events.filter(e=>e.op==='key').length,1);assert.equal(f.service.task.steps.filter(s=>s.purpose==='submit').length,1,'the original attempt remains without replay');await f.service.close();
 });
 test('a different contact frame cannot declare the original submit ineffective',async()=>{
  const f=fixture(),capture=f.service.capture;let frames=0,planned=0;f.service.capture=async(...args)=>{const s=await capture(...args);if(++frames>1)s.ocr=[{text:'Bob',confidence:1,x:.4,y:.04}];return s;};
  f.service.planner=async()=>++planned===1?{action:'type',text:'hello',purpose:'task',focus:{x:.6,y:.88},then:[{action:'key',key:'enter',purpose:'submit',modifiers:[],afterMs:1}]}:{action:'done',completed:false,receipt:{observed:'not_applied',draft:'absent',basis:'another frame has no message'}};
- await assert.rejects(f.service.runOwned(f.service.generation,f.taskScope),/当前画面不属于原会话/);assert(f.service.task.submitAttemptedAt);assert.equal(f.service.task.effectReviews,undefined);assert.equal(f.events.filter(e=>e.op==='key').length,1);await f.service.close();
+ await assert.rejects(f.service.runOwned(f.service.generation,f.taskScope),{code:'E_SUBMISSION_UNCERTAIN'});assert(f.service.task.submitAttemptedAt);assert.equal(f.service.task.effectReviews[0].verified,false);assert.equal(f.events.filter(e=>e.op==='key').length,1);await f.service.close();
 });
 test('sequence structure cannot hide another input after submit or mislabel a send as navigation',()=>{
  assert.throws(()=>validateAction({action:'type',text:'hello',then:[{action:'key',key:'enter',purpose:'submit'},{action:'type',text:'again'}]}));

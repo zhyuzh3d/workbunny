@@ -5,12 +5,13 @@
        textarea, select) {
   appearance: none;
   min-width: 0;
-  border: 1px solid rgba(30, 24, 18, .12);
-  border-radius: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius);
+  min-height: var(--control-height);
   padding: 6px 9px;
-  background-color: #fffdfa;
+  background-color: var(--paper);
   color: var(--ink);
-  font: 12px/1.5 var(--font);
+  font: var(--text-ui)/1.5 var(--font);
   outline: 0;
   transition: border-color .14s, box-shadow .14s, background-color .14s;
   -webkit-user-select: text;
@@ -21,7 +22,7 @@
 select {
   appearance: none;
   padding-right: 28px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m3 4.5 3 3 3-3' fill='none' stroke='%23777f89' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-image: var(--select-chevron);
   background-repeat: no-repeat;
   background-position: right 9px center;
   background-size: 12px;
@@ -29,20 +30,20 @@ select {
 }
 
 textarea { resize: vertical; }
-input::placeholder, textarea::placeholder { color: #8a9099; opacity: 1; }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 
 :where(input:not([type]), input[type="text"], input[type="search"], input[type="password"],
        input[type="url"], input[type="email"], input[type="tel"], input[type="number"],
        textarea, select):focus {
-  border-color: #9c9488;
-  background-color: #fff;
-  box-shadow: 0 0 0 2px rgba(74, 80, 88, .10);
+  border-color: var(--accent);
+  background-color: var(--paper);
+  box-shadow: 0 0 0 2px var(--accent-ring);
 }
 
 :where(input:not([type]), input[type="text"], input[type="search"], input[type="password"],
        input[type="url"], input[type="email"], input[type="tel"], input[type="number"],
        textarea, select):disabled {
-  opacity: .5;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 
@@ -50,17 +51,17 @@ input::placeholder, textarea::placeholder { color: #8a9099; opacity: 1; }
 input[type="checkbox"] {
   appearance:none; -webkit-appearance:none; position:relative; display:inline-block;
   flex:0 0 36px; width:36px; height:20px; margin:0; padding:0; opacity:1;
-  border:1px solid #d2cec7; border-radius:99px; background:#d8d5cf; vertical-align:middle;
+  border:1px solid var(--control-border); border-radius:99px; background:var(--switch-off); vertical-align:middle;
   cursor:pointer; transition:background .15s,border-color .15s;
 }
 input[type="checkbox"]::before {
   content:""; position:absolute; top:1px; left:1px; width:16px; height:16px;
-  border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.18); transition:transform .15s;
+  border-radius:50%; background:var(--paper); box-shadow:var(--shadow-thumb); transition:transform .15s;
 }
-input[type="checkbox"]:checked { background:#5b805f; border-color:#5b805f; }
+input[type="checkbox"]:checked { background:var(--accent); border-color:var(--accent); }
 input[type="checkbox"]:checked::before { transform:translateX(16px); }
-input[type="checkbox"]:focus-visible { box-shadow:0 0 0 2px rgba(74,80,88,.18); }
-input[type="checkbox"]:disabled { opacity:.4; cursor:default; }
+input[type="checkbox"]:focus-visible { box-shadow:0 0 0 2px var(--accent-ring); }
+input[type="checkbox"]:disabled { opacity:var(--disabled-opacity); cursor:default; }
 
 .row > .credential-field, .credential-field {
   position:relative; display:block; flex:1 1 auto; min-width:0; color:var(--ink);
@@ -70,7 +71,7 @@ input[type="checkbox"]:disabled { opacity:.4; cursor:default; }
 .credential-field > .credential-preview {
   position:absolute; left:10px; right:32px; top:50%; transform:translateY(-50%);
   overflow:hidden; white-space:nowrap; text-overflow:ellipsis; pointer-events:none;
-  color:var(--ink); font:12px/1.5 var(--font);
+  color:var(--ink); font:var(--text-ui)/1.5 var(--font);
 }
 .credential-field > input:disabled + .credential-preview { opacity:.5; }
 .credential-field > .credential-clear {
@@ -78,5 +79,5 @@ input[type="checkbox"]:disabled { opacity:.4; cursor:default; }
   width:22px; height:22px; min-width:0; padding:0; border:0; border-radius:50%; box-shadow:none;
   background:transparent; color:var(--ink-soft); font:18px/1 var(--font); cursor:pointer;
 }
-.credential-field > .credential-clear:hover { background:rgba(30,24,18,.07); }
+.credential-field > .credential-clear:hover { background:var(--line); }
 .credential-field > .credential-clear[hidden] { display:none; }

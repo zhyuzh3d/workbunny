@@ -61,3 +61,7 @@ test('fragment limits are enforced even if a loader ignores tuning, and exhauste
  assert(full.metadata.requiredOverBudget);assert.equal(reads,0);assert.equal(full.metadata.omitted[0].reason,'budget');
  const controller=new AbortController();await assert.rejects(assembleContext({signal:controller.signal,fragments:[{id:'core',required:true,load:async()=>{controller.abort();return {goal:'cancelled'};}}]}),{code:'E_ABORTED'});
 });
+test('tag-scoped innate and learned software guides cannot leak into another execution context',()=>{
+ const items=[{sourceId:'wx',tags:['software:wechat'],instructions:'微信专用操作'},{sourceId:'wb',tags:['software:workbuddy'],instructions:'WorkBuddy操作'},{sourceId:'mixed',tags:['software:wechat','software:workbuddy'],instructions:'跨软件操作'},{sourceId:'common',tags:['general:computer'],instructions:'通用框架经验'}];
+ assert.deepEqual(selectExperience(items,{applications:['workbuddy']}).map(i=>i.sourceId),['wb','common']);assert.deepEqual(selectExperience(items,{applications:[]}).map(i=>i.sourceId),['common']);assert.deepEqual(selectExperience(items,{applications:['workbuddy','wechat']}).map(i=>i.sourceId),['wx','wb','mixed','common']);
+});

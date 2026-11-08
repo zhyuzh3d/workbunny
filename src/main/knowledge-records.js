@@ -3,7 +3,7 @@
 const ORIGINS = Object.freeze({ relation: 'semantic-relation-v1', doubt: 'memory-doubt-v1',
   experience: 'task-experience-v1', tool: 'verified-tool-v1', decision: 'doubt-resolution-v1' });
 const TYPES = Object.freeze(Object.keys(ORIGINS));
-const LABELS = Object.freeze({ relation: '相关陈述', doubt: '待核对', experience: '经验', tool: '工具', decision: '核对记录' });
+const LABELS = Object.freeze({ relation: '记忆关联', doubt: '记忆疑问', experience: '经验', tool: '工具', decision: '澄清记录' });
 function typeOf(record) {
   if (record?.kind !== 'state') return null;
   if(record.value?.evidenceOnly)return null;

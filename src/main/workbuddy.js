@@ -44,6 +44,16 @@ function proof(ticket, side, endpoint, clientNonce, serverNonce) {
   return crypto.createHmac('sha256', ticket).update(Buffer.concat(parts)).digest('base64url');
 }
 
+function brokerTransportDiagnostic(frame,params) {
+  const provided = frame.error?.data?.limitBytes;
+  const match = typeof frame.error?.message === 'string' && /^response exceeds inline limit of ([1-9][0-9]{0,15}) bytes$/u.exec(frame.error.message);
+  const parsed = match ? Number(match[1]) : undefined;
+  const limitBytes = Number.isSafeInteger(provided) && provided > 0 ? provided :
+    Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+  const requestKind=params?.path==='/v2/chat/completions'?'model-completion':params?.path==='/v2/enterprises/personal/models'?'model-catalog':null;
+  return { source: 'broker', stage: frame.id === 2 ? 'http-response' : 'pipe-discovery', ...(limitBytes ? { limitBytes } : {}),...(requestKind?{requestKind}:{}) };
+}
+
 function request(params, { signal, timeoutMs = 55000, discover = discovery } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(Object.assign(new Error('aborted'), { code: 'ABORT_ERR' })); return; }
@@ -109,7 +119,8 @@ function request(params, { signal, timeoutMs = 55000, discover = discovery } = {
               const supplied = String(frame.error.code || '');
               const code = /^(?:E_[A-Z0-9_]{1,80}|-?\d{1,10})$/u.test(supplied) ? supplied : 'E_BROKER';
               throw Object.assign(new Error(code === 'E_PAYLOAD_TOO_LARGE'
-                ? 'WorkBuddy 本地转发的回答超过大小限制，请缩短本轮输出或推理预算。' : 'WorkBuddy 请求失败：' + code), { code });
+                ? 'WorkBuddy 本地转发的回答超过大小限制，请缩短本轮输出或推理预算。' : 'WorkBuddy 请求失败：' + code),
+                { code, diagnostic: { transport: brokerTransportDiagnostic(frame,params) } });
             }
             const result = frame.result;
             if (frame.id === 1) {
@@ -134,7 +145,9 @@ function request(params, { signal, timeoutMs = 55000, discover = discovery } = {
           }
         });
       } catch (error) {
-        if (error.code === 'E_JSON_LINE_LIMIT') error = Object.assign(new Error('WorkBuddy 返回内容过大'), { code: 'E_PAYLOAD_TOO_LARGE' });
+        if (error.code === 'E_JSON_LINE_LIMIT') error = Object.assign(new Error('WorkBuddy 返回内容过大'), {
+          code: 'E_PAYLOAD_TOO_LARGE', diagnostic: { transport: { source: 'local-jsonl', stage: 'frame', limitBytes: frames.maxBytes } },
+        });
         else if (error instanceof SyntaxError) error = new Error('WorkBuddy 返回格式异常');
         finish(error);
       }
@@ -157,17 +170,34 @@ async function chatWithTransport(opts, transport) {
   opts = require('./context-budget').fitRequest({ ...opts, provider: 'workbuddy' });
   const { model = 'hy3', signal, onDelta, onSentence } = opts;
   const payload = chatPayload(opts);
-  const r = await transport({ method: 'POST', path: '/v2/chat/completions',
-    headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
-    body_b64: Buffer.from(JSON.stringify(payload)).toString('base64'),
-  }, { signal, timeoutMs: opts.timeoutMs });
-  const { raw, model: usedModel, usage, toolCalls } = parseChatBody(r.body, model);
-  if (toolCalls?.length) return { text: '', raw: '', model: usedModel, usage, provider: 'workbuddy', toolCalls };
+  let response, parsing = false;
+  try {
+    const r = await transport({ method: 'POST', path: '/v2/chat/completions',
+      headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+      body_b64: Buffer.from(JSON.stringify(payload)).toString('base64'),
+    }, { signal, timeoutMs: opts.timeoutMs });
+    parsing = true;
+    response = parseChatBody(r.body, model);
+  }
+  catch (error) {
+    const prior = error.diagnostic && typeof error.diagnostic === 'object' && !Array.isArray(error.diagnostic) ? error.diagnostic : {};
+    const usage = parsing ? sanitizeUsage(error.usage) : null;
+    error.diagnostic = { ...prior, ...(opts.contextBudget?{budget:require('./context-budget').diagnostic(opts.contextBudget)}:{}), completion: {
+      ...(typeof payload.model === 'string' && /^[a-zA-Z0-9_.:-]{1,80}$/u.test(payload.model) ? { model: payload.model } : {}),
+      ...(Number.isSafeInteger(payload.max_tokens) && payload.max_tokens > 0 ? { maxOutputTokens: payload.max_tokens } : {}),
+      ...(parsing && typeof error.finishReason === 'string' ? { finishReason: error.finishReason } : {}),
+      ...(parsing && typeof error.hasReasoning === 'boolean' ? { hasReasoning: error.hasReasoning } : {}),
+      ...(usage ? { usage } : {}),
+    } };
+    throw error;
+  }
+  const { raw, model: usedModel, usage, toolCalls, finishReason } = response;
+  if (toolCalls?.length) return { text: '', raw: '', model: usedModel, usage, finishReason, provider: 'workbuddy', toolCalls,contextBudget:opts.contextBudget };
   if (onDelta) onDelta(raw);
   const { extractTags, makeSentenceSplitter } = require('./llm');
   if (onSentence) { const split = makeSentenceSplitter(onSentence); split.push(raw); split.flush(); }
   const parsed = extractTags(raw);
-  return { ...parsed, text: parsed.clean.trim(), raw, model: usedModel, usage, provider: 'workbuddy' };
+  return { ...parsed, text: parsed.clean.trim(), raw, model: usedModel, usage, finishReason, provider: 'workbuddy',contextBudget:opts.contextBudget };
 }
 
 async function chat(opts) {

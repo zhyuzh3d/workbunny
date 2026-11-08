@@ -38,7 +38,7 @@ test('attention is visible first and ongoing tasks cannot be dismissed by a stal
 });
 test('a selected finished task stays readable until collapse; closing removes the stopped row',()=>{
  const task=publicTask(monitor('selected',{status:'stopped',updatedAt:now-20000}));
- const input={agent:{tasks:[task]},now};assert.equal(taskActivity(input).length,0);const rows=taskActivity({...input,selectedKey:'agent#selected'});assert.equal(rows.length,1);assert.equal(rows[0].action,null);assert.equal(rows[0].expiresAt,undefined);
+ const input={agent:{tasks:[task]},now};assert.equal(taskActivity(input).length,0);const rows=taskActivity({...input,selectedKey:'agent#selected'});assert.equal(rows.length,1);assert.equal(rows[0].action,'archive');assert.equal(rows[0].expiresAt,undefined);
 });
 test('continuous monitoring and actual work phases share a small status presentation',()=>{
  assert.equal(taskPresentation(monitor('Alice')).statusLabel,'持续监看');
@@ -54,3 +54,5 @@ test('only completed tasks get a checkmark; active rows target a real stop and q
  assert(!rows.some(r=>r.taskId==='waiting-to-start'));assert.equal(rows.find(r=>r.taskId==='active').action,'stop');assert.equal(rows.find(r=>r.taskId==='done').action,'dismiss');
  assert.deepEqual(rows.find(r=>r.key==='manual#7').ref,{source:'workbuddy',sessionId:'manual',taskId:7});assert.equal(rows.find(r=>r.key==='failure#8').action,null);
 });
+
+test('archived task identities suppress only their own logical and executor rows',()=>{const task=publicTask(monitor('hidden',{status:'stopped',listArchived:true,updatedAt:now}));const rows=taskActivity({agent:{tasks:[task],archivedTaskIds:['hidden'],archivedWorkJobIds:['old-job']},desktop:{task:{id:'old-job',status:'monitoring',sources:['hidden']}},work:{tasks:[{bunnyTaskId:'old-job',sessionId:'old',taskId:1,status:'running'},{sessionId:'manual',taskId:2,status:'running',name:'manual'}]},now});assert.equal(rows.length,1);assert.equal(rows[0].key,'manual#2');});

@@ -4,7 +4,8 @@ async function enqueue(learning,task,run){
  if(task.scene==='private'||task.visibilityFloor>1||['skill.learn','task.resolve'].includes(task.skill)||task.state.sensitiveContext)return;
  const operations=Object.values(task.operations||{}).filter(op=>!run||op.actionId===run.id).slice(-12);
  const attempts=operations.length?operations.map(op=>({tool:op.tool,...(op.error?{error:String(op.error).slice(0,300)}:{}),
-  ...(op.status==='confirmed'?{result:{verified:op.result?.verified===true&&op.result?.receipt?.inputPerformed!==true,...(op.result?.exitCode!==undefined?{exitCode:op.result.exitCode}:{})}}:{})})):run?[]:task.state.attempts||[];
+  ...(!op.tool.startsWith('conversation.')&&!['result.deliver','result.attach'].includes(op.tool)?{method:Object.fromEntries(['application','command','args','action','role','label','purpose'].filter(k=>op.args?.[k]!==undefined).map(k=>[k,Array.isArray(op.args[k])?op.args[k].slice(0,12).map(v=>String(v).slice(0,240)):typeof op.args[k]==='string'?op.args[k].slice(0,600):op.args[k]]))}:{}),
+  ...(op.status==='confirmed'?{result:{verified:op.result?.verified===true&&op.result?.receipt?.inputPerformed!==true,...(op.result?.exitCode!==undefined?{exitCode:op.result.exitCode}:{}),...(typeof op.result?.stdout==='string'?{stdout:op.result.stdout.slice(-1000)}:{}),...(typeof op.result?.stderr==='string'?{stderr:op.result.stderr.slice(-600)}:{})}}:{})})):run?[]:task.state.attempts||[];
  if(!attempts.some(a=>a.error&&!/授权|空闲|网络|超时|timeout/iu.test(a.error))){
   if(!run&&task.status==='completed'&&attempts.some(a=>a.result?.verified===true)){}
   else {if(!run?.recovery&&!(run?.progress?.reviews>0))return;attempts.unshift({tool:'action.progress',error:'E_NO_PROGRESS: repeated evidence required recovery'});}
@@ -12,7 +13,7 @@ async function enqueue(learning,task,run){
  const memory=learning.memory,id='task-experience-queue:'+task.id+(run?':'+run.id:'');
  if((await readRecords(memory,[id])).length)return;
  const input={id,sourceTaskId:task.id,skill:task.skill,status:run?.status==='needs_attention'?'needs_attention':'completed',scene:task.scene,visibilityFloor:task.visibilityFloor,
-  goal:String(task.goal||'').slice(0,700),criteria:String(task.criteria||'').slice(0,400),subjects:(task.subjects||[]).map(s=>({application:s.application})),state:{attempts,softwarePackages:task.state.softwarePackages||[]}};
+  goal:String(task.goal||'').slice(0,700),criteria:String(task.criteria||'').slice(0,400),subjects:(task.subjects||[]).map(s=>({application:s.application})),state:{attempts,softwarePackages:task.state.softwarePackages||[],softwareMethods:task.state.softwareMethods||[],experienceReviews:task.state.experienceReviews||[]}};
  if(require('./sensitive-policy').hasProtectedContent(JSON.stringify(input),await memory.sensitiveValues()))return;
  await memory.write([{id,kind:'state',ts:Date.now(),domain:task.scene,visibilityFloor:task.visibilityFloor,
   value:{origin:'task-experience-queue-v1',status:'pending',taskId:task.id,input,sources:[task.id]}}]);return true;

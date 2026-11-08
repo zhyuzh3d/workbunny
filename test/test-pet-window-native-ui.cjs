@@ -1,0 +1,19 @@
+'use strict';
+// Directed compositor events in a hidden isolated window; no system mouse/UI control.
+const {app,BrowserWindow,ipcMain}=require('electron'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{pathToFileURL}=require('node:url'),assert=require('node:assert/strict');
+const {PetWindowInput}=require('../src/main/pet-window-input');
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'bunny-native-input-'));app.setPath('userData',path.join(root,'electron'));let win,gate,point={x:-1,y:-1};const operations=[],mouse=[];
+const sleep=ms=>new Promise(r=>setTimeout(r,ms)),evaluate=code=>win.webContents.executeJavaScript(code,true);
+async function until(check){for(let i=0;i<100;i++){if(await check())return;await sleep(40);}throw Error('input fixture timed out');}
+async function run(){
+ await app.whenReady();const style=pathToFileURL(path.resolve('src/renderer/style.css')).href,module=pathToFileURL(path.resolve('src/renderer/window-input-regions.mjs')).href;
+ const html=path.join(root,'input.html');fs.writeFileSync(html,`<!doctype html><html><head><link rel="stylesheet" href="${style}"></head><body><div id="activity"><span>已停止 · 保留错误日志</span><button id="actDone" aria-label="移出任务列表">×</button></div><script type="module">import {observeInputRegions} from '${module}';window.__clicks=0;document.getElementById('actDone').onclick=async()=>{window.__clicks++;await window.pet.activityControl('archive',{source:'agent',id:'fixture-ended'});document.getElementById('activity').classList.add('hidden');};observeInputRegions({publish:v=>window.pet.inputRegions(v)});</script></body></html>`);
+ win=new BrowserWindow({title:'Bunny isolated input fixture',show:false,width:828,height:789,transparent:true,frame:false,hasShadow:false,acceptFirstMouse:true,webPreferences:{preload:path.resolve('src/preload.js'),contextIsolation:true,sandbox:false,backgroundThrottling:false}});
+ win.setIgnoreMouseEvents(true,{forward:true});gate=new PetWindowInput({window:win,screen:{getCursorScreenPoint:()=>point}}).start();
+ ipcMain.on('pet:input-regions',(event,value)=>{if(event.sender===win.webContents)gate.setGeometry(value);});ipcMain.on('pet:hit',(_event,value)=>gate.setHover(value));ipcMain.handle('pet:activity-control',(_event,value)=>{operations.push(value);return {ok:true};});
+ win.webContents.on('before-mouse-event',(_event,event)=>{if(event.type==='mouseDown')mouse.push({x:event.x,y:event.y});});
+ await win.loadFile(html);await until(()=>Promise.resolve(gate.geometry?.regions.length>0));const rect=await evaluate('(()=>{const r=document.getElementById("actDone").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()'),bounds=win.getContentBounds();
+ point={x:bounds.x+rect.x,y:bounds.y+rect.y};gate.refresh();assert.equal(gate.last.interactive,true);win.webContents.sendInputEvent({type:'mouseMove',x:Math.round(rect.x),y:Math.round(rect.y)});win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,x:Math.round(rect.x),y:Math.round(rect.y)});win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,x:Math.round(rect.x),y:Math.round(rect.y)});
+ await until(()=>Promise.resolve(operations.length===1));assert.equal(operations[0].operation,'archive');await until(()=>Promise.resolve(gate.geometry?.regions.length===0));gate.refresh();assert.equal(gate.last.interactive,false);assert.equal(await evaluate('window.__clicks'),1);assert(mouse.length>0);console.log(JSON.stringify({passed:true,liveNative:false,realTransparentWindow:true,compositorMouseEvents:mouse.length,screenPoint:point,operation:operations[0].operation,releasedAfterRemoval:true,fixtureDirectory:root}));
+}
+run().then(async()=>{gate?.close();win?.destroy();app.exit(0);},async error=>{console.error(error.stack);gate?.close();win?.destroy();app.exit(1);});

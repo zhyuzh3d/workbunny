@@ -181,7 +181,7 @@ function validCollectedArtifact(item, expected) {
   return { ...expected, code: codeBytes.length <= MAX_SNAPSHOT_BYTES ? item.code : null };
 }
 
-function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = defaultCollectArtifacts } = {}) {
+function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = defaultCollectArtifacts, artifactTimeoutMs = 15000 } = {}) {
   if (!memory || typeof memory.write !== 'function' || typeof memory.serial !== 'function' ||
       typeof memory.decode !== 'function' || typeof memory.search !== 'function' ||
       typeof collectArtifacts !== 'function') throw new TypeError('ExperienceMemory requires MemoryService and an artifact collector');
@@ -251,13 +251,31 @@ function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = d
     } catch { return []; }
   }
 
-  async function recordAcceptedTask(taskId, { epoch } = {}) {
-    return memory.serial(async () => {
-      const initial = await readVerifiedTask(taskId, epoch);
+  async function recordAcceptedTask(taskId, { epoch = memory.generation, signal } = {}) {
+    const preparation = require('./bounded-wait').createBoundedWait({ signal, timeoutMs: artifactTimeoutMs,
+      code: 'E_ARTIFACT_PREPARATION_TIMEOUT', message: '文件证据读取超时，本次经验未提交。' });
+    let initial, acceptedArtifacts, manifest;
+    try {
+      initial = await preparation.run(() => readVerifiedTask(taskId, epoch));
       if (!initial) return { ok: false, reason: 'task-not-accepted-or-source-invalid' };
+      manifest = normalizeManifest(initial.task);
+      acceptedArtifacts = await preparation.run(() => collect(initial.task, manifest));
+      // Filesystem work never holds the global memory write lane. Evidence is
+      // prepared twice, then the authorization/source snapshot is checked again
+      // under the serial lane immediately before committing.
+      const latestArtifacts = await preparation.run(() => collect(initial.task, manifest));
+      const latestByPath = new Map(latestArtifacts.map(item => [item.path, item]));
+      if (acceptedArtifacts.some(item => latestByPath.get(item.path)?.sha256 !== item.sha256 || latestByPath.get(item.path)?.mtimeMs !== item.mtimeMs)) {
+        return { ok: false, reason: 'artifact-changed-before-commit' };
+      }
+    } catch (error) {
+      if (error.code === 'E_ARTIFACT_PREPARATION_TIMEOUT') return { ok: false, reason: 'artifact-preparation-timeout' };
+      if (signal?.aborted) return { ok: false, reason: 'cancelled' };
+      throw error;
+    } finally { preparation.close(); }
+    return memory.serial(async () => {
+      if (signal?.aborted) return { ok: false, reason: 'cancelled' };
       const task = initial.task, value = task.value;
-      const manifest = normalizeManifest(task);
-      const acceptedArtifacts = await collect(task, manifest);
       if (epoch !== undefined && epoch !== memory.generation) return { ok: false, reason: 'epoch-changed' };
       const checked = await readVerifiedTask(taskId, epoch);
       if (!checked || checked.receipt !== initial.receipt || JSON.stringify(checked.snapshots) !== JSON.stringify(initial.snapshots)) {
@@ -331,16 +349,11 @@ function createExperienceMemory({ memory, clock = Date.now, collectArtifacts = d
         });
       }
       if (records.length) {
-        // Re-read authorization files immediately before committing the snapshot.
-        const latestArtifacts = await collect(task, manifest);
-        const latestByPath = new Map(latestArtifacts.map(item => [item.path, item]));
-        if (acceptedArtifacts.some(item => latestByPath.get(item.path)?.sha256 !== item.sha256 || latestByPath.get(item.path)?.mtimeMs !== item.mtimeMs)) {
-          return { ok: false, reason: 'artifact-changed-before-commit' };
-        }
         const beforeWrite = await readVerifiedTask(taskId, epoch);
         if (!beforeWrite || beforeWrite.receipt !== checked.receipt || JSON.stringify(beforeWrite.snapshots) !== JSON.stringify(checked.snapshots)) {
           return { ok: false, reason: 'source-changed-before-commit' };
         }
+        if (signal?.aborted || epoch !== memory.generation) return { ok: false, reason: 'cancelled' };
         for (const record of records) record.value = require('./memory-tags').tagged(record.value, ['automatic']);
         await memory.write(records);
       }

@@ -1,7 +1,7 @@
 'use strict';
 const requirements={
  'screen.observe':['screenCaptureAllowed'],'screen.activate':['accessibilityTrusted','postEventAllowed'],'screen.action':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
- 'terminal.execute':['terminal'], 'system.configure':['systemConfiguration'], 'system.restore':['systemConfiguration'],
+ 'terminal.execute':['terminal'], 'software.command':['terminal'], 'software.interface':['accessibilityTrusted'], 'software.control':['accessibilityTrusted'], 'software.recover':['accessibilityTrusted'], 'system.configure':['systemConfiguration'], 'system.restore':['systemConfiguration'],
  'work.submit':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
  'result.deliver':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
  'result.attach':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
@@ -15,7 +15,7 @@ const titles={terminal:'非破坏性终端',systemConfiguration:'操作系统配
 const localSetting = name => name === 'terminal' || name === 'systemConfiguration';
 function requiredFor(tool, args = {}) {
  const required = [...(requirements[tool.name] || [])];
- if (tool.name === 'terminal.execute' && args.impact === 'configuration') required.push('systemConfiguration');
+ if (['terminal.execute','software.command'].includes(tool.name) && args.impact === 'configuration') required.push('systemConfiguration');
  return required;
 }
 function denied(tool, args, missing) {
@@ -29,8 +29,8 @@ class AuthorizationService{
   const system=required.some(k=>!localSetting(k))?await this.permissions():{},flags=this.settings();
   return required.filter(k=>localSetting(k)?flags[k]!==true:system[k]!==true);
  }
- async check(tool,args,task){
-  const missing=await this.inspect(tool,args);const record={tool:tool.name,checkedAt:Date.now(),missing};this.last.set(task.id,record);
+ async check(tool,args,task,{signal,isCurrent=()=>true}={}){
+  const missing=await this.inspect(tool,args);if(signal?.aborted||!isCurrent())throw Object.assign(Error('任务已停止，未继续申请权限'),{dispatched:false});const record={tool:tool.name,checkedAt:Date.now(),missing};this.last.set(task.id,record);
   task.state??={};task.state.authorizationChecks??=[];const previous=task.state.authorizationChecks.at(-1);if(previous?.tool!==record.tool||JSON.stringify(previous?.missing)!==JSON.stringify(missing)){task.state.authorizationChecks.push(record);task.state.authorizationChecks=task.state.authorizationChecks.slice(-24);}
   if(!missing.length){
    await this.resolve(task.id);

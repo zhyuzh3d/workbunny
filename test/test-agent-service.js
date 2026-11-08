@@ -8,7 +8,7 @@ function fixture(){
  const desktop={running:false,task:null,screenshot:{captureSource:'fixture'},publicStatus(){return {screenshot:'data:image/png;base64,eA=='};},
   async start(value){if(value.target==='workbuddy'){workCount++;this.task={...value,id:'work-'+workCount,status:'monitoring',handoffSent:true,monitorSessionId:'fixture-session',note:'working'};}
    else{this.task={...value,id:'send-'+(outgoing.length+1),status:'review',sendState:'confirmed',submitAttemptedAt:Date.now()};if(value.operation==='send'){outgoing.push(value.message);messages.push({direction:'outgoing',kind:'text',text:value.message,time:'',observedVerified:true});}}
-   return {ok:true,id:this.task.id};},async accept({report}){this.task.status='accepted';this.task.report=report;},async stop(){this.running=false;}};
+   return {ok:true,id:this.task.id};},async accept({report}){this.task.status='accepted';this.task.report=report;},async stop(){this.running=false;},async suspend(){this.running=false;if(this.task)this.task.status='paused';}};
  const conversationDesktop={...desktop,task:null};
  const request=async opts=>{
   const input=JSON.parse(opts.messages[1].content);
@@ -39,6 +39,44 @@ test('ordinary contacts and remote messages cannot bind themselves as the owner'
  await assert.rejects(h.agent.bindOwner(subject,{...h.owner,channel:'bound-contact'}),/本机/);
  await assert.rejects(h.agent.dispatchOwner({...subject,text:'do work',eventKey:'fake'},{task:{parameters:{behavior:'reply'},authority:h.owner}}),/不是/);
  assert.equal(h.workCount(),0);await h.agent.close();
+});
+test('an old runner-start receipt recovers the same WorkBuddy draft before confirming submission',async()=>{
+ const h=fixture(),started=await h.agent.start({skill:'work.delegate',goal:'recover original work',subjects:[{application:'workbuddy'}]},h.owner);
+ await h.agent.runtime.tick(started.id);const task=h.agent.runtime.tasks.get(started.id),physical=h.desktop.task;
+ const op=Object.values(task.operations).find(o=>o.tool==='work.submit');
+ delete op.result.sessionId;delete task.state.job.sessionId;delete physical.monitorSessionId;physical.handoffSent=false;physical.draftInserted=true;physical.status='paused';task.status='needs_attention';
+ physical.steps=[{action:'type',purpose:'task',state:'input-sent',at:1}];
+ let continued=0;h.desktop.resume=async()=>{throw Error('must not refill a preserved draft');};h.desktop.recoverWorkBuddySubmission=async()=>{continued++;physical.handoffSent=true;physical.sessionId='real-restored-session';physical.monitorSessionId=physical.sessionId;physical.status='monitoring';return {ok:true,verified:true,jobId:physical.id,sessionId:physical.sessionId};};
+ await h.agent.repairLegacyWorkReceipts();assert.equal(op.status,'intent');assert.equal(task.state.job,undefined);
+ assert((await h.agent.control('resume',task.id)).ok);await h.agent.runtime.tick(task.id);
+ assert.equal(continued,1);assert.equal(h.workCount(),1);assert.equal(task.state.job.sessionId,'real-restored-session');assert.equal(op.status,'confirmed');
+ await h.agent.close();
+});
+test('lost WorkBuddy send receipts reconcile using the saved attempt time without sending again',async()=>{
+ const h=fixture(),started=await h.agent.start({skill:'work.delegate',goal:'recover send receipt',subjects:[{application:'workbuddy'}]},h.owner);
+ await h.agent.runtime.tick(started.id);const task=h.agent.runtime.tasks.get(started.id),physical=h.desktop.task,op=Object.values(task.operations).find(o=>o.tool==='work.submit');
+ op.status='intent';delete op.result;task.status='needs_attention';delete task.state.job;
+ delete physical.monitorSessionId;physical.handoffSent=false;physical.submitAttemptedAt=12345;
+ h.desktop.observeWorkBuddy=async p=>{assert.equal(p.submittedAt,12345);return {sessionId:'observed-session',taskId:1,messageKey:'observed-message'};};
+ h.desktop.resume=async()=>{throw Error('must only observe');};
+ assert((await h.agent.reconcile(task.id)).ok);assert.equal(op.result.sessionId,'observed-session');assert.equal(h.workCount(),1);await h.agent.close();
+});
+test('a recovered live WorkBuddy session supersedes the old runner pause without resubmitting',async()=>{
+ const h=fixture(),started=await h.agent.start({skill:'work.delegate',goal:'track recovered work',subjects:[{application:'workbuddy'}]},h.owner);
+ await h.agent.runtime.tick(started.id);const task=h.agent.runtime.tasks.get(started.id);h.desktop.task.status='paused';h.desktop.task.note='应用退出';h.desktop.observeWorkBuddy=async()=>({status:'running'});
+ await h.agent.runtime.tick(task.id);assert.equal(task.status,'waiting');assert.equal(h.desktop.task.status,'monitoring');assert.equal(h.workCount(),1);await h.agent.close();
+});
+test('a WorkBuddy draft conflict is actionable and does not keep retrying an unsent delegation',async()=>{
+ const h=fixture();let starts=0;
+ h.desktop.start=async function(value){starts++;this.task={...value,id:'blocked-work',status:'paused',note:'通用任务页有未发送草稿',errorCode:'E_WORKBUDDY_DRAFT_CONFLICT'};return {ok:true};};
+ const started=await h.agent.start({skill:'work.delegate',goal:'create a learning page',subjects:[{application:'workbuddy'}]},h.owner);
+ await h.agent.runtime.tick(started.id);const task=h.agent.runtime.tasks.get(started.id);
+ assert.equal(task.status,'needs_attention');assert.equal(task.state.lastFailure.code,'E_WORKBUDDY_DRAFT_CONFLICT');
+ assert.equal(Object.values(task.operations)[0].status,'not_dispatched');assert.equal(task.state.job,undefined);
+ const view=require('../src/main/task-presentation').taskPresentation(task);
+ assert.equal(view.statusLabel,'等待处理 WorkBuddy 草稿');assert.match(view.guidance.detail,/保存或处理草稿/);
+ await h.agent.runtime.tick(started.id);assert.equal(starts,1);assert.equal(require('../src/main/self-repair').category({code:'E_WORKBUDDY_DRAFT_CONFLICT'}),null);
+ await h.agent.close();
 });
 test('owner bindings in different scenes cannot overwrite one another',async()=>{
  const h=fixture(),subject={application:'wechat',recipient:'Alice'};
@@ -193,16 +231,16 @@ test('failed full-screen reconnection remains actionable and never reports that 
 });
 test('a restored delegated job is checked against its bound live session without a new GUI submission',async()=>{
  const h=fixture(),started=await h.agent.start({skill:'work.delegate',goal:'Create test report',subjects:[{application:'workbuddy'}]},h.owner);
- await h.agent.runtime.tick(started.id);const physical=structuredClone(h.desktop.task);h.desktop.task=null;
- const saved=[];h.desktop.persist=async record=>saved.push(record);h.desktop.observeWorkBuddy=async task=>{assert.equal(task.id,physical.id);return {status:'ok',summary:'Actual bound session completed the test report'};};
- h.agent.memory={ready:true,db:{request:async()=>({rows:[{state:'active',value:physical}]})},decode:row=>row,addMessageOnce:async()=>{}};
- await h.agent.runtime.tick(started.id);assert.equal(h.workCount(),1);assert.equal(h.agent.runtime.tasks.get(started.id).status,'completed');assert.equal(saved[0].status,'accepted');await h.agent.close();
+ await h.agent.runtime.tick(started.id);const physical={...structuredClone(h.desktop.task),submittedAt:100,monitorTaskId:1,monitorMessageKey:'fixture-message',monitorStatus:'running'};h.desktop.task=null;
+ const saved=[];h.desktop.persist=async record=>saved.push(record);h.desktop.observeWorkBuddy=async task=>{assert.equal(task.id,physical.id);return {sessionId:'fixture-session',taskId:1,messageKey:'fixture-message',status:'ok',startedAt:110,updatedAt:200,summary:'Actual bound session completed the test report'};};
+ h.agent.memory={ready:true,sensitiveValues:async()=>[],db:{request:async()=>({rows:[{state:'active',value:physical}]})},decode:row=>row,addMessageOnce:async()=>{}};
+ await h.agent.runtime.tick(started.id);assert.equal(h.workCount(),1);assert.equal(h.agent.runtime.tasks.get(started.id).status,'completed');assert.equal(saved[0].monitorStatus,'ok');assert.equal(saved.at(-1).status,'accepted');await h.agent.close();
 });
-test('delegation forwards the original owner wording and evidence path instead of a model paraphrase',async()=>{
- const h=fixture(),original='Create a UTF-8 file at /private/tmp/bunny-test.txt containing exactly "Test passed."';
- const started=await h.agent.dispatch({kind:'task',task:{skill:'work.delegate',goal:'Create a test file',subjects:[{application:'workbuddy'}]}},h.owner,{ownerRequest:original});
+test('delegation keeps original wording private and sends the complete interpreted execution brief',async()=>{
+ const h=fixture(),original='Do that earlier thing please; raw-private-sentinel';
+ const started=await h.agent.dispatch({kind:'task',task:{skill:'work.delegate',goal:'Create the requested test file and report',subjects:[{application:'workbuddy'}],workRequest:{goal:'Create a UTF-8 file at /private/tmp/bunny-test.txt containing exactly "Test passed."',context:'Use the confirmed UTF-8 format',criteria:'Read back the exact bytes',output:'files'},policy:'Do not modify other files'}},h.owner,{ownerRequest:original});
  await h.agent.runtime.tick(started.id);assert.equal(h.agent.runtime.tasks.get(started.id).state.ownerRequest,original);
- assert(h.desktop.task.goal.startsWith(original));assert.equal(h.desktop.task.userRequest,original);await h.agent.close();
+ assert(h.desktop.task.goal.includes('exactly "Test passed."'));assert(h.desktop.task.goal.includes('/private/tmp/bunny-test.txt'));assert(h.desktop.task.goal.includes('Do not modify other files'));assert.equal(h.desktop.task.criteria,'Read back the exact bytes');assert(!h.desktop.task.goal.includes(original));assert.equal(h.desktop.task.userRequest,original);await h.agent.close();
 });
 test('an explicit owner interval overrides an interpreter default before task admission',async()=>{
  const h=fixture(),result=await h.agent.start({skill:'conversation.manage',goal:'Watch Alice',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{behavior:'reply'},schedule:{intervalSeconds:60}},h.owner,{ownerRequest:'请每10秒观察Alice的新消息'});
@@ -221,7 +259,7 @@ test('an explicit duration remains separate from observation cadence and expires
  const h=fixture();
  const started=await h.agent.start({skill:'conversation.manage',goal:'watch',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{behavior:'notify'}},h.owner,{ownerRequest:'每60秒观察，持续30分钟'});
  assert(started.ok);const task=h.agent.runtime.tasks.get(started.id);assert.equal(task.schedule.intervalSeconds,60);assert.equal(task.schedule.durationMinutes,30);assert.equal(task.expiresAt-task.createdAt,1800000);
- task.expiresAt=Date.now()-1;await h.agent.runtime.tick(started.id);assert.equal(task.status,'expired');assert.equal(h.outgoing.length,0);await h.agent.close();
+ task.expiresAt=Date.now()-1;await h.agent.runtime.tick(started.id);assert.equal(h.agent.runtime.tasks.get(started.id).status,'expired');assert.equal(h.outgoing.length,0);await h.agent.close();
 });
 test('a status query reports the actual cadence and does not change the task',async()=>{
  const h=fixture(),started=await h.agent.start({skill:'conversation.manage',goal:'watch Alice',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{behavior:'notify'},schedule:{intervalSeconds:60}},h.owner);
@@ -356,7 +394,7 @@ test('a new message for the same contact supersedes a pre-draft reply and the me
   if(starts===1){this.running=true;entered();return {ok:true};}
   this.running=false;this.task.status='review';this.task.sendState='confirmed';this.task.submitAttemptedAt=Date.now();h.outgoing.push(value.message);messages.push({direction:'outgoing',kind:'text',text:value.message,time:'',observedVerified:true});return {ok:true};
  };
- h.conversationDesktop.stop=async function(){stopCount++;this.running=false;this.task.status='stopped';this.task.note='superseded';};
+ h.conversationDesktop.suspend=async function(){stopCount++;this.running=false;this.task.status='paused';this.task.note='superseded';};
  const subject={application:'wechat',recipient:'Alice'},task=await h.agent.start({skill:'conversation.manage',goal:'reply',subjects:[subject],parameters:{behavior:'reply'}},h.owner);
  await h.agent.runtime.tick(task.id);messages.push(incoming('first'));await h.agent.runtime.tick(task.id);
  const running=h.agent.runtime.tick(task.id);await started;messages.push(incoming('second'));await running;
@@ -425,7 +463,7 @@ test('a fresh pre-input check catches a same-contact message even before the per
   if(starts===1){messages.push({direction:'incoming',kind:'text',text:'second',time:'',incomingVerified:true});await this.beforeReplyInput();return {ok:true};}
   this.running=false;this.task.status='review';this.task.sendState='confirmed';this.task.submitAttemptedAt=Date.now();h.outgoing.push(value.message);return {ok:true};
  };
- h.conversationDesktop.stop=async function(){this.running=false;this.task.status='stopped';this.task.note='superseded';};
+ h.conversationDesktop.suspend=async function(){this.running=false;this.task.status='paused';this.task.note='superseded';};
  const a=await h.agent.start({skill:'conversation.manage',goal:'reply',subjects:[subject],parameters:{behavior:'reply'}},h.owner);await h.agent.runtime.tick(a.id);messages.push({direction:'incoming',kind:'text',text:'first',time:'',incomingVerified:true});await h.agent.runtime.tick(a.id);await h.agent.runtime.tick(a.id);
  assert(forced>=1);assert.equal(h.outgoing.length,0);assert.equal(h.agent.runtime.tasks.get(a.id).inbox.length,2);await h.agent.runtime.tick(a.id);assert.equal(h.outgoing.length,1);await h.agent.close();
 });
@@ -473,4 +511,31 @@ test('an admitted owner dispatch is reconciled from its task receipt without wai
  const requestKey='owner-dispatch:'+parent.id+':admit-one',child=await h.agent.command('Produce one report',h.owner,{requestKey,returnTo:{taskId:parent.id,subjectKey:'wechat:Alice'}});assert(child.ok);
  parent.status='needs_attention';parent.operations['admit-one']={id:'admit-one',tool:'owner.dispatch',effect:'write',status:'intent'};h.agent.canOperate=async()=>false;
  await h.agent.recoverPending();assert.equal(parent.operations['admit-one'].status,'confirmed');assert.equal(parent.operations['admit-one'].result.taskId,child.id);assert.equal(h.agent.runtime.tasks.size,2);assert.equal(h.outgoing.length,0);await h.agent.close();
+});
+test('permission maintenance cannot block independent pending-operation recovery',async()=>{
+ const h=fixture();let recovered=0;h.agent.refreshPermissions=async()=>new Promise(()=>{});h.agent.recoverPending=async()=>{recovered++;};void h.agent.maintain();await new Promise(r=>setImmediate(r));assert.equal(recovered,1);await h.agent.close();
+});
+test('work recovery records its actual check time and next retry instead of showing the stale normal cadence',async()=>{
+ const h=fixture(),started=await h.agent.start({skill:'work.delegate',goal:'recover work',subjects:[{application:'workbuddy'}]},h.owner),task=h.agent.runtime.tasks.get(started.id);
+ task.status='needs_attention';task.state.lastCheckedAt=1;task.operations.pending={id:'pending',effect:'write',tool:'work.submit',status:'intent'};
+ h.agent.reconcile=async()=>({ok:false,needsEvidence:true,error:'原草稿与完整会话还需核对'});await h.agent.recoverPending();
+ assert(task.state.lastCheckedAt>1);assert(task.state.reconciliation.pending.nextAt>task.state.lastCheckedAt);const view=h.agent.status().tasks.find(t=>t.id===task.id);assert.equal(view.presentation.guidance.title,'交办还需补证');assert.equal(view.presentation.guidance.working,false);assert.equal(view.presentation.guidance.nextCheckAt,task.state.reconciliation.pending.nextAt);await h.agent.close();
+});
+
+test('an uncertain external stop cannot be recovered, resumed, reported or delivered as the old task',async()=>{
+ const h=fixture(),start=await h.agent.start({skill:'work.delegate',goal:'stop pending submission',subjects:[{application:'workbuddy'}]},h.owner);await h.agent.runtime.tick(start.id);
+ const old=h.agent.runtime.tasks.get(start.id),op=Object.values(old.operations)[0];op.status='intent';delete op.result;old.status='needs_attention';h.agent.stopWork=async()=>{throw Error('no unique external round');};let recoveries=0;h.agent.reconcileWork=async()=>{recoveries++;return {ok:true};};
+ const result=await h.agent.control('stop',start.id),task=h.agent.runtime.tasks.get(start.id);assert.equal(result.ok,true);assert.equal(result.cleanupVerified,false);assert.equal(task.status,'stopped');assert.equal(task.state.stopRequest.phase,'failed');assert.equal(h.desktop.running,false);
+ await h.agent.recoverPending();assert.equal(recoveries,0);assert.equal((await h.agent.control('resume',start.id)).ok,false);assert.equal((await h.agent.reconcile(start.id)).ok,false);
+ await h.agent.routeReport({taskId:start.id,eventId:'late',text:'must not be delivered'});await h.agent.restoreReports();assert.equal(h.reports.length,0);assert.equal(task.state.reportOutbox,undefined);assert.equal(require('../src/main/task-presentation').taskPresentation(task).guidance,undefined);const repeated=await h.agent.control('stop',start.id);assert.equal(repeated.alreadyStopped,true);await h.agent.close();
+});
+test('late recovery results cannot resume or modify the detached stopped task',async()=>{
+ const h=fixture(),start=await h.agent.start({skill:'work.delegate',goal:'stop during recovery',subjects:[{application:'workbuddy'}]},h.owner);const old=h.agent.runtime.tasks.get(start.id);old.status='needs_attention';old.operations.pending={id:'pending',effect:'write',tool:'work.submit',status:'intent'};
+ let entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r);h.agent.reconcile=async()=>{entered();await gate;return {ok:true};};const recovery=h.agent.recoverPending();await at;await h.agent.control('stop',start.id);release();await recovery;const task=h.agent.runtime.tasks.get(start.id);assert.equal(task.status,'stopped');assert.equal(task.state.lastCheckedAt,undefined);assert.equal(task.state.stopRequest.phase,'confirmed');await h.agent.close();
+});
+
+test('a rejected native cancellation remains a cleanup failure instead of a swallowed successful controller receipt',async()=>{
+ const h=fixture(),subject={application:'wechat',recipient:'Alice'},messages=[{direction:'outgoing',kind:'text',text:'old',time:'',observedVerified:true}];let entered,stops=0;const at=new Promise(r=>entered=r);h.agent.scene.observe=async()=>({headerMatched:true,changed:true,draft:'',messages:structuredClone(messages)});
+ h.conversationDesktop.start=async function(value){this.task={...value,id:value.operation==='open'?'open':'send',status:value.operation==='open'?'review':'running',steps:[]};this.running=value.operation==='send';if(this.running)entered();return {ok:true};};h.conversationDesktop.stop=async function(){stops++;this.running=false;throw Error('native cancellation not confirmed');};
+ const a=await h.agent.start({skill:'conversation.manage',goal:'reply',subjects:[subject],parameters:{behavior:'reply'}},h.owner);await h.agent.runtime.tick(a.id);messages.push({direction:'incoming',kind:'text',text:'hello',time:'',incomingVerified:true});await h.agent.runtime.tick(a.id);const running=h.agent.runtime.tick(a.id);await at;const result=await h.agent.control('stop',a.id);await running;assert.equal(stops,1);assert.equal(result.ok,true);assert.equal(result.cleanupVerified,false);assert.match(result.message,/native cancellation not confirmed/);assert.equal(h.agent.runtime.tasks.get(a.id).status,'stopped');assert(h.agent.runtime.tasks.get(a.id).state.cleanupLog.some(row=>row.kind==='controller'&&!row.verified));await h.agent.close();
 });

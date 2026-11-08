@@ -112,6 +112,13 @@
     <div id="speakerStatus" class="note" role="status">点击开始，再自然读完。</div>
     <label class="row speakerToggle" id="speakerToggle" hidden><span>只接收主人声音</span><input id="speakerEnabled" type="checkbox" role="switch"></label>
     <div class="note">讲话或打字可打断朗读。</div>
+    <details class="permBox"><summary>本机语音诊断</summary>
+      <div class="note">最长20秒。测试转写仅保存在本机私有文件，不进入对话或任务。结束后需重新开启常驻监听。</div>
+      <label class="row"><span>保存处理后的音频</span><input id="speechDiagnosticPcm" type="checkbox"></label>
+      <div class="actions"><button id="speechDiagnosticStart" class="mini">开始20秒诊断</button><button id="speechDiagnosticStop" class="mini" disabled>结束诊断</button></div>
+      <div id="speechDiagnosticStatus" class="note" role="status">默认关闭，不会自动采集。</div>
+      <div class="actions"><button id="speechDiagnosticOpen" class="mini" disabled>打开本次文件夹</button><button id="speechDiagnosticClear" class="mini" disabled>清理本次诊断</button><button id="speechDiagnosticResume" class="mini" disabled>重新开启聆听</button></div>
+    </details>
   </div>
 
   <!-- 大脑：选择来源后，只显示对应的密钥、模型和思考 -->
@@ -127,7 +134,7 @@
     <div id="brainWb" class="sub">
       <div class="note">请保持 WorkBuddy 已打开并登录。</div>
       <div class="note">需要搜索时，参考来源会显示在回答下方。</div>
-      <div class="permBtns"><button id="openWorkBuddy" class="mini">连接 WorkBuddy</button><button id="installWorkBuddy" class="mini">下载安装</button></div>
+      <div class="permBtns"><button id="openWorkBuddy" class="mini">连接 WorkBuddy</button><button id="installWorkBuddy" class="mini">下载安装WorkBuddy</button></div>
     </div>
     <div id="brainKey" class="sub">
       <label class="row"><span>API Key</span><input id="brainKeyInput" type="password" autocomplete="off" placeholder="填写这个服务商的密钥" /></label>
@@ -145,22 +152,22 @@
   </div>
 
   <div class="pb" data-page="data">
+    <section class="systemSection" aria-label="主人身份">
     <div class="group">主人身份识别</div>
     <label class="row"><span>允许外部对话认证主人身份</span><input id="ownerIdentityEnabled" type="checkbox" role="switch"></label>
     <label class="row"><span>新身份密钥</span><input id="ownerIdentityKey" type="password" autocomplete="new-password" placeholder="至少8个字符；不会显示原值" disabled></label>
     <div class="permBtns"><button id="ownerIdentitySave" class="mini" disabled>设置／替换密钥</button><button id="ownerIdentityClear" class="mini" disabled>清除密钥并撤销认证</button></div>
     <div id="ownerIdentityStatus" class="permTip" role="status">正在读取身份设置…</div>
     <div class="note">默认关闭，仅主人可在此开启。开启并设置密钥后，微信实际新消息含正确密钥时，该渠道（包含群聊）获得一小时主人权限。关闭或更换密钥立即撤销全部外部认证；重新开启不会恢复旧认证。本地对话不受影响。请使用独立密钥。</div>
-    <section id="softwarePermissions" aria-label="软件操作授权"></section>
-    <div class="group">对话显示</div>
-    <label class="row"><span>对话文字显示在角色背后</span><input id="dialogueBehind" type="checkbox" role="switch"></label>
-    <div class="note">关闭时显示在角色上方；打开后角色会遮挡背后的文字。</div>
-    <div id="dialogueLayerStatus" class="permTip" role="status"></div>
+    </section>
+    <section class="systemSection" id="softwarePermissions" aria-label="主动处理"></section>
+    <section class="systemSection" aria-label="数据库">
     <div class="group">数据库位置</div><p class="note" id="storagePath"></p>
     <div class="note">迁移聊天、记忆和设定，完成后自动重启。模型和作品保留原位。</div>
     <div class="permBtns"><button class="mini" id="storageMove">迁移并重启</button><button class="mini" id="storageReconnect">连接已有数据库</button></div>
     <div class="permTip" id="storageStatus" role="status"></div>
-    <section id="productInfo" aria-label="关于 WorkBunny"></section>
+    </section>
+    <section class="systemSection" id="productInfo" aria-label="关于 WorkBunny"></section>
   </div>
   <!-- 语音 -->
   <div class="pb" data-page="mouth">

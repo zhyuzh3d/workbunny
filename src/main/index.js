@@ -42,7 +42,19 @@ const { createTaskJournal } = require('./task-journal');
 const { prepareVisionPreview } = require('./vision-preview');
 const { randomUUID } = require('crypto');
 const { Monitor, taskName } = require('./monitor');
-const { Asr, probeAccess } = require('./asr');
+const { Asr, probeAccess, asrRecovery } = require('./asr');
+const speechTraceEnabled=process.argv.includes('--speech-trace');
+let speechTraceSequence=0;
+function traceSpeech(record){
+  if(!speechTraceEnabled)return;
+  try{const safe=require('./speech-trace').sanitizeSpeechTrace({...record,at:record.at??Date.now()/1000,seq:++speechTraceSequence,recognizer:asr?.traceRecognizer||0});
+    if(safe)log('[speech-trace]',safe);
+  }catch{ /* Diagnostics never interrupt recognition or persistence. */ }
+}
+function voiceMetadata(record){
+  try{const safe=require('./speech-trace').sanitizeSpeechTrace({...record,at:record.at??Date.now()/1000,
+    seq:++speechTraceSequence,recognizer:asr?.traceRecognizer||0});if(safe)log('[voice]',safe);}catch{}
+}
 const avatars = require('./avatars');
 const { MemoryService } = require('./memory-service');
 const { DesktopService } = require('./desktop-service');
@@ -90,6 +102,7 @@ let monitor = null;
 let monitorScoped = { view: { running: [], done: [], primary: null }, text: '' };
 let monitorUpdateToken = 0;
 let asr = null;
+let speechDiagnostic = null;
 let quitting = false;
 let rendererGoneAt = 0;
 let selfHealTimer = null;
@@ -320,7 +333,12 @@ function publishWebSources(sources = []) {
   send('webSources', { used: visible.length > 0, sources: visible });
 }
 
+function taskReportCancelled(report){
+  const direct=agent?.runtime.tasks.get(report.taskId);if(direct)return !!(direct.state.stopRequest||direct.state.listArchive);
+  return [...(agent?.runtime.tasks.values()||[])].some(task=>(task.state.stopRequest||task.state.listArchive)&&(task.state.workOperationId===report.taskId||task.state.job?.jobId===report.taskId||Object.values(task.state.workOperations||{}).includes(report.taskId)));
+}
 function queueTaskReport(report) {
+  if(taskReportCancelled(report))return;
   if (report.epoch !== memory?.generation) return;
   if (!visibleHere(report)) return;
   taskNotifications?.enqueue(report).catch(() => log('[notifications] 异常提醒未入队，保留本地汇报'));
@@ -337,15 +355,17 @@ async function flushTaskReports() {
     taskReportTimer = setTimeout(flushTaskReports, 500); taskReportTimer.unref?.(); return;
   }
   const report = taskReports.shift();
+  if(taskReportCancelled(report)){flushTaskReports();return;}
   if (report.epoch !== memory?.generation) { flushTaskReports(); return; }
   if (!visibleHere(report)) { flushTaskReports(); return; }
   if (report.persisted) {
     history.push({ role: 'assistant', content: report.text, ...scopePolicy.scopeOf(report) }); history = history.slice(-24);
-  } else pushHistory('assistant', report.text, { delivery: 'task-receipt', taskId: report.taskId, sources: report.sources || [], ...scopePolicy.scopeOf(report), scene: report.scene });
+  } else pushHistory('assistant', report.text, { delivery: 'task-receipt', taskId: report.taskId,resultLinks:report.links, sources: report.sources || [], ...scopePolicy.scopeOf(report), scene: report.scene });
   presentedReplies.clear();
   await agent?.acknowledgeReport(report.eventId);
-  send('chat', { role: 'assistant', text: report.text, final: true });
-  speak(report.text, { silent: Date.now() < quietUntil });
+  if(taskReportCancelled(report)){flushTaskReports();return;}
+  send('chat', { role: 'assistant', text: report.text, taskId:report.taskId,links:report.links, final: true });
+  speak(report.speechText||report.text, { silent: Date.now() < quietUntil,showText:false });
   if (win && !win.isVisible()) notify(report.status === 'accepted' ? '这件事办好了' : '代办有进展', report.text.slice(0, 100));
   if (taskReports.length) { taskReportTimer = setTimeout(flushTaskReports, 1000); taskReportTimer.unref?.(); }
 }
@@ -452,6 +472,10 @@ function createWindow() {
   win.setAlwaysOnTop(true, 'screen-saver', 1);
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setIgnoreMouseEvents(true, { forward: true });
+  petWindowInput=new(require('./pet-window-input').PetWindowInput)({window:win,screen,capturing:()=>desktop?.guiLeaseHeld===true,log}).start();
+  const windowInput=petWindowInput;win.on('resize',()=>windowInput.invalidate());
+  win.webContents.on('before-mouse-event',(_event,mouse)=>{if(mouse.type==='mouseDown'&&windowInput.last.taskUi)log('[window-input] mouseDown',{x:mouse.x,y:mouse.y,button:mouse.button});});
+  win.on('closed',()=>{windowInput.close();if(petWindowInput===windowInput)petWindowInput=null;});
   const petWindow = win;
   win.on('show', () => { if (win === petWindow) send('pet-visibility', { visible: true }); });
   win.on('hide', () => { if (win === petWindow) send('pet-visibility', { visible: false }); });
@@ -573,14 +597,11 @@ function closePanels() {
 }
 
 /* ── 鼠标穿透开关 ── */
-let interactive = false, taskUiInteractive=false;
-function setInteractive(v) {
-  // A window-only screenshot cannot show the transparent pet overlay. Keep it from
-  // swallowing visual-task clicks that are meant for the locked target underneath.
-  if (desktop?.guiLeaseHeld&&!taskUiInteractive) v = false;
-  if (!win || v === interactive) return;
-  interactive = v;
-  win.setIgnoreMouseEvents(!v, { forward: true });
+let interactive = false, taskUiInteractive=false,petWindowInput=null;
+function setInteractive(v,ui=false) {
+  if(petWindowInput){const state=petWindowInput.setHover({inside:v,taskUi:taskUiInteractive,ui});interactive=state.interactive;taskUiInteractive=state.taskUi;return;}
+  if(desktop?.guiLeaseHeld&&!taskUiInteractive)v=false;
+  if(!win||v===interactive)return;interactive=v;win.setIgnoreMouseEvents(!v,{forward:true});
 }
 
 /* ── 拖拽：使用原始按下坐标与事件坐标，快拖也不丢失第一段位移。 ── */
@@ -632,6 +653,23 @@ let activeInteractionAvatar = null;
 let activeSpeechReplyId = null;
 let speechGen = 0;
 let speakWatchdog = null;
+let speechAbort = null;
+// Cancellation releases our waiter even if an engine ignores AbortSignal.
+// The engine's late result/rejection remains observed and cannot revive a turn.
+function waitForSpeech(operation, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true; signal.removeEventListener('abort', abort);
+      error ? reject(error) : resolve(value);
+    };
+    const abort = () => finish(Object.assign(new Error('语音已停止'), { name: 'AbortError' }));
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve(operation).then(value => finish(null, value), error => finish(error));
+    if (signal.aborted) abort();
+  });
+}
 let recentSpeech = '';    // 最近说过的字，用来识别"这句其实是自己的回声"
 let lastSpokeAt = 0;
 
@@ -683,9 +721,11 @@ function stopSpeaking(reason, { keepThought = false } = {}) {
   for (const item of speechQueue) if (item.messageId) presentedReplies.delete(item.messageId);
   activeSpeechReplyId = null;
   if (!keepThought) activeThought?.abort();
-  tts.cancel();
-  synthCache.clear();
   speechGen++;
+  const controller = speechAbort; speechAbort = null;
+  controller?.abort();
+  try { tts.cancel(); } catch (error) { log('[tts] 取消合成未完成：' + error.message); }
+  synthCache.clear();
   speechQueue.length = 0;
   speaking = false;
   if (speakWatchdog) { clearTimeout(speakWatchdog); speakWatchdog = null; }
@@ -836,6 +876,7 @@ async function pumpSpeech() {
   speaking = true;
   activeInteractionAvatar = item.interaction ? item.avatar || null : null;
   const gen = speechGen;
+  const controller = new AbortController(); speechAbort = controller;
   activeSpeechReplyId = item.messageId || null;
   const c = config.load();
   if(item.privateSpeech)c.tts={...c.tts,engine:'system'};
@@ -860,12 +901,12 @@ async function pumpSpeech() {
         ? tts.voiceIdentity(c.tts, { refresh: true }).then(profile => {
           if (gen !== speechGen || JSON.stringify(config.load().tts) !== JSON.stringify(c.tts)) throw Object.assign(new Error('语音设置已变更'), { name: 'AbortError' });
           const identity = profile ? { ...profile, style: item.emo || '' } : null;
-          return interactionAudio.audio(item.motion, item.text, identity, () => synthBuffer(item.text, item.emo, undefined, c, identity));
+          return interactionAudio.audio(item.motion, item.text, identity, () => synthBuffer(item.text, item.emo, { signal: controller.signal }, c, identity));
         })
-        : synthBuffer(item.text, item.emo, playback.options,c);
+        : synthBuffer(item.text, item.emo, { ...playback.options, signal: controller.signal },c);
       prefetchNext();           // 和当前这句并行，先把下一句准备出来
-      const result = await bufP, buffer = result.buffer;
-      // 被打断/换代：不能裸 return —— 那样 speaking 和闭麦都留在原地，麦克风永久哑
+      const result = await waitForSpeech(bufP, controller.signal), buffer = result.buffer;
+      // The cancelling owner has already released this generation's state.
       if (gen !== speechGen) return;
       if (!playback.finish(result)) {
         noteSpoken(item.text);
@@ -879,17 +920,13 @@ async function pumpSpeech() {
         if (gen === speechGen && speaking) finishSpeech(false);
       }, durMs);
     } catch (e) {
-      if (e.name === 'AbortError') { if (gen === speechGen) finishSpeech(false); return; }
+      if (gen !== speechGen) return;
+      if (e.name === 'AbortError') { finishSpeech(false); return; }
       // 以前只往 stderr 写，日志里什么都看不到 —— 于是"她不说话"永远查不出原因
-      if (activeSpeechReplyId) presentedReplies.delete(activeSpeechReplyId); activeSpeechReplyId = null;
       log('[tts] 合成失败：' + e.message);
       console.error('[tts]', e.message);
       send('ttsError', { message: e.message });
-      send('speaking', { on: false });
-      speaking = false;
-      activeInteractionAvatar = null;
-      unmuteAsr('合成失败');
-      if (speechQueue.length) pumpSpeech();
+      finishSpeech(false);
       return;
     }
   } else {
@@ -904,6 +941,16 @@ async function pumpSpeech() {
 }
 
 function finishSpeech(confirmed = true) {
+  // Every sentence owns a generation, including timeouts and silent bubbles.
+  // Retire it before cancellation can deliver an engine callback.
+  speechGen++;
+  const controller = speechAbort; speechAbort = null;
+  controller?.abort();
+  if (!confirmed) {
+    try { tts.cancel(); } catch (error) { log('[tts] 取消合成未完成：' + error.message); }
+    synthCache.clear();
+    send('audio', { stop: true });
+  }
   if (speaking) lastSpokeAt = Date.now();
   if (playbackTest) { playbackTest.resolve(confirmed); playbackTest = null; }
   activeAudioId = null;
@@ -919,7 +966,7 @@ function finishSpeech(confirmed = true) {
   if (speechQueue.length) setTimeout(pumpSpeech, 60);
 }
 
-function speak(text, { motion, emo, silent = false, messageId,privateSpeech=false } = {}) {
+function speak(text, { motion, emo, silent = false, messageId,privateSpeech=false,showText=true } = {}) {
   silent ||= !!speakerFilter.enrollment || suppressEnrollmentFinal;
   const clean = presentConversation(require('./owner-security').redact(text));
   privateSpeech ||= inputAdmission.containsSecret(clean);
@@ -927,7 +974,7 @@ function speak(text, { motion, emo, silent = false, messageId,privateSpeech=fals
   if (!messageId) publishWebSources();
   if (motion) void embodiment.perform(motion, 'autonomy');
   if (emo) send('emo', { key: emo, holdMs: Math.min(10000, Math.max(3500, clean.length * 120)) });
-  send('say', { text: clean });
+  if(showText)send('say', { text: clean });
   if (silent) return;
   const parts = []; let chunk = '';
   const flush = () => { if (chunk.trim()) parts.push(chunk.trim()); chunk = ''; };
@@ -961,7 +1008,29 @@ function dialogueReady() {
   return c.brain.source === 'apikey' ? !!config.resolveLLM(c).apiKey : connection.status().ready;
 }
 
+// This gate owns no business state: an unconfirmed input cannot occupy busy,
+// cancel another request, read memory, call a model or present an error reply.
+async function committedVoice(voiceTurn, { signal, timeoutMs = 8000 } = {}) {
+  if (!voiceTurn) return true;
+  const epoch = contextEpoch, generation = memory?.generation;
+  const current = () => !signal?.aborted && epoch === contextEpoch && generation === memory?.generation &&
+    typeof voiceTurn.isCurrent === 'function' && voiceTurn.isCurrent();
+  if (voiceTurn.accepted !== true || !current() || typeof voiceTurn.waitForCommit !== 'function' || typeof voiceTurn.canCommit !== 'function') return false;
+  if (!voiceTurn.canCommit()) voiceMetadata({stage:'voice-effects-waiting',turn:voiceTurn.id,accepted:true,commitReady:false});
+  const wait = require('./bounded-wait').createBoundedWait({ signal, timeoutMs, code: 'E_VOICE_COMMIT_TIMEOUT' });
+  try { while(current()){
+    if(await wait.run(() => voiceTurn.waitForCommit({signal:wait.signal})) !== true)return false;
+    if(current()&&voiceTurn.canCommit()){voiceMetadata({stage:'voice-effects-allowed',turn:voiceTurn.id,accepted:true,commitReady:true});return true;}
+    // A gate may close between resolving its waiter and this continuation.
+    // Keep the same result and let the bounded deadline remain interruptible.
+    await wait.run(()=>new Promise(resolve=>setTimeout(resolve,0)));
+  }return false; }
+  catch { return false; }
+  finally { wait.close(); }
+}
+
 async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn, userMessage, perception }) {
+  if (voiceTurn && (voiceTurn.accepted !== true || !voiceTurn.isCurrent())) return null;
   const localTaskControl = internal ? null : dialogueActions.taskControl(userText, agent ? agent.currentTask() : desktop?.task);
   if (storageBusy || storageError || !localTaskControl && !dialogueReady()) { voiceTurn?.skip(); send('toast', { text: storageError || connection.status().note }); return null; }
   const c = config.load(), scene = currentScene();
@@ -971,29 +1040,70 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
   if (!taskControl && L.transport !== 'workbuddy' && !L.apiKey) { send('toast', { text: '请先在设置中配置智力。' }); return null; }
   activeThought?.abort();
   const controller = new AbortController(); activeThought = controller; busy = true;
+  const deadline = require('./bounded-wait').createBoundedWait({ controller, timeoutMs: (Number(L.timeoutMs) || 55000) + 15000,
+    code: 'E_THINK_TIMEOUT', message: '本轮处理超时，尚未确认的结果不会当作完成；你可以继续发来新指令。' });
+  const local = invoke => deadline.run(invoke, { timeoutMs: 8000, code: 'E_LOCAL_WAIT_TIMEOUT',
+    message: '记忆或本地资料暂时忙，未能完成本轮读取；你可以继续发来新指令。' });
   const generation = memory?.generation;
   const current = () => !controller.signal.aborted && requestEpoch === contextEpoch && generation === memory?.generation && (!voiceTurn || voiceTurn.isCurrent());
+  const effectsCurrent = () => current() && (!voiceTurn || voiceTurn.canCommit());
+  const admitEffects = async () => !voiceTurn ? current() : await committedVoice(voiceTurn,{signal:controller.signal}) && effectsCurrent();
+  let modelStartedAt = null, modelFinished = false;
   send('think', { on: true }); publishWebSources(); memory?.cancelExtraction();
   try {
-    let role = memory?.ready ? await memory.cognition.loadRoleView({ repair: false }) : null;
-    const memoryContext = memory ? await memory.context(userText, { internal, recent: history, scene, budget: 20000,allowSensitive:!internal }) : { text: nowLine(), messages: history.slice(-12), sourceIds: [] };
-    const workContext = !agent&&monitor ? await scopedWork(monitor.view) : { text: '', sourceIds: [] };
+    if (taskControl) {
+      // Exact local controls use the existing trusted owner/Task control path.
+      // Reducing activity never waits for role/context preparation; starting
+      // execution again still requires the real persisted owner source.
+      if (voiceTurn) {
+        if (!await admitEffects()) return null;
+        userMessage = voiceTurn.remember();
+      } else if (!userMessage) userMessage = pushHistory('user', userText, { scene, perception: perception || require('./perception').keyboard() });
+      const operation = taskControl.request?.operation || taskControl.action;
+      const immediate = ['stop', 'pause', 'status'].includes(operation);
+      const owner = immediate ? null : await local(() => userMessage);
+      if (!immediate && !owner) throw new Error('本轮原文未能保存，没有继续操作。');
+      if (!await admitEffects()) return null;
+      const result = await deadline.run(() => secretary.dispatch(taskControl, { requestId: owner?.value.turnId || voiceTurn?.turnId || randomUUID(),
+        userText, requestSourceId: owner?.id, sources: owner ? [owner.id] : [], scene, context: '',
+        source: voiceTurn ? 'voice' : 'text', voiceTurn, signal: controller.signal, isCurrent: current }));
+      if (!await admitEffects()) return null;
+      const text = conversationText(presentConversation(result.text || result.error || '任务控制结果尚未确认。'));
+      send('chat', { role: 'assistant', text, final: true }); lastDialogueAt = Date.now();
+      if(voiceTurn)asrFailStreak=0;
+      if (allowSpeech) speak(text, { privateSpeech: inputAdmission.containsSecret(text) });
+      // A real control receipt may be recorded after its owner input commits;
+      // this continuation never presents output or starts further work.
+      const receiptWait=require('./bounded-wait').createBoundedWait({timeoutMs:8000,code:'E_CONTROL_RECEIPT_TIMEOUT'});
+      void receiptWait.run(async innerSignal=>{
+        const record=await Promise.resolve(owner||userMessage);
+        // Record an already observed control result, not a fresh command. The
+        // retired voice token cannot erase this fact; privacy/source checks do.
+        if(innerSignal.aborted||!record||requestEpoch!==contextEpoch||generation!==memory?.generation||!memory?.ready)return;
+        return memory.addMessageOnce('reply:' + record.id, 'assistant', text, { delivery: 'task-receipt', scene, sources: [record.id], turnId: record.value.turnId || record.id });
+      }).catch(()=>log('[memory] 任务控制回执暂未保存')).finally(()=>receiptWait.close());
+      if(voiceTurn){send('heard',{text:userText,replied:true});voiceTurn.complete?.();}
+      return { text, reply: { text }, taskControl: true };
+    }
+    let role = memory?.ready ? await local(() => memory.cognition.loadRoleView({ repair: false })) : null;
+    const memoryContext = memory ? await local(() => memory.context(userText, { internal, recent: history, scene, budget: 20000,allowSensitive:!internal })) : { text: nowLine(), messages: history.slice(-12), sourceIds: [] };
+    const workContext = !agent&&monitor ? await local(() => scopedWork(monitor.view)) : { text: '', sourceIds: [] };
     const secretaryContext = secretary?.contextSnapshot() || { text: '', sourceIds: [] };
     if (typeof taskNotifications !== 'undefined' && taskNotifications && memory?.ready) {
-      const alerts = await taskNotifications.context(scene);
+      const alerts = await local(() => taskNotifications.context(scene));
       secretaryContext.text += '\n' + alerts.text; secretaryContext.sourceIds.push(...alerts.sourceIds);
     }
-    const rows = c.memory.enabled && memory?.ready && !internal ? (await memory.query('message', 100, { scene, channelId:'local', sort: 'ingestion', excludedMarkers: ['bunny_external_message'] })).reverse() : [];
+    const rows = c.memory.enabled && memory?.ready && !internal ? (await local(() => memory.query('message', 100, { scene, channelId:'local', sort: 'ingestion', excludedMarkers: ['bunny_external_message'] }))).reverse() : [];
     const dialogueId = 'owner:' + scene;
     const dc = require('./dialogue-cognition');
     const cognitionContext = dc.context(rows, { dialogueId });
-    const growthContext = !internal && c.memory.enabled && memory?.ready ? await memory.growth.view({ scene, budget: 2500, query: userText }) : { text: '', sourceIds: [], entries: [] };
+    const growthContext = !internal && c.memory.enabled && memory?.ready ? await local(() => memory.growth.view({ scene, budget: 2500, query: userText })) : { text: '', sourceIds: [], entries: [] };
     const basisCandidates = growthContext.entries.filter(e => e.type !== 'pursuit' && growthContext.sourceIds.includes(e.id)).map(e => e.id);
     if (cognitionContext.previousReplyId && !presentedReplies.has(cognitionContext.previousReplyId)) {
       cognitionContext.previousReplyId = null; cognitionContext.data.previous = null;
     }
     if (cognitionContext.data.previous?.basis.length && c.memory.enabled && memory?.ready) {
-      const oldBasis = (await require('./memory-evidence').readRecords(memory, cognitionContext.data.previous.basis, { scene }))
+      const oldBasis = (await local(() => require('./memory-evidence').readRecords(memory, cognitionContext.data.previous.basis, { scene })))
         .filter(r => require('./companion-growth').validEntry(r, Date.now()) && r.value.type !== 'pursuit' && growthContext.entries.some(e => e.entryId === r.value.entryId));
       cognitionContext.data.previous.beliefs = oldBasis.map(r => ({ id: r.id, content: r.value.content, condition: r.value.condition, status: r.value.status }));
       cognitionContext.sourceIds.push(...oldBasis.map(r => r.id));
@@ -1022,32 +1132,35 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     const recallSession = !internal && c.memory.enabled && memory?.ready ? require('./conversation-recall').createRecallSession(memory, { scene, isCurrent: current,allowSensitive:true,
       maxSources: 180 - new Set([...(memoryContext.sourceIds || []), ...workContext.sourceIds, ...secretaryContext.sourceIds, ...cognitionContext.sourceIds, ...growthContext.sourceIds]).size }) : null;
     const contextSession=!internal&&agent?require('./context-assembler').createContextSession({fragments:[...agent.contextModules({scene}),...(recallSession?[require('./conversation-recall').recallFragment(recallSession)]:[])],signal:controller.signal,isCurrent:current}):null;
-    const sensitiveTurn=!internal&&require('./sensitive-policy').hasProtectedContent(JSON.stringify(messages),c.memory.enabled&&memory?.ready?await memory.sensitiveValues():[]);
+    const sensitiveTurn=!internal&&require('./sensitive-policy').hasProtectedContent(JSON.stringify(messages),c.memory.enabled&&memory?.ready?await local(() => memory.sensitiveValues()):[]);
     const started = Date.now();
-    const r = taskControl ? { raw: JSON.stringify({ kind: 'action', intent: taskControl }), reply: { intent: taskControl }, motions: [], emos: [] }
-      : internal ? await llm.chat({ ...L, messages, signal: controller.signal, maxTokens: L.maxTokens || 4096 })
-      : await requestReply({ chat: llm.chat, selfRepair: true, request: { ...L, cognitive: true, deferPresentation: true, messages,
+    modelStartedAt=started;if(voiceTurn)voiceMetadata({stage:'voice-model-start',turn:voiceTurn.id,accepted:true});
+    const r = internal ? await deadline.run(() => llm.chat({ ...L, messages, signal: controller.signal, maxTokens: L.maxTokens || 4096 }))
+      : await deadline.run(() => requestReply({ chat: llm.chat, selfRepair: true, request: { ...L, cognitive: true, deferPresentation: true, messages,
         webSearch: !sensitiveTurn&&L.transport === 'workbuddy' && require('./conversation-search').mayUseWebSearch(userText), searchCache: new Map(),
         recallSession,contextSession,
-        maxTokens: L.maxTokens || 4096, signal: controller.signal, isCurrent: current } });
+        maxTokens: L.maxTokens || 4096, signal: controller.signal, isCurrent: current } }));
+    modelFinished=true;if(voiceTurn)voiceMetadata({stage:'voice-model-end',turn:voiceTurn.id,ok:true,elapsedMs:Date.now()-started});
     if (!current()) return null;
-    if (recallSession && !await recallSession.verify()) throw new Error('本轮回忆依据已变化，请重试');
-    if(contextSession)await contextSession.verify();
+    if (recallSession && !await local(() => recallSession.verify())) throw new Error('本轮回忆依据已变化，请重试');
+    if(contextSession)await local(() => contextSession.verify());
     log(`[brain] 完成 ${Date.now() - started}ms（${r.attempts || 1}次请求 · ${L.provider}/${r.model || L.model}）`);
-    if (r.cognitionDegraded) log('[brain] 对话协议降级为已校验普通回复' + (['json', 'envelope', 'review', 'reply', 'prediction'].includes(r.cognitionFailureStage) ? '（阶段：' + r.cognitionFailureStage + '）' : ''));
+    if (r.cognitionDegraded) log('[brain] 对话协议降级为已校验核心回复' + (['json', 'envelope', 'review', 'reply', 'prediction'].includes(r.cognitionFailureStage) ? '（阶段：' + r.cognitionFailureStage + '）' : ''));
     const reply = internal ? { text: r.text } : r.reply;
-    if (reply?.skipped) { voiceTurn?.skip(); send('heard', { text: userText, replied: false }); return { ...r, text: '<skip>' }; }
+    if (!await admitEffects()) return null;
+    if (reply?.skipped) { voiceTurn?.skip(); send('heard', { text: userText, replied: false });voiceTurn?.complete?.();return { ...r, text: '<skip>' }; }
     if (voiceTurn) {
-      if (!await voiceTurn.waitForCommit() || !current()) return null;
+      if (!effectsCurrent()) return null;
       userMessage = voiceTurn.remember();
     }
-    let userRecord = !internal ? await userMessage : null;
-    if (!internal && !userRecord && !voiceTurn && c.memory.enabled) userRecord = await pushHistory('user', userText, { scene,perception:perception||require('./perception').keyboard() });
+    let userRecord = !internal ? await local(() => userMessage) : null;
+    if (!internal && !userRecord && !voiceTurn && c.memory.enabled) userRecord = await local(() => pushHistory('user', userText, { scene,perception:perception||require('./perception').keyboard() }));
     if (!current()) return null;
     if (!internal && c.memory.enabled && !userRecord) throw new Error('本轮原文未能保存，请重试');
     const sources = [...new Set([userRecord?.id, ...(memoryContext.sourceIds || []), ...(workContext.sourceIds || []), ...secretaryContext.sourceIds,
       ...(!internal ? cognitionContext.sourceIds : []), ...growthContext.sourceIds, ...(recallSession?.sourceIds || [])].filter(Boolean))];
     if (sources.length > 200) throw new Error('本轮参考资料过多，请缩小范围');
+    if (!await admitEffects()) return null;
     let text = reply?.taggedText || reply?.text || r.text || '';
     if (reply?.intent) {
       if (internal) return null;
@@ -1058,18 +1171,19 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
         if (!userRecord) throw new Error('请先开启记忆，或在角色设置中直接编辑自我理解。');
         selfMutationOwner = true;
         try {
-          const changed = await memory.cognition.commitPatch({ requestId: 'self-command:' + userRecord.id, baseRevision: role.revision, ops: intent.ops },
-            { actor: 'owner', requestSourceId: userRecord.id, signal: controller.signal });
+          const changed = await deadline.run(() => memory.cognition.commitPatch({ requestId: 'self-command:' + userRecord.id, baseRevision: role.revision, ops: intent.ops },
+            { actor: 'owner', requestSourceId: userRecord.id, signal: controller.signal }));
           role = changed;
           result = { text: changed.changed ? '已经更新我的自我理解，锁定状态也保留好了。' : '这条自我理解已经在里面了。' };
           requestEpoch = contextEpoch;
         } finally { selfMutationOwner = false; }
       } else if (['remember', 'learn_experience'].includes(intent.action)) {
-        result = await require('./memory-commands').rememberRequest(memory, intent, { userRecord, scene, signal: controller.signal, isCurrent: current });
+        result = await deadline.run(() => require('./memory-commands').rememberRequest(memory, intent, { userRecord, scene, signal: controller.signal, isCurrent: effectsCurrent }));
         if (result.ok && result.id) sources.push(result.id);
       } else {
-        result = await secretary.dispatch(intent, { requestId: userRecord?.value.turnId || randomUUID(), userText, requestSourceId: userRecord?.id,
-          source: voiceTurn ? 'voice' : 'text', voiceTurn, signal: controller.signal, context: require('./work-order').encodeContext(memoryContext.messages || []), sources, scene, isCurrent: current });
+        result = await deadline.run(() => secretary.dispatch(intent, { requestId: userRecord?.value.turnId || randomUUID(), userText, requestSourceId: userRecord?.id,
+          source: voiceTurn ? 'voice' : 'text', voiceTurn, signal: controller.signal, context: require('./work-order').encodeTaskContext({...memoryContext,dynamic:{recall:recallSession?.handoff(),context:contextSession?.handoff()}}), sources, scene, isCurrent: current }));
+        if(voiceTurn)voiceMetadata({stage:'voice-task-admitted',turn:voiceTurn.id,taskAdmitted:result?.ok===true&&[result.id,result.taskId,result.watchId].some(id=>typeof id==='string'&&!!id)});
         for (const id of [result.taskId, result.watchId]) if (id && !sources.includes(id)) sources.push(id);
       }
       text = result.text;
@@ -1083,47 +1197,57 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     const postureIntent = internal || activeAvatarPack() ? null : require('./posture-intent').postureIntent(userText);
     const gesture = postureIntent || tags.motions[0] || ({ happy: 'cheer', sad: 'sorry', angry: 'angry', surprised: 'surprise', relaxed: 'idle' })[tags.emos[0]];
     if (gesture) {
-      const actual = await embodiment.perform(gesture, internal ? 'autonomy' : 'reply', { allowPostureChange: !!postureIntent });
+      if (!await admitEffects()) return null;
+      const actual = await deadline.run(() => embodiment.perform(gesture, internal ? 'autonomy' : 'reply', { allowPostureChange: !!postureIntent }));
       if (!current()) return null;
       motionStarted = actual.ok;
       if (!actual.ok && tags.motions.length) r.text = '这个动作暂时没能确认播放成功。' + r.text.replace(/(?:我)?(?:已经|正在|这就)(?:做|跳|挥|转)[^。！？!?]*[。！？!?]?/gu, '');
     }
     let record = null;
     if (!internal && c.memory.enabled) {
+      if (!await admitEffects()) return null;
       const cognition = r.cognition ? { ...r.cognition, previousReplyId: cognitionContext.previousReplyId, selfRevision: role?.revision || 0, dialogueId } : null;
       if (cognition && !cognitionContext.previousReplyId) cognition.review = { ...cognition.review, grade: 'unassessed' };
       if (cognition && reply.intent) cognition.prediction = null;
       if (cognition?.basis) cognition.basis = reply.intent ? [] : cognition.basis.filter(id => basisCandidates.includes(id));
-      const result = await memory.addMessageOnce('reply:' + userRecord.id, 'assistant', r.text, { delivery: 'generated', scene,allowSensitive:true,
-        turnId: userRecord.value.turnId || userRecord.id, sources: [...new Set(sources)], evidenceSnapshots: recallSession?.snapshots, ...(cognition ? { cognition } : {}) });
+      const result = await deadline.run(() => memory.addMessageOnce('reply:' + userRecord.id, 'assistant', r.text, { delivery: 'generated', scene,allowSensitive:true,
+        turnId: userRecord.value.turnId || userRecord.id, sources: [...new Set(sources)], evidenceSnapshots: recallSession?.snapshots, ...(cognition ? { cognition } : {}) }));
       record = result.record;
       if (['opposite', 'branch_miss'].includes(cognition?.review.grade) || cognitionContext.data.consecutiveMisses >= 2 || /不是这个意思|你误会|先听我说/u.test(userText)) maintenance?.requestReflection('conversation-correction');
     }
-    if (!current()) return null;
+    if (!await admitEffects()) return null;
     if (!internal) {
       history.push({ role: 'assistant', content: r.text, domain: scene, visibilityFloor: scopePolicy.rank(scene) }); history = history.slice(-24);
       if (record) { presentedReplies.add(record.id); if (presentedReplies.size > 256) presentedReplies.delete(presentedReplies.values().next().value); }
       publishRecall(reply.intent ? [] : memoryContext.references || []);
       send('chat', { role: 'assistant', text: r.text, final: true }); publishWebSources(r.webSearch?.sources || []);
+      if(voiceTurn)asrFailStreak=0;
       lastDialogueAt = Date.now();
     }
     if (internal) presentedReplies.clear();
-    if (allowSpeech) speak(r.text, { emo: tags.emos[0], messageId: record?.id,privateSpeech:sensitiveTurn });
+    if (allowSpeech) { if(!await admitEffects())return null;speak(r.text, { emo: tags.emos[0], messageId: record?.id,privateSpeech:sensitiveTurn }); }
     else {
       if (tags.motions[0] && !motionStarted) log('[motion] 本轮动作未确认执行');
       if (tags.emos[0]) send('emo', { key: tags.emos[0] });
     }
+    if(voiceTurn){send('heard',{text:userText,replied:true});voiceTurn.complete?.();}
     return r;
   } catch (error) {
-    if (!current()) return null;
+    if(voiceTurn&&modelStartedAt!==null&&!modelFinished)voiceMetadata({stage:controller.signal.aborted||!current()?'voice-model-abort':'voice-model-end',turn:voiceTurn.id,ok:false,elapsedMs:Date.now()-modelStartedAt});
+    const timedOut = ['E_THINK_TIMEOUT', 'E_LOCAL_WAIT_TIMEOUT'].includes(error.code) && activeThought === controller &&
+      requestEpoch === contextEpoch && generation === memory?.generation && (!voiceTurn || voiceTurn.isCurrent());
+    if (!current() && !timedOut) return null;
+    if(voiceTurn&&!await committedVoice(voiceTurn,{signal:timedOut?undefined:controller.signal}))return null;
     log('[brain] 请求未完成：' + (error.code || error.name || 'error'));
     if (error.code === 'E_REPLY_PROTOCOL' && ['json', 'envelope', 'review', 'reply', 'prediction'].includes(error.protocolStage)) log('[brain] 格式校验阶段：' + error.protocolStage);
     if (error.code === 'E_CONTEXT_BUDGET' && error.budget) log('[brain] 输入预算', error.budget);
     const failureText = error.code === 'E_REPLY_PROTOCOL' ? '这次没能正常生成回复，请再试一次。' : '暂时没能回复：' + error.message;
     send('chat', { role: 'assistant', text: failureText });
     if (allowSpeech && error.code === 'E_REPLY_PROTOCOL') speak(failureText);
+    voiceTurn?.complete?.();
     return null;
   } finally {
+    deadline.close();
     if (activeThought === controller) { activeThought = null; busy = false; send('think', { on: false }); memory?.scheduleExtraction(); }
   }
 }
@@ -1556,9 +1680,10 @@ function hideWindow() {
  *   · AEC/文字回声过滤与说话人初筛都在本地，保持可打断
  */
 let alwaysOn = false;
-let asrStartedAt = 0;    // 上一次 ASR 进程起来的时刻：用来判"秒死"并退避
 let asrFailStreak = 0;
+let asrRecoveryBlocked = false;
 let listenRestartTimer = null;
+let voiceInputOwner = null;
 let lastLiveAt = 0;        // 实时字幕节流
 let lastLiveText = '';
 let micPeak = 0;           // 麦克风电平峰值（自检用）
@@ -1577,23 +1702,25 @@ function asrOpts(always) {
     device: c.asr.device || '',
     // 授权只由应用自己问一次，子进程绝不再问 —— 否则 TCC 会被两个身份来回问
     noMicAsk: true, allowNetwork: config.load().asr.allowNetwork === true,
+    trace:speechTraceEnabled,
   };
 }
 
 function startListen(reason) {
-  if (!asr || storageBusy) return;
+  if (quitting || speechDiagnostic?.blocked || !asr || storageBusy) return;
+  if(asrRecoveryBlocked&&!['user','permission'].includes(reason))return;
   if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') return;
   const c = config.load();
   if (screenLocked || (c.memory.enabled && !memory?.ready)) return;
   if (!c.voice.alwaysListen) return;
   if (!fs.existsSync(ASR_BIN)) { send('listen', { on: false, error: '缺少 bin/asr' }); return; }
+  if(['user','permission'].includes(reason)){asrFailStreak=0;asrRecoveryBlocked=false;}
   alwaysOn = true;
   send('listen', { on: true, reason: reason || '' });
   if (asr.running && !asr.always) asr.kill({ discard: true });
   if (asr.running) return;
   asrStatus = { ...asrStatus, captureReady: false, note: 'starting' };
   send('asrStatus', asrStatus);
-  asrStartedAt = Date.now();
   asr.start(asrOpts(true));
   send('listen', { on: true, reason: reason || '' });
   log('[listen] start (' + (reason || 'boot') + ')');
@@ -1609,15 +1736,59 @@ function stopListen() {
 }
 
 function scheduleListenRestart(delay) {
-  if (!alwaysOn) return;
+  if (!mayRecoverListening()) return;
   if (listenRestartTimer) clearTimeout(listenRestartTimer);
-  listenRestartTimer = setTimeout(() => {
+  const epoch = contextEpoch, generation = memory?.generation, recognizer = asr?.traceRecognizer;
+  const timer = setTimeout(() => {
+    if (listenRestartTimer !== timer) return;
     listenRestartTimer = null;
-    if (alwaysOn && asr && !asr.running) {
+    if (mayRecoverListening() && epoch === contextEpoch && generation === memory?.generation &&
+        recognizer === asr?.traceRecognizer && asr && !asr.running) {
       log('[listen] restart');
-      asr.start(asrOpts(true));
+      startListen('recovery');
     }
   }, delay || 900);
+  listenRestartTimer = timer;
+}
+
+function mayRecoverListening() {
+  if (quitting || screenLocked || storageBusy || speechDiagnostic?.blocked || asrRecoveryBlocked || !alwaysOn || !asr) return false;
+  const c = config.load();
+  return c.voice.alwaysListen === true && (!c.memory.enabled || memory?.ready === true);
+}
+
+// Native exits and the host's confirmation deadline share one finite retry
+// budget. A native transcript alone cannot reset a failed host confirmation.
+function recoverListening(code) {
+  if (!mayRecoverListening()) return false;
+  const recovery = asrRecovery({ mode: asrMode, code, failures: asrFailStreak });
+  asrFailStreak = recovery.failures;
+  if (recovery.requiresOwner) {
+    asrRecoveryBlocked = true; alwaysOn = false;
+    if (listenRestartTimer) { clearTimeout(listenRestartTimer); listenRestartTimer = null; }
+    asrStatus = { ...asrStatus, captureReady: false, note: 'needs-attention' };
+    send('listen', { on: false }); send('asrStatus', asrStatus);
+    send('asrError', { message: '语音连续未能可靠确认，已停止自动重试。仍可打字交办任务；检查后可手动重新开启聆听。' });
+    return true;
+  }
+  if (asrFailStreak >= 3) {
+    log(`[listen] 连续失败 ${asrFailStreak} 次，${Math.round(recovery.delayMs / 1000)} 秒后再试`);
+    if (asrFailStreak === 3) send('asrError', { message: '语音识别连续失败，正在退避重连；仍可打字交办任务，也可检查权限和音频输入。' });
+  }
+  scheduleListenRestart(recovery.delayMs); return true;
+}
+
+function recoverVoiceConfirmation(metadata) {
+  const owner = voiceInputOwner;
+  if (!['confirmation-timeout','commit-timeout'].includes(metadata?.reason) || !owner || metadata.turn !== owner.turn ||
+      owner.proc !== asr?.proc || owner.recognizer !== asr?.traceRecognizer ||
+      owner.epoch !== contextEpoch || owner.generation !== memory?.generation || !asr?.running || !mayRecoverListening()) return false;
+  voiceInputOwner = null;
+  voiceTurns.reset(); speakerFilter.latest = null; lastLiveText = '';
+  send('asrPartial', { text: '' }); send('asrLive', { text: '' });
+  asrStatus = { ...asrStatus, captureReady: false, note: 'reconnecting' }; send('asrStatus', asrStatus);
+  asr.kill({ discard: true });
+  return recoverListening(25);
 }
 
 /** 本地小门槛：挡掉气泡音、单字噪声、明显的自己人声残留，不花一次模型调用 */
@@ -1637,21 +1808,50 @@ function publishVoiceLive(text, state) {
 
 /** 每听到一句 → 先判断是不是在对我说，是就回，不是就闭嘴（一次调用搞定） */
 const voiceTurns = require('./voice-turns').createVoiceTurns({
+  requireActivity: () => asrMode === 'continuous',
   allowShort: () => Date.now() - lastDialogueAt < 90_000,
   onRequest: (turn) => handleUtterance(turn.text, turn),
   onInvalidate: () => stopSpeaking(),
-  onRemember: (text, metadata) => pushHistory('user', text, { turnId: metadata.turnId,perception:require('./perception').speech(metadata.turnId) }),
-  onError: (message) => { log('[listen] ' + message); send('toast', { text: message }); },
-  onLive: publishVoiceLive,
+  onRemember: (text, metadata) => {
+    const receipt=pushHistory('user', text, { turnId: metadata.turnId,perception:require('./perception').speech(metadata.turnId) });
+    if(speechTraceEnabled)Promise.resolve(receipt).then(row=>traceSpeech({stage:row?.id?'history-written':'history-unconfirmed',chars:text.length,turn:Number(metadata.turnId.split(':').at(-1))}),()=>traceSpeech({stage:'history-unconfirmed',chars:text.length}));
+    return receipt;
+  },
+  onTrace:record=>{traceSpeech(record);if(['turn-request','turn-invalidated','turn-gate-closed','turn-gate-ready','turn-unconfirmed','turn-completed'].includes(record.stage))voiceMetadata(record);},
+  onError: (message, metadata) => { log('[listen] ' + message); send('toast', { text: message }); recoverVoiceConfirmation(metadata); },
+  onLive: (text, state) => {
+    const turn = voiceTurns.snapshot();
+    const sameContext = voiceInputOwner?.epoch === contextEpoch && voiceInputOwner?.generation === memory?.generation;
+    const successorText = voiceInputOwner?.turn === turn?.id && sameContext &&
+      (voiceInputOwner.proc !== asr?.proc || voiceInputOwner.recognizer !== asr?.traceRecognizer);
+    if (text && turn && (voiceInputOwner?.turn !== turn.id || successorText)) voiceInputOwner = { turn: turn.id, proc: asr?.proc,
+      recognizer: asr?.traceRecognizer, epoch: contextEpoch, generation: memory?.generation };
+    publishVoiceLive(text, state);
+  },
+});
+
+// Private diagnostics use a different recognizer and turn receiver. Normal
+// listeners are discarded before it starts; no diagnostic text is sent to UI,
+// dialogue/history, model, task or voice response callbacks.
+speechDiagnostic=new(require('./speech-diagnostic').SpeechDiagnostic)({
+  root:path.join(USER_DIR,'speech-diagnostics'),bin:ASR_BIN,options:()=>asrOpts(true),speakerFilter,
+  state:()=>({speaking,wakeOnly:config.load().asr.wakeOnly,allowShort:Date.now()-lastDialogueAt<90000}),recentEcho,bargeInReady,
+  nameHit:text=>{const c=config.load();return require('./wake-name').hit(text,c.buddy.name,c.asr.wakeAliases||[]);},
+  canStart:()=>asrMode==='continuous'&&!screenLocked&&!storageBusy&&memory?.ready&&!speaking&&!busy&&!speakerFilter.enrollment&&systemPreferences.getMediaAccessStatus('microphone')==='granted',
+  suspendNormal:()=>{stopListen();asr?.kill({discard:true});voiceTurns.reset();lastLiveText='';send('asrLive',{text:''});},
+  onStatus:status=>{for(const panel of panels.values())if(!panel.isDestroyed())panel.webContents.send('pet:ev',{type:'speech-diagnostic',...status});},
 });
 
 async function handleUtterance(text, voiceTurn) {
+  if (voiceTurn && (voiceTurn.accepted !== true || !voiceTurn.isCurrent())) return;
   const t = String(text || '').trim();
-  if (!worthJudging(t)) { log('[listen] drop noise'); return; }
+  if (!worthJudging(t)) { traceSpeech({stage:'request-drop-noise',chars:t.length});log('[listen] drop noise');voiceTurn?.skip();voiceTurn?.complete?.();return; }
   // 这句可能就是我自己刚说的（回声消除没吃干净）→ 当没听见
   if (recentEcho(t)) {
     log('[listen] drop self echo');
+    traceSpeech({stage:'request-drop-echo',chars:t.length});
     voiceTurn?.skip();
+    voiceTurn?.complete?.();
     return;
   }
   if (speaking) {
@@ -1660,23 +1860,26 @@ async function handleUtterance(text, voiceTurn) {
     stopSpeaking('voice');
   }
   const c = config.load();
-  if (c.asr.wakeOnly && !nameHit(t)) { voiceTurn?.skip(); send('heard', { text:t, replied:false, reason:'not-addressed' }); return; }
+  if (c.asr.wakeOnly && !nameHit(t)) { traceSpeech({stage:'request-drop-wake',chars:t.length});voiceTurn?.skip();send('heard', { text:t, replied:false, reason:'not-addressed' });voiceTurn?.complete?.();return; }
+  traceSpeech({stage:'request-accepted',chars:t.length});
   turnT0 = voiceTurn?.heardAt || Date.now();
   lastHeardAt = Date.now();
   autonomy?.pause();
   taskNotifications?.invalidate();
   send('heard', { text: t });
-  if (voiceTurn) log(`[listen] 预请求：停顿 ${Date.now() - voiceTurn.heardAt}ms`);
+  if (voiceTurn) {log(`[listen] 已接纳：停顿 ${Date.now() - voiceTurn.heardAt}ms`);voiceMetadata({stage:'voice-admitted',turn:voiceTurn.id,accepted:true,commitReady:voiceTurn.canCommit()});}
   log(`[listen] heard ${t.length} 字`);
 
   // 「别烦我」→ 立刻静音 10 分钟。这是主人的明确指令，优先级高于一切。
   // 只在气泡里回一句字，不出声、不撒娇 —— 这时候出声本身就是烦人的一部分。
   if (QUIET_WORDS.test(t)) {
+    if(voiceTurn&&!await committedVoice(voiceTurn))return;
     quietUntil = Date.now() + 10 * 60e3;
     stopSpeaking();
     send('chat', { role: 'assistant', text: '（好，我安静。）' });
     log('[quiet] 主人让我安静 10 分钟');
     send('heard', { text: t, replied: true });
+    if(voiceTurn){asrFailStreak=0;voiceTurn.complete?.();}
     return;
   }
 
@@ -1725,6 +1928,7 @@ function trustedCompanion(event, kind) {
   throw new Error('此窗口无权执行该操作');
 }
 function invalidateMemoryContext() {
+  void speechDiagnostic?.finish('source-change');
   send('dialogue-reset', {});
   lastDialogueAt = 0;
   autonomy?.pause();
@@ -1734,11 +1938,11 @@ function invalidateMemoryContext() {
   voiceTurns.reset(); stopSpeaking(); history = []; publishRecall(); taskReports.length = 0;
   tts.clearSpeechCache?.();
   secretary?.invalidate();
-  taskNotifications?.invalidate(); alertDesktop?.stop('记忆内容已变更，异常提醒已暂停').catch(() => {});
+  taskNotifications?.invalidate(); alertDesktop?.suspend({cause:'source-change',reason:'记忆内容已变更，异常提醒已暂停'}).catch(() => {});
   contacts?.invalidate();
-  void agent?.invalidate('记忆资料已变化，任务已暂停'); watchDesktop?.stop('记忆内容已变更，持续关注已暂停').catch(() => {});
+  void agent?.invalidate('记忆资料已变化，任务已暂停'); watchDesktop?.suspend({cause:'source-change',reason:'记忆内容已变更，持续关注已暂停'}).catch(() => {});
   if (desktop?.task && ['starting', 'running', 'monitoring', 'awaiting', 'verifying', 'review'].includes(desktop.task.status)) {
-    desktop.stop('记忆内容已变更，代理已暂停').catch(() => {});
+    desktop.suspend({cause:'source-change',reason:'记忆内容已变更，代理已暂停'}).catch(() => {});
   }
 }
 function clearTaskView() {
@@ -1812,10 +2016,11 @@ ipcMain.handle('pet:open-web-source', async (e, value) => {
   await shell.openExternal(url); return { ok: true };
 });
 ipcMain.handle('pet:memory-maintenance-status', e => { trustedCompanion(e, 'memory'); return maintenance?.status() || { status: 'idle', note: '等待记忆解锁' }; });
+ipcMain.handle('pet:memory-import-status',async(e,id)=>{trustedCompanion(e,'memory');if(!memory?.ready)return [];if(id!==undefined&&(typeof id!=='string'||id.length>256))throw Error('导入记录无效');return memory.imports.list({id});});
 ipcMain.handle('pet:experience-import',async(e,kind)=>{
   selfAccess(e);trustedCompanion(e,'memory');if(!['zip','folder'].includes(kind))throw Error('请选择ZIP或文件夹');
-  const result=await dialog.showOpenDialog({title:'导入经验和工具',properties:[kind==='zip'?'openFile':'openDirectory'],...(kind==='zip'?{filters:[{name:'经验资源包',extensions:['zip']}]}:{})});
-  if(result.canceled)return {canceled:true};selfAccess(e);return memory.experienceRepository.import(result.filePaths[0]);
+  const result=await dialog.showOpenDialog({title:'导入记忆与经验资料',properties:[kind==='zip'?'openFile':'openDirectory'],...(kind==='zip'?{filters:[{name:'记忆经验资料包',extensions:['zip']}]}:{})});
+  if(result.canceled)return {canceled:true};selfAccess(e);return memory.imports.import(result.filePaths[0]);
 });
 ipcMain.handle('pet:memory-maintain', (e, mode) => {
   trustedCompanion(e, 'memory');
@@ -1868,7 +2073,7 @@ ipcMain.handle('pet:memory-clear', async e => {
   const r = await dialog.showMessageBox(panels.get('memory'), { title:'WorkBunny-清空记忆', type: 'warning', buttons: ['取消', '清空记忆'], defaultId: 0, cancelId: 0,
     message: '清空全部聊天和长期记忆？', detail: '也会清除自我理解、简短身份与行为输入、锁、摘要及任务记录。模型和音色保留。请先导出加密备份。' });
   if (r.response !== 1) return { ok: false, canceled: true };
-  await desktop.stop('清空本地记忆'); invalidateMemoryContext();
+  await desktop.stop('清空本地记忆',{cause:'business-stop'}); invalidateMemoryContext();
   const result = await memory.clear(); contacts?.invalidate(); void agent?.invalidate('资料或账号状态发生变化，任务已暂停'); clearTaskView(); return result;
 });
 ipcMain.handle('pet:memory-export', async (e, passphrase) => {
@@ -1922,7 +2127,15 @@ ipcMain.handle('pet:agent-command', async (e, request) => {
   catch (error) { return { ok: false, text: error.message }; }
 });
 ipcMain.handle('pet:agent-artifact',async(e,{id,index}={})=>{trustedCompanion(e);if(e.sender!==win?.webContents&&e.sender!==panels.get('desktop')?.webContents)throw Error('此窗口无权读取成果');const file=await agent?.revealArtifact(id,index);if(!file)throw Error('成果暂不可用');shell.showItemInFolder(file);return {ok:true};});
-ipcMain.handle('pet:agent-control', async (e, value) => {
+ipcMain.handle('pet:agent-result-link',async(e,{id,index}={})=>{trustedCompanion(e);if(e.sender!==win?.webContents&&e.sender!==panels.get('desktop')?.webContents)throw Error('此窗口无权打开成果链接');if(screenLocked||!memory?.ready)throw Error('请先解锁资料库');const epoch=memory.generation,scene=currentScene();const url=await agent?.revealResultLink(id,index);if(!url||screenLocked||!memory?.ready||memory.generation!==epoch||currentScene()!==scene)throw Error('成果链接暂不可用或资料范围已变化');await shell.openExternal(url);return {ok:true};});
+async function runTaskControl(entry,operation,ref,execute){
+  const requestId=require('crypto').randomUUID(),safe=value=>String(value||'').replace(/[^a-zA-Z0-9_.:#-]/gu,'').slice(0,120);
+  const command={requestId,entry,operation:safe(operation),source:safe(ref?.source),id:safe(ref?.id||ref?.sessionId)};
+  log('[task-control] request',command);
+  try{const result=await execute();log('[task-control] result',{...command,ok:result?.ok===true,localStopped:result?.localStopped===true,cleanupVerified:result?.cleanupVerified,cleanupErrors:result?.cleanupErrors,preserved:result?.preserved,error:result?.error});return result;}
+  catch(error){log('[task-control] failure',{...command,error:error.message});return {ok:false,error:error.message||'任务操作失败，请查看任务状态后重试'};}
+}
+ipcMain.handle('pet:agent-control', async (e, value) => runTaskControl('task-panel',value?.operation,{source:'agent',id:value?.id},async()=>{
   trustedCompanion(e, 'desktop');
   if (!agent || !memory?.ready) return { ok: false, error: '任务服务尚未就绪' };
   if (value?.operation === 'reconnect') return agent.reconnectWeChat();
@@ -1930,8 +2143,8 @@ ipcMain.handle('pet:agent-control', async (e, value) => {
   if (value?.operation === 'check') return agent.reconcile(value.id);
   if (value?.operation === 'resolve') return agent.resolveAttention(value.id);
   return agent.control(value?.operation, value?.id);
-});
-ipcMain.handle('pet:activity-control',async(e,{operation,ref}={})=>{
+}));
+ipcMain.handle('pet:activity-control',async(e,{operation,ref}={})=>runTaskControl('activity',operation,ref,async()=>{
   trustedCompanion(e);
   if(e.sender!==win?.webContents&&e.sender!==panels.get('desktop')?.webContents)throw Error('此窗口无权停止任务');
   if(!memory?.ready||!agent)return {ok:false,error:'任务服务尚未就绪'};
@@ -1942,7 +2155,7 @@ ipcMain.handle('pet:activity-control',async(e,{operation,ref}={})=>{
       }
       if(operation==='resolve')return await agent.resolveAttention(ref.id);
       if(operation==='check')return await agent.reconcile(ref.id);
-      if(!['pause','resume','stop'].includes(operation))throw Error('任务操作不支持');
+      if(!['pause','resume','stop','archive','reviewPriorResult'].includes(operation))throw Error('任务操作不支持');
       return await agent.control(operation,ref.id);
     }
     if(operation!=='stop')throw Error('这项外部工作只支持停止');
@@ -1958,7 +2171,7 @@ ipcMain.handle('pet:activity-control',async(e,{operation,ref}={})=>{
     }
     throw Error('无法识别要停止的任务');
   }catch(error){return {ok:false,error:error.message};}
-});
+}));
 ipcMain.handle('pet:activity-expanded',(e,open)=>{
   if(e.sender!==win?.webContents)throw Error('此窗口无权展开任务');activityPanelOpen=open===true;if(windowLayout)placeWindow(windowLayout.logical);return {ok:true};
 });
@@ -1971,14 +2184,24 @@ async function stopDesktopActivity(id){
   catch(error){desktop.update({status:'paused',note:'Bunny 已停止输入；WorkBuddy 停止尚未确认：'+error.message});await desktop.journal();throw error;}
   await taskNotifications?.cancelTask(id);return {ok:true};
 }
-async function stopWorkBuddy(physical){
-  const matches=monitoredSessions().filter(s=>s.task?.bunnyTaskId===physical.id&&(!physical.monitorSessionId||s.sessionId===physical.monitorSessionId));
+async function stopWorkBuddy(physical,options){
+  const source=ensureMonitor(),{root}=config.load().monitor;
+  if(!source.enabled||source.root!==root)await source.start(root);
+  if(options?.signal?.aborted)throw Error('清理时限已到，未继续操作 WorkBuddy');
+  const record=require('./workbuddy-observation').observeWorkBuddy(source,physical);
+  if(record){
+    if(record.status!=='running')return {ok:true,verified:true,alreadyEnded:true};
+    return workBuddyStopper.stop({sessionId:record.sessionId,taskId:record.taskId,messageKey:record.messageKey,bunnyTaskId:physical.id},options);
+  }
+  if((physical.followUpAwaitingMonitor||physical.followUpPending&&physical.followUpPending.state!=='observed')&&!require('./workbuddy-observation').workSubmissionConfirmed(physical))throw Error('本轮提交尚未绑定可核验的 WorkBuddy 执行记录；Bunny 已停止，不会继续原草稿或误停旧轮次');
+  const matches=monitoredSessions().filter(s=>s.task?.bunnyTaskId===physical.id&&(!physical.monitorSessionId||s.sessionId===physical.monitorSessionId)&&(!physical.monitorTaskId||s.task.id===physical.monitorTaskId)&&(!physical.monitorMessageKey||s.task.messageKey===physical.monitorMessageKey));
   if(matches.length!==1){
     if(['accepted','review'].includes(physical.status))return {ok:true,verified:true,alreadyEnded:true};
     throw Error('尚未绑定唯一 WorkBuddy 执行轮次，请稍后再次停止核对');
   }
-  const snap=matches[0];return workBuddyStopper.stop({sessionId:snap.sessionId,taskId:snap.task.id,messageKey:snap.task.messageKey,bunnyTaskId:physical.id});
+  const snap=matches[0];return workBuddyStopper.stop({sessionId:snap.sessionId,taskId:snap.task.id,messageKey:snap.task.messageKey,bunnyTaskId:physical.id},options);
 }
+
 ipcMain.handle('pet:desktop-insert', (e, text) => { trustedCompanion(e, 'desktop'); return desktop.insert(text); });
 ipcMain.handle('pet:interact', async (e, request) => {
   if (e.sender !== win?.webContents) return null;
@@ -2283,6 +2506,7 @@ ipcMain.handle('pet:say', async (_e, { text, internal = false }) => {
 });
 
 async function applySettings(patch) {
+  if(speechDiagnostic?.active&&(patch?.asr||patch?.buddy||patch?.voice||patch?.memory))await speechDiagnostic.finish('configuration-change');
   const previous = config.load();
   if (patch?.avatar && !avatarList().some(item => item.key === patch.avatar)) throw Error('形象不存在或已删除');
   if (patch?.avatarPalettes !== undefined) {
@@ -2295,11 +2519,13 @@ async function applySettings(patch) {
   if (patch?.asr?.ownerOnly && !speakerFilter.status().ready) throw Error('请先朗读录入主人声音');
   if (patch?.window && Object.hasOwn(patch.window, 'scale')) patch = { ...patch, window: { ...patch.window, scale: clampScale(patch.window.scale) } };
   const c = config.save(patch || {});
+  if(patch?.asr||patch?.voice?.alwaysListen===true){asrRecoveryBlocked=false;asrFailStreak=0;}
+  if(patch?.memory&&c.memory.useInnateExperience!==previous.memory.useInnateExperience&&memory?.ready)await agent?.refreshExperiencePolicy();
   if (previous.voice.enabled && !c.voice.enabled && (speaking || speechQueue.length)) stopSpeaking('user', { keepThought: true });
   if(patch?.software&&['terminal','systemConfiguration'].some(k=>k in patch.software)){pendingTaskPermission=null;await agent?.authorizationChanged();}
   if (c.memory.scene !== previous.memory.scene || c.memory.enabled !== previous.memory.enabled ||
       patch?.brain && JSON.stringify(c.brain) !== JSON.stringify(previous.brain)) {
-    taskNotifications?.invalidate(); await alertDesktop?.stop('对话场景或设置已变化，异常微信提醒已暂停').catch(() => {});
+    taskNotifications?.invalidate(); await alertDesktop?.suspend({cause:'scene-change',reason:'对话场景或设置已变化，异常微信提醒已暂停'}).catch(() => {});
   }
   speakerFilter.enabled = c.asr.ownerOnly === true;
   if (patch?.brain && JSON.stringify(c.brain) !== JSON.stringify(previous.brain)) {
@@ -2326,7 +2552,7 @@ async function applySettings(patch) {
     await memory?.changeScene(c.memory.scene).catch(() => { send('toast', { text: '场景已切换，当前记忆读取异常；未使用旧场景资料。' }); });
     contacts?.invalidate();
     await agent?.invalidate('切换了对话场景，任务已暂停');
-    if (desktop?.task && !visibleHere(desktop.task)) await desktop.stop('切换了对话场景，原任务已暂停').catch(() => log('[desktop] 场景暂停未完成'));
+    if (desktop?.task && !visibleHere(desktop.task)) await desktop.suspend({cause:'scene-change',reason:'切换了对话场景，原任务已暂停'}).catch(() => log('[desktop] 场景暂停未完成'));
     if (resumeListening) startListen('scene');
     for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'memory-changed' });
   }
@@ -2383,7 +2609,8 @@ ipcMain.handle('pet:probe', async () => {
   return out;
 });
 
-ipcMain.on('pet:hit', (e, v) => {if(e.sender!==win?.webContents)return;taskUiInteractive=typeof v==='object'&&v.taskUi===true;setInteractive(typeof v==='object'?v.inside===true:!!v);});
+ipcMain.on('pet:input-regions',(e,value)=>{if(e.sender===win?.webContents)petWindowInput?.setGeometry(value);});
+ipcMain.on('pet:hit', (e, v) => {if(e.sender!==win?.webContents)return;taskUiInteractive=typeof v==='object'&&v.taskUi===true;setInteractive(typeof v==='object'?v.inside===true:!!v,typeof v==='object'&&v.ui===true);});
 ipcMain.on('pet:input-state', (event, open) => {
   if (event.sender !== win?.webContents || textInputOpen === (open === true)) return;
   textInputOpen = open === true; rebuildTray();
@@ -2399,6 +2626,8 @@ ipcMain.on('pet:audio-started', () => {
 ipcMain.on('pet:listen', (_e, v) => {
   const want = v === 'toggle' ? !alwaysOn : !!v;
   if (storageBusy) return;
+  if(speechDiagnostic?.active){if(!want){void speechDiagnostic.finish('owner-stop');stopListen();config.save({voice:{alwaysListen:false}});sendConfig(config.load());}return;}
+  if(want&&speechDiagnostic?.blocked)speechDiagnostic.release();
   if (want) {
     config.save({ voice: { alwaysListen:true } });
     if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') void requestAsrPermission().then(() => startListen('permission'));
@@ -2406,9 +2635,22 @@ ipcMain.on('pet:listen', (_e, v) => {
   } else { stopListen(); config.save({ voice: { alwaysListen:false } }); }
   send('listen', { on:alwaysOn }); sendConfig(config.load());
 });
+ipcMain.handle('pet:speech-diagnostic',async(event,args={})=>{
+  trustedCompanion(event,'settings');
+  if(!args||typeof args!=='object'||Object.keys(args).some(key=>!['action','pcm'].includes(key)))throw Error('诊断参数无效');
+  try{
+    if(args.action==='start')return await speechDiagnostic.start({durationMs:20000,pcm:args.pcm===true});
+    if(args.action==='stop')return await speechDiagnostic.finish('owner-stop');
+    if(args.action==='status')return speechDiagnostic.status();
+    if(args.action==='open'){await shell.openPath(await speechDiagnostic.directory());return speechDiagnostic.status();}
+    if(args.action==='clear')return await speechDiagnostic.clear();
+    throw Error('E_DIAGNOSTIC_OPTIONS');
+  }catch(error){const code=/^E_DIAGNOSTIC_[A-Z_]+$/.test(error.code||'')?error.code:'E_DIAGNOSTIC_FAILED';throw Error(code);}
+});
 ipcMain.handle('pet:speaker-status', e => { trustedCompanion(e, 'settings'); return publishSpeakerStatus(); });
 ipcMain.handle('pet:speaker-enroll', async e => {
   trustedCompanion(e, 'settings');
+  if(speechDiagnostic?.active)throw Error('请先结束语音诊断');
   if (screenLocked || !memory?.ready) throw Error('请先解锁记忆');
   if (speakerFilter.enrollment) throw Error('已经在录入声音');
   const permission = await requestAsrPermission();
@@ -2510,11 +2752,11 @@ ipcMain.handle('pet:storage-migrate', async e => {
   let closed = false;
   try {
     const result = await storage.migrate(choice.filePaths[0], { quiesce: async () => {
-      storageBusy = true; contextEpoch++; activeThought?.abort(); voiceTurns.reset(); stopListen(); stopSpeaking();
+      storageBusy = true; void speechDiagnostic?.finish('storage-migration'); contextEpoch++; activeThought?.abort(); voiceTurns.reset(); stopListen(); stopSpeaking();
       autonomy?.pause(); maintenance?.cancel(); monitor?.stop(); monitor = null; void agent?.invalidate('资料或账号状态发生变化，任务已暂停');
-      taskNotifications?.invalidate(); await alertDesktop?.stop('迁移资料库，异常微信提醒已暂停');
-      await desktop?.stop('迁移资料库，代办已暂停且不会重发');
-      await watchDesktop?.stop('迁移资料库');
+      taskNotifications?.invalidate(); await alertDesktop?.suspend({cause:'storage-migration',reason:'迁移资料库，异常微信提醒已暂停'});
+      await desktop?.suspend({cause:'storage-migration',reason:'迁移资料库，代办已暂停且不会重发'});
+      await watchDesktop?.suspend({cause:'storage-migration',reason:'迁移资料库'});
       await memory.tail; await memory.db.request('checkpoint');
       await memory.close({ strict: true }); closed = true;
     } });
@@ -2682,12 +2924,13 @@ ipcMain.handle('pet:tts-test', async () => {
   stopSpeaking();
   const gen = speechGen;
   speaking = true;
+  const controller = new AbortController(); speechAbort = controller;
   send('speaking', { on: true, text: '' });
   speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(false); }, c.tts.engine === 'qwen' ? 145000 : ['remote', 'http', 'doubao'].includes(c.tts.engine) ? 95000 : 30000);
   try {
     const text = '让我试试这个声音，你觉得顺耳吗？';
     const playback = streamingPlayback(c, gen, text);
-    const r = await tts.synthesize(text, c.tts, { ...playback.options, strict: true });
+    const r = await waitForSpeech(tts.synthesize(text, c.tts, { ...playback.options, strict: true, signal: controller.signal }), controller.signal);
     if (gen !== speechGen) return { ok: false, error: '试听已停止' };
     clearTimeout(speakWatchdog);
     const completed = new Promise(resolve => { playbackTest = { id: playback.id, resolve }; });
@@ -2868,9 +3111,9 @@ connection.on('change', status => {
     require('./workbuddy-free').invalidateCatalog();
     try { require('./model-catalog').invalidate('workbuddy'); } catch { log('[workbuddy] 旧目录缓存清理失败，连接保持暂停'); }
     contextEpoch++; activeThought?.abort(); memory?.cancelExtraction(); maintenance?.cancel(); autonomy?.pause();
-    taskNotifications?.invalidate(); void alertDesktop?.stop('WorkBuddy 授权会话已变化，异常提醒已暂停').catch(() => {});
+    taskNotifications?.invalidate(); void alertDesktop?.suspend({cause:'connection-change',reason:'WorkBuddy 授权会话已变化，异常提醒已暂停'}).catch(() => {});
     monitor?.stop(); monitor = null; monitorScoped = scopedMonitorContext(null, { scene: currentScene() });
-    void desktop?.stop('WorkBuddy 连接变化，已暂停，未重发任务').catch(() => {});
+    void desktop?.suspend({cause:'connection-change',reason:'WorkBuddy 连接变化，已暂停，未重发任务'}).catch(() => {});
     void agent?.invalidate('资料或账号状态发生变化，任务已暂停'); send('monitor', snapshotForUi(monitorScoped.view));
   } else if (connectionWasReady && !status.ready) {
     // Local observation survives a temporary model-broker failure.
@@ -2940,7 +3183,7 @@ if (!lock) {
     const imageResize = png => prepareVisionPreview(nativeImage.createFromBuffer(png));
     const imageCrop = (png, rect) => nativeImage.createFromBuffer(png).crop(rect).toPNG();
     const imageBitmap=png=>{const image=nativeImage.createFromBuffer(png);return {data:image.toBitmap(),...image.getSize()};};
-    desktop = new DesktopService({ sensitivePolicy,beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'primary', getScene: currentScene, emit: status => {
+    desktop = new DesktopService({log,pointerBlocked:point=>petWindowInput?.blocksPoint(point)===true, sensitivePolicy,beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'primary', getScene: currentScene, emit: status => {
       if (status.running&&!taskUiInteractive) setInteractive(false);
       send('desktop', status);
       secretary?.onStatus(status);
@@ -2951,6 +3194,10 @@ if (!lock) {
       if (!source.enabled || source.root !== root) await source.start(root);
       if (source !== monitor || !source.enabled) return null;
       return observeWorkBuddy(source, task);
+    }, inspectWorkBuddySubmission:async task=>{
+      const source=ensureMonitor(),{root}=config.load().monitor;
+      if(!source.enabled||source.root!==root)await source.start(root);
+      return require('./workbuddy-observation').inspectWorkBuddySubmission(source,task);
     }, persist: createTaskJournal(memory) });
     const readyForOwner = () => !quitting && !storageBusy && !screenLocked && !!memory?.ready;
     workBuddyStopper=new (require('./workbuddy-stop').WorkBuddyStopper)({native:desktop.native,lease:guiLease,
@@ -2981,7 +3228,7 @@ if (!lock) {
       }
     }) });
     desktop.contactDirectory = contacts;
-    watchDesktop = new DesktopService({ sensitivePolicy,beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'agent-conversation', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop, bitmap:imageBitmap,
+    watchDesktop = new DesktopService({log,pointerBlocked:point=>petWindowInput?.blocksPoint(point)===true, sensitivePolicy,beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'agent-conversation', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop, bitmap:imageBitmap,
       persist: task => createTaskJournal(memory)({ ...task, taskType: 'agent-operation' }) });
     const agentNative = new (require('./desktop-native').DesktopNative)();
     // Local thinking and speech do not own the mouse or keyboard. Only GUI
@@ -2993,13 +3240,14 @@ if (!lock) {
         const panel=openPanel('settings');const show=()=>{if(!panel.isDestroyed())panel.webContents.send('pet:ev',{type:'task-permission',...request});};
         if(panel.webContents.isLoading())panel.webContents.once('did-finish-load',show);else show();
       }});
-    setInterval(()=>{if(!quitting&&readyForOwner())void agent?.refreshPermissions().then(()=>agent?.recoverPending()).catch(()=>{});},3000).unref();
+    setInterval(()=>{if(!quitting&&readyForOwner())void agent?.maintain().catch(error=>agent?.recoveryDiagnostic('maintenance-loop',null,{error}));},3000).unref();
     agent = new (require('./agent-service').AgentService)({ desktop, conversationDesktop: watchDesktop, memory, contacts, channels:dialogueChannels,
+      readSubmissionEvidence:async()=>{const stat=await fs.promises.stat(LOG_PATH);if(!stat.isFile()||stat.size>1024*1024)throw Error('公开操作日志不完整或过大');return fs.promises.readFile(LOG_PATH,'utf8');},
       authorization,taskDirectory:path.join(USER_DIR,'workspaces'),deliveryDirectory:path.join(USER_DIR,'deliveries'),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,setWeChatOwnership:ownership=>applySettings({software:{wechatAccountOwnership:ownership}}),
       native: agentNative, imageResize, bitmap: png => { const picture = nativeImage.createFromBuffer(png); return { data: picture.toBitmap(), ...picture.getSize() }; },
-      getScene: currentScene, ready: readyForOwner, epoch: () => memory.generation, canOperate, report: queueTaskReport,stopWork:stopWorkBuddy,
+      getScene: currentScene, ready: readyForOwner, epoch: () => memory.generation, canOperate, report: queueTaskReport,stopWork:stopWorkBuddy, log,
       emit: status => { send('agent', status); for (const panel of panels.values()) if (!panel.isDestroyed()) panel.webContents.send('pet:ev', { type: 'agent', ...status }); } });
-    alertDesktop = new DesktopService({ sensitivePolicy,beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'task-alert', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop, bitmap:imageBitmap,
+    alertDesktop = new DesktopService({log,pointerBlocked:point=>petWindowInput?.blocksPoint(point)===true, sensitivePolicy,beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'task-alert', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop, bitmap:imageBitmap,
       persist: task => createTaskJournal(memory)({ ...task, taskType: 'notification-operation' }),
       modelRequest: options => {
         const L = config.resolveLLM(config.load());
@@ -3018,7 +3266,7 @@ if (!lock) {
         return canOperate();
       },
       deliver: async (event, signal) => {
-        const stop = () => { void alertDesktop.stop('异常提醒被暂停').catch(() => {}); };
+        const stop = () => { void alertDesktop.suspend({cause:'task-pause',reason:'异常提醒被暂停'}).catch(() => {}); };
         signal.addEventListener('abort', stop, { once: true });
         try {
           if (signal.aborted || !readyForOwner()) return { state: 'skipped' };
@@ -3029,7 +3277,7 @@ if (!lock) {
           if (!started.ok) return { state: alertDesktop.task?.submitAttemptedAt ? 'unknown' : 'skipped' };
           const deadline = Date.now() + 125000;
           while (alertDesktop.running && !signal.aborted && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 200));
-          if (alertDesktop.running || signal.aborted) { await alertDesktop.stop('异常微信提醒达到时间上限'); return { state: alertDesktop.task?.submitAttemptedAt ? 'unknown' : 'skipped' }; }
+          if (alertDesktop.running || signal.aborted) { await alertDesktop.suspend({cause:'action-timeout',reason:'异常微信提醒达到时间上限'}); return { state: alertDesktop.task?.submitAttemptedAt ? 'unknown' : 'skipped' }; }
           if (alertDesktop.task?.status === 'review' && alertDesktop.task?.sendState === 'confirmed') {
             await alertDesktop.accept({ automatic: true, report: '截图确认指定微信会话中的异常提醒已发送' });
             return { state: 'sent' };
@@ -3074,7 +3322,8 @@ if (!lock) {
     maintenanceTimer.unref?.();
     recoverTaskViews = async () => {
       contacts.invalidate(); void agent.invalidate('记忆资料已变化，任务已暂停'); clearTaskView();
-      await agent.restore().catch(() => log('[agent] 部分任务暂未恢复，保留原始资料'));
+      await agent.restore().catch(error => { agent.recoveryDiagnostic('restore-runtime',null,{error});log('[agent] 部分任务暂未恢复，保留原始资料'); });
+      await memory.imports.recover();
     };
     let vaultOpening = null;
     unlockMemory = () => {
@@ -3111,9 +3360,9 @@ if (!lock) {
       onLocked: () => {
         publishRecall();
         tts.clearSpeechCache?.();
-        screenLocked = true; send('dialogue-reset', {}); speakerFilter.cancel(); publishWebSources(); vaultKeyAbort?.abort(); stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.stop('电脑锁屏').catch(() => {});
-        void agent.invalidate('电脑锁屏，任务已暂停'); watchDesktop.stop('电脑锁屏').catch(() => {});
-        taskNotifications?.invalidate(); alertDesktop?.stop('电脑锁屏').catch(() => {});
+        screenLocked = true; void speechDiagnostic?.finish('screen-lock'); send('dialogue-reset', {}); speakerFilter.cancel(); publishWebSources(); vaultKeyAbort?.abort(); stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.suspend({cause:'screen-lock',reason:'电脑锁屏'}).catch(() => {});
+        void agent.invalidate('电脑锁屏，任务已暂停'); watchDesktop.suspend({cause:'screen-lock',reason:'电脑锁屏'}).catch(() => {});
+        taskNotifications?.invalidate(); alertDesktop?.suspend({cause:'screen-lock',reason:'电脑锁屏'}).catch(() => {});
         asrStatus = { ...asrStatus, captureReady: false, note: 'locked' }; send('asrStatus', asrStatus);
         if (!memory.ready) { memory.waitingForUnlock = true; memory.error = '电脑已锁屏，解锁后自动载入记忆'; log('[memory] 屏幕锁定，延后钥匙串读取'); }
       },
@@ -3153,6 +3402,7 @@ if (!lock) {
     // 再配合固定证书签名（tools/make-signing-cert.sh），重打包多少次都不会再问。
     if (storageError) memory.error = storageError;
     asr = new Asr(ASR_BIN, log);
+    asr.on('speechTrace',traceSpeech);
     const SPEECH_ZH = ['待授权', '缺语言包', '不可用', '可用'];
     function applyStatus(st) {
       st = { ...st, mode: asrMode };
@@ -3237,34 +3487,14 @@ if (!lock) {
       else if (d.name) log(`[asr] 想钉到「${d.name}」但绑定失败，先用系统默认`);
     });
     asr.on('fmt', (f) => log(`[asr] 格式 硬件=${f.hw} → 识别=${f.tgt}`));
-    asr.on('partial', (t) => {
-      if (speakerFilter.enrollment) { speakerFilter.heard(t); return; }
-      if (speakerFilter.enrollment || suppressEnrollmentFinal || !speakerFilter.acceptsText()) return;
-      if (recentEcho(t)) return;
-      if (alwaysOn && speaking && (!bargeInReady(t) || (config.load().asr.wakeOnly && !nameHit(t)))) return;
-      send('asrPartial', { text: t });
-      // 调试用：能听到"半句"就说明识别真的在工作（限流，别刷屏）
-      const now0 = Date.now();
-      if (t && now0 - lastPartialLogAt > 1800) {
-        lastPartialLogAt = now0;
-        log(`[asr] 半句 ${String(t).length} 字`);
-      }
-      // 一秒停顿即可预请求，无需等待原生识别器最终收句。
-      if (!alwaysOn) return;
-      if (t && speaking) stopSpeaking('voice');
-      lastLiveText = t;
-      voiceTurns.partial(t);
+    const asrInput=require('./asr-input-pipeline').createAsrInputPipeline({
+      speakerFilter,state:()=>({alwaysOn,speaking,get wakeOnly(){return config.load().asr.wakeOnly;},asrMode,suppressEnrollmentFinal}),recentEcho,bargeInReady,nameHit,turns:()=>voiceTurns,trace:traceSpeech,
+      onPartial:t=>{send('asrPartial',{text:t});const now0=Date.now();if(t&&now0-lastPartialLogAt>1800){lastPartialLogAt=now0;log(`[asr] 半句 ${String(t).length} 字`);}},
+      onAcceptedPartial:t=>{if(t&&speaking)stopSpeaking('voice');},onUtteranceConfirmed:t=>log(`[asr] 收句确认 ${String(t).length} 字`),
+      setLastLiveText:t=>{lastLiveText=t;},setSuppressEnrollmentFinal:value=>{suppressEnrollmentFinal=value;},
+      onFeatures:()=>{if(Date.now()-lastSpeakerStatusAt>1500){lastSpeakerStatusAt=Date.now();publishSpeakerStatus();}},
     });
-    asr.on('voiceFeatures', feature => {
-      const enrolled = !!speakerFilter.enrollment;
-      const verdict = speakerFilter.offer(feature);
-      if (!enrolled && !speakerFilter.enrollment) {
-        if (speakerFilter.enabled && !verdict.accepted && !voiceTurns.snapshot()?.finalized) voiceTurns.reset();
-        // Voice activity and AEC readiness do not prove this is the owner:
-        // speaker audio can leak through. Wait for filtered recognition text.
-      }
-      if (Date.now() - lastSpeakerStatusAt > 1500) { lastSpeakerStatusAt = Date.now(); publishSpeakerStatus(); }
-    });
+    asr.on('activity',asrInput.activity);asr.on('partial',asrInput.partial);asr.on('voiceFeatures',asrInput.voiceFeatures);
     asr.on('level', (v) => {
       send('asrLevel', { v });
       // 麦克风电平自检：安静时也会走动，方便判断"到底有没有收到声音"。
@@ -3283,20 +3513,7 @@ if (!lock) {
         micPeakAt = now;
       }
     });
-    asr.on('utterance', (t) => {
-      if (speakerFilter.enrollment || suppressEnrollmentFinal) { suppressEnrollmentFinal = !!speakerFilter.enrollment; return; }
-      if (!speakerFilter.acceptsText()) return;
-      lastLiveText = '';
-      if (!alwaysOn) return;
-      log(`[asr] 收句确认 ${String(t).length} 字`);
-      if (!recentEcho(t)) voiceTurns.final(t);
-    });
-    asr.on('final', (t) => {
-      if (speakerFilter.enrollment || suppressEnrollmentFinal) { suppressEnrollmentFinal = !!speakerFilter.enrollment; return; }
-      if (!alwaysOn || !speakerFilter.acceptsText()) return;
-      // The legacy recognizer commits one utterance, then rearms automatically.
-      if (asrMode === 'single' && !recentEcho(t)) voiceTurns.final(t);
-    });
+    asr.on('utterance',text=>{asrInput.utterance(text);});asr.on('final',asrInput.final);
     asr.on('recycle', (n) => log('[asr] recycled after ' + n + ' utterances'));
     asr.on('error', (m) => {
       if (speakerFilter.enrollment) speakerFilter.cancel('麦克风暂时中断，请重新朗读');
@@ -3305,22 +3522,9 @@ if (!lock) {
     });
     asr.on('exit', code => {
       applyStatus({ captureReady: false, note: alwaysOn ? 'reconnecting' : 'off' });
-      voiceTurns.recognizerStopped();
-      if (!alwaysOn) return;
-      // 起来 3 秒内就死的算一次失败。连续失败就退避，否则「授权没了」这种情况
-      // 会每 1.2 秒刷一次日志、把 CPU 白烧掉。
-      const lived = Date.now() - (asrStartedAt || 0);
-      asrFailStreak = asrMode === 'single' && code === 0 ? 0 : lived < 3000 ? asrFailStreak + 1 : 0;
-      if (asrFailStreak >= 3) {
-        const wait = Math.min(60000, 4000 * asrFailStreak);
-        log(`[listen] 连续失败 ${asrFailStreak} 次，${Math.round(wait / 1000)} 秒后再试`);
-        if (asrFailStreak === 3) {
-          send('asrError', { message: '我听不见了（麦克风可能被系统关掉），去「系统设置 → 隐私与安全性 → 麦克风」把 WorkBunny 勾上。' });
-        }
-        scheduleListenRestart(wait);
-      } else {
-        scheduleListenRestart(asrMode === 'single' && code === 0 ? 150 : 1200);
-      }
+      voiceTurns.recognizerStopped({graceful:code===0});
+      if (!alwaysOn || quitting) return;
+      recoverListening(code);
     });
 
     if (connection.status().ready) startMonitor();
@@ -3388,6 +3592,7 @@ if (!lock) {
 
 let shutdownStarted = false, shutdownFlushed = false;
 app.on('before-quit', event => {
+  const diagnosticShutdown=speechDiagnostic?.finish('process-exit');
   connection.close(); speakerFilter.cancel(); embodiment.close();
   for (const controller of avatarDescriptionPending.values()) controller.abort();
   clearInterval(maintenanceTimer); clearInterval(supervisionTimer); clearInterval(notificationTimer); clearTimeout(positionSaveTimer);
@@ -3406,7 +3611,8 @@ app.on('before-quit', event => {
     event.preventDefault();
     if (!shutdownStarted) {
       shutdownStarted = true;
-      Promise.resolve(desktop?.stop('应用退出')).catch(() => {}).then(async () => {
+      Promise.allSettled([diagnosticShutdown,...[desktop,watchDesktop,alertDesktop].filter(Boolean).map(controller=>controller.suspend({cause:'process-exit'}))]).then(async results => {
+        for(const result of results)if(result.status==='rejected')agent?.recoveryDiagnostic('shutdown-controller-suspend',null,{error:result.reason});
         await autonomy?.close(); await agent?.close(); await watchDesktop?.close(); await alertDesktop?.close(); await taskNotifications?.close(); await desktop?.close(); return memory.close();
       }).catch(() => log('[memory] 退出时写入未完成，保留已提交数据')).finally(() => { shutdownFlushed = true; app.quit(); });
     }

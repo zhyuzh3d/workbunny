@@ -2,8 +2,46 @@
 // Repairs are small, request-scoped adjustments, never executable code or new authority.
 const crypto=require('node:crypto');
 const {parseStrictJson}=require('./strict-json');
-const BLOCKED=new Set(['E_PERMISSION_REQUIRED','E_TASK_AUTH','E_APP_CIRCUIT','E_GUI_BUSY','E_CAPTURE_BUSY','E_NO_PROGRESS','ABORT_ERR','E_ABORTED']);
+const BLOCKED=new Set(['E_PERMISSION_REQUIRED','E_TASK_AUTH','E_APP_CIRCUIT','E_GUI_BUSY','E_CAPTURE_BUSY','E_GUI_FOCUS_CHANGED','E_SUBMISSION_UNCERTAIN','E_NO_PROGRESS','E_WORKBUDDY_DRAFT_CONFLICT','E_WORKBUDDY_ROUTE_CONFLICT','ABORT_ERR','E_ABORTED']);
 const OPTIONS={context:['compact_context','retry','defer'],schema:['repair_schema','retry','defer'],output:['increase_output','retry','defer'],response:['compact_response','retry','defer'],unexpected:['retry','defer'],stall:['reobserve','change_method','wait','ask_owner']};
+function diagnostic(value){
+ if(!value||typeof value!=='object'||Array.isArray(value))return undefined;
+ const result={};for(const key of ['operation','method','model'])if(typeof value[key]==='string'&&/^[a-zA-Z0-9_.:-]{1,80}$/u.test(value[key]))result[key]=value[key];
+ if(Number.isSafeInteger(value.candidateCount)&&value.candidateCount>=0&&value.candidateCount<=10000)result.candidateCount=value.candidateCount;
+ if(value.guardChecks&&typeof value.guardChecks==='object'&&!Array.isArray(value.guardChecks)){
+  const checks=Object.entries(value.guardChecks).filter(([key,passed])=>/^[a-zA-Z][a-zA-Z0-9]{0,47}$/u.test(key)&&typeof passed==='boolean').slice(0,16);
+  if(checks.length)result.guardChecks=Object.fromEntries(checks);
+ }
+ for(const key of ['expectedBundleId','actualBundleId'])if(typeof value[key]==='string'&&/^[a-zA-Z0-9_.-]{1,160}$/u.test(value[key]))result[key]=value[key];
+ for(const key of ['expectedPid','actualPid','expectedWindowId'])if(Number.isSafeInteger(value[key])&&value[key]>0)result[key]=value[key];
+ if(value.completion&&typeof value.completion==='object'&&!Array.isArray(value.completion)){
+  const source=value.completion,completion={};
+  if(typeof source.model==='string'&&/^[a-zA-Z0-9_.:-]{1,100}$/u.test(source.model))completion.model=source.model;
+  if(Number.isSafeInteger(source.maxOutputTokens)&&source.maxOutputTokens>0)completion.maxOutputTokens=source.maxOutputTokens;
+  if(typeof source.finishReason==='string'&&/^[a-zA-Z0-9_-]{1,40}$/u.test(source.finishReason))completion.finishReason=source.finishReason;
+  if(typeof source.hasReasoning==='boolean')completion.hasReasoning=source.hasReasoning;
+  const usage=require('./chat-response').sanitizeUsage(source.usage);if(usage)completion.usage=usage;
+  if(Object.keys(completion).length)result.completion=completion;
+ }
+ if(value.transport&&typeof value.transport==='object'&&!Array.isArray(value.transport)){
+  const source=value.transport,transport={};
+  if(['broker','local-jsonl'].includes(source.source))transport.source=source.source;
+  if(['http-response','pipe-discovery','frame'].includes(source.stage))transport.stage=source.stage;
+  if(['model-completion','model-catalog'].includes(source.requestKind))transport.requestKind=source.requestKind;
+  if(Number.isSafeInteger(source.limitBytes)&&source.limitBytes>0)transport.limitBytes=source.limitBytes;
+  if(Object.keys(transport).length)result.transport=transport;
+ }
+ if(value.schemaAudit&&typeof value.schemaAudit==='object'&&!Array.isArray(value.schemaAudit)){
+  const source=value.schemaAudit,schemaAudit={};
+  if(typeof source.protocol==='string'&&/^[a-z][a-z0-9-]{0,47}$/u.test(source.protocol))schemaAudit.protocol=source.protocol;
+  if(typeof source.field==='string'&&/^[a-zA-Z][a-zA-Z0-9.\[\]]{0,95}$/u.test(source.field))schemaAudit.field=source.field;
+  if(typeof source.expected==='string'&&/^[a-z][a-z0-9|._-]{0,95}$/u.test(source.expected))schemaAudit.expected=source.expected;
+  if(['object','array','string','number','boolean','null','undefined'].includes(source.actualType))schemaAudit.actualType=source.actualType;
+  if(Object.keys(schemaAudit).length)result.schemaAudit=schemaAudit;
+ }
+ const budget=require('./context-budget').diagnostic(value.budget);if(budget)result.budget=budget;
+ return Object.keys(result).length?result:undefined;
+}
 function category(error){
  const code=String(error?.code||'');if(BLOCKED.has(code))return null;
  if(['E_CONTEXT_WINDOW','E_CONTEXT_BUDGET'].includes(code))return 'context';
@@ -13,11 +51,18 @@ function category(error){
  if(/(?:timeout|超时|network|网络|连接|ECONNRESET|ETIMEDOUT)/iu.test(String(error?.message||'')))return null;
  return 'unexpected';
 }
-function incident(task,error){return crypto.createHash('sha256').update(JSON.stringify([task.skill,error.code||'E_STEP',String(error.message||''),task.inbox?.[0]?.key||'',task.state?.stepSequence||0,task.state?.goalRevision||0])).digest('hex').slice(0,24);}
-async function advise({kind,skill,code,attempt,phase,errorType,schemaAudit,progress,signal,request,timeoutMs=12000}){
+function incident(task,error,progress){
+ const facts=diagnostic(error.diagnostic);
+ // Changing timestamps or estimated request sizes does not create new
+ // external evidence and must not renew the bounded recovery allowance.
+ if(facts?.budget)facts.budget=Object.fromEntries(['context','output','inputBudget','imageCount'].filter(k=>Object.hasOwn(facts.budget,k)).map(k=>[k,facts.budget[k]]));
+ return crypto.createHash('sha256').update(JSON.stringify([task.skill,error.code||'E_STEP',String(error.message||''),facts,task.inbox?.[0]?.key||'',task.state?.goalRevision||0,[...(progress?.state?.evidence||[])].sort()])).digest('hex').slice(0,24);
+}
+async function advise({kind,skill,code,attempt,phase,errorType,schemaAudit,progress,diagnostic:methodDiagnostic,signal,request,timeoutMs=12000}){
  const choices=OPTIONS[kind];if(!choices)throw Error('unsupported repair category');
  const timing=progress?Object.fromEntries(['elapsedMs','withoutProgressMs','waitingMs','stage','stageElapsedMs','repeatedEvidence','reviews','lastMethod','waitReason','facts','spent'].filter(k=>Object.hasOwn(progress,k)).map(k=>[k,progress[k]])):undefined;
- const context={kind,skill,code,attempt,...(phase?{phase}:{}),...(errorType?{errorType}:{}),...(schemaAudit?{schemaAudit}:{}),...(timing?{progress:timing}:{}),allowedActions:choices, constraints:'仅诊断可恢复的模型或任务错误；不能修改任务目标、权限、实际数据或已确认操作。连续核查没有新证据时要改变方法，不能用同一检查或笼统等待重复续期；时间只用于决策，不可编造成功或重发未知写入。'};
+ const safeDiagnostic=diagnostic(methodDiagnostic);
+ const context={kind,skill,code,attempt,...(safeDiagnostic?{diagnostic:safeDiagnostic}:{}),...(phase?{phase}:{}),...(errorType?{errorType}:{}),...(schemaAudit?{schemaAudit}:{}),...(timing?{progress:timing}:{}),allowedActions:choices, constraints:'仅诊断可恢复的模型或任务错误；不能修改任务目标、权限、实际数据或已确认操作。连续核查没有新证据时要改变方法，不能用同一检查或笼统等待重复续期；时间只用于决策，不可编造成功或重发未知写入。'};
  try{
   const invoke=request||require('./verification-transport').requestVerification,controller=new AbortController();
   const cancel=()=>controller.abort();signal?.addEventListener('abort',cancel,{once:true});
@@ -54,12 +99,30 @@ function auditSchemas(catalog){
  return {checked,issues};
 }
 function applyAction(profile={},action,{code}={}){
- const next={...profile};
- if(action==='compact_context'){next.contextLevel=Math.min(2,(next.contextLevel||0)+1);if(code==='E_CONTEXT_WINDOW')next.budgetScale=.5;}
+ // Input-window reductions belong to the one request rejected by the provider.
+ // Persist content/output adjustments, never a previous request's input ceiling.
+ const {budgetScale:legacyBudgetScale,...next}=profile;
+ if(action==='compact_context')next.contextLevel=Math.min(2,(next.contextLevel||0)+1);
  if(action==='repair_schema')next.schemaHint=true;
- if(action==='increase_output')next.maxTokens=8192;
- if(action==='compact_response')next.responseLevel=Math.min(2,(next.responseLevel||0)+1);
+ if(action==='increase_output'){next.maxTokens=8192;delete next.responseLevel;}
+ if(action==='compact_response'){next.responseLevel=Math.min(2,(next.responseLevel||0)+1);delete next.maxTokens;}
  return next;
+}
+// One read-only retry changes the budget in the direction required by the
+// observed failure. The caller owns the attempt count; this never repeats an
+// action or alternates between opposite limits within another retry loop.
+function responseRecovery(options,error){
+ const requested=Number(options.maxTokens)||4096,effective=error?.diagnostic?.completion?.maxOutputTokens,current=Number.isSafeInteger(effective)&&effective>0?effective:requested;
+ let maxTokens;
+ if(error?.code==='E_OUTPUT_LIMIT'){
+  if(current<requested||current>=8192)return null;
+  maxTokens=applyAction({},'increase_output').maxTokens;
+ }else if(error?.code==='E_PAYLOAD_TOO_LARGE'){
+  maxTokens=Math.min(applyProfile(options,applyAction({},'compact_response')).maxTokens,Math.floor(current/2));
+  if(maxTokens<512||maxTokens>=current)return null;
+ }else return null;
+ const {max_tokens,max_completion_tokens,max_output_tokens,...extraBody}=options.extraBody||{};
+ return {...options,maxTokens,thinking:'low',extraBody:{...extraBody,reasoning_effort:'low'}};
 }
 // Whitelist only replaceable historical context; never trim task goals,
 // current incoming messages, targets, authorization, tools, or receipts.
@@ -91,7 +154,7 @@ function applyProfile(options,profile){
   const system=messages.find(m=>m.role==='system'&&typeof m.content==='string');
   if(system)system.content+='\n'+hint;else messages.unshift({role:'system',content:hint});
  }
- const response=profile.responseLevel?{maxTokens:profile.responseLevel>1?1024:2048,thinking:'low',budgetScale:.5,extraBody:{...options.extraBody,reasoning_effort:'low'}}:{};
- return {...options,messages,...(profile.maxTokens?{maxTokens:Math.min(8192,Math.max(4096,Number(profile.maxTokens)||4096))}:{}),...(profile.budgetScale===.5?{budgetScale:.5}:{}),...response};
+ const response=profile.responseLevel?{maxTokens:profile.responseLevel>1?1024:2048,thinking:'low',extraBody:{...options.extraBody,reasoning_effort:'low'}}:{};
+ return {...options,messages,...(profile.maxTokens?{maxTokens:Math.min(8192,Math.max(4096,Number(profile.maxTokens)||4096))}:{}),...response};
 }
-module.exports={OPTIONS,category,incident,advise,applyAction,applyProfile,compactValue,auditSchemas};
+module.exports={OPTIONS,diagnostic,category,incident,advise,applyAction,applyProfile,responseRecovery,compactValue,auditSchemas};

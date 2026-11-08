@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { DesktopService, makeWorkBuddyOutbound } = require('../src/main/desktop-service');
+const { DesktopService, makeWorkBuddyOutbound, WECHAT_RULE } = require('../src/main/desktop-service');
 const { Secretary } = require('../src/main/secretary');
 const { observeWorkBuddy } = require('../src/main/workbuddy-observation');
 
@@ -24,7 +24,7 @@ class UncertainSendNative {
     if (op === 'workbuddyInspect') {
       if (payload.mode === 'conversation') return { available: true, conversationReady: true, associationMarkerPresent: true,
         editorCount: 1, selectedModel: 'Deepseek-V4.1-Flash', draftEmpty: this.draftEmpty, draftMatchesRequest: this.draftMatchesRequest,
-        sendEnabled: !this.draftEmpty };
+        sendEnabled: !this.draftEmpty,sendButtonRect:{x:RECT.x+RECT.width-80,y:RECT.y+RECT.height-60,width:40,height:30} };
       return { available: true, homeReady: true, editorCount: 1, selectedModel: 'Deepseek-V4.1-Flash', draftEmpty: true, sendEnabled: false };
     }
     if (op === 'workbuddyFill') {
@@ -113,6 +113,8 @@ async function prepareUncertainFollowUp(scenario) {
   assert.equal(scenario.desktop.task.followUpAwaitingMonitor, true);
   assert.ok(scenario.desktop.task.submittedAt > scenario.task.startedAt);
   assert.match(scenario.desktop.task.outboundText, /请补充缺失的日期与金额/);
+  assert(!scenario.desktop.task.outboundText.includes(WECHAT_RULE));assert(!scenario.desktop.task.outboundText.includes('微信'));assert(!scenario.desktop.task.outboundText.includes('不得操作通讯软件'));
+  assert.equal(scenario.native.calls.find(c=>c.op==='workbuddyFill').payload.text,scenario.desktop.task.outboundText);
   const sendIntentSnapshot = scenario.journals.find(entry => entry.steps.some(step => step.action === 'workbuddySend' && step.state === 'intent') && entry.followUpPending?.state === 'unknown');
   assert(sendIntentSnapshot, 'uncertain follow-up state was journaled before native send');
   assert.equal(sendIntentSnapshot.followUpRound, 1);

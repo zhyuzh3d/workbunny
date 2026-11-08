@@ -20,9 +20,15 @@ echo "▸ 从应用原图和黑白标志分别生成图标"
 env -u ELECTRON_RUN_AS_NODE "$ROOT/node_modules/.bin/electron" "$ROOT/tools/make-icons.cjs"
 
 # Ship the matching local TTS engine so downloading weights is sufficient.
-if [ ! -x "$ROOT/bin/asr" ] || [ "$ROOT/native/asr.swift" -nt "$ROOT/bin/asr" ] || [ "$ROOT/native/speaker-features.swift" -nt "$ROOT/bin/asr" ] || [ "$ROOT/native/wake-name.swift" -nt "$ROOT/bin/asr" ]; then
-  zsh "$ROOT/tools/build-asr.sh"
+asr_stale=0
+if [ ! -x "$ROOT/bin/asr" ]; then
+  asr_stale=1
+else
+  for source in "$ROOT"/native/{asr,speech-transcript,speech-diagnostic,speech-activity,speech-endpoint,speaker-features,wake-name}.swift "$ROOT/tools/build-asr.sh" "$ROOT"/native/vendor/libfvad/**/*(.N); do
+    if [ "$source" -nt "$ROOT/bin/asr" ]; then asr_stale=1; break; fi
+  done
 fi
+if [ "$asr_stale" = 1 ]; then zsh "$ROOT/tools/build-asr.sh"; fi
 if [ ! -x "$ROOT/bin/speech/speech" ]; then
   zsh "$ROOT/tools/build-tts-runtime.sh"
 fi

@@ -30,8 +30,9 @@ class FakeNative {
     this.moveAfterCapture = moveAfterCapture; this.capturePNG = capturePNG || Buffer.from('test-image'); this.calls = []; this.cancelled = 0; this.events = events;
     this.clickGate = clickGate; this.clickBehavior = clickBehavior; this.recognizedTexts = recognizedTexts;
     this.modelMenu = modelMenu; this.modelMenuOpen = modelMenu; this.selectedModel = selectedModel;
-    this.workBuddyInspection = workBuddyInspection; this.workBuddyInspectError = workBuddyInspectError;
-    this.workBuddyConversationInspection = workBuddyConversationInspection;
+    const sendButtonRect={x:rect.x+700,y:rect.y+550,width:40,height:30};
+    this.workBuddyInspection = {sendButtonRect,...workBuddyInspection}; this.workBuddyInspectError = workBuddyInspectError;
+    this.workBuddyConversationInspection = workBuddyConversationInspection?{sendButtonRect,...workBuddyConversationInspection}:null;
     this.workBuddyFillError = workBuddyFillError; this.workBuddySendError = workBuddySendError;
     this.workBuddyFillResults = [];
   }
@@ -63,6 +64,7 @@ class FakeNative {
     }
     if (op === 'workbuddyInspect') {
       if (this.workBuddyInspectError) throw new Error('fixture inspect unavailable');
+      if(payload.text&&this.typedWorkBuddyText!==undefined)return {scanComplete:true,editorCount:1,homeReady:payload.mode!=='conversation',conversationReady:payload.mode==='conversation',associationMarkerPresent:payload.mode==='conversation',draftEmpty:!this.typedWorkBuddyText,draftMatchesRequest:this.typedWorkBuddyText===payload.text};
       return payload.mode === 'conversation' ? (this.workBuddyConversationInspection || this.workBuddyInspection) : this.workBuddyInspection;
     }
     if (op === 'workbuddyFill') {
@@ -81,6 +83,7 @@ class FakeNative {
       if (this.clickBehavior) this.clickBehavior(this, payload);
     }
     if (op === 'click' && this.modelMenu && this.modelMenuOpen && Math.abs(payload.y - (rect.y + 0.49 * rect.height)) < 20) this.modelMenuOpen = false;
+    if(op==='type'&&payload.expected?.bundleId==='com.tencent.workbuddy.mac')this.typedWorkBuddyText=payload.text;
     return { performed: true };
   }
   cancel() { this.cancelled++; }
@@ -325,9 +328,11 @@ async function testWorkBuddyTypePurposeAndCurrentScope() {
     assert.equal(native.calls.filter(x => x.op === 'click').length, 1, 'the service clicks the unique free Hy3 row center before planning input');
     if (purpose === 'task') {
       assert(type.payload.text.startsWith(originalText), 'task typing preserves the exact original WorkBuddy request');
-      assert(type.payload.text.includes(WECHAT_RULE));
+      assert(!type.payload.text.includes(WECHAT_RULE));
+      assert(!type.payload.text.includes('不得操作通讯软件'));
       assert(type.payload.text.includes(`[workbunny:${svc.task.id}]`));
-      assert(type.payload.text.includes('本轮唯一允许操作的微信会话：文件传输助手'));
+      assert(!type.payload.text.includes('文件传输助手'));
+      assert(!type.payload.text.includes('允许操作的微信会话'));
       assert.match(sentGoal, /在 WorkBuddy 新建对话/);
       assert.doesNotMatch(sentGoal, /请检查当前任务进度/);
       assert.equal(svc.task.handoffSent, true);
@@ -417,7 +422,8 @@ async function testWorkBuddyAXHandoff() {
   const sendCall = native.calls.find(call => call.op === 'workbuddySend');
   assert(fillCall && sendCall, 'ready Flash editor uses the dedicated fill and send path');
   assert(fillCall.payload.text.startsWith(userText + '\n\n'), 'fast path preserves exact user text');
-  assert(fillCall.payload.text.includes(WECHAT_RULE));
+  assert(!fillCall.payload.text.includes(WECHAT_RULE));
+  assert(!fillCall.payload.text.includes('不得操作通讯软件'));
   assert.match(fillCall.payload.text, new RegExp(`\\[workbunny:${svc.task.id}\\]`));
   assert.equal(fillCall.payload.model, 'deepseek-v4.1-flash');
   assert.deepEqual(fillCall.payload.expected, { bundleId: 'com.tencent.workbuddy.mac', pid: 234 });
@@ -477,10 +483,10 @@ async function testWorkBuddyAXHandoff() {
   const matchingSvc = service(matchingNative, async () => { throw new Error('planner must not stand in for Monitor'); }, [], { observeWorkBuddy });
   assert((await matchingSvc.start({ goal: sameText, target: 'workbuddy', workModel: 'deepseek-v4.1-flash' })).ok);
   await until(() => matchingSvc.task.status === 'review');
-  assert.deepEqual(matchingNative.workBuddyFillResults, [{ filled: true, idempotent: true }], 'native fill takes the idempotent path for the exact same draft');
+  assert.deepEqual(matchingNative.workBuddyFillResults, [], 'the exact existing draft is not filled or refreshed again');
   assert(matchingNative.calls.find(call => call.op === 'workbuddyInspect')?.payload.text.startsWith(sameText));
-  assert(matchingNative.calls.find(call => call.op === 'workbuddyFill')?.payload.text.includes(`[workbunny:${matchingSvc.task.id}]`));
-  assert(matchingNative.calls.find(call => call.op === 'workbuddySend')?.payload.text.includes(WECHAT_RULE));
+  assert(matchingNative.calls.find(call => call.op === 'workbuddySend')?.payload.text.includes(`[workbunny:${matchingSvc.task.id}]`));
+  assert(!matchingNative.calls.find(call => call.op === 'workbuddySend')?.payload.text.includes('不得操作通讯软件'));
   assert.equal(matchingNative.calls.some(call => ['type', 'click', 'key'].includes(call.op)), false, 'an exact pre-existing draft is sent without visual retyping');
 
   const inspectFailureNative = new FakeNative({ bundleId: 'com.tencent.workbuddy.mac', selectedModel: 'flash', workBuddyInspectError: true });
@@ -503,7 +509,8 @@ async function testWorkBuddyOutboundTextBudget() {
   assert.equal(svc.task.goal, goal, '3,000 Unicode scalar goal is preserved in full');
   assert.equal(svc.task.criteria, criteria, '1,200 Unicode scalar criteria is preserved in full');
   assert(svc.task.outboundText.startsWith(goal + '\n\n验收标准：\n' + criteria));
-  assert(svc.task.outboundText.includes(WECHAT_RULE));
+  assert(!svc.task.outboundText.includes('不得操作通讯软件'));
+  assert(!svc.task.outboundText.includes('文件传输助手'));
   assert(svc.task.outboundText.includes(`[workbunny:${svc.task.id}]`));
   assert(svc.task.outboundText.length <= WORKBUDDY_TEXT_UTF16_LIMIT, 'full bounded task and fixed additions fit native UTF-16 budget');
   await until(() => svc.task.status === 'review');
@@ -794,8 +801,8 @@ async function testExplicitResumeRecoverySafety() {
   assert.equal(sameTextService.task.report, undefined);
   assert.equal(sameTextService.task.reportedAt, undefined);
   assert.deepEqual(sameTextService.task.reportHistory, [{ report: '上次暂停的说明', reportedAt: priorReportedAt, status: 'failed' }]);
-  assert.equal(sameTextNative.calls.filter(call => call.op === 'workbuddyFill').length, 1);
-  assert.equal(sameTextNative.workBuddyFillResults[0].idempotent, true, 'matching saved draft resumes through native idempotent fill');
+  assert.equal(sameTextNative.calls.filter(call => call.op === 'workbuddyFill').length, 0);
+  assert.deepEqual(sameTextNative.workBuddyFillResults, [], 'matching saved draft resumes without another fill');
   assert.equal(sameTextNative.calls.filter(call => call.op === 'workbuddySend').length, 1);
   assert.equal(sameTextNative.calls.some(call => call.op === 'type'), false, 'resume never types over the existing exact draft');
   await sameTextService.close();

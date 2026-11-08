@@ -209,7 +209,7 @@ function createMemoryKnowledge({ memory, clock = Date.now } = {}) {
       const type = typeOf(row);
       if (!type || type === 'decision') continue;
       if(row.value.schema==='bunny.experience/v1'){
-        const r=await memory.experienceRepository.resolve(row,scene,true);if(r)result.push({id:row.id,kind:'state',ts:row.ts,domain:r.domain,visibilityFloor:r.visibilityFloor,knowledgeType:type,label:LABELS[type],status:r.value.status,tags:r.value.tags||[],content:r.value.instructions||r.value.title,sources:r.value.sources||[],revision:r.value.revision});continue;
+        const r=await memory.experienceRepository.resolve(row,scene,true);if(r)result.push({id:row.id,kind:'state',ts:row.ts,domain:r.domain,visibilityFloor:r.visibilityFloor,knowledgeType:type,label:LABELS[type],status:r.value.status,tags:r.value.tags||[],content:r.value.instructions||r.value.title,sources:r.value.sources||[],revision:r.value.revision,...(r.value.securityReview?{securityReview:r.value.securityReview}:{})});continue;
       }
       let status = row.value.status, choices = [];
       if (type === 'relation') {

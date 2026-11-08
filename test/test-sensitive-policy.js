@@ -87,7 +87,7 @@ test('WorkBuddy attachment must be visibly present before the safe prompt is sub
  t.after(()=>require('../src/main/sensitive-policy').removeSensitiveAttachment(prepared.attachment).catch(()=>{}));
  const service=new DesktopService({sensitivePolicy:policy,native:{request:async(op,payload)=>{
   calls.push({op,payload});
-  if(op==='workbuddyInspect')return {available:true,homeReady:true,editorCount:1,selectedModel:'deepseek-v4.1-flash',draftEmpty:true};
+  if(op==='workbuddyInspect')return {available:true,homeReady:true,editorCount:1,selectedModel:'deepseek-v4.1-flash',draftEmpty:true,sendButtonRect:{x:900,y:620,width:40,height:40}};
   if(op==='workbuddyFill')return {filled:true};if(op==='pasteFile')return {performed:true};if(op==='workbuddySend')return {pressed:true,postContextValid:true};
   throw Error('unexpected native call');
  }}});
@@ -96,7 +96,7 @@ test('WorkBuddy attachment must be visibly present before the safe prompt is sub
  service.assertScreenshotCurrent=async()=>{};
  service.capture=async()=>({ocr:[{text:path.basename(prepared.attachment.path),confidence:.99}]});
  assert(await service.tryWorkBuddyHandoff({outboundText:prepared.text},{bundleId:'com.tencent.workbuddy.mac',pid:1,windowId:2},{},1));
- assert.deepEqual(calls.map(call=>call.op),['workbuddyInspect','workbuddyFill','pasteFile','workbuddySend']);
+ assert.deepEqual(calls.map(call=>call.op),['workbuddyInspect','workbuddyFill','pasteFile','workbuddyInspect','workbuddySend']);
  assert(!JSON.stringify(calls).includes(fixtureSecret));assert.equal(service.task.sensitiveAttachmentState,'delivered');assert(!fs.existsSync(prepared.attachment.path));
 });
 

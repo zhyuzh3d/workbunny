@@ -1,4 +1,5 @@
-import { taskCard } from './task-card.mjs';
+import { taskCard, refreshTaskClock } from './task-card.mjs';
+import { createTaskControls } from './task-controls.mjs';
 import { setupAutonomy } from './autonomy-ui.js';
 import { characterName, characterText, paintCharacterNames } from './character-name.mjs';
 const $ = (id) => document.getElementById(id);
@@ -127,7 +128,7 @@ function memoryConfigFrom(result) {
   const root = result?.config || result || {};
   setCharacterConfig(root);
   const value = root.memory && typeof root.memory === 'object' ? root.memory : {};
-  memoryCfg = { enabled: !!value.enabled, extract: !!value.extract };
+  memoryCfg = { enabled: !!value.enabled, extract: !!value.extract, useInnateExperience: value.useInnateExperience!==false };
   savedMemoryCfg = { ...memoryCfg };
   activeScene = SCENES.includes(value.scene) ? value.scene : 'life';
   savedScene = activeScene;
@@ -138,9 +139,9 @@ function applyMemoryConfigUpdate(result) {
   const root = result?.config || result || {};
   setCharacterConfig(root);
   const remoteMemory = root.memory && typeof root.memory === 'object' ? root.memory : {};
-  for (const key of ['enabled', 'extract']) {
+  for (const key of ['enabled', 'extract', 'useInnateExperience']) {
     const dirty = memoryCfg[key] !== savedMemoryCfg[key];
-    const remote = !!remoteMemory[key];
+    const remote = key==='useInnateExperience'?remoteMemory[key]!==false:!!remoteMemory[key];
     savedMemoryCfg[key] = remote;
     if (!dirty) memoryCfg[key] = remote;
   }
@@ -154,6 +155,7 @@ function applyMemoryConfigUpdate(result) {
 function paintMemoryConfig() {
   $('memoryEnabled').checked = memoryCfg.enabled;
   $('memoryExtract').checked = memoryCfg.extract;
+  $('memoryInnate').checked = memoryCfg.useInnateExperience!==false;
 }
 function configDraftLabel(draft) {
   return `使用记忆：${draft.enabled ? '开' : '关'}，整理新记忆：${draft.extract ? '开' : '关'}`;
@@ -168,6 +170,7 @@ function changeMemoryScene(scene) {
   const revision = ++sceneRevision;
   memoryViewRevision++;
   memoryStatsRevision++;
+  importReportRevision++;$('memoryImportReports').replaceChildren();$('memoryImportsCard').hidden=true;
   memoryCursor = null; memoryRows = []; memoryPageCount = 0; memoryHasMore = false;
   $('memoryList').replaceChildren(); $('memoryMore').hidden = true;
   $('memoryListNote').textContent = '正在切换场景…';
@@ -205,7 +208,7 @@ async function flushMemoryConfig() {
       const result = await api('config', { memory: snapshot });
       if (result?.ok === false) throw new Error(result.error || '保存失败');
       savedMemoryCfg = snapshot;
-      if (memoryCfg.enabled === snapshot.enabled && memoryCfg.extract === snapshot.extract) {
+      if (memoryCfg.enabled === snapshot.enabled && memoryCfg.extract === snapshot.extract && memoryCfg.useInnateExperience === snapshot.useInnateExperience) {
         setNote('memoryConfigNote', '已保存');
         break;
       }
@@ -251,7 +254,7 @@ function renderSources(card, rows) {
   card.append(region);
 }
 function renderRecord(row) {
-  if (memoryKind === 'knowledge') return renderKnowledgeRecord(row);
+  if (memoryKind === 'knowledge'||memoryKind==='innate') return renderKnowledgeRecord(row);
   const isConflict = row.origin === 'user-key-conflict-v1' && row.status === 'pending';
   const isModelCandidate = /^(?:doze-candidate|dream-candidate|model-candidate)/u.test(row.origin || '') && row.status === 'pending';
   const card = node('article', 'record');
@@ -269,7 +272,7 @@ function renderRecord(row) {
   if (row.evidenceCharacter && !row.role) top.append(node('span', 'badge', `来源：${row.evidenceCharacter}`));
   for (const tag of (row.tags || []).filter(t => t === '主动记忆' || t === '自动记忆')) top.append(node('span', 'badge', tag));
   if (row.origin === 'deepdream-merged-v1') top.append(node('span', 'badge', '归并版本'));
-  if (row.status) top.append(node('span', `badge${row.status === 'pending' ? ' pending' : ''}`, isConflict ? '用户说法待核对' : isModelCandidate ? '整理候选' : labelStatus(row.status)));
+  if (row.status) top.append(node('span', `badge${row.status === 'pending' ? ' pending' : ''}`, row.origin==='imported-memory-v1'?'导入资料 · 来源说法':isConflict ? '用户说法待核对' : isModelCandidate ? '整理候选' : labelStatus(row.status)));
   card.append(top);
   card.append(node('div', `record-content${row.role ? ' role' : ''}`, row.content || '（空内容）'));
   if (row.evidence) card.append(node('div', 'record-source', `依据：${row.evidence}`));
@@ -294,7 +297,7 @@ function renderRecord(row) {
       }, 'button primary');
       editBox.append(textarea, saveRow); card.append(editBox); textarea.focus();
     });
-    if (row.status === 'pending') addAction(actions, isConflict ? '采用这次说法' : '确认', async () => {
+    if (row.status === 'pending' && row.origin !== 'imported-memory-v1') addAction(actions, isConflict ? '采用这次说法' : '确认', async () => {
       try {
         hideError();
         const result = isConflict ? await api('memoryResolveConflict', row.id) : await api('memoryUpdate', row.id, row.content || '');
@@ -333,11 +336,12 @@ function renderRecord(row) {
   return card;
 }
 function knowledgeTypeLabel(type) {
-  return ({ relation: '相关陈述', doubt: '待核对', experience: '经验', tool: '工具', decision: '核对记录' })[type] || '整理资料';
+  return ({ relation: '记忆关联', doubt: '记忆疑问', experience: '经验', tool: '工具', decision: '澄清记录' })[type] || '整理资料';
 }
 function knowledgeStatusLabel(status) {
-  return ({ pending: '待处理', open: '待处理', unresolved: '待处理', snoozed: '稍后查看', dismissed: '不再提醒',
-    resolved: '已核对', accepted: '已采纳', verified: '历史验收', superseded: '已更新', archived: '已归档' })[status] || labelStatus(status);
+  if(status==='pending_review')return '等待自动吸收';if(status==='bundled')return '随包只读';
+  return ({ pending: '待澄清', open: '待澄清', unresolved: '待澄清', snoozed: '稍后查看', dismissed: '不再提醒',
+    resolved: '已澄清', accepted: '已采纳', verified: '历史验收', superseded: '已更新', archived: '已归档' })[status] || labelStatus(status);
 }
 function toolDetails(row) {
   const metadata = row.toolMetadata || row.tool || row.metadata || {};
@@ -364,9 +368,10 @@ function renderKnowledgeRecord(raw) {
   top.append(node('span', 'badge', row.label || knowledgeTypeLabel(row.knowledgeType)));
   for (const tag of (row.tags || []).filter(t => t === '主动记忆' || t === '自动记忆')) top.append(node('span', 'badge', tag));
   if (row.status) top.append(node('span', `badge${['pending', 'open', 'unresolved', 'snoozed'].includes(row.status) ? ' pending' : ''}`,
-    row.knowledgeType === 'experience' && row.status === 'candidate' ? '参考经验' : knowledgeStatusLabel(row.status)));
+    row.securityReview?.runtimeVerified===false?'静态审查 · 未运行验证':row.knowledgeType === 'experience' && row.status === 'candidate' ? '参考经验' : knowledgeStatusLabel(row.status)));
   card.append(top, node('div', 'record-content', row.content || '（空内容）'));
 
+  if(row.readOnly){card.append(node('div','inline-note','用户和 Bunny 均只读 · 仅随安装包更新；新心得另存为习得经验'));return card;}
   const choices = Array.isArray(row.memberChoices) ? row.memberChoices.filter(choice =>
     choice && typeof choice.id === 'string' && choice.id.length > 0 && typeof choice.content === 'string') : [];
   if (choices.length) {
@@ -493,8 +498,7 @@ function paintCurrentRecall(entries) {
         const active = tab.dataset.kind === memoryKind;
         tab.classList.toggle('active', active); tab.setAttribute('aria-selected', String(active));
       }
-      $('knowledgeFilters').hidden = memoryKind !== 'knowledge';
-      $('memorySearch').placeholder = memoryKind === 'knowledge' ? '搜索整理与经验' : '搜索内容';
+      paintMemoryView();
       await loadMemoryList(true);
       document.querySelector('.memory-main').scrollTop = 0;
       document.querySelector(`[data-record-id="${CSS.escape(entry.id)}"]`)?.scrollIntoView({ block: 'center' });
@@ -502,11 +506,28 @@ function paintCurrentRecall(entries) {
     item.append(actions); target.append(item);
   }
 }
+let importReportRevision=0;
+async function loadImportReports(){
+  if(typeof window.pet?.memoryImportStatus!=='function')return;
+  const revision=++importReportRevision,scene=activeScene;
+  try{
+    const reports=await api('memoryImportStatus');if(revision!==importReportRevision||scene!==activeScene)return;
+    const list=$('memoryImportReports');list.replaceChildren();
+    for(const report of (Array.isArray(reports)?reports:[]).slice(0,5)){
+      const card=node('article','record'),status=({queued:'等待分析',preparing:'正在接收',processing:'正在吸收',waiting:'等待自动重试',completed:'已完成',incomplete:'接收中断',failed:'未完成'})[report.status]||'等待更新';
+      card.append(node('strong','',report.title+' · '+status),node('p','inline-note',`${report.processed}/${report.total} 批 · ${report.note||''}`),node('p','',report.summary));
+      if(report.ignored?.length){const details=node('details');details.append(node('summary','',`未吸收内容与原因（${report.ignored.length}项）`));for(const item of report.ignored)details.append(node('p','inline-note',`${item.file}：${item.reason}${item.risk?'（安全或隐私风险）':''}`));card.append(details);}
+      if(report.results?.length){const details=node('details');details.append(node('summary','','查看实际入库记录'));for(const item of report.results)details.append(node('p','inline-note',`${({memory:'记忆',experience:'经验',tool:'工具'})[item.type]||'资料'} · ${({added:'新增',merged:'合并',reused:'复用',registered:'登记'})[item.action]||item.action} · ${item.title}`));card.append(details);}
+      list.append(card);
+    }
+    $('memoryImportsCard').hidden=memoryKind==='innate'||!list.children.length;
+  }catch{if(revision===importReportRevision&&scene===activeScene)$('memoryImportsCard').hidden=true;}
+}
 async function loadMemoryStats() {
   const revision = ++memoryStatsRevision;
   try {
     const stats = await api('memoryStats');
-    if (revision === memoryStatsRevision) paintMemoryStats(stats);
+    if (revision === memoryStatsRevision) {paintMemoryStats(stats);void loadImportReports();}
   } catch (error) {
     if (revision === memoryStatsRevision) paintMemoryStats({ ready: false, error: error.message });
   }
@@ -532,8 +553,9 @@ function resultHasMemoryMore(result, rows, query) {
   return rows.length > 0;
 }
 function memoryListOptions(view, cursor) {
-  const options = { kind: view.kind, query: view.query, ...(view.kind === 'memory' ? { effective: true } : {}) };
+  const options = { kind: view.kind === 'innate' ? 'knowledge' : view.kind, query: view.query, ...(view.kind === 'memory' ? { effective: true } : {}) };
   if (view.kind === 'knowledge') options.category = view.category;
+  if (view.kind === 'innate') options.category = 'innate';
   if (cursor) { options.before = cursor.ts; options.beforeId = cursor.id; }
   return options;
 }
@@ -610,9 +632,10 @@ async function refreshMemoryView() {
 }
 function hasStoredMemory() {
   const counts = countsObject(memoryStats);
-  return ['message', 'memory', 'summary', 'task'].some(key => countValue(counts[key]) > 0);
+  return !!memoryStats.hasImports||['message', 'memory', 'summary', 'task'].some(key => countValue(counts[key]) > 0);
 }
 async function initMemory() {
+  paintMemoryView();
   try {
     const [stats, config] = await Promise.all([api('memoryStats'), api('config')]);
     paintMemoryStats(stats); memoryConfigFrom(config);
@@ -621,32 +644,40 @@ async function initMemory() {
     setNote('memoryConfigNote', error.message || '设置暂不可用', true);
   }
   await loadMaintenanceStatus();
+  await loadImportReports();
   await loadMemoryList(true);
 }
 $('maintenanceDoze').addEventListener('click', () => { void requestMemoryMaintenance('doze'); });
 $('maintenanceDream').addEventListener('click', () => { void requestMemoryMaintenance('dream'); });
 $('maintenanceDeepdream').addEventListener('click', () => { void requestMemoryMaintenance('deepdream'); });
 $('memoryUnlock').addEventListener('click', async () => { try { paintMemoryStats(await api('memoryUnlock')); await loadMemoryList(true); } catch (error) { showError(error); } });
+function paintMemoryView(){
+  const knowledge=memoryKind==='knowledge',innate=memoryKind==='innate';
+  for(const tab of $('memoryTabs').querySelectorAll('.tab')){const active=tab.dataset.kind===memoryKind;tab.classList.toggle('active',active);tab.setAttribute('aria-selected',String(active));}
+  $('knowledgeFilters').hidden=!knowledge;
+  $('innateExperienceNote').hidden=!innate;
+  $('memoryEditingNote').hidden=memoryKind!=='memory';
+  $('knowledgeCategoryNote').hidden=!knowledge;
+  $('knowledgeCategoryNote').textContent=({all:'查看 Bunny 整理出的记忆关联、疑问、习得经验和工具。先天经验在独立的只读页签中查看。',relation:'几条记忆之间的联系，例如同一件事的不同说法、时间上的变化，或不同条件下的安排。',doubt:'记忆中的说法有冲突或缺少判断条件时，Bunny 会保留疑问，供你补充说明；这与导入经验无关。',experience:'对话、任务中积累的心得与用户导入的经验。导入后自动吸收，无需逐条确认。',tool:'与经验配套的工具及其使用记录。'})[memoryCategory]||'';
+  $('experienceImportSection').hidden=innate;
+  $('memoryImportsCard').hidden=innate||!$('memoryImportReports').children.length;
+  $('memorySearch').placeholder=innate?'搜索先天经验':knowledge?'搜索整理与经验':'搜索内容';
+}
 $('memoryTabs').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-kind]');
   if (!button) return;
   memoryKind = button.dataset.kind;
-  for (const tab of $('memoryTabs').querySelectorAll('.tab')) {
-    const active = tab === button;
-    tab.classList.toggle('active', active);
-    tab.setAttribute('aria-selected', String(active));
-  }
-  $('knowledgeFilters').hidden = memoryKind !== 'knowledge';
-  $('memorySearch').placeholder = memoryKind === 'knowledge' ? '搜索整理与经验' : '搜索内容';
+  paintMemoryView();
   loadMemoryList(true);
 });
 $('knowledgeCategory').addEventListener('change', event => {
   memoryCategory = ['all', 'relation', 'doubt', 'experience', 'tool'].includes(event.target.value) ? event.target.value : 'all';
+  paintMemoryView();
   loadMemoryList(true);
 });
 for(const [id,kind] of [['experienceImportZip','zip'],['experienceImportFolder','folder']])$(id).onclick=async()=>{
   $('experienceImportZip').disabled=$('experienceImportFolder').disabled=true;
-  try{setNote('experienceImportNote','正在读取资源包…');const result=await api('experienceImport',kind);if(result.canceled){setNote('experienceImportNote','');return;}setNote('experienceImportNote',result.duplicate?'已导入过此版本，无需重复添加':`已导入 ${result.experiences} 条经验、${result.tools} 个工具；Bunny 将整理吸收`);await loadMemoryList(true);}
+  try{setNote('experienceImportNote','正在读取资源包…');const result=await api('experienceImport',kind);if(result.canceled){setNote('experienceImportNote','');return;}setNote('experienceImportNote',result.duplicate?'这份资料已经接收，继续查看已有进度和报告':result.queued?'资料已接收，Bunny 将自动分析吸收，无需再次确认':result.report?.summary||'资料已处理');memoryKind='knowledge';memoryCategory='all';memoryQuery='';$('knowledgeCategory').value=memoryCategory;$('memorySearch').value='';paintMemoryView();await loadImportReports();await loadMemoryList(true);}
   catch(error){setNote('experienceImportNote',error.message);}
   finally{$('experienceImportZip').disabled=$('experienceImportFolder').disabled=false;}
 };
@@ -655,6 +686,7 @@ $('memorySearch').addEventListener('keydown', (event) => { if (event.key === 'En
 $('memoryMore').addEventListener('click', () => { if (memoryHasMore) loadMemoryList(false); });
 $('memoryScene').addEventListener('change', event => changeMemoryScene(event.target.value));
 $('openSelfSettings').addEventListener('click', () => window.pet.open('self'));
+$('memoryInnate').addEventListener('change', event=>saveMemorySetting('useInnateExperience',event.target.checked));
 $('memoryEnabled').addEventListener('change', (event) => saveMemorySetting('enabled', event.target.checked));
 $('memoryExtract').addEventListener('change', (event) => saveMemorySetting('extract', event.target.checked));
 $('memoryExport').addEventListener('click', async () => {
@@ -691,7 +723,8 @@ let desktopStatus = null, paintedTaskId = null;
 let resumePendingId = null, resumePreviousStatus = null, resumeTimer = null;
 let workBuddyMonitorSnapshot = null;
 let agentSnapshot = { tasks: [], skills: [] };
-const agentActionsPending = new Set(),agentActionMessages=new Map();
+const agentControls=createTaskControls({changed:()=>paintAgent(agentSnapshot)}),agentActionsPending=agentControls.pending,agentActionMessages=agentControls.messages;
+setInterval(()=>{for(const card of document.querySelectorAll('#agentTaskList .task-card')){const task=agentSnapshot?.tasks?.find(t=>t.id===card.dataset.taskId);if(task)refreshTaskClock(card,task);}},1000);
 const PERMISSION_NAMES = { accessibilityTrusted: '辅助功能', screenCaptureAllowed: '屏幕录制', postEventAllowed: '输入控制', accessibility: '辅助功能', screenRecording: '屏幕录制', automation: '自动化', inputMonitoring: '输入监控' };
 const TASK_STATUS_LABELS = { starting: '正在准备', running: '代理操作中', awaiting: '等待 WorkBuddy 开始处理', monitoring: '观察 WorkBuddy', verifying: '核对结果', paused: '代理已暂停', stopped: '代理已暂停', cancelled: '已取消', review: '待你确认', accepted: '你已确认', failed: '代理未完成' };
 function taskStatusLabel(status) { return TASK_STATUS_LABELS[status] || labelStatus(status); }
@@ -802,10 +835,12 @@ function paintDesktopStatus(status) {
     const fullGoal = String(task.taskText || task.goal || '');
     summary.textContent = fullGoal;
     summary.title = fullGoal;
-    const fields = [['goal', '任务'], ['criteria', '验收条件'], ['step', '步骤'], ['currentStep', '当前步骤'], ['message', '说明'], ['report', '执行报告'], ['result', '结果'], ['error', '状态说明']];
+    const fields = [['goal', '任务'], ['criteria', '验收条件'], ['associationMarker', '会话关联标记'], ['outboundText', '完整交办原文'], ['step', '步骤'], ['currentStep', '当前步骤'], ['message', '说明'], ['report', '执行报告'], ['result', '结果'], ['error', '状态说明']];
     for (const [key, title] of fields) { const value = taskFieldValue(task[key]); if (value) details.append(node('div', 'task-detail', `${title}：${value}`)); }
     const verification = verificationValue(task.verification);
     if (verification) details.append(node('div', 'task-detail', `核对结论：${verification}`));
+    if(task.workbuddyUi)details.append(node('div','task-detail',`WorkBuddy 控件核对：${JSON.stringify(task.workbuddyUi)}`));
+    for(const step of (task.steps||[]).slice(-6))details.append(node('div','task-detail',`操作记录：${step.action||''} · ${step.state||''}${step.method?' · '+step.method:''}`));
     if (typeof task.monitorSummary === 'string' && task.monitorSummary.trim()) {
       const summary = node('details', 'task-monitor-summary');
       summary.append(node('summary', '', '查看 WorkBuddy 回复摘要'), node('div', 'task-detail', task.monitorSummary));
@@ -840,8 +875,9 @@ function paintWorkBuddyMonitor(snapshot) {
 }
 const AGENT_STATUS = { ready:'等待执行', running:'正在处理', waiting:'等待动态', waiting_permission:'等待授权', paused:'已暂停', needs_attention:'需要核对', completed:'已完成', stopped:'已停止', expired:'已到期' };
 function paintAgentSummary(){
-  const active=(agentSnapshot?.tasks||[]).filter(t=>!['completed','stopped','expired'].includes(t.status));
+  const active=(agentSnapshot?.tasks||[]).filter(t=>!['completed','stopped','expired'].includes(t.status)||t.stopRequest?.phase==='pending');
   if(agentSnapshot?.restoring){setPill('desktopStatus','正在恢复任务','warn');return;}
+  if(active.some(t=>t.stopRequest)){setPill('desktopStatus','Bunny 已停止，正在清理外部执行','warn');return;}
   const blocked=active.filter(t=>['needs_attention','waiting_permission'].includes(t.status)&&!t.presentation?.guidance?.working);
   if(blocked.length)setPill('desktopStatus',blocked.length===1?blocked[0].presentation?.guidance?.title||'有任务待确认':blocked.length+'项任务待确认','bad');
   else if(active.some(t=>t.presentation?.guidance?.working)){const pending=active.filter(t=>t.presentation?.guidance?.working);setPill('desktopStatus',pending.length===1?pending[0].presentation.guidance.title:'Bunny正在跟进 '+pending.length+' 项核对','warn');}
@@ -854,20 +890,22 @@ function paintAgent(snapshot) {
   agentSnapshot = snapshot || { tasks: [], skills: [] };
   paintAgentSummary();
   const list = $('agentTaskList'); if (!list) return;
+  $('agentClearList').disabled=agentActionsPending.has('*list*')||!(agentSnapshot.tasks||[]).length;
+  $('agentRestoreList').hidden=!agentSnapshot.archivedCount;$('agentRestoreList').disabled=agentActionsPending.has('*list*');$('agentRestoreList').textContent='恢复已清理任务（'+(agentSnapshot.archivedCount||0)+'）';
   list.replaceChildren();
   const capacity=agentSnapshot.capacity;if(capacity)list.append(node('div','watch-item-note',`已启动 ${capacity.active}/${capacity.limit} 项${capacity.queued?' · '+capacity.queued+' 项待启动':''}。待启动任务需点击启动，不会自动补位。`));
-  const rows = agentSnapshot.tasks || [], active = rows.filter(t => !['completed','stopped','expired'].includes(t.status));
+  const rows = agentSnapshot.tasks || [], active = rows.filter(t => !['completed','stopped','expired'].includes(t.status)||t.stopRequest?.phase==='pending'||agentActionsPending.has(t.id));
   const render = task => {
     const item=taskCard(task,{pending:agentActionsPending.has(task.id),message:agentActionMessages.get(task.id)||'',onAction:operation=>{
       if(operation==='details'){const details=item.querySelector('[data-details-key="reason"]');if(details)details.open=true;return;}
       if(operation==='reissue'){$('agentCommand').value=task.goal;$('agentCommand').focus();$('agentCommand').scrollIntoView({block:'center',behavior:'smooth'});return;}
       void runAgentControl(operation,task.id);
-    },onArtifact:(id,index)=>api('agentArtifact',id,index).catch(error=>{agentActionMessages.set(id,error.message);paintAgent(agentSnapshot);})});
+    },onResultLink:(id,index)=>api('agentResultLink',id,index),onArtifact:(id,index)=>api('agentArtifact',id,index).catch(error=>{agentActionMessages.set(id,error.message);paintAgent(agentSnapshot);})});
     item.classList.add('agent-task-row');return item;
   };
   if (!active.length) list.append(node('div','watch-empty','没有正在跟进的任务。可以在上方交办，或直接与 Bunny 对话。'));
   for (const task of active) list.append(render(task));
-  const finished = rows.filter(t => ['completed','stopped','expired'].includes(t.status));
+  const finished = rows.filter(t => ['completed','stopped','expired'].includes(t.status)&&!active.includes(t));
   if (finished.length) { const details = node('details','watch-inactive'); details.append(node('summary','',`最近结束的任务（${finished.length}）`)); for (const task of finished.slice(-20).reverse()) details.append(render(task)); list.append(details); }
   const skills = $('agentSkillList'); skills?.replaceChildren();
   for (const skill of agentSnapshot.skills || []) { const item=node('article','watch-item'); item.append(node('div','watch-item-name',skill.title || '任务执行器'),node('div','watch-item-note',skill.description));skills?.append(item); }
@@ -878,10 +916,7 @@ async function refreshAgent() {
   try { paintAgent(await api('agentStatus')); } catch(error) { $('agentCommandNote').textContent = error.message; }
 }
 async function runAgentControl(operation,id) {
-  if (agentActionsPending.has(id)) return; agentActionsPending.add(id); paintAgent(agentSnapshot);
-  try { agentActionMessages.delete(id);const result=await api('agentControl',operation,id); if (!result?.ok) throw new Error(result?.error || '任务状态未更新');if(result.message)agentActionMessages.set(id,result.message);await refreshAgent(); }
-  catch(error) {agentActionMessages.set(id,error.message);}
-  finally { agentActionsPending.delete(id); paintAgent(agentSnapshot); }
+  await agentControls.run(id,operation,()=>api('agentControl',operation,id));$('agentCommandNote').textContent=agentActionMessages.get(id)||'';await refreshAgent();
 }
 async function submitAgentCommand() {
   const text=$('agentCommand').value.trim(); if(!text)return;
@@ -991,6 +1026,8 @@ else {
   refreshAgent();
   $('agentRefresh').addEventListener('click', refreshAgent);
   $('agentSubmit').addEventListener('click', submitAgentCommand);
+  $('agentClearList').onclick=()=>runAgentControl('clearList','*list*');
+  $('agentRestoreList').onclick=()=>runAgentControl('restoreList','*list*');
   $('agentCommand').addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void submitAgentCommand(); } });
   $('agentPauseAll').addEventListener('click', () => runAgentControl('pauseAll','all'));
   $('agentReconnect').addEventListener('click', () => runAgentControl('reconnect','wechat'));

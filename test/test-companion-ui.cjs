@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-/* Run with: node_modules/.bin/electron test/test-companion-ui.cjs
+/* Run with: node_modules/.bin/electron test/test-companion-ui.cjs [--memory-only]
  * This launches only hidden fixture BrowserWindows, stubs every pet API through
  * a contextBridge preload, and writes Electron userData into a temporary folder.
  */
@@ -32,13 +32,15 @@ let rows = [
   { id: 'memory-confirmed-2', kind: 'memory', ts: Date.now() - 1000, content: '安静的音乐', status: 'confirmed', sources: [] },
   { id: 'message-1', kind: 'message', ts: Date.now(), role: 'user', content: '你好' },
 ];
+let importReports=[];
 let knowledgeRows = [
-  { id: 'knowledge-relation', kind: 'state', ts: 180, domain: 'work', visibilityFloor: 0, knowledgeType: 'relation', label: '相关陈述', status: 'active', content: '合成关系记录', sources: [] },
-  { id: 'doubt-choose', kind: 'state', ts: 170, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '待核对', status: 'pending', content: '合成冲突：周五或周六', memberChoices: [{ id: 'choice-fri', content: '周五' }, { id: 'choice-sat', content: '周六' }], sources: ['source-1'] },
-  { id: 'doubt-snooze', kind: 'state', ts: 160, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '待核对', status: 'pending', content: '合成冲突：早上或下午', memberChoices: [{ id: 'choice-am', content: '早上' }, { id: 'choice-pm', content: '下午' }], sources: ['source-1'] },
-  { id: 'doubt-both', kind: 'state', ts: 150, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '待核对', status: 'pending', content: '合成冲突：工作日或周末', memberChoices: [{ id: 'choice-weekday', content: '工作日' }, { id: 'choice-weekend', content: '周末' }], sources: ['source-1'] },
-  { id: 'doubt-dismiss', kind: 'state', ts: 140, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '待核对', status: 'pending', content: '合成冲突：地点A或地点B', memberChoices: [{ id: 'choice-a', content: '地点A' }, { id: 'choice-b', content: '地点B' }], sources: ['source-1'] },
-  { id: 'doubt-stale', kind: 'state', ts: 130, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '待核对', status: 'pending', content: '合成冲突：新场景下不可见', memberChoices: [{ id: 'choice-old', content: '旧场景说法' }, { id: 'choice-new', content: '另一说法' }], sources: ['source-1'] },
+  { id: 'innate:fixture', kind: 'state', ts: 0, domain: 'work', visibilityFloor: 0, knowledgeType: 'experience', label: '先天经验', origin: 'innate', readOnly: true, status: 'bundled', content: '安装包只读经验夹具', sources: [] },
+  { id: 'knowledge-relation', kind: 'state', ts: 180, domain: 'work', visibilityFloor: 0, knowledgeType: 'relation', label: '记忆关联', status: 'active', content: '合成关系记录', sources: [] },
+  { id: 'doubt-choose', kind: 'state', ts: 170, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '记忆疑问', status: 'pending', content: '合成冲突：周五或周六', memberChoices: [{ id: 'choice-fri', content: '周五' }, { id: 'choice-sat', content: '周六' }], sources: ['source-1'] },
+  { id: 'doubt-snooze', kind: 'state', ts: 160, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '记忆疑问', status: 'pending', content: '合成冲突：早上或下午', memberChoices: [{ id: 'choice-am', content: '早上' }, { id: 'choice-pm', content: '下午' }], sources: ['source-1'] },
+  { id: 'doubt-both', kind: 'state', ts: 150, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '记忆疑问', status: 'pending', content: '合成冲突：工作日或周末', memberChoices: [{ id: 'choice-weekday', content: '工作日' }, { id: 'choice-weekend', content: '周末' }], sources: ['source-1'] },
+  { id: 'doubt-dismiss', kind: 'state', ts: 140, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '记忆疑问', status: 'pending', content: '合成冲突：地点A或地点B', memberChoices: [{ id: 'choice-a', content: '地点A' }, { id: 'choice-b', content: '地点B' }], sources: ['source-1'] },
+  { id: 'doubt-stale', kind: 'state', ts: 130, domain: 'life', visibilityFloor: 1, knowledgeType: 'doubt', label: '记忆疑问', status: 'pending', content: '合成冲突：新场景下不可见', memberChoices: [{ id: 'choice-old', content: '旧场景说法' }, { id: 'choice-new', content: '另一说法' }], sources: ['source-1'] },
   { id: 'knowledge-tool', kind: 'state', ts: 120, domain: 'life', visibilityFloor: 1, knowledgeType: 'tool', label: '工具', status: 'verified', fileStatus: 'unknown', artifact: '/private/tmp/fixture-tool/helper.js', snapshotAvailable: true, code: 'FIXTURE_CODE_SHOULD_NOT_RENDER', content: '合成工具验收记录', sources: [] },
   { id: 'knowledge-experience', kind: 'state', ts: 110, domain: 'work', visibilityFloor: 0, knowledgeType: 'experience', label: '经验', status: 'active', content: '合成工作经验', sources: [] },
 ];
@@ -74,7 +76,7 @@ fs.writeFileSync(preload, `
   contextBridge.exposeInMainWorld('pet', {
     on: cb => ipcRenderer.on('fixture:event', (_event, value) => cb(value)),
     init: (...a) => api('init', ...a), workbuddyOpen: (...a) => api('workbuddyOpen', ...a), say: (...a) => api('say', ...a),
-    memoryStats: (...a) => api('memoryStats', ...a), memoryList: (...a) => api('memoryList', ...a),
+    memoryStats: (...a) => api('memoryStats', ...a), memoryList: (...a) => api('memoryList', ...a), experienceImport: (...a) => api('experienceImport', ...a), memoryImportStatus: (...a)=>api('memoryImportStatus',...a),
     memoryUpdate: (...a) => api('memoryUpdate', ...a), memoryRemove: (...a) => api('memoryRemove', ...a),
     memoryResolveConflict: (...a) => api('memoryResolveConflict', ...a),
     memoryResolveDoubt: (...a) => api('memoryResolveDoubt', ...a),
@@ -83,6 +85,7 @@ fs.writeFileSync(preload, `
     memoryMaintain: (...a) => api('memoryMaintain', ...a), memoryMaintenanceStatus: (...a) => api('memoryMaintenanceStatus', ...a),
     config: (...a) => api('config', ...a), taskStatus: (...a) => api('taskStatus', ...a),
     taskStart: (...a) => api('taskStart', ...a), taskStop: (...a) => api('taskStop', ...a), taskCancel: (...a) => api('taskCancel', ...a),
+    agentStatus:()=>api('agentStatus'),agentControl:(...a)=>api('agentControl',...a),agentArtifact:(...a)=>api('agentArtifact',...a),
     taskAccept: (...a) => api('taskAccept', ...a), desktopPermission: (...a) => api('desktopPermission', ...a),
     autonomyStatus: () => api('autonomyStatus'), autonomyControl: action => api('autonomyControl', action), autonomyDirectory: () => api('autonomyDirectory'),
     desktopRefresh: (...a) => api('taskStatus', ...a), desktopInsert: (...a) => api('desktopInsert', ...a),
@@ -104,6 +107,7 @@ fs.writeFileSync(preload, `
       emitMemoryChange: () => ipcRenderer.invoke('fixture:control', 'emitMemoryChange'),
       injectConflictRows: () => ipcRenderer.invoke('fixture:control', 'injectConflictRows'),
       emitMaintenance: value => ipcRenderer.invoke('fixture:control', 'emitMaintenance', value),
+      completeImport: ()=>ipcRenderer.invoke('fixture:control','completeImport'),
       getCalls: () => ipcRenderer.invoke('fixture:control', 'getCalls') },
   });
 `);
@@ -140,11 +144,13 @@ ipcMain.handle('fixture:control', (_event, action, value) => {
   if (action === 'injectConflictRows') {
     rows.push(
       { id: 'memory-user-conflict-fixture', kind: 'memory', ts: Date.now(), content: '用户生日冲突fixture', status: 'pending', origin: 'user-key-conflict-v1', sources: ['source-1'], evidence: '我的生日是3月4日' },
+      { id: 'memory-imported-fixture', kind: 'memory', ts: Date.now() - 2, content: '资料作者说法fixture', status: 'pending', origin: 'imported-memory-v1', sources: ['source-1'] },
       { id: 'memory-doze-candidate-fixture', kind: 'memory', ts: Date.now() - 1, content: '普通整理候选fixture', status: 'pending', origin: 'doze-candidate-v1', sources: ['source-1'], evidence: '候选来源' },
     );
     activeWindow?.webContents.send('fixture:event', { type: 'memory-changed', counts: emptyCounts() });
     return true;
   }
+  if(action==='completeImport'){knowledgeRows.push({id:'imported-fixture',kind:'state',ts:190,domain:'work',visibilityFloor:0,knowledgeType:'experience',label:'导入经验',origin:'imported',status:'candidate',content:'导入后自动吸收的经验夹具',sources:[]});importReports=[{...importReports[0],status:'completed',processed:1,summary:'新增经验1条；忽略1项',counts:{experiences:1},ignored:[{file:'unsupported.pdf',reason:'当前格式不支持',risk:false}],results:[{type:'experience',title:'自动吸收的经验夹具',action:'added'}]}];activeWindow?.webContents.send('fixture:event',{type:'memory-changed'});return true;}
   if (action === 'getCalls') return calls;
   return false;
 });
@@ -180,7 +186,8 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
     const knowledge = options.kind === 'knowledge';
     const rank = { work: 0, life: 1, private: 2 }[settings.memory.scene] ?? 1;
     let found = (knowledge ? knowledgeRows : rows).filter(row => knowledge ? row.kind === 'state' : row.kind === options.kind);
-    if (knowledge && options.category && options.category !== 'all') found = found.filter(row => row.knowledgeType === options.category);
+    if (knowledge) found = options.category === 'innate' ? found.filter(row=>row.origin==='innate') : found.filter(row=>row.origin!=='innate');
+    if (knowledge && options.category && !['all','innate'].includes(options.category)) found = found.filter(row => row.knowledgeType === options.category);
     if (knowledge) found = found.filter(row => Number(row.visibilityFloor ?? 2) <= rank);
     if (options.query) found = found.filter(row => String(row.content || '').toLowerCase().includes(options.query.toLowerCase()));
     if (knowledge) found.sort((a, b) => b.ts - a.ts || String(b.id).localeCompare(String(a.id)));
@@ -194,6 +201,11 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
       return new Promise(resolve => { heldMemoryListResolve = () => resolve(result); });
     }
     return result;
+  }
+  if(name==='memoryImportStatus')return importReports;
+  if (name === 'experienceImport') {
+    importReports=[{id:'fixture-import',title:'合成资料包',status:'queued',processed:0,total:1,counts:{},ignored:[],results:[],summary:'已接收，等待分析',note:'无需审批'}];
+    return {ok:true,queued:true,importId:'fixture-import',report:importReports[0]};
   }
   if (name === 'memoryResolveDoubt') {
     const [id, resolution] = args;
@@ -229,6 +241,8 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
   if (name === 'memoryClear') { rows = []; return { ok: true }; }
   if (name === 'memoryExport') return { ok: true };
   if (name === 'memoryRestore') return { canceled: true };
+  if (name === 'agentStatus') return agentView();
+  if (name === 'agentControl') return agentControlReply(...args);
   if (name === 'taskStatus') return status;
   if (name === 'watchList') return watches.map(row => ({ ...row }));
   if (['watchPause', 'watchResume', 'watchStop', 'watchCheck'].includes(name)) {
@@ -257,6 +271,8 @@ ipcMain.handle('fixture:api', async (_event, name, ...args) => {
   throw new Error(`unexpected fixture API: ${name}`);
 });
 
+let archivedAgentTasks=[],agentTasks=[],agentControlReply=async()=>({ok:true});
+const agentView=()=>({tasks:agentTasks,archivedCount:archivedAgentTasks.length,archivedTaskIds:archivedAgentTasks.map(t=>t.id),skills:[],capacity:{active:agentTasks.filter(t=>!['stopped','completed','expired','paused','queued'].includes(t.status)).length,limit:5,queued:0}});
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(check, label, timeout = 4000) {
   const until = Date.now() + timeout;
@@ -282,6 +298,8 @@ async function testMemory() {
   const win = await loadPage('memory');
   await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .record').length" ).then(n => n === 2), 'memory list');
   await waitFor(() => evalIn(win, "document.getElementById('maintenanceStatus').textContent").then(text => text.includes('空闲')), 'initial maintenance status');
+  assert.equal(await evalIn(win, "document.getElementById('experienceImportSection').hidden"),false,'mixed intake is visible on first opening, before any tab click');
+  assert((calls.memoryImportStatus||[]).length>0,'saved import reports are loaded on first opening');
   assert.match(await evalIn(win, "document.querySelector('.maintenance-scope').textContent"), /Doze.*Dream.*04:00.*Deepdream.*05:00.*场景边界/);
   assert.match(await evalIn(win, "document.getElementById('contextStatus').textContent"), /生活.*压缩版本 2/);
   await click(win, 'maintenanceDoze');
@@ -416,6 +434,10 @@ async function testMemory() {
   assert.equal(calls.memoryUpdate.at(-1)[0], 'memory-doze-candidate-fixture');
   assert.equal(calls.memoryUpdate.at(-1)[1], '普通整理候选fixture');
   assert.equal((calls.memoryResolveConflict || []).length, beforeConflictResolve + 1, 'ordinary candidate did not use conflict resolution');
+  await evalIn(win, "document.getElementById('memorySearch').value='资料作者说法fixture'; document.getElementById('memorySearchBtn').click()");
+  await waitFor(()=>evalIn(win,"document.querySelector('#memoryList [data-record-id=memory-imported-fixture]') !== null"),'imported source memory');
+  assert.match(await evalIn(win,"document.querySelector('#memoryList [data-record-id=memory-imported-fixture]').textContent"),/导入资料 · 来源说法/);
+  assert.equal(await evalIn(win,"[...document.querySelector('#memoryList [data-record-id=memory-imported-fixture]').querySelectorAll('button')].some(b=>b.textContent==='确认')"),false,'absorbed source data never asks for another confirmation');
   await evalIn(win, "document.getElementById('memorySearch').value='海边'; document.getElementById('memorySearchBtn').click()");
   await waitFor(() => evalIn(win, "[...document.querySelectorAll('#memoryList .record-content')].some(el=>el.textContent==='海边新记忆')"), 'restore existing memory query');
 
@@ -474,15 +496,27 @@ async function testKnowledge() {
   assert.deepEqual(calls.memoryList.at(-1)[0], { kind: 'knowledge', query: '', category: 'all' }, 'knowledge IPC sends its category');
   assert.equal(await evalIn(win, "document.querySelectorAll('#memoryList .record').length"), 2, 'knowledge results are paged');
   assert.equal(await evalIn(win, "document.getElementById('knowledgeFilters').hidden"), false);
+  assert.equal(await evalIn(win, "document.querySelector('#knowledgeCategory option[value=innate]')"), null);
+  assert.equal(await evalIn(win, "document.getElementById('experienceImportSection').hidden"), false);
+  await evalIn(win, "document.querySelector('#memoryTabs [data-kind=innate]').click()");
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=\"innate:fixture\"]') !== null"), 'dedicated innate view');
+  assert.deepEqual(calls.memoryList.at(-1)[0],{kind:'knowledge',query:'',category:'innate'});
+  assert.equal(await evalIn(win, "document.getElementById('knowledgeFilters').hidden && document.getElementById('experienceImportSection').hidden"),true);
+  assert.equal(await evalIn(win, "document.querySelector('#memoryList .record').querySelectorAll('button,textarea').length"),0,'packaged entries expose no mutating actions');
+  assert.match(await evalIn(win,"document.getElementById('innateExperienceNote').textContent"),/只能随安装包更新/);
+  await evalIn(win, "document.querySelector('#memoryTabs [data-kind=knowledge]').click()");
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=knowledge-relation]') !== null"),'return to learned collections');
 
   await evalIn(win, "document.getElementById('knowledgeCategory').value='doubt'; document.getElementById('knowledgeCategory').dispatchEvent(new Event('change',{bubbles:true}))");
   await waitFor(() => evalIn(win, "document.querySelectorAll('#memoryList .knowledge-card').length").then(n => n === 2), 'first doubt page');
   assert.equal(calls.memoryList.at(-1)[0].category, 'doubt');
-  assert.equal(await evalIn(win, "[...document.querySelectorAll('#memoryList .record')].every(card=>card.textContent.includes('待核对'))"), true);
+  assert.equal(await evalIn(win,"document.getElementById('experienceImportSection').hidden"),false,'the independent import card is not a category destination');
+  assert.match(await evalIn(win,"document.getElementById('knowledgeCategoryNote').textContent"),/与导入经验无关/);
+  assert.equal(await evalIn(win, "[...document.querySelectorAll('#memoryList .record')].every(card=>card.textContent.includes('记忆疑问'))"), true);
   await evalIn(win, "[...document.querySelector('#memoryList [data-record-id=doubt-choose]').querySelectorAll('button')].find(b=>b.textContent==='采用第 1 项').click()");
   await waitFor(() => Promise.resolve((calls.memoryResolveDoubt || []).length === 1), 'choose doubt');
   assert.deepEqual(calls.memoryResolveDoubt[0], ['doubt-choose', { action: 'choose', choiceId: 'choice-fri' }]);
-  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=doubt-choose] .badge:last-of-type')?.textContent").then(t => t === '已核对'), 'choose result refreshed');
+  await waitFor(() => evalIn(win, "document.querySelector('#memoryList [data-record-id=doubt-choose] .badge:last-of-type')?.textContent").then(t => t === '已澄清'), 'choose result refreshed');
 
   // Snooze the second row on the first page. The first resolved item remains listed.
   await evalIn(win, "[...document.querySelector('#memoryList [data-record-id=doubt-snooze]').querySelectorAll('button')].find(b=>b.textContent==='稍后').click()");
@@ -515,6 +549,20 @@ async function testKnowledge() {
   assert.match(toolText, /helper\.js/);
   assert.match(toolText, /历史验收；当前文件未复验/);
   assert.doesNotMatch(toolText, /FIXTURE_CODE_SHOULD_NOT_RENDER|\/private\/tmp/, 'tool cards hide code and full paths');
+  const clarificationsBeforeImport=(calls.memoryResolveDoubt||[]).length;
+  await click(win,'experienceImportZip');
+  await waitFor(()=>evalIn(win,"document.getElementById('memoryImportReports').textContent.includes('等待分析')"),'intake progress is not presented as completed');
+  assert.equal(await evalIn(win,"document.querySelector('#memoryList [data-record-id=imported-fixture]')"),null);
+  await evalIn(win,'window.pet.__fixture.completeImport()');
+  await waitFor(()=>evalIn(win,"document.querySelector('#memoryList [data-record-id=imported-fixture]') !== null"),'completed absorption shows actual stored experience');
+  assert.match(await evalIn(win,"document.getElementById('memoryImportReports').textContent"),/新增经验1条/);
+  assert.match(await evalIn(win,"document.getElementById('memoryImportReports').textContent"),/unsupported.pdf/);
+  assert.deepEqual(calls.experienceImport.at(-1),['zip'],'imports have no innate destination parameter');
+  assert.equal(calls.memoryList.at(-1)[0].category,'all');
+  assert.match(await evalIn(win,"document.getElementById('experienceImportNote').textContent"),/自动分析吸收，无需再次确认/);
+  assert.match(await evalIn(win,"document.querySelector('#memoryList [data-record-id=imported-fixture]').textContent"),/参考经验/);
+  assert.equal(await evalIn(win,"[...document.querySelector('#memoryList [data-record-id=imported-fixture]').querySelectorAll('button')].some(b=>/采用|确认|澄清/.test(b.textContent))"),false);
+  assert.equal((calls.memoryResolveDoubt||[]).length,clarificationsBeforeImport);
 
   await evalIn(win, "document.getElementById('knowledgeCategory').value='doubt'; document.getElementById('knowledgeCategory').dispatchEvent(new Event('change',{bubbles:true}))");
   await click(win, 'memoryMore');
@@ -538,141 +586,21 @@ async function testKnowledge() {
 }
 
 async function testDesktop() {
-  const characterRenderer = fs.readFileSync(path.resolve(__dirname, '../src/renderer/app.js'), 'utf8');
-  assert.match(characterRenderer, /case 'desktop':\s*paintDesktopActivity\(ev\);/);
-  assert.match(characterRenderer, /if \(init\?\.desktop\) paintDesktopActivity\(init\.desktop\)/, 'startup restores the current desktop state');
-  assert.match(characterRenderer, /case 'recall':\s*paintRecallButton\(ev\.entries\);/);
-  assert.match(characterRenderer, /pet\.open\('desktop'\)/, 'clicking an active desktop status opens the work panel');
-  assert.match(characterRenderer, /recentTerminal && running\.length === 0/, 'recent terminal status cannot hide running WorkBuddy tasks');
-  assert.match(characterRenderer, /desktopRecentUntil = Date\.now\(\) \+ 7000/, 'paused and completed status has a short lifetime');
-  assert.match(characterRenderer, /desktopTask\.automaticAccepted \? 'Bunny 已核对代理结果' : '你已确认代理结果'/, 'automatic acceptance is not attributed to the user');
-  assert.match(characterRenderer, /desktopTask\.origin === 'dialogue' \? '已有结果，Bunny 正在核对'/, 'dialogue review is not presented as awaiting user acceptance');
-  const mainHtml = fs.readFileSync(path.resolve(__dirname, '../src/renderer/index.html'), 'utf8');
-  assert.match(mainHtml, /id="memoryBasis"[^>]*hidden/, 'the main-window memory entry starts hidden');
-  for (const state of ['monitoring', 'verifying', 'awaiting', 'paused', 'review', 'accepted']) assert(characterRenderer.includes(`'${state}'`), `main character handles desktop ${state} state`);
-  status = { permissions: { accessibilityTrusted: true, screenCaptureAllowed: true, postEventAllowed: false }, running: false,
-    task: { id: 'task-2', target: 'workbuddy', status: 'paused', goal: 'fixture paused task', note: '可以继续检查' }, screenshot: null };
-  const win = await loadPage('desktop');
-  await waitFor(() => Promise.resolve((calls.taskStatus || []).length > 0), 'initial task status');
-  await waitFor(() => evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent").then(text => text.includes('Fixture 正在整理')), 'initial WorkBuddy monitor snapshot');
-  await waitFor(() => evalIn(win, "document.getElementById('watchList').textContent").then(text => text.includes('Alice') && text.includes('WorkBuddy')), 'continuous watch list initializes');
-  const watchText = await evalIn(win, "document.getElementById('watchList').textContent");
-  assert.match(watchText, /仅通知/);
-  assert.match(watchText, /按规则回复/);
-  assert.match(watchText, /上次检查/);
-  assert.match(watchText, /每 60 秒检查/);
-  assert.match(watchText, /到期：/);
-  assert.match(watchText, /持续至手动停止/);
-  assert.match(watchText, /已停止或到期（1）/);
-  assert.equal(await evalIn(win, "document.querySelector('#watchList .watch-inactive').open"), false, 'stopped watches stay folded');
-  assert.equal(await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] .watch-policy').open"), false, 'reply policy starts folded to keep the card compact');
-  assert.match(await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] .watch-policy summary').textContent"), /查看处理规则/);
-  await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] .watch-policy summary').click()");
-  assert.match(await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] .watch-policy').textContent"), /只回复明确询问进度的问题/);
-  await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] .watch-policy summary').click()");
-  await evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice] button').click()");
-  await waitFor(() => Promise.resolve(watches.find(row => row.id === 'watch-wechat-alice').status === 'paused'), 'pause watch action');
-  assert.equal(calls.watchPause.at(-1)[0], 'watch-wechat-alice');
-  await waitFor(() => evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice]').textContent").then(text => text.includes('已暂停')), 'paused watch state refresh');
-  await evalIn(win, "document.querySelector('[data-watch-id=watch-workbuddy] button').click()");
-  await waitFor(() => Promise.resolve(watches.find(row => row.id === 'watch-workbuddy').status === 'active'), 'resume watch action');
-  assert.equal(calls.watchResume.at(-1)[0], 'watch-workbuddy');
-  await evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice] button').click()");
-  await waitFor(() => Promise.resolve(watches.find(row => row.id === 'watch-wechat-alice').status === 'active'), 'resume Alice watch');
-  await waitFor(() => evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice]').querySelectorAll('button').length").then(count => count === 3), 'active watch controls refresh');
-  await evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice] .watch-item-actions button:nth-child(2)').click()");
-  await waitFor(() => Promise.resolve((calls.watchCheck || []).length === 1), 'manual watch check action');
-  assert.equal(calls.watchCheck[0][0], 'watch-wechat-alice');
-  await waitFor(() => evalIn(win, "![...document.querySelectorAll('[data-watch-id=watch-wechat-alice] .watch-item-actions button')].some(button=>button.disabled)"), 'check action settles');
-  await evalIn(win, "document.querySelector('[data-watch-id=watch-wechat-alice] .watch-item-actions button:nth-child(3)').click()");
-  await waitFor(() => Promise.resolve(watches.find(row => row.id === 'watch-wechat-alice').status === 'stopped'), 'stop watch action');
-  await waitFor(() => evalIn(win, "document.querySelector('#watchList .watch-inactive')?.textContent").then(text => text.includes('Alice')), 'stopped watch moves to archive');
-  await evalIn(win, "window.pet.__fixture.emitWatches([{id:'watch-needs-window',target:'wechat',recipient:'Alice',goal:'提醒新消息',mode:'notify',status:'needs_window',note:'请打开微信',intervalSeconds:90,eventCount:4}])");
-  await waitFor(() => evalIn(win, "document.getElementById('watchList').textContent").then(text => text.includes('需要打开目标应用')), 'watch event updates the list');
-  assert.match(await evalIn(win, "document.getElementById('watchList').textContent"), /已发现 4 条动态/);
-  await evalIn(win, "window.pet.__fixture.emitWatches([])");
-  await waitFor(() => evalIn(win, "document.getElementById('watchList').textContent").then(text => text.includes('帮我关注某位联系人的新消息')) , 'generic empty watch state');
-  assert.doesNotMatch(await evalIn(win, "document.getElementById('watchList').textContent"), /Alice/, 'empty-state guidance does not hard-code a contact');
-  assert.match(await evalIn(win, "document.getElementById('taskStateNote').textContent"), /代理已暂停.*可以继续检查/, 'restored paused status is visible as a report, not accepted');
-  assert.equal(await evalIn(win, "document.getElementById('desktopActions').hidden"), false, 'a paused task offers a continuation control');
-  assert.equal(await evalIn(win, "document.getElementById('taskResume').hidden"), false);
-  assert.match(await evalIn(win, "document.querySelector('#permissionList').textContent"), /辅助功能.*屏幕录制.*输入控制/);
-  assert.match(await evalIn(win, "document.getElementById('taskPauseNote').textContent"), /暂停只停止 (?:Bunny|伙伴) 的代理操作；WorkBuddy 已接收的会话可能仍在继续/);
-  assert.equal(await evalIn(win, "document.getElementById('taskAccept').disabled"), true, 'paused tasks cannot be accepted');
-  await click(win, 'taskResume');
-  await waitFor(() => Promise.resolve((calls.say || []).length === 1), 'resume routes through normal dialogue');
-  assert.equal(calls.say[0][0], '继续刚才的这件代办，请保留原任务，不重复发送。');
-  assert.equal((calls.taskStart || []).length, 0, 'resume does not start a duplicate task');
-  assert.equal((calls.taskStop || []).length, 0);
-  assert.equal((calls.taskAccept || []).length, 0, 'resume request does not accept results');
-  assert.equal(await evalIn(win, "document.getElementById('taskResume').disabled"), true, 'resume stays pending until actual desktop status changes');
-  assert.match(await evalIn(win, "document.getElementById('desktopStatus').textContent"), /代理已暂停/, 'sending the request is not presented as a successful resume');
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{accessibilityTrusted:true,screenCaptureAllowed:true,postEventAllowed:true},running:true,task:{id:'task-2',status:'awaiting',goal:'fixture paused task'}})");
-  assert.match(await evalIn(win, "document.getElementById('desktopStatus').textContent"), /等待 WorkBuddy 开始处理/);
-  assert.match(await evalIn(win, "document.getElementById('desktopActionNote').textContent"), /状态已更新/);
-  assert.equal(await evalIn(win, "document.getElementById('taskResume').hidden"), true, 'active task no longer offers resume');
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:false,task:null})");
-  assert.equal(await evalIn(win, "document.getElementById('taskResume').hidden"), true, 'resume is absent without an existing task');
-  await evalIn(win, "window.pet.__fixture.emitMonitor({tasks:[{sessionId:'session-1',name:'Monitor 实际进展',status:'running'}]})");
-  await waitFor(() => evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent").then(text => text.includes('Monitor 实际进展')), 'WorkBuddy monitor event refresh');
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{accessibilityTrusted:true,screenCaptureAllowed:true,postEventAllowed:true},running:false,task:{id:'task-2',status:'paused',goal:'fixture paused task',note:'可以继续检查'}})");
-  assert.match(await evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent"), /Monitor 实际进展/, 'paused status does not obscure the real WorkBuddy monitor');
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:true,task:{id:'task-text-wechat',status:'paused',origin:'dialogue',inputSource:'text',target:'wechat',goal:'已提交任务'}})");
-  await waitFor(() => evalIn(win, "document.getElementById('taskMeta').textContent").then(text => text.includes('文字交代 · 微信')), 'text source and WeChat target labels');
-  assert.match(await evalIn(win, "document.getElementById('taskMeta').textContent"), /文字交代 · 微信/);
-  assert.doesNotMatch(await evalIn(win, "document.getElementById('taskPauseNote').textContent"), /WorkBuddy/);
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:true,task:{id:'task-awaiting',status:'awaiting',origin:'dialogue',inputSource:'text',target:'workbuddy',goal:'已提交任务'}})");
-  assert.match(await evalIn(win, "document.getElementById('desktopStatus').textContent"), /等待 WorkBuddy 开始处理/);
-  assert.equal(await evalIn(win, "document.getElementById('taskStop').hidden"), false, 'awaiting is an active state with a pause action');
-  await evalIn(win, `window.pet.__fixture.emitDesktop({permissions:{},running:true,task:{id:'task-monitor',status:'monitoring',origin:'dialogue',inputSource:'voice',target:'workbuddy',goal:'检查交付',criteria:'在WorkBuddy会话中出现回复',report:'已收到回复',verification:{verdict:'revise',report:'请补充日期和金额',at:1761000000000},monitorSummary:'WorkBuddy 已收到任务，正在整理资料。\\n已找到相关记录，正在核对日期与金额。',monitorSessionId:'session-1',handoffSent:true,note:'正在观察'}})`);
-  await waitFor(() => evalIn(win, "document.getElementById('desktopStatus').textContent").then(text => text.includes('观察 WorkBuddy')), 'monitoring status');
-  const details = await evalIn(win, "document.getElementById('taskDetails').textContent");
-  assert.match(await evalIn(win, "document.getElementById('taskMeta').textContent"), /口头交代 · WorkBuddy/);
-  assert.match(await evalIn(win, "document.getElementById('taskSummary').textContent"), /检查交付/);
-  assert.match(details, /任务：检查交付.*验收条件：在WorkBuddy会话中出现回复.*执行报告：已收到回复.*核对结论：需要 WorkBuddy 修改：请补充日期和金额/);
-  assert.equal(await evalIn(win, "document.getElementById('taskEvidenceDetails').open"), false, 'full task and verification evidence starts folded');
-  await evalIn(win, "document.getElementById('taskEvidenceDetails').open=true");
-  assert.match(await evalIn(win, "document.getElementById('taskDetails').textContent"), /验收条件：在WorkBuddy会话中出现回复/);
-  await evalIn(win, "document.getElementById('taskEvidenceDetails').open=false");
-  await waitFor(() => evalIn(win, "!!document.querySelector('.task-monitor-summary summary')"), 'folded WorkBuddy summary');
-  assert.equal(await evalIn(win, "document.querySelector('.task-monitor-summary').open"), false, 'long WorkBuddy reply summary is folded by default');
-  assert.match(await evalIn(win, "document.querySelector('.task-monitor-summary summary').textContent"), /WorkBuddy 回复摘要/);
-  assert.match(await evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent"), /Monitor 实际进展/, 'monitorSessionId selects the matching WorkBuddy session');
-  await evalIn(win, `window.pet.__fixture.emitDesktop({permissions:{},running:false,task:{id:'task-monitor',status:'verifying',origin:'dialogue',inputSource:'voice',target:'workbuddy',goal:'检查交付',criteria:'可见回复',verification:{verdict:'need_user',report:'请确认这条回复符合预期',at:1761000000000},monitorSessionId:'session-1',handoffSent:true,note:'正在核对'}})`);
-  assert.match(await evalIn(win, "document.getElementById('desktopStatus').textContent"), /核对结果/);
-  assert.match(await evalIn(win, "document.getElementById('taskDetails').textContent"), /核对结论：需要你确认：请确认这条回复符合预期/);
-  assert.equal(await evalIn(win, "document.getElementById('taskResume').hidden"), true, 'verifying tasks do not offer resume');
-  assert.equal(await evalIn(win, "document.getElementById('taskStop').hidden"), false, 'independent verification is cancellable even when the desktop monitor has finished');
-  assert.equal(await evalIn(win, "document.getElementById('taskStart').disabled"), true, 'verification prevents starting a competing task');
-  await evalIn(win, `window.pet.__fixture.emitDesktop({permissions:{},running:false,task:{id:'task-monitor',status:'paused',origin:'dialogue',inputSource:'voice',target:'workbuddy',goal:'检查交付',monitorSessionId:'session-1',handoffSent:true,note:'用户暂停'}})`);
-  assert.match(await evalIn(win, "document.getElementById('taskPauseNote').textContent"), /WorkBuddy 已接收的会话可能仍在继续/);
-  assert.doesNotMatch(await evalIn(win, "document.getElementById('taskStateNote').textContent"), /WorkBuddy 会话可能仍在继续/);
-  assert.doesNotMatch(await evalIn(win, "document.getElementById('taskStateNote').textContent"), /WorkBuddy 已停止/);
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:false,task:{id:'task-panel',status:'paused',origin:'panel',inputSource:'panel',target:'wechat',goal:'手动交代测试'}})");
-  await waitFor(() => evalIn(win, "document.getElementById('taskMeta').textContent").then(text => text.includes('设定任务 · 微信')), 'manual source and WeChat target labels');
-  assert.match(await evalIn(win, "document.getElementById('taskMeta').textContent"), /设定任务 · 微信/);
-  assert.match(await evalIn(win, "document.getElementById('taskPauseNote').textContent"), /暂停只停止 (?:Bunny|伙伴) 的微信代理操作/);
-  assert.doesNotMatch(await evalIn(win, "document.getElementById('taskPauseNote').textContent"), /WorkBuddy/);
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:false,task:{id:'task-panel',status:'accepted',origin:'panel',inputSource:'panel',target:'wechat',goal:'手动交代测试',report:'已核对微信结果'}})");
-  assert.equal(await evalIn(win, "document.getElementById('taskPauseNote').hidden"), true, 'completed tasks do not show pause instructions');
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:false,task:{id:'task-monitor',status:'paused',origin:'dialogue',inputSource:'voice',target:'workbuddy',goal:'检查交付',monitorSessionId:'session-1',handoffSent:true,note:'用户暂停'}})");
-  await evalIn(win, "window.pet.__fixture.emitMonitor({tasks:[{sessionId:'session-1',name:'Monitor 实际交付',status:'ok'}]})");
-  await waitFor(() => evalIn(win, "document.getElementById('workbuddyMonitorTasks').textContent").then(text => text.includes('Monitor 实际交付 · 已有答复')), 'native monitor completion status');
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:false,task:null})");
-  assert.deepEqual(await evalIn(win, "[...document.querySelectorAll('#desktopTabs button')].map(b=>b.textContent)"), ['当前任务','持续关注','WorkBuddy','自主生活','系统权限']);
-  await click(win, 'taskSetup');
-  assert.equal(await evalIn(win, "document.getElementById('taskDialog').open"), true);
-  assert.equal(await evalIn(win, "document.querySelectorAll('#taskDialog textarea').length"), 1);
-  await evalIn(win, "document.getElementById('taskGoal').value='整理今天的资料';document.getElementById('taskStart').click()");
-  await waitFor(() => Promise.resolve((calls.say || []).length === 2), 'simple task routes through dialogue');
-  assert.equal(calls.say.at(-1)[0], '请安排并执行这个任务：\n整理今天的资料');
-  await waitFor(() => evalIn(win, "!document.getElementById('taskDialog').open"), 'task dialog closes after accepted input');
-  assert.equal(await evalIn(win, "document.querySelectorAll('#desktopInsert,#taskCriteria,#taskTarget').length"), 0);
-  await evalIn(win, "window.pet.__fixture.emitDesktop({permissions:{},running:true,task:{id:'to-cancel',status:'running',target:'workbuddy'}})");
-  await click(win, 'taskCancel');
-  await waitFor(() => Promise.resolve((calls.taskCancel || []).length === 1), 'cancel current task');
-  await waitFor(() => evalIn(win, "document.getElementById('desktopStatus').textContent.includes('已取消')"), 'cancelled state visible');
-  win.hide();
+  const {taskPresentation}=require('../src/main/task-presentation'),presentation=task=>({...task,presentation:taskPresentation(task)});
+  agentTasks=[presentation({id:'control-fixture',skill:'system.operate',goal:'核对独立进程停止',status:'waiting',createdAt:Date.now(),updatedAt:Date.now(),state:{},subjects:[{application:'system'}],schedule:{intervalSeconds:60}})];
+  const win=await loadPage('desktop'),emit=()=>win.webContents.send('fixture:event',{type:'agent',...agentView()});
+  await waitFor(()=>evalIn(win,'!!document.querySelector("#agentTaskList [data-operation=stop]")'),'current task card initializes');
+  let finish;agentControlReply=async(operation,id)=>{assert.equal(operation,'stop');assert.equal(id,'control-fixture');const stopRequest={phase:'pending',deadlineAt:Date.now()+30000};agentTasks=[presentation({...agentTasks[0],status:'stopped',stopRequest,resources:[{id:'process',kind:'process',phase:'running',ownership:'owned'}],state:{stopRequest}})];emit();return new Promise(r=>finish=r);};
+  await evalIn(win,'document.querySelector("#agentTaskList [data-operation=stop]").click();document.querySelector("#agentTaskList [data-operation=stop]").click()');
+  await waitFor(()=>evalIn(win,'!!document.querySelector("[data-cleanup-countdown]")'),'external cleanup countdown');
+  assert.equal((calls.agentControl||[]).length,1);assert.equal(agentView().capacity.active,0);assert.equal(agentTasks[0].status,'stopped');assert.match(await evalIn(win,'document.querySelector("#agentTaskList .task-card-status").textContent'),/已停止/);assert.equal(await evalIn(win,'document.querySelector("#agentTaskList [data-operation=stop]")===null'),true);
+  const before=await evalIn(win,'document.querySelector("[data-cleanup-countdown]").textContent');await waitFor(()=>evalIn(win,'document.querySelector("[data-cleanup-countdown]").textContent').then(text=>text!==before),'countdown advances');fs.writeFileSync(path.join(tmp,'desktop-stop-countdown.png'),(await win.webContents.capturePage()).toPNG(),{mode:0o600});
+  const stopRequest={...agentTasks[0].stopRequest,phase:'failed'};agentTasks=[presentation({...agentTasks[0],stopRequest,state:{stopRequest},cleanupLog:[{kind:'process',label:'独立命令',verified:false,reason:'停止尚未确认'}]})];emit();finish({ok:true,localStopped:true,cleanupVerified:false,message:'Bunny 已停止；独立命令停止尚未确认'});
+  await waitFor(()=>evalIn(win,'document.getElementById("agentCommandNote").textContent').then(text=>text.includes('停止尚未确认')),'partial cleanup feedback');emit();await delay(100);assert.match(await evalIn(win,'document.querySelector("#agentTaskList").textContent'),/停止尚未确认/);assert.equal(await evalIn(win,'document.querySelector("#agentTaskList [data-operation=stop]")===null'),true);assert.equal(await evalIn(win,'document.querySelector("[data-cleanup-countdown]")===null'),true);
+  agentControlReply=async operation=>{if(operation==='archive'||operation==='clearList'){archivedAgentTasks.push(...agentTasks);agentTasks=[];}else if(operation==='restoreList'){agentTasks=archivedAgentTasks;archivedAgentTasks=[];}else throw Error('unexpected repeat control '+operation);emit();return {ok:true,message:'任务列表已更新；保留记忆与产物'};};
+  await evalIn(win,'document.querySelector("#agentTaskList [data-operation=archive]").click()');await waitFor(()=>evalIn(win,'document.querySelector("#agentTaskList .task-card")===null'),'archive removes row');await waitFor(()=>evalIn(win,'!document.getElementById("agentRestoreList").hidden'),'restore available');await evalIn(win,'document.getElementById("agentRestoreList").click()');await waitFor(()=>evalIn(win,'!!document.querySelector("#agentTaskList [data-operation=archive]")'),'undo restores ended row');assert.equal(agentTasks[0].status,'stopped');assert.equal(agentTasks[0].cleanupLog[0].reason,'停止尚未确认');
+  await evalIn(win,'document.getElementById("agentClearList").click()');await waitFor(()=>evalIn(win,'document.querySelector("#agentTaskList .task-card")===null'),'clear removes list');assert.equal(archivedAgentTasks[0].status,'stopped');assert.equal((calls.agentControl||[]).filter(args=>args[0]==='stop').length,1);
+  agentTasks=[presentation({id:'failed-command',skill:'system.operate',goal:'错误反馈夹具',status:'waiting',state:{},createdAt:Date.now(),updatedAt:Date.now()})];emit();await delay(100);agentControlReply=async()=>{throw Error('任务服务暂不可用');};await evalIn(win,'document.querySelector("#agentTaskList [data-operation=stop]").click()');await waitFor(()=>evalIn(win,'document.getElementById("agentCommandNote").textContent').then(text=>text.includes('任务服务暂不可用')),'IPC exception feedback');assert.equal(agentTasks[0].status,'waiting');assert.equal(await evalIn(win,'document.querySelector("#agentTaskList [data-operation=stop]").disabled'),false);win.hide();
 }
 
 async function run() {
@@ -681,8 +609,9 @@ async function run() {
   try {
     await testMemory();
     await testKnowledge();
-    await testDesktop();
-    console.log('companion Electron fixture: memory, knowledge and desktop flows passed (hidden windows, stub APIs, isolated userData)');
+    const memoryOnly=process.argv.includes('--memory-only');
+    if(!memoryOnly)await testDesktop();
+    console.log(`companion Electron fixture: ${memoryOnly?'memory and knowledge':'memory, knowledge and desktop'} flows passed (hidden windows, stub APIs, isolated userData)`);
     for (const win of fixtureWindows) if (!win.isDestroyed()) win.destroy();
     app.exit(0);
   } catch (error) {

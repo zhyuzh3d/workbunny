@@ -37,3 +37,10 @@ test('legitimate waiting is accounted separately and cannot cause an immediate f
  now+=5000;p.wait('gui');now+=600000;const restored=new ActionProgress(JSON.parse(JSON.stringify(p.state)),()=>now);restored.wait(null);now+=1000;
  assert.equal(restored.snapshot().elapsedMs,606000);assert.equal(restored.snapshot().waitingMs,600000);assert.equal(restored.snapshot().withoutProgressMs,6000);assert.equal(restored.reviewDue(),false);
 });
+test('changing failed methods and error descriptions cannot renew the progress clock',()=>{
+ let now=1000;const p=new ActionProgress({},()=>now);p.observe('screen.observe',{visible:'same real page'});const evidence=[...p.state.evidence];
+ for(let i=0;i<3;i++){now+=6000;assert.equal(p.observe('method-'+i,{tool:'method-'+i,args:{attempt:i},error:'E_UNAVAILABLE_'+i}),false);}
+ assert.deepEqual(p.state.evidence,evidence);assert.equal(p.snapshot().withoutProgressMs,18000);assert(p.reviewDue());
+ assert.equal(p.observe('inspect',{result:{ok:false,error:'E_OTHER'}}),false);
+ assert.equal(p.observe('screen.observe',{visible:'new real page'}),true);
+});

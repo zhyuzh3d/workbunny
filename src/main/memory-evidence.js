@@ -115,9 +115,10 @@ async function evidenceFor(memory, record, { scene = null } = {}) {
   const byId = new Map(rows.map(row => [row.id, row]));
   for (const sourceId of sourceIds) {
     const source = byId.get(sourceId);
-    if (!source || source.kind !== 'message') continue;
+    const imported=source?.kind==='state'&&source.value.schema==='bunny.memory-import/v1'&&source.value.type==='source'&&source.value.origin==='memory-import-source-v1'&&value.origin==='imported-memory-v1';
+    if (!source || source.kind !== 'message'&&!imported) continue;
     const observation = value.memoryKind === 'observation';
-    if (observation ? value.evidenceCharacter !== actors.character(source.value) : !actors.isOwner(source.value)) continue;
+    if (!imported&&(observation ? value.evidenceCharacter !== actors.character(source.value) : !actors.isOwner(source.value))) continue;
     let sourceScope;
     try { sourceScope = scopes.scopeOf(source); } catch { continue; }
     if (sourceScope.visibilityFloor > memoryScope.visibilityFloor) continue;

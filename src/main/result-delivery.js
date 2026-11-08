@@ -1,6 +1,7 @@
 'use strict';
 const {fields,text}=require('./agent-contract');
 const {deliveryText}=require('./task-result');
+const {resultLinks}=require('./result-links');
 function registerResultTools(tools,{deliver}){
  tools.register({name:'result.deliver',description:'向本任务指定的微信对象交付已回收成果，不重做工作，不重复播报。',effect:'write',capabilities:['conversation.send'],
  validate:v=>{fields(v,['message'],'成果交付');return {message:text(v.message,'成果消息',3000)};},execute:(a,c)=>deliver(a.message,c.task,c.signal,undefined,c.operationId)});
@@ -22,7 +23,7 @@ async function deliverResult({task,call,checkpoint,report}){
   }
   task.state.delivery.status='delivered';
  }else{
-  await report(result.summary,'result:'+result.revision);if(task.state.delivery.status!=='delivered')task.state.delivery.status='queued';
+  await report(deliveryText(result,{maxLength:12000}),'result:'+result.revision,{links:resultLinks(result),speechText:result.summary});if(task.state.delivery.status!=='delivered')task.state.delivery.status='queued';
  }
  await checkpoint();
 }

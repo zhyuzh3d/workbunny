@@ -35,6 +35,8 @@ async function run() {
     ] };
   } });
   autonomy = new CompanionAutonomy({ memory: m, getScene: () => settings.scene, defaultDirectory: path.join(root, 'creations'), canRun: () => false, propose: async () => ({ kind: 'none' }) });
+  handle('owner-security-status',()=>({enabled:false,configured:false}));
+  handle('memory-import-status',()=>[]);
   handle('product-info',()=>require('../src/main/product-info').productInfo('0.20.0'));
   handle('speaker-status', () => ({ ready: false, enabled: false, samples: 0 }));
   handle('panel-init', () => ({ config: config.publicConfig(), avatars: [], motions: [], asr: {} }));
@@ -136,7 +138,7 @@ async function run() {
   const desktop = await page('companion.html', { p: 'desktop' });
   await wait(desktop, "document.getElementById('autonomyStatus').textContent.length > 0");
   assert.equal((await autonomy.status()).grants.length, 3, 'local life starts without a setup form');
-  assert.deepEqual(await exec(desktop, "[...document.querySelectorAll('#desktopTabs button')].map(b=>b.textContent)"), ['任务','技能','WorkBuddy','自主工作','系统权限']);
+  assert.deepEqual(await exec(desktop, "[...document.querySelectorAll('#desktopTabs button')].map(b=>b.textContent)"), ['任务','任务能力','WorkBuddy','自主工作','系统权限']);
   await exec(desktop, "document.querySelector('[data-desktop-tab=autonomy]').click(); document.getElementById('autonomyPause').click()");
   await wait(desktop, "document.getElementById('autonomyResume').hidden === false");
   assert((await autonomy.status()).paused);

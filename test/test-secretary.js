@@ -164,22 +164,22 @@ async function testVoiceCommitAndCurrentTurnGate() {
   const desktop = new FakeDesktop();
   const secretary = new Secretary({ desktop, report: async () => {} });
   const uncommitted = await secretary.dispatch(intent(), { requestId: 'voice-uncommitted', userText: '整理项目', source: 'voice',
-    voiceTurn: { waitForCommit: async () => false, isCurrent: () => true } });
+    voiceTurn: { accepted:false,canCommit:()=>false,waitForCommit: async () => false, isCurrent: () => true } });
   assert.match(uncommitted.text, /尚未被系统识别确认/);
   assert.equal(desktop.startCalls.length, 0);
 
   const stale = await secretary.dispatch(intent(), { requestId: 'voice-stale', userText: '整理项目', source: 'voice',
-    voiceTurn: { waitForCommit: async () => true, isCurrent: () => false } });
+    voiceTurn: { accepted:true,canCommit:()=>true,waitForCommit: async () => true, isCurrent: () => false } });
   assert.match(stale.text, /没有发起操作/);
   assert.equal(desktop.startCalls.length, 0);
 
   let committed = 0;
-  const turn = { waitForCommit: async () => { committed++; return true; }, isCurrent: () => true };
+  const turn = { accepted:true,canCommit:()=>true,waitForCommit: async () => { committed++; return true; }, isCurrent: () => true };
   const first = secretary.dispatch(intent(), { requestId: 'voice-confirmed-token', userText: '整理项目', source: 'voice', voiceTurn: turn });
   const duplicate = secretary.dispatch(intent(), { requestId: 'voice-confirmed-token', userText: '整理项目', source: 'voice', voiceTurn: turn });
   assert.equal(first, duplicate);
   await Promise.all([first, duplicate]);
-  assert.equal(committed, 1);
+  assert(committed >= 1, 'each effect boundary rechecks the same admitted token');
   assert.equal(desktop.startCalls.length, 1, 'one confirmed voice token starts at most once');
   secretary.close();
 }

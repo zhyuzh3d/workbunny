@@ -19,7 +19,9 @@ class ActionLifecycle {
    protect:async()=>{assertCurrent();entry.phase='protected';await entry.onPhase(entry.phase);assertCurrent();},
    retryBeforeEffect:async()=>{assertCurrent();if(entry.phase!=='protected')throw Error('只有确认未发令的保护阶段可重新准备');entry.phase='preparing';await entry.onPhase(entry.phase);assertCurrent();},
    commit:async()=>{assertCurrent();entry.phase='committed';await entry.onPhase(entry.phase);},
-   reconcile:async review=>{if(review?.observed!=='not_applied'||typeof review.basis!=='string'||review.basis.trim().length<3)throw Error('重新准备动作需要明确的未生效核查依据');entry.phase='preparing';await entry.onPhase(entry.phase);assertCurrent();},
+   // A narrative assessment cannot reopen a committed write. Only an actual
+   // before-effect rejection can use retryBeforeEffect; external receipts are
+   // reconciled by the operation ledger without replaying the action.
    finish:()=>{parentSignal?.removeEventListener('abort',cancel);if(this.active.get(id)===entry)this.active.delete(id);}
   };
  }

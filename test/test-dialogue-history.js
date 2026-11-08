@@ -4,6 +4,17 @@ const fs = require('node:fs'), os = require('node:os'), path = require('node:pat
 const { MemoryService } = require('../src/main/memory-service');
 const { dialoguePage } = require('../src/main/dialogue-history');
 
+test('task result links persist in the encrypted dialogue and remain scoped and idempotent',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bunny-dialogue-links-')),url='https://example.com/game?sharecode=a%2Fb%2Bc&mode=kids#start';
+ const memory=new MemoryService({dir,bin:path.resolve('bin/vault'),openKey:async()=>Buffer.alloc(32,72),getSettings:()=>({enabled:true,extract:false,scene:'life'})});
+ try{await memory.init();await memory.write([{id:'result-task',kind:'task',ts:1,domain:'life',value:{content:'source task'}}]);
+  const details={scene:'life',delivery:'task-receipt',taskId:'result-task',sources:['result-task'],resultLinks:[{url}]},content='游戏做好了。\n'+url;
+  await memory.addMessageOnce('result-reply','assistant',content,details);await memory.addMessageOnce('result-reply','assistant',content,details);
+  const life=await dialoguePage(memory,{},'life'),row=life.rows.find(r=>r.id==='result-reply');assert.equal(row.taskId,'result-task');assert.equal(row.links[0].url,url);assert(row.text.includes(url));assert(!(await dialoguePage(memory,{},'work')).rows.some(r=>r.id==='result-reply'));
+  await assert.rejects(memory.addMessageOnce('result-reply','assistant',content,{...details,resultLinks:[]}));
+ }finally{await memory.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 test('dialogue history pages across years, tied timestamps, scenes and external messages', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bunny-dialogue-history-'));
   const memory = new MemoryService({ dir, bin: path.resolve('bin/vault'), openKey: async () => Buffer.alloc(32, 41), getSettings: () => ({ enabled: true, extract: false, scene: 'private' }) });

@@ -33,11 +33,11 @@ test('ongoing actions learn through immutable scoped outcomes, never private con
  await learning.settled(task,{id:'round-1',status:'completed'});assert.equal(calls,0);
  task.state.newRound='changed while Dream was queued';await memory.write([{id:task.id,kind:'task',ts:Date.now(),domain:'life',visibilityFloor:1,value:task}]);
  await maintain(learning,'dream');assert.equal(calls,1);const rows=await learning.rows();assert.equal(rows.length,1);assert(rows[0].value.sources.includes(task.id));
- await learning.prepare(task);assert.equal(task.state.operatingKnowledge.length,0,'a continuing monitor must not depend on experience derived from itself');
+ learning.applyPrepared(task,await learning.prepare(task));assert.equal(task.state.operatingKnowledge.length,0,'a continuing monitor must not depend on experience derived from itself');
  await learning.settled(task,{id:'round-1',status:'completed'});await maintain(learning,'dream');assert.equal(calls,1,'outcome is idempotent');
  await learning.settled({...task,id:'private-task',scene:'private',visibilityFloor:2},{id:'private-round',status:'completed'});assert.equal(await maintain(learning,'dream'),'done');
  await memory.write([{id:'private-source',kind:'task',ts:Date.now(),domain:'private',visibilityFloor:2,value:{sources:[]}}]);
  await memory.write([{id:'private-source-queue',kind:'state',ts:Date.now(),domain:'life',visibilityFloor:2,value:{origin:'task-experience-queue-v1',status:'pending',sources:['private-source'],input:{...task,id:'private-source-queue',status:'completed',state:{attempts:[{tool:'conversation.transcribe',error:'unverified private-origin failure'}]}}}}]);
  assert.equal(await maintain(learning,'dream'),'continue');assert.equal(calls,1,'authoritative inherited source scope overrides an incorrectly low input scope');
- const other={...task,id:'new-task',sources:[],state:{}};await learning.prepare(other);assert.equal(other.state.operatingKnowledge.length,1);
+ const other={...task,id:'new-task',sources:[],state:{}};learning.applyPrepared(other,await learning.prepare(other));assert.equal(other.state.operatingKnowledge.length,1);
 });

@@ -72,6 +72,14 @@ class DesktopNative extends EventEmitter {
         else {
           const error = new Error(response.error || '桌面原生请求失败');
           if (typeof response.code === 'string') error.code = response.code;
+          if (typeof response.dispatched === 'boolean') error.dispatched = response.dispatched;
+          if (response.diagnostic && typeof response.diagnostic === 'object') {
+            const d=response.diagnostic;
+            const guardChecks=require('./self-repair').diagnostic({guardChecks:d.guardChecks})?.guardChecks;
+            error.diagnostic={...(typeof d.operation==='string'&&/^[a-zA-Z]{1,48}$/u.test(d.operation)?{operation:d.operation}:{}),
+              ...(Number.isSafeInteger(d.candidateCount)&&d.candidateCount>=0?{candidateCount:d.candidateCount}:{}),
+              ...(['background-ax','foreground-ax'].includes(d.method)?{method:d.method}:{}),...(guardChecks?{guardChecks}:{})};
+          }
           pending.reject(error);
         }
       });

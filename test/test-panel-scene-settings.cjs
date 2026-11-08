@@ -209,8 +209,7 @@ async function main() {
   await waitFor(() => evalIn(win, 'document.getElementById("productInfo").textContent.includes("MIT License")'), 'shared product info');
   await evalIn(win, 'document.querySelector(".product-repository").click()');
   await waitFor(() => Promise.resolve(calls.some(c=>c.openRepository)), 'repository external action');
-  await evalIn(win, 'document.getElementById("dialogueBehind").checked=true;document.getElementById("dialogueBehind").dispatchEvent(new Event("change"))');
-  await waitFor(() => Promise.resolve(settings.ui?.dialogueBehind===true), 'dialogue layer persisted');
+  assert.equal(await evalIn(win, 'document.getElementById("dialogueBehind")'), null, 'the duplicate dialogue switch is removed');
   await evalIn(win, 'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
   fs.writeFileSync(path.join(tmp,'system.png'), (await win.webContents.capturePage()).toPNG());
   await evalIn(win, 'document.querySelector("[data-t=scene]").click()');

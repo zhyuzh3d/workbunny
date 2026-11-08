@@ -42,7 +42,7 @@ function taskSpec(value) {
   if(value.delivery!==undefined){fields(value.delivery,['channel','recipient','includeFiles'],'结果渠道');if(!['speech','wechat'].includes(value.delivery.channel))throw new Error('结果渠道不合法');
     if(value.delivery.channel==='speech'&&value.delivery.recipient!==undefined)throw new Error('语音渠道不能指定收件人');
     if(value.delivery.includeFiles!==undefined&&typeof value.delivery.includeFiles!=='boolean')throw Error('附件交付选项无效');delivery={channel:value.delivery.channel,...(value.delivery.includeFiles===undefined?{}:{includeFiles:value.delivery.includeFiles}),...(value.delivery.channel==='wechat'?{recipient:text(value.delivery.recipient??'文件传输助手','结果收件人',100)}:{})};}
-  if(value.workContext!==undefined){fields(value.workContext,['workspace','directory','mode'],'工作位置');if(!['work.delegate','software.execute'].includes(skill))throw new Error('工作位置只适用于工作委派');
+  if(value.workContext!==undefined){fields(value.workContext,['workspace','directory','mode','buddyApp','reason'],'工作位置');if(!['work.delegate','software.execute'].includes(skill))throw new Error('工作位置只适用于工作委派');
     if(value.workContext.mode!==undefined&&!['auto','none','workspace'].includes(value.workContext.mode))throw new Error('工作位置模式不合法');
     workContext=Object.fromEntries(Object.entries(value.workContext).map(([key,v])=>[key,text(v,'工作位置',key==='directory'?1000:160)]));}
   return { skill,...(value.title?{title:text(value.title,'任务标题',80)}:{}), goal: text(value.goal,'任务目标',6000), criteria: text(value.criteria ?? value.goal,'验收条件',3000), subjects,

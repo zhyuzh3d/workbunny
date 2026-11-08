@@ -12,16 +12,25 @@ import AVFoundation
 import IOSurface
 import Vision
 
-struct DesktopError: LocalizedError { let message: String; var errorDescription: String? { message } }
+struct DesktopError: LocalizedError {
+    let message: String
+    let code: String?
+    let dispatched: Bool?
+    let diagnostic: [String: Any]?
+    init(message: String, code: String? = nil, dispatched: Bool? = nil, diagnostic: [String: Any]? = nil) {
+        self.message = message; self.code = code; self.dispatched = dispatched; self.diagnostic = diagnostic
+    }
+    var errorDescription: String? { message }
+}
 struct CaptureUnavailableError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
 }
 struct CaptureBusyError: LocalizedError { var errorDescription: String? { "另一个截图进程正在使用显示连接，稍后继续" } }
 var displayOwnerFD: Int32 = -1
-func ensureDisplayOwnership() throws {
+func ensureDisplayOwnership(directory: String = NSTemporaryDirectory()) throws {
     if displayOwnerFD >= 0 { return }
-    let file = NSTemporaryDirectory() + "workbunny-display-\(getuid()).lock"
+    let file = (directory as NSString).appendingPathComponent("workbunny-display-\(getuid()).lock")
     let fd = open(file, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
     guard fd >= 0 else { throw CaptureBusyError() }
     guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { close(fd); throw CaptureBusyError() }
@@ -78,7 +87,86 @@ func windowEntries() -> [[String: Any]] {
 }
 func appIdentity(_ app: NSRunningApplication?) -> [String: Any] {
     guard let app else { return ["pid": 0, "bundleId": "", "name": ""] }
-    return ["pid": Int(app.processIdentifier), "bundleId": app.bundleIdentifier ?? "", "name": app.localizedName ?? ""]
+    return ["pid": Int(app.processIdentifier), "bundleId": app.bundleIdentifier ?? "", "name": app.localizedName ?? "", "launchDate": app.launchDate?.timeIntervalSince1970 ?? 0]
+}
+func taskProcessIdentity(_ pid: pid_t) -> [String: Any]? {
+    guard pid > 1 else { return nil }
+    var info = proc_bsdinfo()
+    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size else { return nil }
+    var bytes = [CChar](repeating: 0, count: 4096)
+    guard proc_pidpath(pid, &bytes, UInt32(bytes.count)) > 0 else { return nil }
+    return ["pid": Int(pid), "pgid": Int(info.pbi_pgid), "uid": Int(info.pbi_uid), "startSeconds": info.pbi_start_tvsec, "startMicros": info.pbi_start_tvusec, "executable": String(cString: bytes)]
+}
+func taskResourcePause(_ seconds: Double) {
+    let until = Date().addingTimeInterval(seconds)
+    while Date() < until {
+        if !RunLoop.current.run(mode: .default, before: until) { Thread.sleep(forTimeInterval: min(0.01, max(0, until.timeIntervalSinceNow))) }
+    }
+}
+func taskApplicationHealth(_ request: [String: Any]) throws -> [String: Any] {
+    guard let bundle = request["bundleId"] as? String, bundle != "com.tencent.xinWeChat" else { throw DesktopError(message: "此应用不允许界面接口诊断") }
+    guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { return ["running": false, "reason": "目标软件未运行"] }
+    guard AXIsProcessTrusted() else { return ["running": true, "identity": appIdentity(app), "reason": "缺少界面诊断权限，不能据此判为卡死"] }
+    let root = AXUIElementCreateApplication(app.processIdentifier); AXUIElementSetMessagingTimeout(root, 1)
+    var value: CFTypeRef?; let first = AXUIElementCopyAttributeValue(root, kAXWindowsAttribute as CFString, &value)
+    if first == .success { return ["running": true, "responsive": true, "identity": appIdentity(app), "reason": "界面接口已响应"] }
+    guard first == .cannotComplete else { return ["running": true, "identity": appIdentity(app), "reason": "界面诊断不可用，未认定卡死"] }
+    taskResourcePause(0.25)
+    let second = AXUIElementCopyAttributeValue(root, kAXWindowsAttribute as CFString, &value)
+    return ["running": true, "responsive": second != .cannotComplete, "identity": appIdentity(app), "evidence": "two-bounded-interface-probes", "reason": second == .cannotComplete ? "两次有时限的界面请求均未响应" : "第二次界面请求已返回"]
+}
+func taskApplicationForceStop(_ request: [String: Any]) throws -> [String: Any] {
+    try taskResourceDeadline(request)
+    guard let identity = request["identity"] as? [String: Any], let pid = identity["pid"] as? Int, let bundle = identity["bundleId"] as? String, let launch = identity["launchDate"] as? Double,
+          !["com.tencent.xinWeChat", "cn.haminn.workbunny"].contains(bundle) else { throw DesktopError(message: "缺少可强制恢复的专属应用身份") }
+    guard let app = NSRunningApplication(processIdentifier: pid_t(pid)) else { return ["verified": true, "reason": "原应用已退出，无需强制终止"] }
+    guard app.bundleIdentifier == bundle, app.launchDate?.timeIntervalSince1970 == launch else { throw DesktopError(message: "应用身份已变化，未强制终止") }
+    let health = try taskApplicationHealth(["bundleId": bundle])
+    guard health["responsive"] as? Bool == false else { return ["verified": false, "reason": "当前缺少持续无响应证据，未强制终止"] }
+    // Failure to inspect data is uncertainty, never evidence that it is safe to
+    // discard. Only a fresh complete list with explicit unedited flags qualifies.
+    let root = AXUIElementCreateApplication(app.processIdentifier); AXUIElementSetMessagingTimeout(root, 0.5)
+    var raw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(root, kAXWindowsAttribute as CFString, &raw) == .success, let windows = raw as? [AXUIElement] else { return ["verified": false, "reason": "未保存数据状态无法核实，未强制终止"] }
+    for window in windows {
+        var edited: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, "AXEdited" as CFString, &edited) == .success, let flag = edited as? Bool, flag == false else { return ["verified": false, "reason": "窗口含未保存内容或状态不明，未强制终止"] }
+    }
+    try taskResourceDeadline(request)
+    guard app.forceTerminate() else { return ["verified": false, "reason": "专属应用未能强制终止"] }
+    for _ in 0..<20 { if app.isTerminated { return ["verified": true, "reason": "持续无响应、专属身份及无未保存内容已核对，强制终止成功"] }; taskResourcePause(0.1) }
+    return ["verified": false, "reason": "强制终止已请求，结束尚未确认"]
+}
+func taskResourceDeadline(_ request: [String: Any]) throws {
+    guard let sent = request["sentAtMs"] as? Double, let timeout = request["timeoutMs"] as? Double, Date().timeIntervalSince1970 * 1000 <= sent + timeout else { throw DesktopError(message: "资源停止请求已过期，未继续操作") }
+}
+func taskResourceStop(_ request: [String: Any], application: Bool) throws -> [String: Any] {
+    try taskResourceDeadline(request)
+    guard let identity = request["identity"] as? [String: Any], let pid = identity["pid"] as? Int, pid > 1, pid != getpid(), pid != getppid() else { throw DesktopError(message: "缺少专属进程身份") }
+    if application {
+        guard let bundle = identity["bundleId"] as? String, !["com.tencent.xinWeChat", "cn.haminn.workbunny"].contains(bundle), let launch = identity["launchDate"] as? Double, launch > 0 else { throw DesktopError(message: "共享应用或启动归属未确认，已保留") }
+        guard let app = NSRunningApplication(processIdentifier: pid_t(pid)) else { return ["verified": true, "reason": "原应用进程已结束"] }
+        guard app.bundleIdentifier == bundle, app.launchDate?.timeIntervalSince1970 == launch else { throw DesktopError(message: "应用进程身份已变化，未退出其它应用") }
+        try taskResourceDeadline(request)
+        guard app.terminate() else { return ["verified": false, "reason": "专属应用未接受退出请求，可能有未保存内容；已保留"] }
+        for _ in 0..<20 { if app.isTerminated { return ["verified": true, "reason": "任务专属应用已退出"] }; taskResourcePause(0.1) }
+        return ["verified": false, "reason": "已请求正常退出，尚未确认；未强制关闭未保存内容"]
+    }
+    guard let actual = taskProcessIdentity(pid_t(pid)) else {
+        return kill(-pid_t(pid), 0) == -1 && errno == ESRCH ? ["verified": true, "reason": "原进程组已结束"] : ["verified": false, "reason": "原进程已消失但组内进程仍存在，无法重新核实归属，已保留"]
+    }
+    for field in ["pid", "pgid", "uid", "startSeconds", "startMicros", "executable"] {
+        guard let expected = identity[field] as? NSObject, let observed = actual[field] as? NSObject, expected == observed else { throw DesktopError(message: "进程身份已变化，未停止其它进程") }
+    }
+    guard actual["pgid"] as? Int == pid, actual["uid"] as? Int == Int(getuid()) else { throw DesktopError(message: "不是本任务可独立停止的用户进程组") }
+    try taskResourceDeadline(request)
+    _ = kill(-pid_t(pid), SIGTERM)
+    for i in 0..<20 {
+        if kill(-pid_t(pid), 0) == -1 && errno == ESRCH { return ["verified": true, "reason": "任务命令进程组已结束"] }
+        if i == 7, let fresh = taskProcessIdentity(pid_t(pid)), (fresh["startSeconds"] as? NSNumber) == (identity["startSeconds"] as? NSNumber), (fresh["startMicros"] as? NSNumber) == (identity["startMicros"] as? NSNumber) { try taskResourceDeadline(request); _ = kill(-pid_t(pid), SIGKILL) }
+        taskResourcePause(0.1)
+    }
+    return ["verified": false, "reason": "已请求停止命令，但进程组结束尚未确认"]
 }
 func sessionLocked() -> Bool {
     guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
@@ -113,20 +201,20 @@ func postMouse(_ type: CGEventType, _ point: CGPoint, _ button: CGMouseButton = 
     }
     event.post(tap: .cghidEventTap)
 }
-func postUnicodeText(_ units: [UInt16]) throws {
+func postUnicodeText(_ units: [UInt16], targetPID: pid_t? = nil) throws {
     guard !units.isEmpty else { return }
     for down in [true, false] {
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else { throw DesktopError(message: "无法创建文本事件") }
         event.flags = []
         event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-        event.post(tap: .cghidEventTap)
+        if let targetPID { event.postToPid(targetPID) } else { event.post(tap: .cghidEventTap) }
     }
 }
-func postShiftReturn() throws {
+func postShiftReturn(targetPID: pid_t? = nil) throws {
     for down in [true, false] {
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: down) else { throw DesktopError(message: "无法创建软换行事件") }
         event.flags = .maskShift
-        event.post(tap: .cghidEventTap)
+        if let targetPID { event.postToPid(targetPID) } else { event.post(tap: .cghidEventTap) }
     }
 }
 func keyCode(_ name: String) -> CGKeyCode? {
@@ -191,6 +279,9 @@ func workBuddyTextMatches(_ raw: String?, expected: String) -> Bool {
     if raw == expected { return true }
     var comparable = raw
     if !expected.hasPrefix("\u{FEFF}") && comparable.hasPrefix("\u{FEFF}") { comparable.removeFirst() }
+    // The RTE serializes a soft break as FEFF + LF + FEFF after real
+    // keyboard/paste input. Remove only this observed boundary pair.
+    if !expected.contains("\u{FEFF}") { comparable = comparable.replacingOccurrences(of: "\u{FEFF}\n\u{FEFF}", with: "\n") }
     if comparable == expected { return true }
     let actualLines = comparable.components(separatedBy: "\n")
     let expectedLines = expected.components(separatedBy: "\n")
@@ -207,6 +298,50 @@ func workBuddyDraftPlan(current: String?, requested: String, sendButtonCount: In
     if workBuddyDraftIsEmpty(current, sendButtonCount: sendButtonCount, sendEnabled: sendEnabled) { return .write }
     if workBuddyTextMatches(current, expected: requested) { return .alreadyFilled }
     return .reject
+}
+struct WorkBuddySubmissionExpectation { let text: String; let mode: String; let marker: String? }
+func workBuddySubmissionExpectation(_ request: [String: Any]) throws -> WorkBuddySubmissionExpectation? {
+    let fields = ["expectedSubmissionText", "expectedSubmissionMode", "expectedSubmissionMarker"]
+    guard fields.contains(where: { request[$0] != nil }) else { return nil }
+    guard let expected = request["expected"] as? [String: Any],
+          workBuddyBundleAllowed(expected["bundleId"] as? String),
+          let op = request["op"] as? String, ["click", "key"].contains(op),
+          let text = request["expectedSubmissionText"] as? String, !text.isEmpty,
+          workBuddyTextWithinLimit(text), workBuddyTextControlsAllowed(text),
+          let mode = request["expectedSubmissionMode"] as? String, ["home", "conversation"].contains(mode),
+          request["expectedSubmissionMarker"] == nil || workBuddyMarkerAllowed(request["expectedSubmissionMarker"] as? String),
+          mode != "conversation" || workBuddyMarkerAllowed(request["expectedSubmissionMarker"] as? String) else {
+        throw DesktopError(message: "提交草稿核对参数无效或目标不是 WorkBuddy，未派发输入", code: "E_GUI_DRAFT_UNVERIFIED", dispatched: false)
+    }
+    return WorkBuddySubmissionExpectation(text: text, mode: mode, marker: request["expectedSubmissionMarker"] as? String)
+}
+enum WorkBuddySubmissionDraftState { case ready, conflict, unverified }
+func workBuddySubmissionDraftState(scanComplete: Bool, editorCount: Int, targetReady: Bool,
+                                   scannedDraft: String?, currentDraft: String?, expected: String) -> WorkBuddySubmissionDraftState {
+    guard scanComplete, editorCount == 1, targetReady, let scannedDraft, let currentDraft else { return .unverified }
+    guard workBuddyTextMatches(scannedDraft, expected: expected), workBuddyTextMatches(currentDraft, expected: expected) else { return .conflict }
+    return .ready
+}
+struct WorkBuddySendGuardPlan {
+    let checks: [String: Bool]
+    let conflictingDraft: Bool
+    var ready: Bool { checks.values.allSatisfy { $0 } }
+}
+func workBuddySendGuardPlan(scanComplete: Bool, childrenFetchErrors: Int, editorCount: Int,
+                            targetReady: Bool, modelMatched: Bool, draft: String?, requested: String,
+                            sendButtonCount: Int, sendEnabled: Bool) -> WorkBuddySendGuardPlan {
+    let draftMatched = workBuddyTextMatches(draft, expected: requested)
+    return WorkBuddySendGuardPlan(checks: [
+        "scanComplete": scanComplete, "childrenReadable": childrenFetchErrors == 0,
+        "editorUnique": editorCount == 1, "targetReady": targetReady,
+        "modelMatched": modelMatched, "draftMatched": draftMatched,
+        "sendButtonUnique": sendButtonCount == 1, "sendEnabled": sendEnabled
+    ], conflictingDraft: editorCount == 1 && draft != nil && !draftMatched &&
+        !workBuddyDraftIsEmpty(draft, sendButtonCount: sendButtonCount, sendEnabled: sendEnabled))
+}
+func workBuddySendGuardDiagnostic(_ plan: WorkBuddySendGuardPlan, background: Bool, sendButtonCount: Int) -> [String: Any] {
+    ["operation": "submit", "method": background ? "background-ax" : "foreground-ax",
+     "candidateCount": sendButtonCount, "guardChecks": plan.checks]
 }
 func workBuddyControlsUnique(editors: Int, combos: Int, sendButtons: Int, scanComplete: Bool) -> Bool {
     scanComplete && editors == 1 && combos == 1 && sendButtons == 1
@@ -389,13 +524,14 @@ func workBuddyControls(_ request: [String: Any]) throws -> (WorkBuddyContext, Wo
         throw DesktopError(message: "WorkBuddy AX 模式或会话关联标记无效")
     }
     guard mode == "home" || marker != nil else { throw DesktopError(message: "conversation 模式必须提供本任务关联标记") }
-    let context = try validateWorkBuddyContext(request)
+    let background = request["background"] as? Bool == true
+    let context = try validateWorkBuddyContext(request, requireFrontmost: !background)
     guard AXIsProcessTrusted() else { throw DesktopError(message: "缺少辅助功能权限") }
     // The exact bundle/PID and matching visible CG window are checked before creating any AX element.
     let app = AXUIElementCreateApplication(context.pid)
     AXUIElementSetMessagingTimeout(app, 0.2)
     guard let window = workBuddyAXWindow(app: app, targetRect: context.rect) else {
-        try revalidateWorkBuddyContext(request, context)
+        try revalidateWorkBuddyContext(request, context, requireFrontmost: !background)
         return (context, WorkBuddyControls(application: app, editors: [], editorFocusElements: [], combos: [], sendButtons: [], draft: nil,
             selectedModel: nil, sendEnabled: false, homeReady: false, associationMarkerPresent: false, scanComplete: false,
             visitedNodes: 0, maxDepthVisited: 0, depthCutoff: false, markerTextFound: false,
@@ -411,10 +547,42 @@ func workBuddyControls(_ request: [String: Any]) throws -> (WorkBuddyContext, Wo
         visitedNodes: scanned.visitedNodes, maxDepthVisited: scanned.maxDepthVisited, depthCutoff: scanned.depthCutoff,
         markerTextFound: scanned.markerTextFound, markerFrameMissing: scanned.markerFrameMissing,
         markerFrameOutsideTarget: scanned.markerFrameOutsideTarget, childrenFetchErrors: scanned.childrenFetchErrors)
-    try revalidateWorkBuddyContext(request, context)
+    try revalidateWorkBuddyContext(request, context, requireFrontmost: !background)
     let available = workBuddyControlsUnique(editors: controls.editors.count, combos: controls.combos.count,
                                              sendButtons: controls.sendButtons.count, scanComplete: controls.scanComplete)
     return (context, controls, available)
+}
+// The caller supplies host-owned expected text only for a raw WorkBuddy submit.
+// This observation is kept in the same native dispatch as the first event; it
+// neither chooses a submit method nor replaces the existing action guards.
+func validateWorkBuddySubmission(_ request: [String: Any], _ expectation: WorkBuddySubmissionExpectation?) throws {
+    guard let expectation else { return }
+    do {
+        var scoped = request
+        scoped["mode"] = expectation.mode; scoped["marker"] = expectation.marker
+        scoped["background"] = false
+        let (context, controls, _) = try workBuddyControls(scoped)
+        try revalidateWorkBuddyContext(scoped, context)
+        if request["op"] as? String == "key", !workBuddyEditorFocused(controls) {
+            throw DesktopError(message: "提交前未能核实本任务编辑器焦点，未发送按键", code: "E_GUI_DRAFT_UNVERIFIED", dispatched: false)
+        }
+        let currentDraft = controls.editors.first.flatMap { axAttribute($0, kAXValueAttribute as String) as? String }
+        switch workBuddySubmissionDraftState(scanComplete: controls.scanComplete && controls.childrenFetchErrors == 0, editorCount: controls.editors.count,
+            targetReady: workBuddyTargetReady(mode: expectation.mode, homeReady: controls.homeReady, conversationMarkerPresent: controls.associationMarkerPresent),
+            scannedDraft: controls.draft, currentDraft: currentDraft, expected: expectation.text) {
+        case .conflict:
+            throw DesktopError(message: "提交前草稿与本任务全文不一致，已保留原内容且未提交", code: "E_WORKBUDDY_DRAFT_CONFLICT", dispatched: false)
+        case .unverified:
+            throw DesktopError(message: "提交前编辑器、目标页面或草稿无法完整核对，未提交", code: "E_GUI_DRAFT_UNVERIFIED", dispatched: false)
+        case .ready: break
+        }
+        try revalidateWorkBuddyContext(scoped, context)
+        _ = try validateActionContext(request)
+    } catch let error as DesktopError {
+        throw DesktopError(message: error.message, code: error.code ?? "E_GUI_DRAFT_UNVERIFIED", dispatched: false)
+    } catch {
+        throw DesktopError(message: "提交前草稿核对未取得有效读回，未提交", code: "E_GUI_DRAFT_UNVERIFIED", dispatched: false)
+    }
 }
 // WorkBuddy-only semantic navigation. No generic AX endpoint is exported.
 struct WorkBuddyNavigationNode {
@@ -423,30 +591,53 @@ struct WorkBuddyNavigationNode {
     let label: String
     let inMenu: Bool
 }
+// The workspace popup belongs to the composer's lower left edge. Window
+// percentages describe neither that relationship nor a collapsed sidebar.
+func workBuddyWorkspacePickerRect(_ popup: CGRect, editor: CGRect, window: CGRect) -> Bool {
+    guard window.contains(popup), window.contains(editor), popup.width > 0, popup.height > 0,
+          editor.width > 0, editor.height > 0 else { return false }
+    return abs(popup.minX - editor.minX) <= 48 && popup.midX <= editor.maxX &&
+        popup.minY >= editor.maxY - 8 && popup.maxY <= editor.maxY + 120
+}
 func workBuddyNavigation(_ request: [String: Any]) throws -> [String: Any] {
-    let context = try validateWorkBuddyContext(request)
+    let background = request["background"] as? Bool == true
+    let operation = request["operation"] as? String ?? "inspect"
+    func locateError(_ message: String, count: Int? = nil) -> DesktopError {
+        var diagnostic: [String: Any] = ["operation": operation, "method": background ? "background-ax" : "foreground-ax"]
+        if let count { diagnostic["candidateCount"] = count }
+        return DesktopError(message: message, code: count.map { $0 > 1 ? "E_GUI_LOCATE_AMBIGUOUS" : "E_GUI_LOCATE_MISSING" } ?? "E_GUI_LOCATE_UNAVAILABLE", dispatched: false, diagnostic: diagnostic)
+    }
+    let context = try validateWorkBuddyContext(request, requireFrontmost: !background)
     guard AXIsProcessTrusted() else { throw DesktopError(message: "缺少辅助功能权限") }
     let app = AXUIElementCreateApplication(context.pid)
-    guard let window = workBuddyAXWindow(app: app, targetRect: context.rect) else { throw DesktopError(message: "WorkBuddy 主窗口已变化") }
+    guard let window = workBuddyAXWindow(app: app, targetRect: context.rect) else { throw locateError("WorkBuddy 目标窗口的辅助功能结构不可用") }
     var queue: [(AXUIElement, Int, Bool)] = [(window, 0, false)], nodes: [WorkBuddyNavigationNode] = []
-    var cursor = 0
+    var cursor = 0, editorRects: [CGRect] = []
     let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
     while cursor < queue.count {
-        guard cursor < 2500, DispatchTime.now().uptimeNanoseconds < deadline else { throw DesktopError(message: "WorkBuddy 导航结构尚未完整读取") }
+        guard cursor < 2500, DispatchTime.now().uptimeNanoseconds < deadline else { throw locateError("WorkBuddy 导航结构尚未完整读取") }
         let (element, depth, parentMenu) = queue[cursor]; cursor += 1
         AXUIElementSetMessagingTimeout(element, 0.15)
         guard let role = axAttribute(element, kAXRoleAttribute as String) as? String else { continue }
-        if role == kAXTextAreaRole as String { continue }
+        if role == kAXTextAreaRole as String {
+            if let rect = axWindowRect(element), context.rect.contains(rect) { editorRects.append(rect) }
+            continue
+        }
         let inMenu = parentMenu || role == kAXMenuRole as String
         var label = (axAttribute(element, kAXTitleAttribute as String) as? String) ?? ""
         if label.isEmpty { label = (axAttribute(element, kAXDescriptionAttribute as String) as? String) ?? "" }
         if label.isEmpty && (role == kAXStaticTextRole as String || role == kAXHeadingRole as String) { label = (axAttribute(element, kAXValueAttribute as String) as? String) ?? "" }
         if !label.isEmpty && label.utf16.count < 200 { nodes.append(WorkBuddyNavigationNode(element: element, role: role, label: label, inMenu: inMenu)) }
-        if depth < 48, let children = axAttribute(element, kAXChildrenAttribute as String) as? [AXUIElement] { queue.append(contentsOf: children.map { ($0, depth+1, inMenu) }) }
+        if let children = axAttribute(element, kAXChildrenAttribute as String) as? [AXUIElement], !children.isEmpty {
+            guard depth < 48 else { throw locateError("WorkBuddy 导航结构尚未完整读取") }
+            queue.append(contentsOf: children.map { ($0, depth+1, inMenu) })
+        }
     }
+    let popups = nodes.filter { !$0.inMenu && $0.role == kAXPopUpButtonRole as String }
     let pickers = nodes.filter { node in
-        guard node.role == kAXPopUpButtonRole as String, let rect = axWindowRect(node.element) else { return false }
-        return rect.midX > context.rect.minX + context.rect.width * 0.32 && rect.midY > context.rect.minY + context.rect.height * 0.3
+        guard !node.inMenu, node.role == kAXPopUpButtonRole as String, editorRects.count == 1,
+              let rect = axWindowRect(node.element) else { return false }
+        return workBuddyWorkspacePickerRect(rect, editor: editorRects[0], window: context.rect)
     }
     let picker = pickers.count == 1 ? pickers[0] : nil
     let menuItems = nodes.filter { $0.inMenu && $0.role == kAXMenuItemRole as String }
@@ -454,23 +645,29 @@ func workBuddyNavigation(_ request: [String: Any]) throws -> [String: Any] {
         guard let rect = axWindowRect(node.element), node.role == kAXStaticTextRole as String else { return false }
         return rect.midX < context.rect.minX + context.rect.width * 0.32 && rect.midY > context.rect.minY + 160
     }
-    let operation = request["operation"] as? String ?? "inspect"
+    let buddyExits = nodes.filter { $0.label == "退出当前 Buddy 应用" && $0.role == kAXButtonRole as String }
     if operation == "inspect" {
         return ["workspace": picker?.label ?? "", "pickerAvailable": picker != nil,
+                "workspacePicker": ["editorCount": editorRects.count, "popupCount": popups.count, "candidateCount": pickers.count],
                 "menuOpen": !menuItems.isEmpty, "workspaces": menuItems.map { $0.label }.filter { !["新建工作空间", "打开本地文件夹", "不使用工作空间"].contains($0) },
-                "homeReady": nodes.contains { workBuddyHomeReady(title: $0.label) }, "conversations": conversationNodes.map { $0.label }]
+                "homeReady": nodes.contains { workBuddyHomeReady(title: $0.label) }, "buddyAppActive": !buddyExits.isEmpty,
+                "conversations": conversationNodes.map { $0.label }]
     }
     var candidates: [WorkBuddyNavigationNode] = []
     if operation == "newTask" { candidates = nodes.filter { $0.label == "新建任务" && $0.role != kAXStaticTextRole as String } }
+    else if operation == "exitBuddyApp" { candidates = buddyExits }
     else if operation == "selectConversation", let name = request["name"] as? String, !name.isEmpty, name.utf16.count <= 199 { candidates = conversationNodes.filter { $0.label == name } }
-    else if operation == "workspaceMenu", let picker { candidates = [picker] }
+    else if operation == "workspaceMenu" { candidates = pickers }
     else if operation == "selectWorkspace", let name = request["name"] as? String, !name.isEmpty, name.utf16.count <= 160 { candidates = menuItems.filter { $0.label == name } }
     else { throw DesktopError(message: "WorkBuddy 导航动作不支持或控件不可用") }
-    guard candidates.count == 1 else { throw DesktopError(message: "WorkBuddy 导航对象不唯一或不可见") }
+    guard candidates.count == 1 else { throw locateError(candidates.isEmpty ? "WorkBuddy 导航控件未找到" : "WorkBuddy 导航控件有多个候选", count: candidates.count) }
     let chosen = candidates[0]
-    try revalidateWorkBuddyContext(request, context)
+    try revalidateWorkBuddyContext(request, context, requireFrontmost: !background)
     let pressed = AXUIElementPerformAction(chosen.element, kAXPressAction as CFString)
     if pressed != .success {
+        if background {
+            throw DesktopError(message: "WorkBuddy 后台导航控件不支持定向操作", code: "E_BACKGROUND_UNSUPPORTED", dispatched: false)
+        }
         guard let frame = axWindowRect(chosen.element), context.rect.contains(CGPoint(x: frame.midX, y: frame.midY)) else { throw DesktopError(message: "WorkBuddy 导航需要视觉定位") }
         let point = CGPoint(x: frame.midX, y: frame.midY)
         try postMouse(.leftMouseDown, point); try postMouse(.leftMouseUp, point)
@@ -489,6 +686,9 @@ func workBuddyInspect(_ request: [String: Any]) throws -> [String: Any] {
             workBuddyTextMatches(controls.draft, expected: text)
     }
     return ["available": available, "editorCount": controls.editors.count,
+            "editorFocused": workBuddyEditorFocused(controls),
+            "editorRect": controls.editors.first.flatMap { axWindowRect($0) }.map(rectObject) as Any? ?? NSNull(),
+            "sendButtonRect": controls.sendButtons.first.flatMap { axWindowRect($0.0) }.map(rectObject) as Any? ?? NSNull(),
             "draftMatchesRequest": draftMatchesRequest,
             "draftEmpty": workBuddyDraftIsEmpty(controls.draft, sendButtonCount: controls.sendButtons.count, sendEnabled: controls.sendEnabled),
             "selectedModel": controls.selectedModel ?? "", "sendEnabled": controls.sendEnabled,
@@ -499,6 +699,109 @@ func workBuddyInspect(_ request: [String: Any]) throws -> [String: Any] {
             "markerTextFound": controls.markerTextFound, "markerFrameMissing": controls.markerFrameMissing,
             "markerFrameOutsideTarget": controls.markerFrameOutsideTarget,
             "childrenFetchErrors": controls.childrenFetchErrors]
+}
+// Semantic interfaces are addressed to an exact process/window, never to the
+// user's current keyboard focus. WeChat is excluded at this native boundary.
+func softwareBundle(_ request: [String: Any]) throws -> String {
+    guard let bundle = request["bundleId"] as? String, !bundle.isEmpty, bundle.utf16.count <= 200,
+          bundle.lowercased() != "com.tencent.xinwechat" else {
+        throw DesktopError(message: "软件接口对象无效；微信只允许视觉键鼠", dispatched: false)
+    }
+    return bundle
+}
+func softwareInfo(_ request: [String: Any]) throws -> [String: Any] {
+    let id = try softwareBundle(request)
+    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id), let bundle = Bundle(url: url) else {
+        return ["installed": false, "bundleId": id]
+    }
+    var cli: [String] = [], dictionaries: [String] = []
+    let fm = FileManager.default
+    for relative in ["Contents/Resources/bin", "Contents/Resources/app.asar.unpacked/cli/bin"] {
+        let directory = url.appendingPathComponent(relative)
+        for name in (try? fm.contentsOfDirectory(atPath: directory.path)) ?? [] {
+            let file = directory.appendingPathComponent(name)
+            if fm.isExecutableFile(atPath: file.path) { cli.append(file.path) }
+        }
+    }
+    if let resources = bundle.resourceURL {
+        dictionaries = ((try? fm.contentsOfDirectory(atPath: resources.path)) ?? []).filter { $0.hasSuffix(".sdef") }.map { resources.appendingPathComponent($0).path }
+    }
+    return ["installed": true, "bundleId": bundle.bundleIdentifier ?? id,
+            "name": bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? url.deletingPathExtension().lastPathComponent,
+            "version": bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+            "path": url.path, "cliCandidates": Array(cli.sorted().prefix(20)), "scriptDictionaries": dictionaries,
+            "accessibilityTrusted": AXIsProcessTrusted()]
+}
+struct SoftwareNode { let element: AXUIElement; let data: [String: Any] }
+func softwareNodes(_ root: AXUIElement) throws -> [SoftwareNode] {
+    var queue: [(AXUIElement, Int)] = [(root, 0)], cursor = 0, result: [SoftwareNode] = []
+    let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+    while cursor < queue.count {
+        guard cursor < 2500, DispatchTime.now().uptimeNanoseconds < deadline else { throw DesktopError(message: "软件界面树尚未完整读取", dispatched: false) }
+        let (element, depth) = queue[cursor]; cursor += 1
+        AXUIElementSetMessagingTimeout(element, 0.15)
+        guard let role = axAttribute(element, kAXRoleAttribute as String) as? String else { continue }
+        let title = axAttribute(element, kAXTitleAttribute as String) as? String ?? ""
+        let description = axAttribute(element, kAXDescriptionAttribute as String) as? String ?? ""
+        let value = axAttribute(element, kAXValueAttribute as String) as? String
+        var settable = DarwinBoolean(false), actionNames: CFArray?
+        _ = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable)
+        _ = AXUIElementCopyActionNames(element, &actionNames)
+        let actions = actionNames as? [String] ?? []
+        let label = !title.isEmpty ? title : !description.isEmpty ? description : role == kAXStaticTextRole as String ? value ?? "" : ""
+        if settable.boolValue || !actions.isEmpty || !label.isEmpty {
+            var data: [String: Any] = ["role": role, "label": String(label.prefix(300)), "actions": actions,
+                                      "settable": settable.boolValue, "enabled": (axAttribute(element, kAXEnabledAttribute as String) as? NSNumber)?.boolValue ?? true]
+            if let value { data["value"] = String(value.prefix(1500)); data["valueTruncated"] = value.count > 1500 }
+            result.append(SoftwareNode(element: element, data: data))
+        }
+        if depth < 48, let children = axAttribute(element, kAXChildrenAttribute as String) as? [AXUIElement] { queue.append(contentsOf: children.map { ($0, depth + 1) }) }
+    }
+    return result
+}
+func softwareWindow(_ request: [String: Any]) throws -> (String, WorkBuddyContext, AXUIElement) {
+    let id = try softwareBundle(request)
+    guard !sessionLocked(), AXIsProcessTrusted(), let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first,
+          let row = windowEntries().filter({ ($0["pid"] as? Int) == Int(app.processIdentifier) && ($0["layer"] as? Int) == 0 }).max(by: {
+              let a = rectFrom($0["rect"]) ?? .zero, b = rectFrom($1["rect"]) ?? .zero; return a.width*a.height < b.width*b.height
+          }), let windowId = uint(row["windowId"]), let rect = rectFrom(row["rect"]),
+          let window = workBuddyAXWindow(app: AXUIElementCreateApplication(app.processIdentifier), targetRect: rect) else {
+        throw DesktopError(message: "软件当前没有可读取的授权窗口", dispatched: false)
+    }
+    if let expected = request["expected"] as? [String: Any] {
+        guard expected["bundleId"] as? String == id, expected["pid"] as? Int == Int(app.processIdentifier), uint(request["windowId"]) == windowId else {
+            throw DesktopError(message: "软件进程或窗口已经变化，请重新读取界面", dispatched: false)
+        }
+    }
+    return (id, WorkBuddyContext(pid: app.processIdentifier, windowID: windowId, rect: rect), window)
+}
+func softwareInterface(_ request: [String: Any]) throws -> [String: Any] {
+    let (id, context, window) = try softwareWindow(request)
+    return ["available": true, "target": ["bundleId": id, "expected": ["bundleId": id, "pid": Int(context.pid)], "windowId": context.windowID],
+            "nodes": try softwareNodes(window).map { $0.data }, "method": "background-ax"]
+}
+func softwareControl(_ request: [String: Any]) throws -> [String: Any] {
+    let (_, _, window) = try softwareWindow(request)
+    let nodes = try softwareNodes(window).filter { $0.data["role"] as? String == request["role"] as? String && $0.data["label"] as? String == request["label"] as? String }
+    guard nodes.count == 1, let chosen = nodes.first, chosen.data["enabled"] as? Bool == true else {
+        throw DesktopError(message: "软件控件不唯一、不可见或不可用，请重新检查", dispatched: false)
+    }
+    let result: AXError
+    if request["action"] as? String == "press" {
+        guard (chosen.data["actions"] as? [String] ?? []).contains(kAXPressAction as String) else { throw DesktopError(message: "控件不支持语义点击", code: "E_BACKGROUND_UNSUPPORTED", dispatched: false) }
+        result = AXUIElementPerformAction(chosen.element, kAXPressAction as CFString)
+    } else if request["action"] as? String == "setValue", let value = request["value"] as? String, let expected = request["expectedValue"] as? String {
+        guard chosen.data["settable"] as? Bool == true, axAttribute(chosen.element, kAXValueAttribute as String) as? String == expected else {
+            throw DesktopError(message: "编辑器原值已变化，保留主人编辑内容", dispatched: false)
+        }
+        result = AXUIElementSetAttributeValue(chosen.element, kAXValueAttribute as CFString, value as CFString)
+        if result == .success && axAttribute(chosen.element, kAXValueAttribute as String) as? String != value {
+            throw DesktopError(message: "界面输入回执尚未核实，先观察实际结果", code: "E_GUI_INPUT_UNKNOWN", dispatched: true)
+        }
+    } else { throw DesktopError(message: "软件控件动作无效", dispatched: false) }
+    if result == .success { return ["performed": true, "method": "background-ax"] }
+    let unsupported = result == .actionUnsupported || result == .attributeUnsupported || result == .notImplemented
+    throw DesktopError(message: "软件界面操作未取得成功回执", code: unsupported ? "E_BACKGROUND_UNSUPPORTED" : "E_GUI_INPUT_UNKNOWN", dispatched: !unsupported)
 }
 // A bounded WorkBuddy-only cancellation surface. Message identity is checked
 // outside editors and the sidebar; a title alone never authorizes stopping.
@@ -596,6 +899,7 @@ func workBuddyInputStillTargeted(_ request: [String: Any], context: WorkBuddyCon
 }
 func workBuddyFill(_ request: [String: Any]) throws -> [String: Any] {
     let (text, model) = try workBuddyPayload(request)
+    let background = request["background"] as? Bool == true
     let mode = request["mode"] as? String ?? "home"
     let (context, controls, available) = try workBuddyControls(request)
     guard available, workBuddyTargetReady(mode: mode, homeReady: controls.homeReady, conversationMarkerPresent: controls.associationMarkerPresent), controls.editors.count == 1,
@@ -605,9 +909,8 @@ func workBuddyFill(_ request: [String: Any]) throws -> [String: Any] {
     let expectedText = text
     switch workBuddyDraftPlan(current: controls.draft, requested: expectedText,
                               sendButtonCount: controls.sendButtons.count, sendEnabled: controls.sendEnabled) {
-    case .alreadyFilled: return ["filled": true, "idempotent": true]
-    case .reject: throw DesktopError(message: "WorkBuddy 草稿非空且与请求不同，已保留原内容")
-    case .write: break
+    case .reject: throw DesktopError(message: "WorkBuddy 草稿非空且与请求不同，已保留原内容", code: "E_WORKBUDDY_DRAFT_CONFLICT", dispatched: false)
+    case .alreadyFilled, .write: break
     }
     let plan = try makeInputPlan(text, lineBreak: "shiftEnter")
     guard let combo = controls.combos.first?.0,
@@ -617,19 +920,46 @@ func workBuddyFill(_ request: [String: Any]) throws -> [String: Any] {
     let latestSendEnabled = (controls.sendButtons.first.map { axAttribute($0.0, kAXEnabledAttribute as String) as? NSNumber } ?? nil)?.boolValue ?? true
     switch workBuddyDraftPlan(current: axAttribute(editor, kAXValueAttribute as String) as? String, requested: expectedText,
                               sendButtonCount: controls.sendButtons.count, sendEnabled: latestSendEnabled) {
+    case .reject: throw DesktopError(message: "WorkBuddy 草稿已变化且非空，已保留原内容", code: "E_WORKBUDDY_DRAFT_CONFLICT", dispatched: false)
+    case .alreadyFilled, .write: break
+    }
+    if background {
+        try revalidateWorkBuddyContext(request, context, requireFrontmost: false)
+        guard CGPreflightPostEventAccess() else { throw DesktopError(message: "缺少定向输入权限", code: "E_BACKGROUND_UNSUPPORTED", dispatched: false) }
+        AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        let focusDeadline = DispatchTime.now().uptimeNanoseconds + 250_000_000
+        while !workBuddyEditorFocused(controls) && DispatchTime.now().uptimeNanoseconds < focusDeadline { usleep(25_000) }
+        guard workBuddyEditorFocused(controls) else { throw DesktopError(message: "后台编辑器焦点不可确认", code: "E_BACKGROUND_UNSUPPORTED", dispatched: false) }
+    } else {
+        try focusWorkBuddyEditor(request, context: context, controls: controls, editor: editor)
+    }
+    // Focusing can restore the editor's controlled draft after an AX-only value
+    // change. Re-read after focus before any text input; never replace a draft
+    // to refresh a disabled send button. AX emptiness cannot prove that an
+    // application's hidden model agrees, so the final exact readback remains
+    // necessary and must not be reported as a successful fill on mismatch.
+    try revalidateWorkBuddyContext(request, context, requireFrontmost: !background)
+    guard workBuddyModelLabelAllowed(axAttribute(combo, kAXValueAttribute as String) as? String),
+          workBuddyEditorFocused(controls) else {
+        throw DesktopError(message: "WorkBuddy 模型或编辑器焦点已变化，草稿未写入", dispatched: false)
+    }
+    let focusedSendEnabled = (controls.sendButtons.first.map { axAttribute($0.0, kAXEnabledAttribute as String) as? NSNumber } ?? nil)?.boolValue ?? true
+    switch workBuddyDraftPlan(current: axAttribute(editor, kAXValueAttribute as String) as? String, requested: expectedText,
+                              sendButtonCount: controls.sendButtons.count, sendEnabled: focusedSendEnabled) {
     case .alreadyFilled:
-        try revalidateWorkBuddyContext(request, context)
-        return ["filled": true, "idempotent": true]
-    case .reject: throw DesktopError(message: "WorkBuddy 草稿已变化且非空，已保留原内容")
+        return ["filled": true, "idempotent": true, "verified": true, "sendEnabled": focusedSendEnabled]
+    case .reject:
+        throw DesktopError(message: "WorkBuddy 取得焦点后的草稿与请求不一致或不可读，已保留原内容", code: "E_WORKBUDDY_DRAFT_CONFLICT", dispatched: false)
     case .write: break
     }
-    try focusWorkBuddyEditor(request, context: context, controls: controls, editor: editor)
+    let targetPID: pid_t? = background ? context.pid : nil
     do {
         for item in plan {
-            try workBuddyInputStillTargeted(request, context: context, controls: controls, combo: combo)
+            try revalidateWorkBuddyContext(request, context, requireFrontmost: !background)
+            guard workBuddyModelLabelAllowed(axAttribute(combo, kAXValueAttribute as String) as? String), workBuddyEditorFocused(controls) else { throw DesktopError(message: "定向编辑器已变化") }
             switch item {
-            case .text(let units): try postUnicodeText(units)
-            case .softLineBreak: try postShiftReturn()
+            case .text(let units): try postUnicodeText(units, targetPID: targetPID)
+            case .softLineBreak: try postShiftReturn(targetPID: targetPID)
             }
         }
     } catch {
@@ -638,7 +968,7 @@ func workBuddyFill(_ request: [String: Any]) throws -> [String: Any] {
     let waitDeadline = DispatchTime.now().uptimeNanoseconds + 800_000_000
     var finalReadback: String?
     repeat {
-        try revalidateWorkBuddyContext(request, context)
+        try revalidateWorkBuddyContext(request, context, requireFrontmost: !background)
         guard workBuddyModelLabelAllowed(axAttribute(combo, kAXValueAttribute as String) as? String) else {
             throw DesktopError(message: "WorkBuddy 模型已变化，输入结束但不会发送")
         }
@@ -654,7 +984,7 @@ func workBuddyFill(_ request: [String: Any]) throws -> [String: Any] {
                 "trailingNewlineDifference": readback.trailingNewline,
                 "whitespaceDifference": readback.whitespaceOnly]
     }
-    try revalidateWorkBuddyContext(request, context)
+    try revalidateWorkBuddyContext(request, context, requireFrontmost: !background)
     return ["filled": true, "idempotent": false, "verified": true, "inputChunks": plan.count,
             "readbackLength": readback.actualLength, "trailingNewlineDifference": false,
             "whitespaceDifference": readback.whitespaceOnly]
@@ -670,48 +1000,72 @@ func workBuddySendPoint(buttonRect: CGRect?, windowRect: CGRect) -> CGPoint? {
           rect.maxX <= windowRect.maxX, rect.maxY <= windowRect.maxY else { return nil }
     return CGPoint(x: rect.midX, y: rect.midY)
 }
+func approvedWorkBuddySendPoint(_ request: [String: Any], buttonRect: CGRect?, windowRect: CGRect) throws -> CGPoint {
+    guard let approval = request["approvedPointer"] as? [String: Any],
+          let approvedRect = rectFrom(approval["rect"]), let expectedPoint = approval["point"] as? [String: Any],
+          let x = number(expectedPoint["x"]), let y = number(expectedPoint["y"]), x.isFinite, y.isFinite,
+          let currentRect = buttonRect, currentRect == approvedRect,
+          let actualPoint = workBuddySendPoint(buttonRect: currentRect, windowRect: windowRect),
+          actualPoint == CGPoint(x: x, y: y) else {
+        throw DesktopError(message: "发送按钮或已核对指针位置已变化，本次未派发", code: "E_GUI_POINTER_CHANGED", dispatched: false,
+            diagnostic: ["operation": "submit", "method": "foreground-pointer"])
+    }
+    return actualPoint
+}
 func workBuddySend(_ request: [String: Any]) throws -> [String: Any] {
     let (text, model) = try workBuddyPayload(request)
+    let background = request["background"] as? Bool == true
     let mode = request["mode"] as? String ?? "home"
     let (context, controls, available) = try workBuddyControls(request)
-    guard available, workBuddyTargetReady(mode: mode, homeReady: controls.homeReady, conversationMarkerPresent: controls.associationMarkerPresent), let editor = controls.editors.first,
-          controls.editors.count == 1, workBuddyModelAllowed(model, selectedModel: controls.selectedModel),
-          workBuddyTextMatches(controls.draft, expected: text),
-          controls.sendButtons.count == 1, controls.sendEnabled else {
-        throw DesktopError(message: "WorkBuddy 草稿、首页、Flash 模型或发送状态未确认")
+    let preflight = workBuddySendGuardPlan(scanComplete: controls.scanComplete, childrenFetchErrors: controls.childrenFetchErrors,
+        editorCount: controls.editors.count,
+        targetReady: workBuddyTargetReady(mode: mode, homeReady: controls.homeReady, conversationMarkerPresent: controls.associationMarkerPresent),
+        modelMatched: controls.combos.count == 1 && workBuddyModelAllowed(model, selectedModel: controls.selectedModel),
+        draft: controls.draft, requested: text, sendButtonCount: controls.sendButtons.count, sendEnabled: controls.sendEnabled)
+    guard available, preflight.ready, let editor = controls.editors.first else {
+        throw DesktopError(message: preflight.conflictingDraft ? "WorkBuddy 草稿与本任务原文不同，已保留且未提交" : "WorkBuddy 草稿、首页、Flash 模型或发送状态未确认",
+            code: preflight.conflictingDraft ? "E_WORKBUDDY_DRAFT_CONFLICT" : "E_GUI_BEFORE_DISPATCH", dispatched: false,
+            diagnostic: workBuddySendGuardDiagnostic(preflight, background: background, sendButtonCount: controls.sendButtons.count))
     }
     guard let button = controls.sendButtons.first?.0, let combo = controls.combos.first?.0 else { throw DesktopError(message: "发送按钮或模型控件不可用") }
-    try revalidateWorkBuddyContext(request, context)
+    try revalidateWorkBuddyContext(request, context, requireFrontmost: !background)
     guard workBuddyTextMatches(axAttribute(editor, kAXValueAttribute as String) as? String, expected: text),
           workBuddyModelLabelAllowed(axAttribute(combo, kAXValueAttribute as String) as? String),
           axAttribute(button, kAXEnabledAttribute as String) as? Bool == true else {
         throw DesktopError(message: "WorkBuddy 草稿或发送状态已变化")
     }
-    guard CGPreflightPostEventAccess(), let buttonRect = axWindowRect(button),
-          let clickPoint = workBuddySendPoint(buttonRect: buttonRect, windowRect: context.rect) else {
-        throw DesktopError(message: "发送按钮几何不完整、不在目标窗口内或缺少输入控制权限；未发送")
+    if background {
+        let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
+        if result == .success { return ["pressed": true, "method": "background-ax"] }
+        if result == .actionUnsupported || result == .notImplemented {
+            throw DesktopError(message: "WorkBuddy 不支持后台发送", code: "E_BACKGROUND_UNSUPPORTED", dispatched: false)
+        }
+        throw DesktopError(message: "后台发送回执待核对，不重复发送", code: "E_GUI_SEND_UNKNOWN", dispatched: true)
     }
+    guard CGPreflightPostEventAccess(), let buttonRect = axWindowRect(button) else {
+        throw DesktopError(message: "发送按钮几何不完整或缺少输入控制权限；未发送", code: "E_GUI_BEFORE_DISPATCH", dispatched: false)
+    }
+    let clickPoint = try approvedWorkBuddySendPoint(request, buttonRect: buttonRect, windowRect: context.rect)
     guard let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: clickPoint, mouseButton: .left),
           let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: clickPoint, mouseButton: .left) else {
-        throw DesktopError(message: "无法创建发送鼠标事件；未发送")
+        throw DesktopError(message: "无法创建发送鼠标事件；未发送", code: "E_GUI_BEFORE_DISPATCH", dispatched: false)
     }
     try revalidateWorkBuddyContext(request, context)
     guard let app = controls.application,
           let focusedWindow = axElementAttribute(app, kAXFocusedWindowAttribute as String),
           let focusedRect = axWindowRect(focusedWindow), rectsMatch(focusedRect, context.rect),
-          let currentButtonRect = axWindowRect(button), rectsMatch(buttonRect, currentButtonRect),
-          workBuddySendPoint(buttonRect: currentButtonRect, windowRect: context.rect) != nil,
+          let currentButtonRect = axWindowRect(button),
           workBuddyTextMatches(axAttribute(editor, kAXValueAttribute as String) as? String, expected: text),
           workBuddyModelLabelAllowed(axAttribute(combo, kAXValueAttribute as String) as? String),
           axAttribute(button, kAXEnabledAttribute as String) as? Bool == true else {
-        throw DesktopError(message: "发送按钮、草稿或模型已变化；未发送")
+        throw DesktopError(message: "发送按钮、草稿或模型已变化；未发送", code: "E_GUI_BEFORE_DISPATCH", dispatched: false)
     }
+    _ = try approvedWorkBuddySendPoint(request, buttonRect: currentButtonRect, windowRect: context.rect)
     try revalidateWorkBuddyContext(request, context)
     mouseDown.post(tap: .cghidEventTap)
     mouseUp.post(tap: .cghidEventTap)
     let postContextIsValid = (try? revalidateWorkBuddyContext(request, context)) != nil
-    guard postContextIsValid else { return ["pressed": true, "postContextValid": false] }
-    return ["pressed": true]
+    return ["pressed": true, "method": "foreground-pointer", "point": ["x": clickPoint.x, "y": clickPoint.y], "postContextValid": postContextIsValid]
 }
 func unicodeChunks(_ value: String, limit: Int = 20) -> [[UInt16]] {
     var chunks: [[UInt16]] = []
@@ -1531,7 +1885,17 @@ func recognizePNG(_ request: [String: Any]) throws -> [String: Any] {
 }
 func perform(_ request: [String: Any]) throws -> [String: Any] {
     guard let op = request["op"] as? String else { throw DesktopError(message: "缺少 op") }
+    let submissionExpectation = try workBuddySubmissionExpectation(request)
     switch op {
+    case "workbuddyCapabilities": return ["backgroundAX": true]
+    case "softwareInfo": return try softwareInfo(request)
+    case "taskProcessIdentity": return ["identity": taskProcessIdentity(pid_t(request["pid"] as? Int ?? 0)) ?? [:]]
+    case "taskProcessStop": return try taskResourceStop(request, application: false)
+    case "taskApplicationStop": return try taskResourceStop(request, application: true)
+    case "taskApplicationHealth": return try taskApplicationHealth(request)
+    case "taskApplicationForceStop": return try taskApplicationForceStop(request)
+    case "softwareInterface": return try softwareInterface(request)
+    case "softwareControl": return try softwareControl(request)
     case "permissions":
         return ["accessibilityTrusted": AXIsProcessTrusted(), "screenCaptureAllowed": CGPreflightScreenCaptureAccess(),
                 "postEventAllowed": CGPreflightPostEventAccess(), "sessionLocked": sessionLocked()]
@@ -1554,7 +1918,11 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
     case "workbuddyInspect": return try workBuddyInspect(request)
     case "workbuddyStop": return try workBuddyStop(request)
     case "workbuddyFill": return try workBuddyFill(request)
-    case "workbuddySend": return try workBuddySend(request)
+    case "workbuddySend":
+        do { return try workBuddySend(request) }
+        catch let error as DesktopError {
+            throw DesktopError(message: error.message, code: error.code ?? "E_GUI_BEFORE_DISPATCH", dispatched: error.dispatched ?? false, diagnostic: error.diagnostic)
+        }
     case "capture":
         guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
         return try capture(request)
@@ -1563,17 +1931,18 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
         guard let bundle = request["bundleId"] as? String, !bundle.isEmpty else { throw DesktopError(message: "缺少 bundleId") }
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first {
             guard app.activate(options: [.activateAllWindows]) else { throw DesktopError(message: "无法激活目标应用") }
-            return ["activated": true, "application": appIdentity(app)]
+            return ["activated": true, "launched": false, "application": appIdentity(app)]
         }
         guard bundle != "com.tencent.xinWeChat", request["requireRunning"] as? Bool != true else {
             throw DesktopError(message: "目标应用未运行，禁止自动启动或重新登录微信")
         }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { throw DesktopError(message: "找不到目标应用") }
+        let launchBegan = Date().timeIntervalSince1970
         let semaphore = DispatchSemaphore(value: 0); var launched: NSRunningApplication?; var launchError: Error?
         let config = NSWorkspace.OpenConfiguration(); config.activates = true
         NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in launched = app; launchError = error; semaphore.signal() }
         guard waitWithRunLoop(semaphore, seconds: 7), let app = launched, launchError == nil else { throw DesktopError(message: "目标应用启动或激活失败") }
-        return ["activated": true, "application": appIdentity(app)]
+        return ["activated": true, "launched": (app.launchDate?.timeIntervalSince1970 ?? 0) >= launchBegan, "application": appIdentity(app)]
     case "click", "move", "scroll", "key", "type", "pasteFile":
         guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
         _ = try validateActionContext(request)
@@ -1601,6 +1970,7 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
             else {
                 let button = request["button"] as? String ?? "left"
                 guard ["left", "right"].contains(button) else { throw DesktopError(message: "鼠标按钮无效") }
+                try validateWorkBuddySubmission(request, submissionExpectation)
                 if button == "right" { try postMouse(.rightMouseDown, p, .right); try postMouse(.rightMouseUp, p, .right) }
                 else { try postMouse(.leftMouseDown, p); try postMouse(.leftMouseUp, p) }
             }
@@ -1616,6 +1986,7 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
         if op == "key" {
             guard let name = request["key"] as? String, let code = keyCode(name) else { throw DesktopError(message: "不支持的按键") }
             let flags = try modifiers(request["modifiers"])
+            try validateWorkBuddySubmission(request, submissionExpectation)
             for down in [true, false] {
                 guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { throw DesktopError(message: "无法创建键盘事件") }
                 event.flags = flags; event.post(tap: .cghidEventTap)
@@ -1826,6 +2197,20 @@ func runNativeSelfTest() -> Never {
               !workBuddyTargetReady(mode: "arbitrary", homeReady: true, conversationMarkerPresent: true) else {
             throw DesktopError(message: "WorkBuddy bundle/model/control/home guard 失败")
         }
+        // Responsive composer fixtures: collapsed/expanded sidebar, resized
+        // and displaced windows. The neighboring access popup is not a route.
+        for (width, inset) in [(961.0, 81.0), (961.0, 290.0), (1440.0, 310.0), (640.0, 24.0)] {
+            let window = CGRect(x: -500, y: 80, width: width, height: 1280)
+            let editor = CGRect(x: window.minX + inset, y: 600, width: width - inset - 60, height: 110)
+            let popup = CGRect(x: editor.minX + 3, y: editor.maxY + 12, width: 150, height: 28)
+            guard workBuddyWorkspacePickerRect(popup, editor: editor, window: window),
+                  !workBuddyWorkspacePickerRect(popup.offsetBy(dx: 170, dy: 0), editor: editor, window: window),
+                  !workBuddyWorkspacePickerRect(popup.offsetBy(dx: 0, dy: -300), editor: editor, window: window),
+                  !workBuddyWorkspacePickerRect(popup.offsetBy(dx: 0, dy: 300), editor: editor, window: window),
+                  !workBuddyWorkspacePickerRect(popup.offsetBy(dx: -1000, dy: 0), editor: editor, window: window) else {
+                throw DesktopError(message: "WorkBuddy 响应式工作空间选择器定位失败")
+            }
+        }
         guard case .write = workBuddyDraftPlan(current: "", requested: "task text"),
               case .write = workBuddyDraftPlan(current: "\u{FEFF}", requested: "task text"),
               case .write = workBuddyDraftPlan(current: workBuddyRTEEmptyValue, requested: "task text", sendButtonCount: 1, sendEnabled: false),
@@ -1843,6 +2228,40 @@ func runNativeSelfTest() -> Never {
               !workBuddyDraftIsEmpty("\u{FEFF}\u{FEFF}"), !workBuddyDraftIsEmpty(" \n"),
               case .reject = workBuddyDraftPlan(current: nil, requested: "task text") else {
             throw DesktopError(message: "WorkBuddy 草稿填充幂等策略失败")
+        }
+        // Offline controlled-editor fixtures: focus can reveal a different
+        // draft even when the pre-focus AX snapshot was empty or identical.
+        let focusedRequest = "current fixture request"
+        let restoredDraft = "previous fixture draft [workbunny:bcf0b2af-d420-4fb4-8fa3-98effc9246c9]"
+        guard case .write = workBuddyDraftPlan(current: "", requested: focusedRequest),
+              case .reject = workBuddyDraftPlan(current: restoredDraft, requested: focusedRequest),
+              case .reject = workBuddyDraftPlan(current: nil, requested: focusedRequest),
+              case .alreadyFilled = workBuddyDraftPlan(current: focusedRequest, requested: focusedRequest, sendButtonCount: 1, sendEnabled: false),
+              case .reject = workBuddyDraftPlan(current: focusedRequest + restoredDraft, requested: focusedRequest),
+              !workBuddyReadbackFlags(actual: focusedRequest + restoredDraft, expected: focusedRequest).matches else {
+            throw DesktopError(message: "WorkBuddy 焦点后草稿冲突与禁止同文重写策略失败")
+        }
+        let submissionFixture: [String: Any] = ["op": "click", "expected": ["bundleId": workBuddyBundleID],
+            "expectedSubmissionText": focusedRequest, "expectedSubmissionMode": "home"]
+        guard try workBuddySubmissionExpectation(["op": "click"]) == nil,
+              try workBuddySubmissionExpectation(submissionFixture)?.text == focusedRequest,
+              case .ready = workBuddySubmissionDraftState(scanComplete: true, editorCount: 1, targetReady: true,
+                  scannedDraft: focusedRequest, currentDraft: "\u{FEFF}" + focusedRequest, expected: focusedRequest),
+              case .conflict = workBuddySubmissionDraftState(scanComplete: true, editorCount: 1, targetReady: true,
+                  scannedDraft: focusedRequest, currentDraft: focusedRequest + restoredDraft, expected: focusedRequest),
+              case .unverified = workBuddySubmissionDraftState(scanComplete: false, editorCount: 1, targetReady: true,
+                  scannedDraft: focusedRequest, currentDraft: focusedRequest, expected: focusedRequest),
+              case .unverified = workBuddySubmissionDraftState(scanComplete: true, editorCount: 1, targetReady: true,
+                  scannedDraft: focusedRequest, currentDraft: nil, expected: focusedRequest) else {
+            throw DesktopError(message: "WorkBuddy 提交前全文核对策略失败")
+        }
+        for patch: [String: Any] in [["op": "type"], ["expected": ["bundleId": "com.tencent.xinWeChat"]],
+            ["expectedSubmissionText": ""], ["expectedSubmissionText": 3], ["expectedSubmissionMode": "conversation"],
+            ["expectedSubmissionMarker": "[workbunny:invalid]"]] {
+            do {
+                _ = try workBuddySubmissionExpectation(submissionFixture.merging(patch) { _, value in value })
+                throw DesktopError(message: "错误接纳提交全文核对参数")
+            } catch let error as DesktopError where error.code == "E_GUI_DRAFT_UNVERIFIED" && error.dispatched == false { /* Expected pure parameter rejection. */ }
         }
         let exactReadback = workBuddyReadbackFlags(actual: "line1\nline2", expected: "line1\nline2")
         let bomReadback = workBuddyReadbackFlags(actual: "\u{FEFF}task", expected: "task")
@@ -1870,6 +2289,10 @@ func runNativeSelfTest() -> Never {
               !workBuddyTextMatches(paragraphSerialized + "\n", expected: paragraphExpected),
               workBuddyTextMatches("alpha\n\u{FEFF}\nbeta\n\u{FEFF}\ngamma", expected: "alpha\n\nbeta\n\ngamma") else {
             throw DesktopError(message: "WorkBuddy 读回规范化/差异标志失败")
+        }
+        guard workBuddyTextMatches("alpha\u{FEFF}\n\u{FEFF}beta\u{FEFF}\n\u{FEFF}\u{FEFF}\n\u{FEFF}gamma", expected: "alpha\nbeta\n\ngamma"),
+              !workBuddyTextMatches("alpha\u{FEFF}x\nbeta", expected: "alphax\nbeta") else {
+            throw DesktopError(message: "WorkBuddy 软换行边界哨兵匹配失败")
         }
         let atLimit = String(repeating: "😀", count: workBuddyTextUTF16Limit / 2)
         guard workBuddyTextWithinLimit(atLimit), atLimit.utf16.count == workBuddyTextUTF16Limit,
@@ -1916,6 +2339,8 @@ func runNativeSelfTest() -> Never {
                    "visualSample": true, "visualCapacity": visualSampleCapacity, "inputIdleReadOnly": true,
                    "syntheticSidebarBadgePixels": syntheticCounts, "syntheticStableOverlap": stableOverlap,
                    "workBuddyGuards": true, "workBuddyConversationGuard": true, "workBuddyReadbackGuards": true, "workBuddySerializedMatch": true,
+                   "workBuddyPostFocusDraftGuards": true,
+                   "workBuddySubmissionDraftGuards": true,
                    "workBuddyTextUTF16Limit": workBuddyTextUTF16Limit,
                    "invalidRectsRejected": invalidRects.count,
                    "multilineEvents": ["text:A", "shiftEnter", "text:B", "shiftEnter", "text:C"],
@@ -1927,11 +2352,26 @@ func runNativeSelfTest() -> Never {
     }
 }
 
+if CommandLine.arguments.contains("--self-test-pointer-approval") {
+    let window = CGRect(x: -100, y: 20, width: 1000, height: 800), button = CGRect(x: 700, y: 700, width: 40, height: 30)
+    let approved: [String: Any] = ["approvedPointer": ["point": ["x": 720, "y": 715], "rect": rectObject(button)]]
+    do {
+        guard try approvedWorkBuddySendPoint(approved, buttonRect: button, windowRect: window) == CGPoint(x: 720, y: 715) else { throw DesktopError(message: "approved point mismatch") }
+        let cases: [([String: Any], CGRect?)] = [([:], button), (approved, nil), (approved, button.offsetBy(dx: 0.5, dy: 0)),
+            (["approvedPointer": ["point": ["x": 721, "y": 715], "rect": rectObject(button)]], button),
+            (["approvedPointer": ["point": ["x": 720, "y": 715], "rect": ["x": 700, "y": 700, "width": 0, "height": 30]]], button)]
+        for (request, rect) in cases {
+            do { _ = try approvedWorkBuddySendPoint(request, buttonRect: rect, windowRect: window); throw DesktopError(message: "accepted pointer drift") }
+            catch let error as DesktopError where error.code == "E_GUI_POINTER_CHANGED" && error.dispatched == false { }
+        }
+        writeJSON(["ok": true, "selfTest": "pointer-approval", "rejectedCases": cases.count, "noInputDispatched": true]);exit(0)
+    } catch { writeJSON(["ok": false, "selfTest": "pointer-approval"]);exit(1) }
+}
 if CommandLine.arguments.contains("--self-test-native") || CommandLine.arguments.contains("--self-test-input-plan") ||
    CommandLine.arguments.contains("--self-test-workbuddy") || CommandLine.arguments.contains("--self-test-visual") { runNativeSelfTest() }
 
 if CommandLine.arguments.contains("--self-test-display-lease") {
-    do { try ensureDisplayOwnership(); writeJSON(["ok": true, "held": true]); _ = readLine(); exit(0) }
+    do { try ensureDisplayOwnership(directory: ProcessInfo.processInfo.environment["WORKBUNNY_TEST_DISPLAY_LEASE_DIR"] ?? NSTemporaryDirectory()); writeJSON(["ok": true, "held": true]); _ = readLine(); exit(0) }
     catch { writeJSON(["ok": false, "code": "E_CAPTURE_BUSY"]); exit(1) }
 }
 
@@ -1943,7 +2383,13 @@ func handleLineInPool(_ line: String) {
     do { writeJSON(["id": id, "ok": true, "result": try perform(request)]) }
     catch is CaptureBusyError { writeJSON(["id": id, "ok": false, "code": "E_CAPTURE_BUSY", "error": "另一个截图进程正在使用显示连接，稍后继续"]) }
     catch let e as CaptureUnavailableError { writeJSON(["id": id, "ok": false, "code": "captureUnavailable", "error": e.message]) }
-    catch let e as DesktopError { writeJSON(["id": id, "ok": false, "error": e.message]) }
+    catch let e as DesktopError {
+        var response: [String: Any] = ["id": id, "ok": false, "error": e.message]
+        if let code = e.code { response["code"] = code }
+        if let dispatched = e.dispatched { response["dispatched"] = dispatched }
+        if let diagnostic = e.diagnostic { response["diagnostic"] = diagnostic }
+        writeJSON(response)
+    }
     catch { writeJSON(["id": id, "ok": false, "error": error.localizedDescription]) }
 }
 

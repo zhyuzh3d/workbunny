@@ -114,9 +114,10 @@ class MemoryMaintenance {
   }
   async runKnowledge(mode,signal) {
     const options={signal,reserveModelCall:s=>this.reserveModelCall(s)};
-    if(this.experienceOnly){const result=await this.memory.experienceRepository.maintain({...options,request:this.memory.agentLearning?.request});if(result==='done')this.experienceOnly=false;return result;}
+    if(this.experienceOnly){const imported=await this.memory.imports?.maintain(options)||'done';if(imported!=='done')return imported;const result=await this.memory.experienceRepository.maintain({...options,request:this.memory.agentLearning?.request});if(result==='done')this.experienceOnly=false;return result;}
     const lanes=[()=>mode==='dream'?this.runExtract(signal):this.runDeepdream(signal),
       ()=>this.memory.agentLearning?require('./task-experience-maintenance').maintain(this.memory.agentLearning,mode,options):'done',
+      ()=>this.memory.imports?.maintain(options)||'done',
       ()=>this.memory.experienceRepository?.maintain({...options,request:this.memory.agentLearning?.request})||'done'];
     for(let i=0;i<lanes.length;i++){const index=((this.knowledgeLane||0)+i)%lanes.length,result=await lanes[index]();if(result!=='done'){this.knowledgeLane=(index+1)%lanes.length;return result;}}
     return 'done';

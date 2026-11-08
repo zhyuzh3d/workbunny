@@ -2,7 +2,7 @@ import '../shared/external-message.js';
 const {MARK}=globalThis.BunnyExternalMessage;
 export function mountSoftwarePermissions(root,api,{config,save,onOpen}={}){
  if(!root)return;
- const title=document.createElement('div');title.className='group';title.textContent='主动自处理';root.append(title);
+ const title=document.createElement('div');title.className='group';title.textContent='主动处理';root.append(title);
  const note=document.createElement('p');note.className='note';note.textContent='推荐开启，让 Bunny 在授权任务内主动解决问题，尝试可恢复的小风险；系统密码仍由你确认。';root.append(note);
  const inputs=new Map();
  for(const [key,label] of [['systemConfiguration','允许 Bunny 进行操作系统配置修改'],['terminal','允许 Bunny 完全使用非破坏性终端命令']]){

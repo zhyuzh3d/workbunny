@@ -45,5 +45,5 @@ test('Window movement reacquires the full display and uses the new region', asyn
 });
 test('A foreground switch stops before cropping or input', async () => {
   const { service, crops } = fixture({ switchApp: true });
-  await assert.rejects(service.capture(scope, 1), /目标应用切换/); assert.equal(crops.length, 0);
+  await assert.rejects(service.capture(scope, 1), {code:'E_GUI_FOCUS_CHANGED',dispatched:false}); assert.equal(crops.length, 0);
 });

@@ -18,3 +18,7 @@ WorkBunny's own source code is MIT-licensed. This does not relicense models, mot
 The old personal Maple/58.vrm model prohibits redistribution and is not shipped. Users may import their own lawfully obtained self-contained VRM model into a private, persistent library.
 
 Known raw-file redistribution-restricted motions remain excluded. The reviewed selection also includes assets with unresolved ownership or redistribution rights; these are explicitly identified in `licenses/ANIMATION-NOTICE.md` and the manifest and are not covered by WorkBunny's MIT license. A notice or lack of objection does not establish permission.
+
+## libfvad / WebRTC voice activity detection
+
+The native speech activity observer includes unmodified libfvad C sources, pinned to commit `532ab666c20d3cfda38bca63abbb0f152706c369` from https://github.com/dpirch/libfvad. Copyright 2011–2012 The WebRTC project authors and 2016 Daniel Pirch. Distributed under BSD-3-Clause; the complete license, authors, patent grant and source provenance are in `licenses/libfvad-LICENSE`, `libfvad-AUTHORS`, `libfvad-PATENTS` and `libfvad-SOURCE.json`. No model download is required.

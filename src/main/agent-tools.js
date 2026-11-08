@@ -21,7 +21,7 @@ class ToolRegistry {
   check(name, args, task) {
     const tool = this.get(name);
     if(require('./owner-security').contains(JSON.stringify(args)))throw Object.assign(Error('Identity credential cannot be passed to tools'),{code:'E_IDENTITY_OUTPUT',dispatched:false});
-    if(task.state?.sensitiveContext&&(name==='terminal.execute'||name==='screen.action'&&['wechat','workbuddy'].includes(args?.application)))throw Object.assign(Error('本任务已读取敏感信息，请使用受控的工作委派或会话交付通道'),{dispatched:false,code:'E_SENSITIVE_ROUTE'});
+    if(task.state?.sensitiveContext&&(['terminal.execute','software.command'].includes(name)||['screen.action','software.control'].includes(name)&&['wechat','workbuddy'].includes(args?.application)))throw Object.assign(Error('本任务已读取敏感信息，请使用受控的工作委派或会话交付通道'),{dispatched:false,code:'E_SENSITIVE_ROUTE'});
     // Skill lists describe familiar methods, not authority. The task's actual
     // capabilities, the validated target, and the host authorization check
     // remain mandatory for every call.

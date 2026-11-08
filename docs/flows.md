@@ -1,6 +1,6 @@
 # WorkBunny 架构与执行 FLOW
 
-流程对应 0.25.0 早期 Beta，更新日期为 2026-11-06。图示记录逻辑责任与主要路径。数据字段和实现边界见[架构设计](architecture.md)。
+流程记录当前源码的逻辑责任与主要路径，更新日期为 2026-11-07。数据字段和实现边界见[架构设计](architecture.md)。
 
 ## 1. 系统总览
 
@@ -103,16 +103,40 @@ stateDiagram-v2
     paused --> ready: 主人继续，保留原任务
     running --> completed: Bunny 确认目标完成
     waiting --> expired: Task 到期
-    ready --> stopping: 主人停止
-    running --> stopping: 主人停止或取消
-    waiting --> stopping: 主人停止或取消
-    stopping --> stopped: 子动作收到取消，保留效果记录
+    ready --> stopped: 主人停止，立即封住调度与回调
+    running --> stopped: 主人停止或取消，立即释放名额
+    waiting --> stopped: 主人停止或取消
+    paused --> stopped: 主人停止
+    needs_attention --> stopped: 主人停止，禁止自动恢复
     completed --> [*]
-    stopped --> [*]
+    stopped --> [*]: 清理只一轮，失败不重试
     expired --> [*]
 ```
 
+原文收到 → 内部待理解记录 → 语义判断 → 聊天/澄清或真实业务采用。接收阶段只确认收到，业务采用之后才按真实状态回执；话题切换不自动控制旧任务。
+
+首次交办、主人续办、自动修订 → 整理后的目标、必要背景、约束和验收 → 共用正文封装 → WorkBuddy。主人原文与原始历史只留私有来源记录，不附正文或敏感任务附件。未知草稿恢复沿用原先保存的精确正文，不因策略升级改写或重发。
+
 这是主要迁移示意；实际迁移还校验来源、代次、权限、未知写入和恢复资格。状态切换不撤销已发生的外部效果。
+
+```mermaid
+flowchart LR
+    Stop[主人停止] --> Local[立即 stopped
+取消子动作、替换执行快照、释放名额]
+    Local --> Cleanup[按任务资源句柄清理
+外部停止中，最多30秒]
+    Local --> New[可开始独立新任务]
+    Cleanup --> Verified[逐项实际确认停止]
+    Cleanup --> Partial[超时、失败或共享保留
+写逐项日志并提示]
+    Verified --> Remain[本地仍为 stopped]
+    Partial --> Remain
+    Partial --> Record[保留原日志与资源身份
+失败、超时、重启都不重试]
+    Remain --> Hide[终态 X 或清空列表：保存隐藏标记]
+    Hide --> Undo[恢复列表：仍保持结束，不执行或补发]
+```
+
 
 ## 5. 监听、异步 Action 与连续 Operation
 
@@ -167,6 +191,18 @@ flowchart TD
     Reuse --> Business
 ```
 
+同一外部会话中的新一轮交办仍需要本轮消息回执。首次、主人续办与自动修订共用制作正文分工；已有会话绑定只用于定位，填写草稿或发出提交动作后先显示待核对，观察到本轮新消息才确认交办。未观察到时保留原草稿与记录，读取原会话补证，不复用旧回复或重复发送。
+
+填稿前建立新轮次和消息基线 → 仅展示本轮输入/提交阶段 → 当前阻断绑定同一工作与轮次。前轮已确认的交办和成果独立保留，不能让新草稿直接变成已接收；旧失败不会覆盖更新的实际阻断，控制请求返回也不等于业务完成。成果网址先按原答复的 Markdown 边界整理；只有真实验收缺项才考虑必要修订。
+
+当前补充确证未派发 → 绑定前轮正向回执与保留成果 → Bunny 在原验收中判断补充是否仍必要。原目标已满足且明确选择放弃 → 完整归档补充稿和拒绝证据 → 按前轮成果汇报；否则保留待核对，不派发本次验收生成的补充。unknown、已派发或新消息出现不进入此分支；同组证据不反复自动复核，暂停和停止优先。
+
+旧成果状态不完整时：未派发证明 → 原 session/messageKey 的只读完成回执 → 克隆候选与 snapshot 同步事实 → 严格资格检查。不同消息、失败/未完成记录或无合法时间不能补成完成；坏任务单独记录脱敏阶段与原因，后续任务继续核对。
+
+正常退出 → 取消本进程控制器并保存 host-suspend → 按原业务状态和提交屏障恢复；用户/业务停止 → 保存 terminal → 重启和挂起均不复活。旧停止意图不明确 → 完整证明只能开放本次明确只读重验 → 当前进程许可校验 → 重新验收；不自动发送、不清草稿、不把 unknown 降级。状态及生命周期变化都会产生新 checkpoint，拒绝原因包含固定检查布尔与有限 Vault code/op。
+
+恢复核对把“查到本轮回执”和“Bunny确认原提交未生效”作为不同分支：前者直接补全回执；后者在完整记录、原会话、精确草稿和当前画面支持下保留正文与轮次，核查当前权限后续交一次，再等待新回执。未知判断保留缺口等待新事实，迟到回执、草稿变化和取消优先于任何恢复输入。权限维护不阻塞恢复核对，界面显示实际检查与下一恢复时点。
+
 ## 7. 异常、自主恢复与保活
 
 ```mermaid
@@ -178,6 +214,7 @@ flowchart TD
     Reminder --> Original["仍使用同一 Task / Action 的上下文和权限"]
     Original --> Decide["Bunny 判断下一步"]
     Diagnose --> Decide
+    Diagnose -->|"同一失败耗尽恢复预算"| Ask
     Decide -->|"缩减上下文或修复本轮请求"| Tune["调整允许的模块、输出或格式参数"]
     Decide -->|"补证或换方法"| Replan["保留目标、已确认效果及原对象继续"]
     Decide -->|"确需等待"| Wait["记录条件和下一检查时机"]
@@ -194,24 +231,54 @@ flowchart TD
 ```mermaid
 flowchart TB
     Input["键盘 / 音频 / 图像 / 工具结果"] --> Sensor["实际感知器及转换链"]
+    Diagnostic["主人开启本机诊断；最长20秒"] --> PrivateSensor["独立识别器；暂停普通聆听及自动重启"]
+    PrivateSensor --> PrivateSink["同一过滤与轮次规则 → 私有文件接收端"]
+    PrivateSink --> DiagnosticEnd["停止采集并有界排空；不进入对话或Task；手动清理"]
+    Audio["原样送入仅含 Transcriber 的 Analyzer"] --> VAD["独立VAD：随物理音频连续；不随Analyzer冷启，不裁音频"]
+    VAD --> EndGate["交付事件异步复核：同代新鲜静音 + 文字稳定；timer兜底"]
+    EndGate --> FinalBarrier["finalizer成功 + 结果流确认结束 → 仅上报一次"]
+    FinalBarrier --> TurnGate["整句确认 + 三秒封口 + 新鲜quiet → 业务请求"]
+    VAD --> TurnGate
+    TurnGate --> EntryGate["接纳一次语义轮次；修订/取消/代次使旧结果失效"]
+    Partial["partial仅显示；新认可文字修订旧轮次"] --> TurnGate
+    Partial --> Unconfirmed["八秒输入未确认或提交门超时：提示重说或文字"]
+    VAD --> EffectGate["当前提交门：fresh quiet；新有声须新定稿"]
+    EffectGate --> WaitGate["门关闭：保留同轮推理/结果；独立八秒有界等待"]
+    WaitGate -.-> EffectGate
+    WaitGate --> Unconfirmed
+    Unconfirmed --> Rearm["丢弃旧识别器；有限重试；旧回调隔离；继续接收新消息"]
+    EntryGate --> Observation
+    VAD --> VoiceFault["四秒无证据 / 最长界：取消未确认片段并有界恢复"]
     Sensor --> Observation["原内容 + perception + 可用证据引用"]
     Observation --> Think["Bunny 综合上下文判断；关键歧义才补证"]
-    Think --> Act["授权内行动及自主核查"]
+    Think --> EffectGate
+    EffectGate --> Act["授权内行动及自主核查；真实提交处重核"]
     Act --> Outcome["真实成功、失败、恢复与适用条件"]
     Dialogue["渠道历史与重要事实"] --> Doze["分渠道、分场景 Doze Summary"]
     Dialogue --> Dream["统一 Dream / Deepdream 调度与预算"]
     Outcome --> Dream
-    Pack["外部 ZIP / 文件夹；主人传授；内置指南"] --> Validate["路径、清单、完整性、精确去重"]
-    Validate --> Stage["固定工具快照；提交来源和当前 head"]
-    Stage --> Dream
+    Pack["主人选择混合资料 ZIP / 文件夹，不预先分类"] --> Validate["路径与完整性检查；凭据等本地过滤"]
+    Validate --> Source["加密隔离来源与游标；不执行代码"]
+    Source --> Dream
+    Dream --> Absorb["Bunny 理解资料、按需检索已有记录、剔除风险"]
+    Absorb --> Stage["快照复查后提交记忆、经验修订、静态审查工具"]
+    Stage --> ImportReport["基于实际写入生成新增/合并/忽略报告"]
+    Bundle["安装包更新"] --> Innate["独立只读先天区；用户与 Bunny 不可修改"]
+    Innate --> Retrieve
     Dream --> Related["有限相关候选；Bunny 合并、修订、并存或判失效"]
     Related --> Commit["核对来源与代次后提交修订；保留引用"]
     Commit --> Repo["同一加密记忆库：事实、经验、工具元数据"]
     Doze --> Repo
-    Repo --> Retrieve["按目标、场景和标签取概要；正文及工具按需展开"]
-    Retrieve --> Think
+    Repo --> Retrieve["按目标、场景和标签取概要；共享有界祖先检查"]
+    Retrieve --> Prepare["排除回到本 Task 或不完整来源链；快照准备"]
+    Prepare --> SavePolicy["核对任务/控制/资料代次；先持久化"]
+    SavePolicy --> AdoptPolicy["成功后合入经验；保留旧来源"]
+    AdoptPolicy --> Think
     Tools["不可变工具资源与接口"] --> Act
     Stage --> Tools
+    Stage --> Repo
 ```
 
 私聊记忆不进入任务经验提炼，Task 读取最高生活；导入不等于执行或授权。经验更新和模型解释都不能被当作外部效果已经发生的证据。
+
+任务列表清理：本机主人请求 → 快照旧任务 → 本地同步停止并释放名额 → 至多30秒的一轮外部清理 → 记录错误 → 加密保存列表隐藏标记。终态 X 直接保存同一隐藏标记；“恢复已清理任务”只移除标记，保留终态和取消的旧报告。整个过程不级联删除资料或文件。

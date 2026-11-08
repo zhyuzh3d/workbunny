@@ -2,37 +2,42 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');
 const fs=require('fs'),path=require('path'),vm=require('vm');
 const {SpeakerFilter}=require('../src/main/speaker-filter');
-const {Asr}=require('../src/main/asr');const {createVoiceTurns}=require('../src/main/voice-turns');
-function fixture(){let at=0,next=0;const timers=new Map(),requests=[],events=[];
- const turns=createVoiceTurns({now:()=>at,setTimer:(fn,ms)=>{const id=++next;timers.set(id,{at:at+ms,fn});return id;},clearTimer:id=>timers.delete(id),onRequest:t=>requests.push({at,turn:t}),onInvalidate:()=>{},onRemember:()=>{}});
+const {Asr,createActivityClock}=require('../src/main/asr');const {createVoiceTurns}=require('../src/main/voice-turns');
+function fixture(){let at=0,next=0,seq=0;const timers=new Map(),requests=[],events=[];
+ const turns=createVoiceTurns({requireActivity:true,now:()=>at,setTimer:(fn,ms)=>{const id=++next;timers.set(id,{at:at+ms,fn});return id;},clearTimer:id=>timers.delete(id),onRequest:t=>requests.push({at,turn:t}),onInvalidate:()=>{},onRemember:()=>{}});
  const asr=new Asr('/unused');const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');
- const handlers=source.slice(source.indexOf("    asr.on('partial', (t) => {"),source.indexOf("    asr.on('final', (t) => {"));
- const ctx={asr,voiceTurns:turns,speakerFilter:new SpeakerFilter(),suppressEnrollmentFinal:false,screenLocked:false,stopSpeaking:()=>{},publishSpeakerStatus:()=>{},lastSpeakerStatusAt:0,Date:{now:()=>at},send:(type,data)=>events.push({type,...data}),log:()=>{},alwaysOn:true,speaking:false,lastPartialLogAt:0,lastLiveText:'',lastSpokeAt:0,recentSpeech:'',config:{load:()=>({asr:{wakeOnly:false}})},nameHit:()=>true,micPeak:0,micPeakAt:0,micQuietLoggedAt:0};
+ const handlers=source.slice(source.indexOf('    const asrInput='),source.indexOf("    asr.on('recycle'"));
+ const ctx={asr,asrMode:'continuous',asrFailStreak:0,require:name=>name==='./asr-input-pipeline'?require('../src/main/asr-input-pipeline'):require(name),voiceTurns:turns,speakerFilter:new SpeakerFilter(),suppressEnrollmentFinal:false,screenLocked:false,stopSpeaking:()=>{},publishSpeakerStatus:()=>{},lastSpeakerStatusAt:0,Date:{now:()=>at},send:(type,data)=>events.push({type,...data}),log:()=>{},alwaysOn:true,speaking:false,lastPartialLogAt:0,lastLiveText:'',lastSpokeAt:0,recentSpeech:'',config:{load:()=>({asr:{wakeOnly:false}})},nameHit:()=>true,micPeak:0,micPeakAt:0,micQuietLoggedAt:0};
+ ctx.traceSpeech=()=>{};ctx.nameHit=()=>ctx.nameMatches!==false;
  vm.runInNewContext(source.slice(source.indexOf('function echoLike('),source.indexOf('let activeAudioId =')),ctx);
  vm.runInNewContext(handlers,ctx);
  function advance(ms){const end=at+ms;while(true){const due=[...timers].filter(([,v])=>v.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!due)break;at=due[1].at;timers.delete(due[0]);due[1].fn();}at=end;}
- function levels(ms,value=.08){for(let i=0;i<ms/200;i++){advance(200);asr.onMessage({t:'level',v:value});}}
- return{asr,turns,requests,events,advance,levels,ctx};}
-test('real ASR handlers dispatch after one second despite ongoing microphone noise and confirm the final',async()=>{
+ asr.traceRecognizer=1;asr.activityClock=createActivityClock({wallNow:()=>at,monoNow:()=>at});
+ function activity(state='quiet'){asr.onMessage({t:'activity',state,quietSeconds:state==='quiet'?3:0,at:at/1000,emittedAt:at/1000,seq:++seq,gen:1});}
+ function levels(ms,value=.08,state='quiet'){for(let i=0;i<ms/200;i++){advance(200);asr.onMessage({t:'level',v:value});activity(state);}}
+ activity('unknown');return{asr,turns,requests,events,advance,levels,activity,ctx};}
+test('real ASR handlers never request partial text; confirmed final waits for seal and fresh quiet',async()=>{
  const f=fixture();f.asr.onMessage({t:'partial',v:'贝比你在吗'});f.levels(1200);
- assert.equal(f.requests.length,1);assert.equal(f.requests[0].at,1000);
- f.asr.onMessage({t:'utterance',v:'贝比你在吗？'});f.levels(4000);
+ assert.equal(f.requests.length,0);
+ f.asr.onMessage({t:'utterance',v:'贝比你在吗？'});f.levels(1800);assert.equal(f.requests.length,1);f.levels(2200);
  assert.equal(f.requests.length,1);assert.equal(f.requests[0].turn.isCurrent(),true);
  assert.equal(await f.requests[0].turn.waitForCommit(),true);
  assert.equal(f.events.filter(e=>e.type==='asrLevel').length,26);
 });
-test('loud input without new recognized words cannot cancel a valid response; new words do cancel it',()=>{
+test('active acoustic input blocks a final and new recognized words cancel the confirmed response',()=>{
  const f=fixture();f.asr.onMessage({t:'partial',v:'贝比帮我整理'});f.levels(1200,.5);
- assert.equal(f.requests.length,1);const old=f.requests[0].turn;
- f.asr.onMessage({t:'utterance',v:'贝比帮我整理。'});f.levels(400,.8);assert.equal(old.isCurrent(),true);
+ assert.equal(f.requests.length,0);
+ f.asr.onMessage({t:'utterance',v:'贝比帮我整理。'});f.levels(2000,.8,'active');assert.equal(f.requests.length,0);
+ f.asr.onMessage({t:'utterance',v:'贝比帮我整理。'});f.levels(3000);assert.equal(f.requests.length,1);const old=f.requests[0].turn;
  f.asr.onMessage({t:'partial',v:'再列出待办'});assert.equal(old.isCurrent(),false);
- f.levels(1000,.1);assert.equal(f.requests.length,2);assert.match(f.requests[1].turn.text,/整理。\n再列出待办/);
+ f.levels(1000,.1);assert.equal(f.requests.length,1);f.asr.onMessage({t:'utterance',v:'再列出待办。'});f.levels(2200);assert.equal(f.requests.length,2);assert.match(f.requests[1].turn.text,/再列出待办/);
 });
 test('late final from disabled continuous listening never becomes a manual chat',()=>{
  const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');
- const handler=source.slice(source.indexOf("    asr.on('final', (t) => {"),source.indexOf("    asr.on('recycle'"));
+ const handler=source.slice(source.indexOf("    asr.on('utterance',text=>"),source.indexOf("    asr.on('recycle'"));
  const asr=new Asr('/unused'),requests=[],events=[],messages=[];
  const ctx={asr,asrMode:'single',voiceTurns:{final:text=>requests.push(text)},recentEcho:()=>false,speakerFilter:new SpeakerFilter(),suppressEnrollmentFinal:false,alwaysOn:false,speaking:false,log:()=>{},send:(type,data)=>events.push({type,...data}),pushHistory:(...a)=>messages.push(a),think:q=>requests.push(q)};
+ ctx.asrInput=require('../src/main/asr-input-pipeline').createAsrInputPipeline({speakerFilter:ctx.speakerFilter,state:()=>ctx,recentEcho:()=>false,bargeInReady:()=>true,nameHit:()=>true,turns:()=>ctx.voiceTurns});
  vm.runInNewContext(handler,ctx);
  asr.always=true;asr.emit('final','停用之前尚未提交的半句');
  assert.equal(requests.length,0);assert.equal(messages.length,0);assert.equal(events.length,0);
@@ -45,7 +50,7 @@ test('non-owner evidence rejects new words without cancelling an already confirm
  f.ctx.speakerFilter.load({schema:'local-speaker/v1',samples:[vector(0),vector(0),vector(0)],threshold:.9});f.ctx.speakerFilter.enabled=true;
  const feature=index=>({t:'voiceFeatures',vector:vector(index),frames:40,quality:.9,durationMs:400});
  f.asr.onMessage(feature(1));f.asr.onMessage({t:'partial',v:'其他人在聊天'});f.levels(1200);assert.equal(f.requests.length,0);
- f.asr.onMessage(feature(0));f.asr.onMessage({t:'partial',v:'贝比你在吗'});f.levels(1200);f.asr.onMessage({t:'utterance',v:'贝比你在吗？'});
+ f.asr.onMessage(feature(0));f.asr.onMessage({t:'partial',v:'贝比你在吗'});f.levels(1200);f.asr.onMessage({t:'utterance',v:'贝比你在吗？'});f.levels(2000);
  const owner=f.requests[0].turn;f.asr.onMessage(feature(1));assert(owner.isCurrent(),'a completed owner turn is not cancelled by another speaker');
  f.asr.onMessage({t:'partial',v:'旁人后来说话'});assert.equal(f.requests.length,1);
 });
@@ -67,17 +72,17 @@ test('AEC voice activity and short or misrecognized self echo do not interrupt p
  f.asr.onMessage({t:'partial',v:'接下来我们可以检察结果'});
  assert.equal(interruptions,0);assert.equal(f.requests.length,0);assert.equal(f.events.filter(e=>e.type==='asrPartial').length,0);
  f.asr.onMessage({t:'partial',v:'等一下我有新问题'});assert.equal(interruptions,1);
- f.advance(1000);assert.equal(f.requests.length,1);
+ f.advance(1000);assert.equal(f.requests.length,0);
 });
 test('wake-only mode does not interrupt speech when the name was not called',()=>{
  const f=fixture();let interruptions=0;f.ctx.stopSpeaking=()=>interruptions++;
- f.ctx.speaking=true;f.ctx.config.load=()=>({asr:{wakeOnly:true}});f.ctx.nameHit=()=>false;
+ f.ctx.speaking=true;f.ctx.config.load=()=>({asr:{wakeOnly:true}});f.ctx.nameMatches=false;
  f.asr.onMessage({t:'partial',v:'旁边的人在聊天'});assert.equal(interruptions,0);assert.equal(f.turns.snapshot(),null);
 });
 test('switching from one-shot recording to continuous listening replaces the recognizer generation',()=>{
  const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');let killed=0,started=0;
  const asr={running:true,always:false,kill(opts){assert(opts.discard);killed++;this.running=false;},start(opts){assert(opts.always);started++;this.running=true;this.always=true;}};
- const ctx={asr,asrMode:'continuous',storageBusy:false,screenLocked:false,memory:{ready:true},alwaysOn:false,systemPreferences:{getMediaAccessStatus:()=> 'granted'},
+ const ctx={asr,quitting:false,speechDiagnostic:null,asrRecoveryBlocked:false,asrMode:'continuous',storageBusy:false,screenLocked:false,memory:{ready:true},alwaysOn:false,systemPreferences:{getMediaAccessStatus:()=> 'granted'},
   config:{load:()=>({memory:{enabled:true},voice:{alwaysListen:true}})},fs:{existsSync:()=>true},ASR_BIN:'fixture',send(){},log(){},Date,asrStatus:{},asrStartedAt:0,asrOpts:always=>({always})};
  vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function startListen('),source.indexOf('function stopListen(')),ctx);
  ctx.startListen('test');assert.equal(killed,1);assert.equal(started,1);assert(ctx.alwaysOn);ctx.startListen('again');assert.equal(started,1);

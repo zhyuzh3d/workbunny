@@ -18,7 +18,7 @@ const failure = code => Object.assign(new Error('controlled response failure'), 
       selectFree: async options => { lookups.push(options); return 'hy3'; },
     });
     assert.equal(result.model, 'hy3'); assert.equal(result.fallbackReason, code);
-    assert.equal(attempts.length, 2); assert.equal(attempts[1].maxTokens, 4096);
+    assert.equal(attempts.length, 2); assert.equal(attempts[1].maxTokens, code==='E_PAYLOAD_TOO_LARGE'?2048:code==='E_OUTPUT_LIMIT'?8192:4096);
     assert.equal(attempts[1].messages, messages, 'read-only fallback uses the same evidence');
     assert.equal(lookups[0].vision, true, 'image checking needs a catalog-confirmed free visual model');
   }

@@ -24,6 +24,7 @@ async function dialoguePage(memory, options = {}, scene) {
   return {
     scene, rows: rows.filter(r => actors.isOwner(r.value) || actors.isBunny(r.value)).map(r => ({
       id: r.id, ts: r.ts, role: actors.isOwner(r.value) ? 'user' : 'assistant', text: String(r.value.content || ''),
+      ...(actors.isBunny(r.value)&&r.value.delivery==='task-receipt'&&r.value.taskId?{taskId:r.value.taskId,links:require('./result-links').normalizeResultLinks(r.value.resultLinks)}:{}),
     })), oldest: cursorOf(rows[0]), newest: cursorOf(rows.at(-1)), more: rows.length === limit,
   };
 }

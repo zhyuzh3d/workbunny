@@ -81,10 +81,11 @@ async function testVoiceStableTurnReceiptAndCascade() {
   });
   fixture.voice.partial('请记住海风很舒服');
   fixture.advance(1000);
-  assert.equal(fixture.requests.length, 1);
-  const token = fixture.requests[0];
+  assert.equal(fixture.requests.length, 0, 'partial text is display-only');
   fixture.voice.final('请记住海风很舒服。');
   fixture.advance(2000);
+  assert.equal(fixture.requests.length, 1);
+  const token = fixture.requests[0];
   assert.equal(await token.waitForCommit(), true);
 
   const firstReceipt = await token.remember();

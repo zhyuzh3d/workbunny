@@ -1,0 +1,64 @@
+{
+  "schema": "bunny.memory-pack/v1",
+  "id": "org.example.file-check",
+  "version": "1.0.0",
+  "title": "文件核查与计行练习资料",
+  "author": "Example author",
+  "description": "混合资料示例；由Bunny自行识别、提取、合并和报告。",
+  "scope": "work",
+  "tools": [
+    {
+      "id": "count-lines",
+      "title": "统计文本行数",
+      "entry": "tools/count-lines.cjs",
+      "runtime": "node",
+      "effect": "read",
+      "capabilities": [
+        "files.read",
+        "terminal.execute"
+      ],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "lines": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lines"
+        ]
+      },
+      "resources": [
+        "tools/count-lines.cjs"
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "path": "README.md",
+      "bytes": 562,
+      "sha256": "8f0076e2f06e68953561347f13712ea278aac19c0efecc9f2241a0c8add4c301"
+    },
+    {
+      "path": "notes/file-check.md",
+      "bytes": 563,
+      "sha256": "e8c31e278048f9bafd63c0d2ea9d7357834cb93e4b4ea3ee9bcda3fa435763c7"
+    },
+    {
+      "path": "tools/count-lines.cjs",
+      "bytes": 675,
+      "sha256": "b29a93845c08e1fc3dd6c352da625c2b43224b635c45b357f27eb55439c0d47f"
+    }
+  ]
+}

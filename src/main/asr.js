@@ -16,6 +16,30 @@ const { JsonLines } = require('./json-lines');
 const AUTH_TIMEOUT_MS = 25000;
 const MAX_ASR_LINE_BYTES = 512 * 1024;
 
+// Native uptime and host wall time have different origins. A per-process
+// minimum receive offset preserves both native observation age and pipe delay.
+function createActivityClock({ wallNow = () => Date.now(), monoNow = () => Number(process.hrtime.bigint()) / 1e6 } = {}) {
+  let offset = Infinity, sequence = 0, generation = -1, emittedAt = -Infinity;
+  return (message, recognizer) => {
+    const wall = wallNow(), mono = monoNow();
+    const validSeq = Number.isSafeInteger(message.seq) && message.seq > 0;
+    const validGen = Number.isSafeInteger(message.gen) && message.gen >= 0;
+    const unknown = () => ({ state: 'unknown', quietSeconds: 0, at: wall,
+      seq: validSeq ? message.seq : 0, recognizer, sourceGen: validGen ? message.gen : Math.max(0, generation) });
+    if (!validSeq || !validGen || message.seq <= sequence || message.gen < generation) return unknown();
+    sequence = message.seq; generation = message.gen;
+    if (!['unknown', 'active', 'quiet'].includes(message.state) || !Number.isFinite(message.quietSeconds) || message.quietSeconds < 0 ||
+        !Number.isFinite(message.at) || message.at < 0 || !Number.isFinite(message.emittedAt) || message.emittedAt < message.at ||
+        message.emittedAt < emittedAt || !Number.isFinite(wall) || !Number.isFinite(mono)) return unknown();
+    emittedAt = message.emittedAt;
+    offset = Math.min(offset, mono - message.emittedAt * 1000);
+    const age = mono - (message.at * 1000 + offset);
+    if (!Number.isFinite(age) || age < 0) return unknown();
+    return { state: age <= 500 ? message.state : 'unknown', quietSeconds: message.state === 'quiet' && age <= 500 ? message.quietSeconds : 0,
+      at: wall - age, seq: message.seq, recognizer, sourceGen: message.gen };
+  };
+}
+
 class Asr extends EventEmitter {
   constructor(binPath, log = () => {}, spawnProcess = spawn) {
     super();
@@ -33,6 +57,8 @@ class Asr extends EventEmitter {
     this.lastCaptureAt = 0;
     this.captureTimer = null;
     this.installing = false;
+    this.traceEnabled = false; this.traceRecognizer = 0; this.traceSequence = 0;
+    this.activityClock = createActivityClock();
   }
 
   get running() {
@@ -41,6 +67,8 @@ class Asr extends EventEmitter {
 
   start(opts = {}) {
     if (this.proc) return;
+    if(opts.diagnostic&&(!require('node:path').isAbsolute(opts.diagnostic.directory)||!Number.isSafeInteger(opts.diagnostic.durationMs)||opts.diagnostic.durationMs<1||opts.diagnostic.durationMs>20000||typeof opts.diagnostic.pcm!=='boolean'))throw Error('E_DIAGNOSTIC_OPTIONS');
+    this.diagnostic=opts.diagnostic||null;
     const args = [
       '--lang', opts.lang || 'zh-CN',
       '--silence', String(opts.silenceMs || 950),
@@ -56,6 +84,10 @@ class Asr extends EventEmitter {
     args.push('--aec'); // Native audio tries voice processing once, then falls back automatically.
     if (opts.device) args.push('--mic', String(opts.device));
     if (opts.noMicAsk) args.push('--no-mic-ask');
+    if (opts.trace === true) args.push('--speech-trace');
+    if(this.diagnostic){args.push('--speech-diagnostic-dir',this.diagnostic.directory,'--speech-diagnostic-ms',String(this.diagnostic.durationMs));if(this.diagnostic.pcm)args.push('--speech-diagnostic-pcm');}
+    this.traceEnabled = opts.trace === true;this.traceRecognizer++;this.traceSequence=0;
+    this.activityClock = createActivityClock();
     this.always = !!opts.always;
     let p;
     try {
@@ -71,16 +103,17 @@ class Asr extends EventEmitter {
     this.aec = false;
     this.lastCaptureAt = 0;
     this.installing = false;
-    this.log(`[asr] spawn ${this.bin} ${args.join(' ')} pid=${p.pid}`);
+    this.writeLog(`[asr] spawn ${this.bin} ${args.join(' ')} pid=${p.pid}`);
     const messages = new JsonLines(MAX_ASR_LINE_BYTES);
     let sawAuth = false;
 
-    // 超时守门：没 auth 也没 ready，就认为权限/设备出了问题
+    // Authentication is not capture readiness. A process can report auth and
+    // then stall while preparing its input, before a capture heartbeat exists.
     this.authWaitTimer = setTimeout(() => {
-      if (this.proc === p && !sawAuth && !this.ready) {
-        this.log('[asr] no auth/ready within ' + AUTH_TIMEOUT_MS + 'ms -> kill');
-        this.emit('error', '语音权限没有确认。第一次用会弹系统窗口，请点「允许」。');
-        try { p.kill('SIGKILL'); } catch {}
+      if (this.proc === p && !this.ready) {
+        this.writeLog('[asr] no ready within ' + AUTH_TIMEOUT_MS + 'ms -> kill');
+        this.emit('error', sawAuth ? '语音输入准备超时，正在重连。' : '语音权限没有确认。第一次用会弹系统窗口，请点「允许」。');
+        if (this.proc === p) this.kill();
       }
     }, AUTH_TIMEOUT_MS);
 
@@ -99,7 +132,7 @@ class Asr extends EventEmitter {
     });
     p.stdin.on?.('error', error => {
       if (this.proc !== p) return;
-      this.log('[asr] stdin error ' + error.code);
+      this.writeLog('[asr] stdin error ' + error.code);
       this.kill();
     });
 
@@ -107,12 +140,12 @@ class Asr extends EventEmitter {
     p.stderr.on('data', (d) => {
       if (this.proc !== p || this.discarded.has(p)) return;
       const s = String(d).trim();
-      if (s) this.log('[asr stderr] ' + s.slice(0, 300));
+      if (s) this.writeLog('[asr stderr] ' + s.slice(0, 300));
     });
 
     p.on('error', (e) => {
       if (this.proc !== p || this.discarded.has(p)) return;
-      this.log('[asr] spawn error ' + e.message);
+      this.writeLog('[asr] spawn error ' + e.message);
       this.emit('error', '语音模块启动失败：' + e.message);
     });
 
@@ -120,7 +153,7 @@ class Asr extends EventEmitter {
       if (this.discarded.has(p)) return;
       const isCurrent = this.proc === p;
       if (!isCurrent && (!this.retiring.has(p) || this.proc !== null)) return;
-      this.log(`[asr] exit code=${code} sig=${sig}`);
+      this.writeLog(`[asr] exit code=${code} sig=${sig}`);
       // Timers are instance state. A stale close may notify recovery after a
       // normal kill, but it must never clear a replacement process's timers.
       if (isCurrent) {
@@ -139,11 +172,20 @@ class Asr extends EventEmitter {
 
   onMessage(m, sourceProc = null) {
     if (sourceProc && (this.proc !== sourceProc || this.discarded.has(sourceProc))) return;
+    if(this.diagnostic)try{this.diagnostic.record?.(m);}catch{this.kill({discard:true});return;}
+    if(['partial','utterance','final'].includes(m.t))this.emitSpeechTrace({stage:'raw-'+m.t,chars:typeof m.v==='string'?m.v.length:0});
     if (typeof m.wakeNameHit === 'boolean' && typeof m.v === 'string' && m.v.length <= 4000 && ['partial','utterance','final'].includes(m.t)) {
       this.wakeHits.set(m.v.trim(), m.wakeNameHit);
       if (this.wakeHits.size > 32) this.wakeHits.delete(this.wakeHits.keys().next().value);
     }
     switch (m.t) {
+      case 'activity':
+        this.emit('activity', this.activityClock(m, this.traceRecognizer));
+        break;
+      case 'speechTrace': {
+        this.emitSpeechTrace(m);
+        break;
+      }
       case 'auth':
         this.emit('auth', { speech: m.speech, mic: m.mic, locale: m.locale || '', engine: m.engine || '' });
         break;
@@ -153,23 +195,29 @@ class Asr extends EventEmitter {
         if (this.authWaitTimer) { clearTimeout(this.authWaitTimer); this.authWaitTimer = null; }
         this.emit('ready');
         if (m.captureHeartbeat && !this.captureTimer) {
+          const p = sourceProc || this.proc;
           this.lastCaptureAt = Date.now();
           this.captureTimer = setInterval(() => {
-            if (this.proc && Date.now() - this.lastCaptureAt > 6000) {
-              this.emit('error', '麦克风输入中断，正在重连'); this.kill();
+            if (this.proc === p && p && Date.now() - this.lastCaptureAt > 6000) {
+              this.emit('error', '麦克风输入中断，正在重连');
+              if (this.proc === p) this.kill();
             }
           }, 1000);
           this.captureTimer.unref?.();
         }
         break;
-      case 'installing':
+      case 'installing': {
+        const p = sourceProc || this.proc;
         this.installing = true;
         if (this.authWaitTimer) clearTimeout(this.authWaitTimer);
         this.authWaitTimer = setTimeout(() => {
-          this.emit('error', '语音资源准备超时，请检查网络后重试'); this.kill();
+          if (this.proc !== p || !p || !this.installing) return;
+          this.emit('error', '语音资源准备超时，请检查网络后重试');
+          if (this.proc === p) this.kill();
         }, 5 * 60 * 1000);
         this.emit('installing', { locale: m.locale || '' });
         break;
+      }
       case 'tap':
       case 'capture':
         this.lastCaptureAt = Date.now();
@@ -209,7 +257,7 @@ class Asr extends EventEmitter {
         break;
       case 'warn':
         // 方案降级的中间过程：只进日志，不打扰主人
-        this.log('[asr] ' + (m.v || ''));
+        this.writeLog('[asr] ' + (m.v || ''));
         break;
       case 'level':
         this.emit('level', m.v || 0);
@@ -230,6 +278,13 @@ class Asr extends EventEmitter {
   }
 
   wakeHit(text) { return this.wakeHits.get(String(text || '').trim()) ?? this.wakeHits.get(String(text || '').split('\n')[0].trim()); }
+
+  writeLog(...args) { if(!this.diagnostic)this.log(...args); }
+
+  emitSpeechTrace(value) {
+    if(!this.traceEnabled)return;
+    try{const record=require('./speech-trace').sanitizeSpeechTrace(value);if(record)this.emit('speechTrace',{...record,recognizer:this.traceRecognizer,seq:++this.traceSequence});}catch{ /* Diagnostics never interrupt capture. */ }
+  }
 
   /** 抑制自听：娃娃自己出声时别把自己说的当成主人在说话 */
   mute() {
@@ -331,4 +386,12 @@ function probeAccess(binPath, { timeoutMs = 5000, requestMic = false, lang = 'zh
   });
 }
 
-module.exports = { Asr, probeAccess };
+// Capture readiness alone cannot clear a recurrent VAD/finalization fault.
+// Confirmed utterances or a normal recycle reset this counter at the host.
+function asrRecovery({mode,code,failures=0}){
+  if(code===0)return {failures:0,delayMs:mode==='single'?150:1200,requiresOwner:false};
+  const next=failures+1;
+  if(code===25&&next>=3)return {failures:next,delayMs:null,requiresOwner:true};
+  return {failures:next,delayMs:next>=3?Math.min(60000,4000*next):1200,requiresOwner:false};
+}
+module.exports = { Asr, probeAccess, asrRecovery, createActivityClock };

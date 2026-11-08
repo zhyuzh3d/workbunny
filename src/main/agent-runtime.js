@@ -5,10 +5,18 @@ const { canRead } = require('./memory-scope');
 const { scriptPlan } = require('./agent-tools');
 const {OperationLedger}=require('./operation-ledger');
 const {ActionProgress}=require('./action-progress');
+const {assertAdmission,waitAdmission}=require('./task-admission');
+function resolveFailure(task,{operationId,actionId,at,reason}){
+  const failure=task.state.lastFailure;
+  if(!failure||Number.isFinite(failure.resolvedAt))return;
+  if(failure.operationId?failure.operationId!==operationId:!actionId||failure.actionId!==actionId)return;
+  if(operationId&&failure.actionId&&task.operations[operationId]?.actionId!==failure.actionId)return;
+  failure.resolvedAt=at;failure.resolution=reason;
+}
 class AgentRuntime {
-  constructor({ journal, tools, skills, ready = () => true, epoch = () => 0, getScene = () => 'life', emit = () => {}, report = async () => {}, clock = Date.now, autoSchedule = true, prepare = async()=>{}, completed = async()=>{},settled=async()=>{},failed=async()=>{},authorize=async()=>{},stopTask=async()=>{},diagnoseRepair=null,observeWhileActive=null,remindIdle=null }) {
-    Object.assign(this, { journal, tools, skills, ready, epoch, getScene, emit, report, clock, autoSchedule, prepare, completed,settled,failed,authorize,stopTask,diagnoseRepair,observeWhileActive });
-    this.tasks = new Map(); this.controllers = new Map(); this.actionGroups = new Map(); this.tokens = new Map(); this.closed = false; this.admissionEpoch = 0;
+  constructor({ journal, tools, skills, ready = () => true, epoch = () => 0, getScene = () => 'life', emit = () => {}, report = async () => {}, clock = Date.now, autoSchedule = true, prepare = async()=>{}, completed = async()=>{},settled=async()=>{},failed=async()=>{},authorize=async()=>{},stopTask=async()=>{},stopTimeoutMs=30000,stopAckTimeoutMs=1000,diagnoseRepair=null,observeWhileActive=null,remindIdle=null,onRecoveryDiagnostic=()=>{} }) {
+    Object.assign(this, { journal, tools, skills, ready, epoch, getScene, emit, report, clock, autoSchedule, prepare, completed,settled,failed,authorize,stopTask,stopTimeoutMs,stopAckTimeoutMs,diagnoseRepair,observeWhileActive,onRecoveryDiagnostic });
+    this.tasks = new Map(); this.controllers = new Map(); this.actionGroups = new Map(); this.tokens = new Map(); this.controlRequests = new Map(); this.closed = false; this.admissionEpoch = 0;
     this.admissionTail=Promise.resolve();this.stops=new Map();this.pendingSaves=new Map();this.amending=new Set();
     this.operations=new OperationLedger({tools,clock,authorize:(...args)=>this.authorize(...args),save:task=>this.save(task)});
     this.keepalive=new(require('./task-keepalive').TaskKeepalive)({clock,remind:remindIdle});
@@ -28,12 +36,12 @@ class AgentRuntime {
     if(task.skill!=='task.resolve'&&active>=MAX_ACTIVE_TASKS){task.status='queued';task.note=capacityNote;delete task.expiresAt;return false;}
     task.status='ready';task.nextCheckAt=this.clock();if(task.schedule.durationMinutes&&!task.expiresAt)task.expiresAt=this.clock()+task.schedule.durationMinutes*60000;return true;
   }
-  list({scene=this.getScene()}={}) {
-    return [...this.tasks.values()].filter(t => !(t.skill==='task.resolve'&&TERMINAL.has(t.status))&&t.privacyEpoch===this.epoch() && canRead(scene, t)).map(t => ({ id:t.id, goal:t.goal, skill:t.skill,
+  list({scene=this.getScene(),includeArchived=false}={}) {
+    return [...this.tasks.values()].filter(t => (includeArchived||!t.state.listArchive)&&!(t.skill==='task.resolve'&&TERMINAL.has(t.status))&&t.privacyEpoch===this.epoch() && canRead(scene, t)).map(t => ({ id:t.id, goal:t.goal, skill:t.skill,listArchived:!!t.state.listArchive,
       presentation:require('./task-presentation').taskPresentation(t,{handling:this.controllers.has(t.id)&&t.status==='needs_attention'}),workJobId:t.state.workOperationId||t.state.job?.jobId||null,lastCheckedAt:t.state.lastCheckedAt||null,subjects:clone(t.subjects), status:t.status, note:t.note, createdAt:t.createdAt, updatedAt:t.updatedAt,
-      nextCheckAt:t.nextCheckAt, expiresAt:t.expiresAt, queuedEvents:t.inbox.length+(t.overflowEvent?1:0),
+      nextCheckAt:t.nextCheckAt, expiresAt:t.expiresAt, stopRequest:clone(t.state.stopRequest||null),resources:clone(Object.values(t.state.resources||{})),cleanupLog:clone(t.state.cleanupLog||[]),queuedEvents:t.inbox.length+(t.overflowEvent?1:0),
       observationReady:t.skill==='conversation.manage'?Object.values(t.state.conversations||{}).filter(c=>c.cursor?.ready).length===t.subjects.length:undefined,
-      counters:clone(t.counters), schedule:clone(t.schedule), completion:t.completion,delivery:clone(t.state.delivery||t.delivery||null),result:t.state.result?{revision:t.state.result.revision,source:clone(t.state.result.source||null),summary:t.state.result.summary,text:String(t.state.result.text||t.state.result.summary).slice(0,12000),artifacts:clone(t.state.result.artifacts||[])}:null })).sort((a,b)=>a.createdAt-b.createdAt);
+      counters:clone(t.counters), schedule:clone(t.schedule), completion:t.completion,delivery:clone(t.state.delivery||t.delivery||null),result:t.state.result?{revision:t.state.result.revision,source:clone(t.state.result.source||null),summary:t.state.result.summary,links:require('./result-links').resultLinks(t.state.result),text:String(t.state.result.text||t.state.result.summary).slice(0,12000),artifacts:clone(t.state.result.artifacts||[])}:null })).sort((a,b)=>a.createdAt-b.createdAt);
   }
   publish() {
     if (this.restoring) return;
@@ -43,10 +51,11 @@ class AgentRuntime {
   async reportProgress(task,progress,actionId,text){
     if(!progress||progress.state.blockedReportedAt)return;
     progress.state.blockedReportedAt=this.clock();await this.save(task);
+    if(!this.owns(task)||task.state.stopRequest)return;
     await this.report({taskId:task.id,eventId:'progress:'+actionId,text,sources:[task.id],scene:task.scene,domain:task.domain,visibilityFloor:task.visibilityFloor,epoch:task.privacyEpoch});
   }
   current(task, token, activeAction = false) { return !this.closed && !this.restoring && !this.amending.has(task.id) && this.ready() && this.tasks.get(task.id) === task && this.tokens.get(task.id) === token &&
-    task.privacyEpoch === this.epoch() && (canRead(this.getScene(), task)||task.authority?.channel==='authenticated-channel') && !TERMINAL.has(task.status) &&
+    task.privacyEpoch === this.epoch() && (canRead(this.getScene(), task)||task.authority?.channel==='authenticated-channel') && !task.state.listArchive && !task.state.stopRequest && !TERMINAL.has(task.status) &&
     !['queued','stopping','paused',...(activeAction?[]:['needs_attention','waiting_permission'])].includes(task.status); }
   eventScope(event) { return typeof event?.subjectKey==='string'&&event.subjectKey ? 'subject:'+event.subjectKey : typeof event?.scope==='string'&&event.scope ? 'scope:'+event.scope : null; }
   selectEvent(task, group) {
@@ -99,10 +108,10 @@ class AgentRuntime {
     task.updatedAt = now;
     this.publish();
   }
-  async start(specification, authorization, { signal, ownerRequest,ownerContext,initialState={},requestKey,authorizeAdmission=()=>{} } = {}) {
+  async start(specification, authorization, { signal, ownerRequest,ownerContext,initialState={},requestKey,authorizeAdmission=()=>{},commitGate,isCurrent=()=>true } = {}) {
     const admission = this.admissionEpoch, epoch = this.epoch();
     const live = () => !this.closed && !this.restoring && this.ready() && !signal?.aborted &&
-      admission === this.admissionEpoch && epoch === this.epoch();
+      admission === this.admissionEpoch && epoch === this.epoch() && isCurrent() && (!commitGate || commitGate.isCurrent?.());
     if (!live()) return { ok:false, error:'请先解锁本地资料，再开始任务' };
     try {
       const spec = taskSpec(specification), actor = authority(authorization, authorization?.scene ?? this.getScene()), skill = this.skills.get(spec.skill);
@@ -116,19 +125,34 @@ class AgentRuntime {
         ...(spec.schedule.durationMinutes ? { expiresAt:now+spec.schedule.durationMinutes*60000 } : {}),
         state:{...clone(initialState),...(requestKey?{requestKey}:{}),...(ownerContext?{ownerContext:require('./agent-contract').text(ownerContext,'主人历史交办',12000)}:{}),...(typeof ownerRequest==='string'?{ownerRequest:require('./agent-contract').text(ownerRequest,'主人原始交办',12000)}:{})}, inbox:[], eventKeys:[], operations:{}, actionRuns:{}, reports:[], counters:{ wakes:0, reads:0, writes:0, events:0 } };
       await this.prepare(task);
+      await waitAdmission(commitGate,{signal,live});
       return await this.admission(async()=>{
         if(!live())return {ok:false,error:'交办在启动前被取消'};
+        assertAdmission(commitGate,live);
         authorizeAdmission();
-        if(requestKey){const existing=[...this.tasks.values()].find(t=>t.state.requestKey===requestKey);if(existing){if(existing.state.ownerRequest!==task.state.ownerRequest)throw Error('同一交办标识的原文不一致，未创建重复任务');return {ok:true,id:existing.id,duplicate:true};}}
-        this.admit(task);await this.journal.put(clone(task));
-        try{authorizeAdmission();}catch(error){task.status='stopped';task.note=error.message;await this.journal.put(clone(task));throw error;}
+        if(requestKey){const existing=[...this.tasks.values()].find(t=>t.state.requestKey===requestKey);if(existing){if(existing.state.ownerRequest!==task.state.ownerRequest)throw Error('同一交办标识的原文不一致，未创建重复任务');if(existing.state.admissionPending)return {ok:false,id:existing.id,saved:true,paused:true,error:existing.note,code:'E_VOICE_COMMIT_UNCONFIRMED'};return {ok:true,id:existing.id,duplicate:true};}}
+        this.admit(task);if(commitGate)task.state.admissionPending=true;await this.journal.put(clone(task));
+        try{
+          authorizeAdmission();assertAdmission(commitGate,live);
+        }catch(error){
+          task.status=commitGate?'paused':'stopped';task.note=error.message;
+          if(commitGate)task.state.admissionPending=true;
+          await this.journal.put(clone(task));
+          if(commitGate&&epoch===this.epoch()&&!this.closed){this.tasks.set(task.id,task);this.tokens.set(task.id,0);this.publish();}
+          return {ok:false,id:task.id,saved:true,paused:!!commitGate,error:error.message,code:error.code};
+        }
         if(!live()){task.status='stopped';task.note='交办在启动前被取消';await this.journal.put(clone(task));return {ok:false,error:task.note};}
+        if(commitGate)delete task.state.admissionPending;
         this.tasks.set(task.id,task); this.tokens.set(task.id,0); this.publish(); this.schedule(25);
+        // Admission linearizes above, with no await between the fresh seal and
+        // publication. Clearing its crash-safe marker is subsequent bookkeeping;
+        // a later acoustic event cannot pretend that admission never happened.
+        if(commitGate)try{await this.save(task);}catch(error){try{this.onRecoveryDiagnostic('admission-confirmation-save',task,error);}catch{}}
         return { ok:true, id:task.id,queued:task.status==='queued',...(task.status==='queued'?{note:capacityNote}:{}) };
       });
-    } catch (error) { return { ok:false, error:error.message }; }
+    } catch (error) { return { ok:false, error:error.message,...(error.code?{code:error.code}:{}) }; }
   }
-  async adopt(id,specification,authorization,{signal,live=()=>true,replaceId}={}){
+  async adopt(id,specification,authorization,{signal,live=()=>true,replaceId,commitGate}={}){
     const task=this.tasks.get(id);if(!task||signal?.aborted||!live())throw Error('交办已取消');
     const spec=taskSpec(specification),actor=authority(authorization,authorization.scene),skill=this.skills.get(spec.skill);try{await skill.validate?.(spec,actor);}catch(error){error.code||='E_TASK_SPEC';throw error;}
     let capabilities;
@@ -139,9 +163,10 @@ class AgentRuntime {
     if(staged.skill==='task.resolve')for(const key of ['context','delivery','workContext','workRequest'])delete staged[key];
     Object.assign(staged,spec);staged.authority=actor;staged.sources=[...new Set([...staged.sources,...actor.sources])];staged.capabilities=[...capabilities];staged.skillVersion=skill.version;staged.visibilityFloor=Math.max(staged.visibilityFloor,actor.visibilityFloor);
     staged.state.resolution={kind:'task',at:this.clock()};delete staged.state.selfRepair;await this.prepare(staged);if(signal?.aborted||!live())throw Error('交办已取消');
+    await waitAdmission(commitGate,{signal,live});
     // Publish executable state only after all preparation and persistence pass.
     // A failed adoption must leave a saved intent, never a half-prepared skill.
-    return this.admission(async () => {
+    const adopted=await this.admission(async () => {
       if (signal?.aborted || !live()) throw Error('交办已取消');
       const prior = this.tasks.get(replaceId);
       const replacing = prior && prior !== task && !TERMINAL.has(prior.status) ? prior : null;
@@ -152,19 +177,29 @@ class AgentRuntime {
       try {
         return await this.writeInOrder(records, async () => {
           if (signal?.aborted || !live()) throw Error('交办已取消');
+          assertAdmission(commitGate,live);
           this.admit(staged, replacing);
           staged.updatedAt = this.clock();
           const stopped = replacing && { ...clone(replacing), status: 'stopped',
-            note: '补充要求已接续到同一工作会话', updatedAt: staged.updatedAt };
+            note: '补充要求已接续到同一工作会话', updatedAt: staged.updatedAt,state:{...clone(replacing.state),stopRequest:{at:staged.updatedAt,phase:'confirmed',externalDisposition:'transferred'}} };
+          if(commitGate)staged.state.admissionPending=true;
           await put(stopped ? [clone(staged), stopped] : [clone(staged)]);
+          try{
+            assertAdmission(commitGate,()=>!signal?.aborted&&live());
+          }catch(error){
+            if(commitGate&&this.owns(task)&&!TERMINAL.has(task.status)&&!task.state.stopRequest){task.status='paused';task.note=error.message;task.state.admissionPending=true;}
+            if(records.every(record=>this.owns(record)))await put(records.map(clone));
+            throw error;
+          }
           if (signal?.aborted || !live()) {
             if (records.every(record => this.owns(record))) await put(records.map(clone));
             throw Error('交办已取消');
           }
           if (replacing) {
             this.cancelWorker(replacing);
-            Object.assign(replacing, { status: stopped.status, note: stopped.note, updatedAt: stopped.updatedAt });
+            this.tasks.set(replacing.id,clone(stopped));
           }
+          if(commitGate)delete staged.state.admissionPending;
           for (const key of Object.keys(task)) if (!(key in staged)) delete task[key];
           Object.assign(task, staged);
           this.publish();
@@ -175,6 +210,8 @@ class AgentRuntime {
         this.schedule();
       }
     });
+    if(commitGate)try{await this.save(adopted);}catch(error){try{this.onRecoveryDiagnostic('admission-confirmation-save',adopted,error);}catch{}}
+    return adopted;
   }
   restore() {
     if (this.restoreWork) return this.restoreWork;
@@ -189,13 +226,14 @@ class AgentRuntime {
       const live = () => !this.closed && this.ready() && this.epoch() === epoch;
       const records = await this.journal.list();
       const restored = new Map(), changed = [];
-      let active = 0;
+      let active = 0,skipped=0;
       for (const record of records) {
+       try{
         if (!live()) return { restored: 0 };
         if (record.schema !== TASK_SCHEMA || !this.skills.skills.has(record.skill) || !await this.journal.authorized(record)) continue;
         const task = clone(record);
         task.privacyEpoch = epoch;
-        if (!TERMINAL.has(task.status) && this.restoreTask(task)) changed.push(task);
+        if ((!TERMINAL.has(task.status) || task.state.stopRequest&&(task.state.stopRequest.version!==2||task.state.stopRequest.phase==='pending')) && this.restoreTask(task)) changed.push(task);
         if (occupiesSlot(task)) {
           if (active < MAX_ACTIVE_TASKS) active++;
           else {
@@ -206,6 +244,7 @@ class AgentRuntime {
           }
         }
         restored.set(task.id, task);
+       }catch(error){skipped++;try{this.onRecoveryDiagnostic('restore-task-record',record,error);}catch{}}
       }
       if (!live()) return { restored: 0 };
       this.controllers.clear();
@@ -214,12 +253,13 @@ class AgentRuntime {
       this.tokens = new Map([...restored.keys()].map(id => [id, 0]));
       for (const task of changed) {
         try { await this.save(task); }
-        catch {
+        catch(error) {
+          skipped++;try{this.onRecoveryDiagnostic('restore-task-save',task,error);}catch{}
           restored.delete(task.id);
           this.tokens.delete(task.id);
         }
       }
-      return { restored: restored.size };
+      return { restored: restored.size,...(skipped?{skipped}:{}) };
     }).finally(() => {
       this.restoring = false;
       this.restoreWork = null;
@@ -231,10 +271,18 @@ class AgentRuntime {
 
   restoreTask(task) {
     let changed = false;
-    if (task.status === 'stopping') {
-      task.status = 'needs_attention';
-      task.note = '上次停止尚未确认，请再次停止以核对外部任务';
-      changed = true;
+    if(task.state.admissionPending&&!TERMINAL.has(task.status)&&!task.state.stopRequest){task.status='paused';task.note='上次语音交办的提交确认未完成，原输入已保留；等待重新确认后继续。';changed=true;}
+    if(task.state.listArchive&&!TERMINAL.has(task.status)){task.status='stopped';task.state.stopRequest??={at:this.clock(),phase:'failed',cause:'list-clear'};task.note='任务已移出列表并停止；恢复列表不会继续执行';changed=true;}
+    if(task.state.stopRequest||task.status==='stopping'||/^停止尚未确认：|^上次停止尚未确认/.test(task.note||'')){
+      const prior=task.state.stopRequest||{},interrupted=prior.phase==='pending'||task.status==='stopping',failed=prior.phase!=='confirmed';
+      task.state.stopRequest={...prior,version:2,at:prior.at||this.clock(),phase:failed?'failed':'confirmed',finishedAt:prior.finishedAt||this.clock()};
+      task.status=prior.cause==='expired'?'expired':'stopped';
+      if(failed){task.state.legacyStopNote??=task.note;task.note=interrupted?'Bunny 已停止；上次外部清理未完成，原记录已保留，不会再次执行。':'Bunny 已停止；旧版外部清理有未完成项，日志已保留。';}
+      for(const entry of Object.values(task.state.resources||{}))if(!['ended','stopped','preserved'].includes(entry.phase)){
+        entry.phase='unknown';entry.verified=false;entry.cleanupAttemptedAt??=this.clock();entry.reason=interrupted?'应用退出前未能确认清理完成；不会再次清理':entry.reason||'旧版清理未确认，记录已保留';
+        if(interrupted){task.state.cleanupLog??=[];task.state.cleanupLog.push({id:entry.id,kind:entry.kind,label:entry.label,phase:'unknown',verified:false,reason:entry.reason,at:this.clock()});}
+      }
+      changed=true;
     }
     for (const run of Object.values(task.actionRuns)) {
       if (run.status === 'running') {
@@ -242,6 +290,7 @@ class AgentRuntime {
         changed = true;
       }
     }
+    if(task.state.stopRequest){for(const run of Object.values(task.actionRuns))if(!['completed','cancelled'].includes(run.status))run.status='cancelled';return true;}
     let unknown = false;
     for (const op of Object.values(task.operations)) {
       if (op.effect !== 'write' || op.status !== 'intent') continue;
@@ -305,45 +354,71 @@ class AgentRuntime {
       return { ok: false, error: error.message };
     }
   }
-  async stop(task) {
+  async stop(task,{terminalState='stopped',reason='已停止',cause='owner'}={}) {
     const id = task.id;
     if (this.stops.has(id)) return this.stops.get(id);
+    if (!this.canControl(task)) return { ok:false, error:'任务当前不可控制，请先解锁资料库' };
+    const openResources=Object.values(task.state.resources||{}).some(entry=>entry.ownership==='owned'&&!['ended','stopped','preserved'].includes(entry.phase));
+    if(task.state.stopRequest||task.status==='stopped')return {ok:true,verified:true,localStopped:true,alreadyStopped:true,cleanupVerified:task.state.stopRequest?.phase!=='failed',message:task.note||'任务已停止；不会再次清理或继续执行'};
+    if (TERMINAL.has(task.status) && task.status !== 'stopped' && !openResources) return { ok:false, error:'任务已结束，无需停止' };
+    // Detach the canonical record from closures already running against the old
+    // object. They may settle, but cannot mutate or persist the stopped task.
+    task = clone(task); this.tasks.set(id, task);
+    // Owner cancellation is a latch, not a recoverable execution failure. Set it
+    // before awaiting admission/storage so old workers lose authority at once.
+    task.state.stopRequest = { at: task.state.stopRequest?.at || this.clock(), version:2,phase:'pending',cause,deadlineAt:Date.now()+this.stopTimeoutMs };
+    task.status = terminalState; task.note = reason+'；Bunny 已停止，正在核对后台执行';
+    this.cancelWorker(task); this.publish(); this.schedule();
     const work = (async () => {
-      const started = await this.admission(async () => {
-        if (!this.canControl(task) || TERMINAL.has(task.status)) return false;
-        this.cancelWorker(task);
-        task.status = 'stopping';
-        task.note = '正在停止任务';
-        await this.save(task);
-        this.schedule();
-        return true;
-      });
-      if (!started) return { ok: false, error: '任务已结束或不可用' };
-
-      let failure;
-      try { await this.stopTask(task); }
-      catch (error) { failure = error; }
-      return this.admission(async () => {
+      let storageFailure,failure,initialSaved=false,finalSaved=false;
+      const controller=new AbortController();let timer;
+      const timeout=new Promise(resolve=>{timer=setTimeout(()=>{controller.abort();for(const entry of Object.values(task.state.resources||{}))if(!['ended','stopped','preserved'].includes(entry.phase)){entry.phase='unknown';entry.verified=false;entry.reason='外部清理超过总时限，停止未确认';task.state.cleanupLog??=[];task.state.cleanupLog.push({id:entry.id,kind:entry.kind,label:entry.label,phase:'unknown',verified:false,reason:entry.reason,at:Date.now()});}failure=Error('外部清理超过总时限，仍未确认的资源已记录；Bunny 任务已停止，可以开始新任务');resolve();},this.stopTimeoutMs);});
+      const stopping=Promise.race([Promise.resolve().then(()=>this.stopTask(task,{signal:controller.signal})).catch(error=>{if(!controller.signal.aborted)failure=error;}),timeout]).finally(()=>clearTimeout(timer));
+      const initialSave=this.save(task).then(()=>{initialSaved=true;}).catch(error=>{storageFailure=error;});
+      // Local cancellation and its acknowledgement never wait behind admission
+      // or an unbounded storage queue. Persistence gets a bounded final grace.
+      await stopping;
+      return (async () => {
         if (this.tasks.get(id) !== task || task.privacyEpoch !== this.epoch()) return { ok: false, error: '任务资料已变化' };
-        task.status = failure ? 'needs_attention' : 'stopped';
-        task.note = failure ? '停止尚未确认：' + failure.message : '已停止';
-        await this.save(task);
-        this.schedule();
-        return failure ? { ok: false, error: task.note } : { ok: true };
-      });
+        task.state.stopRequest.phase = failure ? 'failed' : 'confirmed';task.state.stopRequest.finishedAt=this.clock();task.state.stopRequest.cleanupErrors=failure?[failure.message]:[];
+        task.status = terminalState;
+        task.note = failure ? 'Bunny 已停止；外部清理未完成（已记录，不再尝试）：' + failure.message : reason+(task.state.stopRequest.preserved?.length?'；'+task.state.stopRequest.preserved.join('；'):'');
+        this.publish();this.schedule();
+        const finalSave=this.save(task).then(()=>{finalSaved=true;storageFailure=null;}).catch(error=>{storageFailure=error;});let storageTimer;
+        try{await Promise.race([Promise.all([initialSave,finalSave]),new Promise(resolve=>{storageTimer=setTimeout(resolve,Math.max(0,task.state.stopRequest.deadlineAt-Date.now())+this.stopAckTimeoutMs);})]);}finally{clearTimeout(storageTimer);}
+        if(!finalSaved){storageFailure??=Error('停止状态保存尚未确认');task.state.stopRequest.phase='failed';task.state.stopRequest.persistence='unconfirmed';task.note+='；停止状态保存失败或未确认：'+storageFailure.message+'。本地已停止，重启后的持久化状态需核对';this.publish();}
+        return {ok:true,verified:true,localStopped:true,cleanupVerified:!failure,persistenceVerified:initialSaved||finalSaved,cleanupLogPersisted:finalSaved,cleanupErrors:[...(failure?[failure.message]:[]),...(!finalSaved?[storageFailure.message]:[])],preserved:clone(task.state.stopRequest.preserved||[]),message:task.note};
+      })();
     })();
     this.stops.set(id, work);
     try { return await work; }
     finally { if (this.stops.get(id) === work) this.stops.delete(id); }
   }
 
-  async control(action, id) {
+  controlRevision(id) { return this.controlRequests.get(id)||0; }
+  async control(action, id, {expectedRevision,commitGate,isCurrent=()=>true,signal}={}) {
     const task = this.tasks.get(id);
     if (!this.canControl(task)) return { ok: false, error: '请明确要控制的任务' };
     if (action === 'status') return { ok: true, task: this.list().find(t => t.id === id) };
+    if(!['pause','resume','stop'].includes(action))return {ok:false,error:'任务控制不合法'};
+    if(expectedRevision!==undefined&&expectedRevision!==this.controlRevision(id))return {ok:false,superseded:true,error:'已采用更新的任务控制，本次请求不再执行'};
+    const requestRevision=this.controlRevision(id)+1;this.controlRequests.set(id,requestRevision);
     if (action === 'stop') return this.stop(task);
+    if(task.state.listArchive)return {ok:false,error:'这项任务已移出列表，请先恢复列表；恢复显示不会自动执行'};
+    const resumeAdmission=this.admissionEpoch;
+    const resumeLive=()=>!signal?.aborted&&isCurrent()&&resumeAdmission===this.admissionEpoch&&this.canControl(task)&&!TERMINAL.has(task.status)&&!task.state.stopRequest&&requestRevision===this.controlRevision(id);
+    // Voice resume preparation cannot hold the global admission lane while
+    // waiting for renewed acoustic evidence or an asynchronous skill hook.
+    if(action==='resume'&&commitGate)try{
+      if(TERMINAL.has(task.status)||task.state.stopRequest||task.status==='stopping'||Object.values(task.operations).some(op=>op.effect==='write'&&op.status==='intent'))return {ok:false,error:'任务已停止或原操作结果不确定，未开始恢复准备'};
+      await waitAdmission(commitGate,{signal,live:resumeLive});
+      await this.skills.get(task.skill).resume?.(task);
+      await waitAdmission(commitGate,{signal,live:resumeLive});
+    }catch(error){return {ok:false,error:error.message,code:error.code};}
     return this.admission(async () => {
+      if(requestRevision!==this.controlRevision(id))return {ok:false,superseded:true,error:'已采用更新的任务控制，本次请求不再执行'};
       if (!this.canControl(task) || !['pause', 'resume'].includes(action) || TERMINAL.has(task.status)) return { ok: false, error: '任务已结束或操作不合法' };
+      if (task.state.stopRequest) return {ok:false,error:'任务已停止，不能继续或重试；请交办独立新任务'};
       if (task.status === 'stopping') return { ok: false, error: '正在停止，请等待确认' };
       if (action === 'resume' && Object.values(task.operations).some(op => op.effect === 'write' && op.status === 'intent')) {
         return { ok: false, error: '上次写入结果不确定，不能自动恢复或重发' };
@@ -357,13 +432,16 @@ class AgentRuntime {
       if (action === 'pause' || !active) this.cancelWorker(task);
       else this.keepalive.cancel(id);
       if (action === 'resume') {
+        if(commitGate)try{assertAdmission(commitGate,resumeLive);}catch(error){return {ok:false,error:error.message,code:error.code};}
         const admission = this.admissionEpoch;
-        await this.skills.get(task.skill).resume?.(task);
+        if(!commitGate)await this.skills.get(task.skill).resume?.(task);
+        if(requestRevision!==this.controlRevision(id))return {ok:false,superseded:true,error:'已采用更新的任务控制，本次请求不再执行'};
         if (admission !== this.admissionEpoch || !this.canControl(task) || TERMINAL.has(task.status)) return { ok: false, error: '任务状态已变化' };
         for (const run of Object.values(task.actionRuns)) {
           if (['needs_attention', 'waiting_permission'].includes(run.status)) run.status = 'waiting';
         }
       }
+      if(action==='resume')delete task.state.admissionPending;
       task.status = action === 'pause' ? 'paused' : active ? 'running' : 'waiting';
       task.note = action === 'pause' ? '已暂停，保留待处理事项' : '继续原任务与待处理事项';
       task.nextCheckAt = this.clock();
@@ -376,11 +454,12 @@ class AgentRuntime {
   async confirmReconciled(id,operationId,result){
     return this.admission(async () => {
       const task = this.tasks.get(id), op = task?.operations[operationId];
-      if (!this.canControl(task) || op?.effect !== 'write' || op.status !== 'intent' ||
+      if (!this.canControl(task) || task.state.stopRequest || op?.effect !== 'write' || op.status !== 'intent' ||
           this.operations.isRunning(task, op) || result?.verified !== true || result?.ok !== true) return { ok: false, error: '没有可核对的未确认操作' };
       const apply = (target, now) => {
         const entry = target.operations[operationId];
         entry.status = 'confirmed'; entry.result = clone(result); entry.finishedAt = now;
+        resolveFailure(target,{operationId,at:now,reason:'operation-confirmed'});
         delete entry.args; delete entry.error;
         target.counters.writes++;
         if (entry.actionId && target.actionRuns[entry.actionId]) target.actionRuns[entry.actionId].status = 'waiting';
@@ -393,14 +472,55 @@ class AgentRuntime {
       return { ok: true };
     });
   }
-  async controlAll(action,{excludeIds=[]}={}){
+  async controlAll(action,{excludeIds=[],commitGate,isCurrent,signal}={}){
     if(action==='status')return {ok:true,tasks:this.list().filter(t=>!excludeIds.includes(t.id))};
     if(!['pause','stop','resume'].includes(action))return {ok:false,error:'任务控制不合法'};
     if(action!=='resume')this.admissionEpoch++;
-    const targets=[...this.tasks.values()].filter(t=>!excludeIds.includes(t.id)&&!TERMINAL.has(t.status)&&canRead(this.getScene(),t)&&(action!=='resume'||t.status==='paused')&&(action!=='pause'||t.status!=='queued'));
+    const targets=[...this.tasks.values()].filter(t=>!excludeIds.includes(t.id)&&(!TERMINAL.has(t.status)||action==='stop'&&!t.state.stopRequest&&t.status!=='stopped'&&Object.values(t.state.resources||{}).some(entry=>entry.ownership==='owned'&&entry.phase==='running'))&&canRead(this.getScene(),t)&&(action!=='resume'||t.status==='paused')&&(action!=='pause'||t.status!=='queued'));
     const results=[];
-    for(const task of targets)results.push(await this.control(action,task.id));
-    return {ok:results.every(r=>r.ok),...(results.some(r=>!r.ok)?{error:'部分任务有不确定操作，需要先核对'}:{})};
+    if(action==='stop')results.push(...await Promise.all(targets.map(task=>this.control(action,task.id))));
+    else for(const task of targets)results.push(await this.control(action,task.id,action==='resume'?{commitGate,isCurrent,signal}:{}));
+    const cleanupErrors=results.flatMap(result=>result.cleanupErrors||[]),preserved=results.flatMap(result=>result.preserved||[]);
+    return {ok:results.every(r=>r.ok),...(cleanupErrors.length||preserved.length?{cleanupErrors,preserved,message:'Bunny 任务已停止；'+[...cleanupErrors,...preserved].join('；')}:{}) ,...(results.some(r=>!r.ok)?{error:'部分任务有不确定操作，需要先核对'}:{})};
+  }
+  archiveList(ids){
+    const key=ids===undefined?'clearList':'archive:'+JSON.stringify(Array.isArray(ids)?[...ids].sort():ids);
+    if(this.listChangeWork)return this.listChangeKey===key?this.listChangeWork:Promise.resolve({ok:false,error:'任务列表正在更新，请稍后再操作'});
+    const scene=this.getScene(),epoch=this.epoch(),visible=new Set(this.list().map(task=>task.id));
+    if(ids!==undefined&&(!Array.isArray(ids)||ids.some(id=>typeof id!=='string'||!visible.has(id))))return Promise.resolve({ok:false,error:'找不到当前列表中的任务'});
+    if(ids===undefined)this.admissionEpoch++;
+    const chosen=ids?new Set(ids):null,targets=[...this.tasks.values()].filter(task=>task.privacyEpoch===epoch&&canRead(scene,task)&&!task.state.listArchive&&(!chosen||chosen.has(task.id)));
+    const work=(async()=>{
+      const stopped=await Promise.all(targets.filter(task=>!TERMINAL.has(task.status)||!task.state.stopRequest&&Object.values(task.state.resources||{}).some(entry=>entry.ownership==='owned'&&entry.phase==='running')).map(task=>this.stop(task,{cause:'list-clear',reason:'已停止并移出任务列表'})));
+      if(stopped.some(result=>!result.ok))return {ok:false,error:'部分任务未能确认本地停止，仍保留在列表中'};
+      const count=targets.filter(task=>visible.has(task.id)).length;
+      const result=await this.changeListVisibility(targets.map(task=>task.id),{at:this.clock(),batchId:crypto.randomUUID()},scene,epoch);
+      const unresolved=targets.map(task=>this.tasks.get(task.id)).filter(task=>task?.state.stopRequest?.phase==='failed').length;
+      return {...result,count:result.ok?count:result.count||0,...(result.ok?{message:'已移出 '+count+' 项任务；记忆、产物及原记录已保留。'+(unresolved?'其中 '+unresolved+' 项有外部清理错误，日志已保留，可恢复列表查看；不会再次执行。':'')}: {})};
+    })();this.listChangeKey=key;this.listChangeWork=work.finally(()=>{this.listChangeWork=null;this.listChangeKey=null;});return this.listChangeWork;
+  }
+  restoreList(){
+    if(this.listChangeWork)return this.listChangeKey==='restoreList'?this.listChangeWork:Promise.resolve({ok:false,error:'任务列表正在更新，请稍后再操作'});
+    const scene=this.getScene(),epoch=this.epoch(),ids=[...this.tasks.values()].filter(task=>task.state.listArchive&&task.privacyEpoch===epoch&&canRead(scene,task)).map(task=>task.id),visible=new Set(this.list({includeArchived:true}).map(task=>task.id));
+    const work=this.changeListVisibility(ids,null,scene,epoch).then(result=>({...result,...(result.ok?{count:ids.filter(id=>visible.has(id)).length,message:'已恢复任务列表；任务保持结束状态，不会自动执行或发送。'}:{})}));
+    this.listChangeKey='restoreList';this.listChangeWork=work.finally(()=>{this.listChangeWork=null;this.listChangeKey=null;});return this.listChangeWork;
+  }
+  async changeListVisibility(ids,archive,scene,epoch){
+    let count=0;
+    try{
+      for(let i=0;i<ids.length;i+=24){
+        const tasks=ids.slice(i,i+24).map(id=>this.tasks.get(id));
+        if(epoch!==this.epoch()||scene!==this.getScene()||!this.ready()||tasks.some(task=>!this.canControl(task)||!TERMINAL.has(task.status)))throw Error('任务或资料范围已变化，未继续清理列表');
+        await this.writeInOrder(tasks,async()=>{
+          const now=this.clock(),apply=task=>{if(archive){task.state.listArchive=clone(archive);for(const entry of task.state.reportOutbox||[])if(!['delivered','cancelled'].includes(entry.status)){entry.status='cancelled';entry.cancelledAt=now;entry.cancelledBy='task-list-clear';}}else delete task.state.listArchive;task.updatedAt=now;};
+          const snapshots=tasks.map(task=>{const snapshot=clone(task);apply(snapshot);return snapshot;});
+          if(snapshots.length>1){if(typeof this.journal.putAll!=='function')throw Error('任务记录不支持安全的批量保存');await this.journal.putAll(snapshots);}else if(snapshots.length)await this.journal.put(snapshots[0]);
+          if(epoch!==this.epoch()||tasks.some(task=>!this.owns(task)))throw Error('任务资料已变化，请重新读取列表');
+          for(const task of tasks)apply(task);count+=tasks.length;this.publish();
+        });
+      }
+      return {ok:true,count};
+    }catch(error){return {ok:false,count,error:'任务列表保存未完成：'+error.message+'；原资料未删除，可刷新后重试。'};}
   }
   async update(id, patch, authorization) {
     try {
@@ -478,20 +598,14 @@ class AgentRuntime {
   async step(id) {
     const task=this.tasks.get(id),token=this.tokens.get(id);
     if (!task||!this.current(task,token,true))return;
-    if (task.expiresAt && this.clock() >= task.expiresAt) {
-      this.cancelWorker(task);
-      task.status = 'expired';
-      task.note = '已达到主人指定时长';
-      await this.save(task);
-      return;
-    }
+    if (task.expiresAt && this.clock() >= task.expiresAt) return this.stop(task,{terminalState:'expired',cause:'expired',reason:'已达到主人指定时长'});
     const selected = this.selectWork(task);
     if (!selected) return;
     let { group, event } = selected;
     if(!group){const parent=new AbortController();group={parent,workers:new Map()};this.actionGroups.set(id,group);this.controllers.set(id,parent);}
     const workerKey=event?.key||'__task__',scope=this.eventScope(event),controller=new AbortController();
     const cancel=()=>controller.abort(group.parent.signal.reason);group.parent.signal.addEventListener('abort',cancel,{once:true});if(group.parent.signal.aborted)cancel();
-    group.workers.set(workerKey,{eventKey:event?.key,scope,controller});let stopObservation,actionRun,progress;
+    group.workers.set(workerKey,{eventKey:event?.key,scope,controller});let stopObservation,actionRun,progress,failureOperationId,failureOperationError;
     const actionKind=event?'event':!['task.resolve','conversation.manage','screen.watch'].includes(task.skill)?'goal':null;
     const actionId=actionKind?crypto.createHash('sha256').update(id+'\0'+actionKind+'\0'+(event?.key||'goal')).digest('hex'):null;
     try {
@@ -501,23 +615,37 @@ class AgentRuntime {
       if(actionId){task.actionRuns??={};actionRun=task.actionRuns[actionId]??={id:actionId,eventKey:event?.key||null,scope,eventType:event?.type||'task.goal',createdAt:this.clock(),attempts:0};actionRun.status='running';actionRun.attempts++;actionRun.startedAt??=this.clock();progress=new ActionProgress(actionRun.progress??={},this.clock).wait(null);}
       if(!['needs_attention','waiting_permission'].includes(task.status))task.status='running';task.counters.wakes++;await this.save(task);
       if(event?.type==='conversation.messages')stopObservation=this.observeWhileActive?.(task,event,controller.signal);
-      const call=call=>this.operations.execute({task,call,signal:controller.signal,actionId,
-        isCurrent:()=>this.current(task,token,true)&&!controller.signal.aborted&&(!task.expiresAt||this.clock()<task.expiresAt)});
+      const operationFor=call=>Object.values(task.operations).filter(op=>op.key===call.key&&(actionId?op.actionId===actionId:!op.actionId)).at(-1);
+      const call=async call=>{
+        try{
+          const result=await this.operations.execute({task,call,signal:controller.signal,actionId,
+            isCurrent:()=>this.current(task,token,true)&&!controller.signal.aborted&&(!task.expiresAt||this.clock()<task.expiresAt)});
+          const operation=operationFor(call);
+          if(this.current(task,token,true)&&!controller.signal.aborted&&operation?.status==='confirmed')resolveFailure(task,{operationId:operation.id,at:this.clock(),reason:'operation-confirmed'});
+          return result;
+        }catch(error){const operation=operationFor(call);if(operation?.error===error.message){failureOperationId=operation.id;failureOperationError=error;}throw error;}
+      };
       const script=async plan=>{const steps=scriptPlan(plan,this.tools,task,skill),results=[];for(const action of steps)results.push(await call(action));return results;};
       const result=await skill.run({ task,progress,isLive:()=>this.current(task,token,true), event:clone(event), recovery:actionRun?.recovery,signal:controller.signal, call, script, now:this.clock(),clock:()=>this.clock(),
         availableTools:this.tools.catalog(undefined,task),validateCall:(name,args)=>this.tools.check(name,args,task),
         completedCall:(key,tool)=>{const op=Object.values(task.operations).find(o=>o.key===key&&o.tool===tool&&o.effect==='write'&&o.status==='confirmed'&&(!actionId||o.actionId===actionId));return op?clone(op.result):null;},
         checkpoint:async()=>{if(!this.current(task,token,true))throw new Error('任务已停止');await this.save(task);},
-        enqueue:(event, options)=>this.enqueue(id,event,options), report:async(text,key)=>{
+        enqueue:(event, options)=>this.current(task,token,true)?this.enqueue(id,event,{...options,current:()=>this.current(task,token,true)&&(!options?.current||options.current())}):Promise.resolve({ok:false}), report:async(text,key,details={})=>{
+          if(!this.owns(task)||task.state.stopRequest||controller.signal.aborted)return;
           if(typeof text!=='string'||!text.trim()||text.length>12000)throw new Error('任务汇报不合法');
           const reportId=crypto.createHash('sha256').update(id+'\0'+key).digest('hex');
           if(task.reports.includes(reportId))return;
-          await this.report({taskId:id,eventId:reportId,text,sources:[id],scene:task.scene,domain:task.domain,visibilityFloor:task.visibilityFloor,epoch:task.privacyEpoch});
+          const reportDetails={};
+          if(Array.isArray(details.links)){const requested=new Set(require('./result-links').normalizeResultLinks(details.links).map(link=>link.url));reportDetails.links=require('./result-links').resultLinks(task.state.result).filter(link=>requested.has(link.url));}
+          if(typeof details.speechText==='string'&&details.speechText.length<=12000)reportDetails.speechText=details.speechText;
+          await this.report({taskId:id,eventId:reportId,text,...reportDetails,sources:[id],scene:task.scene,domain:task.domain,visibilityFloor:task.visibilityFloor,epoch:task.privacyEpoch});
           if(!this.current(task,token,true))return;task.reports.push(reportId);await this.save(task);
         } });
       if(!this.current(task,token,true))return;
       if(!result||!STATES.has(result.status)||['running','ready'].includes(result.status))throw new Error('技能没有返回可持续保存的任务状态');
       if(result.state&&result.state!==task.state)task.state=clone(result.state);
+      if(!['needs_attention','waiting_permission'].includes(result.status)&&!Object.values(task.operations).some(op=>op.effect==='write'&&op.status==='intent'&&(actionId?op.actionId===actionId:!op.actionId)))
+        resolveFailure(task,{actionId,at:this.clock(),reason:'action-progressed'});
       if(task.state.selfRepair?.status==='retrying'){
         task.state.selfRepair.status='resumed';task.state.selfRepair.resumedAt=this.clock();
       }else if(task.state.selfRepair?.status==='resumed'&&this.clock()-task.state.selfRepair.resumedAt>=600000){
@@ -555,8 +683,9 @@ class AgentRuntime {
       this.keepalive.touch(task,actionRun,{waitReason:result.waitReason,nextCheckAt:task.nextCheckAt});
       if(task.inbox.some(e=>e.key!==event?.key&&!group.workers.has(e.key)))task.nextCheckAt=this.clock();
       await this.save(task);
+      if(!this.owns(task)||task.state.stopRequest)return;
       if(actionRun&&['completed','needs_attention'].includes(actionRun.status)&&event){try{await this.settled(task,actionRun);}catch{}}
-      if(task.status==='completed'){group.parent.abort();await this.completed(task);}
+      if(this.owns(task)&&!task.state.stopRequest&&task.status==='completed'){group.parent.abort();await this.completed(task);}
     }catch(error){
       if(this.current(task,token,true)){
         if(error.code==='E_ACTION_SUPERSEDED'&&error.dispatched===false){if(actionRun)actionRun.status='waiting';const blocked=Object.values(task.actionRuns||{}).map(a=>a.status);task.status=blocked.includes('needs_attention')?'needs_attention':blocked.includes('waiting_permission')?'waiting_permission':'waiting';task.note='同一对象有新动态，正在合并后继续';task.nextCheckAt=this.clock();await this.save(task);this.schedule(25);return;}
@@ -570,15 +699,15 @@ class AgentRuntime {
           task.note=error.message;task.nextCheckAt=this.clock()+1000;await this.save(task);return;
         }
         try{await this.failed(task,error);}catch{}
-        task.state.lastFailure={message:error.message,code:error.code||'E_STEP',at:this.clock(),unknown};
-        const failureStatus=error.code==='E_PERMISSION_REQUIRED'?'waiting_permission':unknown||['E_TASK_AUTH','E_APP_CIRCUIT','E_NO_PROGRESS'].includes(error.code)?'needs_attention':'waiting';
+        task.state.lastFailure={message:error.message,code:error.code||'E_STEP',at:this.clock(),unknown,...(actionId?{actionId}:{}),...(failureOperationId&&failureOperationError===error?{operationId:failureOperationId}:{}),...(require('./self-repair').diagnostic(error.diagnostic)?{diagnostic:require('./self-repair').diagnostic(error.diagnostic)}:{})};
+        const failureStatus=error.code==='E_PERMISSION_REQUIRED'?'waiting_permission':unknown||['E_TASK_AUTH','E_APP_CIRCUIT','E_NO_PROGRESS','E_WORKBUDDY_DRAFT_CONFLICT','E_WORKBUDDY_ROUTE_CONFLICT'].includes(error.code)?'needs_attention':'waiting';
         if(actionRun){actionRun.status=failureStatus;actionRun.note=error.message;actionRun.updatedAt=this.clock();}
         const blocked=Object.values(task.actionRuns||{}).map(a=>a.status);
-        task.status=blocked.includes('needs_attention')?'needs_attention':blocked.includes('waiting_permission')?'waiting_permission':failureStatus;task.note=unknown?'操作结果不确定，已停止重发；'+error.message:error.message;
+        task.status=blocked.includes('needs_attention')?'needs_attention':blocked.includes('waiting_permission')?'waiting_permission':failureStatus;task.note=require('./task-presentation').failureNote(task,error,{unknown});
         if(error.code==='E_NO_PROGRESS')await this.reportProgress(task,progress,actionId,task.note);
         const repair=require('./self-repair'),kind=!unknown&&this.diagnoseRepair?repair.category(error):null;
         if(kind&&this.current(task,token,true)&&!controller.signal.aborted){
-          const fingerprint=repair.incident(task,error),previous=task.state.selfRepair||{};
+          const fingerprint=repair.incident(task,error,progress),previous=task.state.selfRepair||{};
           const attempts=previous.fingerprint===fingerprint?(previous.attempts||0):0;
           const recent=(task.state.selfRepairAttempts||[]).filter(at=>Number.isFinite(at)&&this.clock()-at<3600000);
           if(attempts<2&&recent.length<4){
@@ -589,17 +718,27 @@ class AgentRuntime {
             const code=/^E_[A-Z0-9_]{1,60}$/u.test(String(error.code||''))?error.code:'E_STEP';
             const errorType=['Error','TypeError','RangeError','SyntaxError'].includes(error.name)?error.name:'Error';
             const phase=task.state.pendingDecision?'pending_decision':task.inbox.length?'pending_event':'task_step';
-            let advice;try{advice=await this.diagnoseRepair({kind,skill:task.skill,code,attempt:attempts+1,phase,errorType,schemaAudit,progress:progress?.snapshot(),signal:controller.signal});}catch{}
+            let advice;try{advice=await this.diagnoseRepair({kind,skill:task.skill,code,attempt:attempts+1,phase,errorType,schemaAudit,diagnostic:repair.diagnostic(error.diagnostic),progress:progress?.snapshot(),signal:controller.signal});}catch{}
             if(!this.current(task,token,true)||controller.signal.aborted)return;
             const state=task.state.selfRepair;
             const allowed=repair.OPTIONS[kind];
             const action=allowed.includes(advice?.action)?advice.action:'defer';
             state.action=action;state.source=advice?.source==='llm'?'llm':'local';state.profile=repair.applyAction(state.profile,action,{code:error.code});
             state.status=action==='defer'?'deferred':'retrying';
-            if(action==='defer')task.note='暂未找到可安全应用的修复，已保留任务并继续重试';
+            if(action==='defer')task.note='暂未找到可安全应用的修复，保留原任务、现场和回执；在有限恢复预算内重新核对';
             if(action!=='defer'){
               task.note=action==='retry'?'诊断完成，正在重试原任务':'已调整本次请求，继续原任务';task.nextCheckAt=this.clock()+1000;await this.save(task);this.schedule(25);return;
             }
+          }
+          // A diagnostic budget is also an execution budget for this unchanged
+          // failure. Otherwise the scheduler repeats forever after diagnosis stops.
+          if(attempts>=2||recent.length>=4){
+            task.status='needs_attention';
+            if(actionRun)actionRun.status='needs_attention';
+            task.note='同一异常的恢复未取得有效进展，已保留原任务和回执；请补充必要信息或明确恢复后继续：'+error.message;
+            if(task.state.selfRepair)task.state.selfRepair.status='exhausted';
+            if(actionRun)actionRun.note=task.note;
+            await this.reportProgress(task,progress,actionId,task.note);
           }
         }
         if(error.code==='E_PERMISSION_REQUIRED'){task.state.missingPermissions=error.missing;task.state.permissionRequest=error.permissionRequest;}
