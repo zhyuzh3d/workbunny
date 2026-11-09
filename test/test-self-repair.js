@@ -36,7 +36,7 @@ test('unknown writes never trigger autonomous diagnostic replay',async()=>{
  const original=h.tools.get('test.write');h.tools.tools.set('test.write',{...original,execute:async()=>{throw Error('unknown receipt');}});const {id}=await h.start();await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).status,'needs_attention');assert.equal(diagnostics,0);await h.runtime.tick(id);assert.equal(diagnostics,0);await h.runtime.close();
 });
 test('diagnostic attempts are bounded and explicit pause cancels a pending repair',async()=>{
- let diagnostics=0;const h=harness(async()=>{throw Object.assign(Error('bad'),{code:'E_CONTEXT_WINDOW'});},async()=>{diagnostics++;return {action:'compact_context',source:'llm'};});const {id}=await h.start();for(let i=0;i<4;i++)await h.runtime.tick(id);assert.equal(diagnostics,2);assert.equal(h.runtime.tasks.get(id).state.selfRepair.attempts,2);await h.runtime.close();
+ let diagnostics=0;const h=harness(async()=>{throw Object.assign(Error('bad'),{code:'E_CONTEXT_WINDOW'});},async()=>{diagnostics++;return {action:'compact_context',source:'llm'};});const {id}=await h.start();for(let i=0;i<8;i++){await h.runtime.tick(id);h.advance();}assert.equal(diagnostics,3);assert.equal(h.runtime.tasks.get(id).state.selfRepair.attempts,3);await h.runtime.close();
  let entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r),h2=harness(async()=>{throw Object.assign(Error('bad'),{code:'E_MODEL_SCHEMA'});},async()=>{entered();await gate;return {action:'repair_schema',source:'llm'};});const started=await h2.start(),tick=h2.runtime.tick(started.id);await at;await h2.runtime.control('pause',started.id);release();await tick;assert.equal(h2.runtime.tasks.get(started.id).status,'paused');assert.equal(h2.runtime.tasks.get(started.id).state.selfRepair.status,'diagnosing');await h2.runtime.close();
 });
 test('ordinary dialogue applies the same bounded repair without exposing its original message to diagnosis',async()=>{
@@ -83,12 +83,12 @@ test('broker response caps shrink the request while output truncation can expand
 test('an unchanged failure stops execution after its repair budget, retains pending work, and reports attention',async()=>{
  let executions=0,diagnoses=0;const reports=[],h=harness(async({task})=>{executions++;task.state.stepSequence=(task.state.stepSequence||0)+1;throw Object.assign(Error('route evidence unavailable'),{code:'E_WORKBUDDY_ROUTE_UNVERIFIED'});},async()=>{diagnoses++;return {action:'retry',source:'llm'};});h.runtime.report=async r=>reports.push(r);
  const {id}=await h.start();await h.runtime.enqueue(id,{key:'pending',text:'preserve this request'});
- for(let i=0;i<8;i++)await h.runtime.tick(id);
- const task=h.runtime.tasks.get(id);assert.equal(executions,3);assert.equal(diagnoses,2);assert.equal(task.status,'needs_attention');assert.equal(task.state.selfRepair.status,'exhausted');assert.equal(task.inbox[0].key,'pending');assert.equal(reports.length,1);assert.match(task.note,/必要信息|恢复/);
- assert((await h.runtime.control('resume',id)).ok);await h.runtime.tick(id);assert.equal(executions,4);await h.runtime.close();
+ for(let i=0;i<8;i++){await h.runtime.tick(id);h.advance();}
+ const task=h.runtime.tasks.get(id);assert.equal(executions,4);assert.equal(diagnoses,3);assert.equal(task.status,'needs_attention');assert.equal(task.state.selfRepair.status,'exhausted');assert.equal(task.inbox[0].key,'pending');assert.equal(reports.length,1);assert.match(task.note,/必要信息|恢复/);
+ assert((await h.runtime.control('resume',id)).ok);await h.runtime.tick(id);assert.equal(executions,5);await h.runtime.close();
 });
 test('diagnostic defer permits bounded reobservation before escalating the unchanged failure',async()=>{
- let executions=0;const h=harness(async()=>{executions++;throw Error('missing observation');},async()=>({action:'defer',source:'llm'}));const {id}=await h.start();for(let i=0;i<4;i++)await h.runtime.tick(id);assert.equal(executions,3);assert.equal(h.runtime.tasks.get(id).status,'needs_attention');assert.equal(h.runtime.tasks.get(id).state.selfRepair.status,'exhausted');await h.runtime.close();
+ let executions=0;const h=harness(async()=>{executions++;throw Error('missing observation');},async()=>({action:'defer',source:'llm'}));const {id}=await h.start();for(let i=0;i<8;i++){await h.runtime.tick(id);h.advance();}assert.equal(executions,4);assert.equal(h.runtime.tasks.get(id).status,'needs_attention');assert.equal(h.runtime.tasks.get(id).state.selfRepair.status,'exhausted');await h.runtime.close();
 });
 test('new external facts permit a new recovery decision while repeated errors do not reset its budget',async()=>{
  let phase=0,diagnoses=0;const h=harness(async({progress})=>{progress.observe('observe',{actualPage:phase});progress.observe('failed-method',{error:'E_REPEATED'});throw Error('same failure');},async()=>{diagnoses++;return {action:'retry',source:'llm'};});

@@ -38,8 +38,10 @@ async function excludeAncestorRows(memory,rows,{scene,excludeTaskId,clock=Date.n
  const current=()=>memory.ready!==false&&memory.generation===generation&&memory.sceneEpoch===sceneEpoch;
  const unavailable=(id,reason)=>{unknown.add(id);graph.set(id,[]);reasons.add(reason);};
  const register=async row=>{
+  const claimsInnate=row?.value?.origin==='innate'||String(row?.id||'').startsWith('innate:')||row?.value?.schema==='bunny.innate/v1';
+  let trustedInnate=false;if(claimsInnate){try{trustedInnate=await memory.innateExperiences?.verifySource?.(row)===true;}catch{}if(!trustedInnate){if(row?.id)unavailable(row.id,'lineage-source-unavailable');return;}}
   let visible=false;try{visible=canRead(scene,row);}catch{}
-  if(!row||row.state!=='active'||!visible||row.expiresAt&&row.expiresAt<=clock()||!row.value||typeof row.value!=='object'||row.value.type==='pack'&&row.value.status!=='committed'){if(row?.id)unavailable(row.id,'lineage-source-unavailable');return;}
+  if(!row||row.state!=='active'||!visible||row.expiresAt&&row.expiresAt<=clock()||!row.value||typeof row.value!=='object'||row.value.type==='pack'&&row.value.status!=='committed'&&!trustedInnate){if(row?.id)unavailable(row.id,'lineage-source-unavailable');return;}
   if(!await validateProof(row)){unavailable(row.id,'lineage-proof-unavailable');return;}
   const sources=row.value.sources===undefined?[]:row.value.sources;
   if(!Array.isArray(sources)||sources.length>200||sources.some(id=>typeof id!=='string'||!id||id.length>256)){unavailable(row.id,'lineage-source-invalid');return;}

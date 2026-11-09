@@ -64,7 +64,7 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if (hasWords) onError(message, metadata);
   }
   function fresh(at) { return { id: ++serial, segments: [], partial: '', finalized: false, awaitingAudioFinal: false,
-    lastTextAt: at, lastAudioActiveAt: null, remembered: false, skipped: false, request: null, gateClosedAt: null, gateTimer: null }; }
+    awaitingAudioSource: null, lastTextAt: at, lastAudioActiveAt: null, remembered: false, skipped: false, request: null, gateClosedAt: null, gateTimer: null }; }
   function updateGate(t, reasonCode = reasons.none) {
     if (!accepted(t)) return;
     if (commitReady(t)) {
@@ -132,7 +132,7 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if (!text) return;
     rejectedPartialKey = null;
     if (current?.finalized && !current.partial && contentKey(current.segments.at(-1)) === contentKey(text)) {
-      if (current.awaitingAudioFinal) { current.awaitingAudioFinal = false; trace('turn-final'); onLive(textOf(current), { final: true, pending: accepted(current) }); schedule(); }
+      if (current.awaitingAudioFinal) { current.awaitingAudioFinal = false; current.awaitingAudioSource = null; trace('turn-final'); onLive(textOf(current), { final: true, pending: accepted(current) }); schedule(); }
       return;
     }
     if (current?.remembered || current?.skipped) { invalidate(current, reasons.next); current = null; }
@@ -141,7 +141,7 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if (changed || current.partial) invalidate(current, reasons.text);
     if (changed) current.lastTextAt = now();
     if (current.segments.at(-1) !== text || current.partial) current.segments.push(text);
-    current.partial = ''; current.finalized = true; current.awaitingAudioFinal = false;
+    current.partial = ''; current.finalized = true; current.awaitingAudioFinal = false; current.awaitingAudioSource = null;
     trace('turn-final'); onLive(textOf(current), { final: true, pending: !!current.request }); schedule();
   }
   function activity(meta) {
@@ -161,6 +161,10 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if (latestActivity && next.sourceGen > latestActivity.sourceGen) rejectedPartialKey = null;
     latestActivity = next; clearTimer(activityTimer);
     if (current && next.state === 'active') {
+      // Retain the first uncovered source. A later empty segment cannot
+      // cover an earlier segment whose words were rejected by input filters.
+      if (!current.awaitingAudioFinal) current.awaitingAudioSource = { recognizer: next.recognizer, sourceGen: next.sourceGen,
+        previousActiveAt: current.lastAudioActiveAt };
       current.lastAudioActiveAt = clock; current.awaitingAudioFinal = true;
     }
     if (accepted(current)) updateGate(current, next.state === 'active' ? reasons.active : next.state === 'unknown' ? reasons.unknown : reasons.stale);
@@ -170,7 +174,23 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     }, Math.max(0, next.at + activityFreshMs + 1 - clock));
     schedule(); return valid;
   }
-  return { partial, final, activity, reset,
+  function audioFinal(meta) {
+    // Only the native finalizer's empty, fully drained successor may cover
+    // raw activity. It cannot add words, authenticate input, clear a partial,
+    // resurrect a cancelled turn, or cover newer/out-of-order audio.
+    if (!current?.finalized || current.partial || !current.awaitingAudioFinal || !latestActivity ||
+        !meta || !['recognizer', 'sourceGen', 'coveredSeq'].every(key => Number.isSafeInteger(meta[key]) && meta[key] >= 0) ||
+        meta.recognizer !== current.awaitingAudioSource?.recognizer || meta.sourceGen !== current.awaitingAudioSource?.sourceGen ||
+        meta.recognizer !== latestActivity.recognizer || meta.sourceGen !== latestActivity.sourceGen ||
+        meta.coveredSeq !== latestActivity.seq || latestActivity.state !== 'quiet') return false;
+    // Proven-empty audio must stop extending the semantic seal too. Otherwise
+    // its now-covered activity can push the three-second seal beyond the
+    // unchanged eight-second text deadline and cancel already confirmed words.
+    // Restore the prior boundary; real speech still retains its original seal.
+    current.lastAudioActiveAt = current.awaitingAudioSource.previousActiveAt;
+    current.awaitingAudioFinal = false; current.awaitingAudioSource = null; trace('turn-audio-final'); schedule(); return true;
+  }
+  return { partial, final, activity, audioFinal, reset,
     recognizerStopped: ({ graceful = false } = {}) => {
       if (!current) return;
       if (graceful && !accepted(current) && current.finalized && !current.awaitingAudioFinal) {

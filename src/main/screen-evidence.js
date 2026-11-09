@@ -32,4 +32,20 @@ function sameActionTarget(bitmap,first,second,action,anchor){
   return sameTargetRegion(bitmap,frame(first),frame(second),row)&&
     sameTargetRegion(bitmap,frame(first),frame(second),{x:.1,y:0,width:.8,height:.13},.001);
 }
-module.exports={sameTargetRegion,sameActionTarget};
+// Change detection, not semantic recognition. Regions come from a visual
+// model; a few changed pixels in a small status area must not disappear in a
+// whole-screen percentage. Overlapping regions count each pixel only once.
+function regionsChanged(bitmap,first,second,regions,minChangedPixels=3){
+ try{
+  const a=bitmap(Buffer.from(first.pngBase64,'base64')),b=bitmap(Buffer.from(second.pngBase64,'base64'));
+  if(!a?.data||!b?.data||a.width!==b.width||a.height!==b.height||a.data.length<a.width*a.height*4||b.data.length<b.width*b.height*4)return true;
+  const seen=new Uint8Array(a.width*a.height);let changed=0;
+  for(const r of regions){if(!r||!['x','y','width','height'].every(k=>Number.isFinite(r[k]))||r.x<0||r.y<0||r.width<=0||r.height<=0||r.x+r.width>1||r.y+r.height>1)return true;
+   for(let y=Math.floor(r.y*a.height);y<Math.ceil((r.y+r.height)*a.height);y++)for(let x=Math.floor(r.x*a.width);x<Math.ceil((r.x+r.width)*a.width);x++){
+    const pixel=y*a.width+x;if(seen[pixel])continue;seen[pixel]=1;const i=pixel*4;
+    if(Math.max(Math.abs(a.data[i]-b.data[i]),Math.abs(a.data[i+1]-b.data[i+1]),Math.abs(a.data[i+2]-b.data[i+2]))>24&&++changed>=minChangedPixels)return true;
+   }
+  }return false;
+ }catch{return true;}
+}
+module.exports={sameTargetRegion,sameActionTarget,regionsChanged};

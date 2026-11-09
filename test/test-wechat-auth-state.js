@@ -13,8 +13,9 @@ test('legacy notification and direct desktop routes share the circuit before act
  const calls=[],svc=new DesktopService({native:{request:async op=>calls.push(op)},beforeWeChat:async()=>{throw Object.assign(Error('微信已暂停'),{code:'E_APP_CIRCUIT',dispatched:false});}});svc.running=true;svc.task={id:'auth-fixture',scene:'life',domain:'life',visibilityFloor:1,steps:[]};
  await assert.rejects(svc.runOwned(0,{target:'wechat'}),e=>e.code==='E_APP_CIRCUIT');assert.deepEqual(calls,[]);
 });
-test('legacy visual route rejects a login click and propagates the shared fault before any native input',async()=>{
+test('visual route rejects a login click and propagates the shared fault before any native input',async()=>{
  const calls=[],faults=[],svc=new DesktopService({native:{request:async op=>calls.push(op)},onWeChatUnavailable:async reason=>faults.push(reason)});
- await assert.rejects(svc.act({action:'click',x:.5,y:.5},{bundleId:'com.tencent.xinWeChat'},{ocr:[row('进入微信')]},0),e=>e.code==='E_APP_CIRCUIT'&&e.dispatched===false);
+ svc.running=true;svc.task={target:'wechat',recipient:'Alice',scene:'life',domain:'life',visibilityFloor:1};svc.visualSessions=new Map([['wechat',{identity:()=>({mode:'visual',sessionId:'fixture'}),anchor:{software:'微信'}}]]);
+ await assert.rejects(svc.act({action:'click',x:.5,y:.5},{mode:'visual',sessionId:'fixture'},{ocr:[row('进入微信')]},svc.generation),e=>e.code==='E_APP_CIRCUIT'&&e.dispatched===false);
  assert.equal(calls.length,0);assert.equal(faults.length,1);
 });

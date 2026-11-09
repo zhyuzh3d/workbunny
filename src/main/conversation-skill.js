@@ -16,6 +16,10 @@ function validateConversationParameters(spec){
 function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurrent=()=>true,selfChannel=()=>false,observationBlocked=()=>false,ownerBindings=()=>false,sentMessages=()=>[]}){
   return {
     id:'conversation.manage',title:'会话代管',version:1,subjectApplications:['wechat'],description:'持续照看指定会话、按上下文回复、主动询问并跟进主人目标，或接收已绑定主人通道的交办。',
+    activeAction:task=>task.subjects.some(subject=>{
+      const state=task.state.conversations?.[subjectKey(subject)];
+      return !state?.cursor?.ready||task.parameters.behavior==='inquiry'&&(!state.introduced||(task.state.goalRevision||0)>(state.goalRevision||0));
+    })?'prepare:'+(task.state.goalRevision||0):null,
     parameters:{behavior:'notify只通知 / reply等来信再回复 / inquiry主动开口问清目标 / owner已绑定主人',questions:'可选问题列表',language:'可选交流语言',openingMessage:'可选指定开场原文',minReplySeconds:'仅主人明确要求间隔时填写10到300秒，否则省略并尽快回复'},
     tools:['conversation.observe','conversation.open','conversation.transcribe','conversation.send','memory.related','owner.dispatch',...(channelDialogue?['conversation.save']:[])],
     capabilities:['screen.read','screen.input','conversation.read','conversation.send','memory.read','owner.command'],
@@ -163,6 +167,7 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
         // Persist the decision before waiting or sending, so a busy desktop does
         // not lose a message and retries do not create a different reply.
         event.decision=decision;event.decisionAt??=clock();const queued=task.inbox.find(e=>e.key===event.key);if(queued){queued.decision=decision;queued.decisionAt=event.decisionAt;}await checkpoint();
+        if(decision.selfSuspension)return {status:'paused',selfSuspension:decision.selfSuspension,assessment:decision.assessment,consumeEvent:false,state:task.state};
         if(decision.decision==='ignore'){state.summary=decision.summary||state.summary;state.ignored=(state.ignored||0)+incoming.length;return wait('已按规则忽略广告或无需处理的消息');}
         if(decision.decision==='notify'){
           await report(`${subject.recipient} 的消息需要你处理：${decision.summary}`,event.key);return wait('已向主人汇报需要处理的事项');
@@ -243,7 +248,7 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
         if(delta.messages.length){
           // Cursor advancement and its new event are persisted in one snapshot.
           const queued = await enqueue({key:`conversation:${key}:${nextCursor.sequence}`,subjectKey:key,type:'conversation.messages',ownerChannel,messages:delta.messages},
-            { advance, current: () => !signal?.aborted && task.state.conversations?.[key]?.cursor === priorCursor });
+            { advance,recoveryEvidence:delta.messages.some(message=>message.incomingVerified===true||message.observedVerified===true||message.voiceVerified===true),current: () => !signal?.aborted && task.state.conversations?.[key]?.cursor === priorCursor });
           if (!queued?.ok) throw Error(queued?.error || '新来信尚未入队，保留观察位置');
         } else { advance(task); await checkpoint(); }
         if(openingPending&&state.cursor.ready&&!ctx.observeOnly){

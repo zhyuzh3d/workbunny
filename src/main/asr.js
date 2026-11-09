@@ -182,6 +182,10 @@ class Asr extends EventEmitter {
       case 'activity':
         this.emit('activity', this.activityClock(m, this.traceRecognizer));
         break;
+      case 'audioFinal':
+        if (Number.isSafeInteger(m.gen) && m.gen >= 0 && Number.isSafeInteger(m.coveredSeq) && m.coveredSeq > 0)
+          this.emit('audioFinal', { sourceGen: m.gen, coveredSeq: m.coveredSeq, recognizer: this.traceRecognizer });
+        break;
       case 'speechTrace': {
         this.emitSpeechTrace(m);
         break;

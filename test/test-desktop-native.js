@@ -28,6 +28,19 @@ function fixture(options = {}) {
   } });
   return { client, children };
 }
+test('pure display native entry points contain no application or window discovery',()=>{
+ const source=fs.readFileSync(require.resolve('../native/desktop.swift'),'utf8');
+ const capture=source.slice(source.indexOf('func captureDisplayPixels('),source.indexOf('func capture(_ request:'));
+ const input=source.slice(source.indexOf('func displayInput('),source.indexOf('func perform('));
+ for(const body of [capture,input])assert.doesNotMatch(body,/windowEntries\(|currentFrontmost\(|targetWindow\(|AXUIElement|NSRunningApplication|postToPid/);
+ assert.match(capture,/Set\(request.keys\).isSubset/);assert.match(input,/Set\(request.keys\).isSubset/);
+});
+test('new native pixel entry points reject target metadata before capturing or dispatching',t=>{
+ const binary=process.env.WORKBUNNY_NATIVE_TEST_BINARY;if(!binary)return t.skip('requires the coordinated temporary native build');
+ for(const op of ['displayCapture','displayInput'])for(const forbidden of [{windowId:1},{pid:1},{bundleId:'fixture.target'},{expected:{bundleId:'fixture.target',pid:1}}]){
+  const request={id:'forbidden',op,...(op==='displayCapture'?{output:'base64'}:{action:'click',visualEvidence:{}}),...forbidden,sentAtMs:Date.now(),timeoutMs:1000},run=spawnSync(binary,[],{encoding:'utf8',timeout:3000,input:JSON.stringify(request)+'\n'});assert.equal(run.status,0,run.stderr);const response=JSON.parse(run.stdout.trim());assert.equal(response.ok,false);assert.match(response.error,/不接受应用、窗口或界面参数/);assert.equal(response.dispatched,false);
+ }
+});
 
 test('JSONL client correlates concurrent requests and resolves native responses', async () => {
   const { client, children } = fixture();
@@ -127,15 +140,13 @@ test('Unicode chunks iterate scalar values and revalidate focus before each type
   assert.match(source, /for item in plan \{\s*let \(currentId, _\) = try validateActionContext\(request\)/);
 });
 
-test('capture disables shadows and cursor and writes screenshot files with no-follow private modes', () => {
+test('environment screenshots exclusively use CG display pixels and retain private screenshot files', () => {
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
-  assert.match(source, /config\.showsCursor = false/);
-  assert.match(source, /config\.ignoreShadowsSingleWindow = true/);
-  assert.match(source, /config\.ignoreShadowsDisplay = true/);
-  assert.match(source, /filter\.pointPixelScale/);
-  assert.match(source, /config\.scalesToFit = true/);
-  assert.match(source, /config\.preservesAspectRatio = true/);
-  assert.match(source, /func capturePixelSize\(rect: CGRect, pointPixelScale: CGFloat\)/);
+  assert.match(source, /CGDisplayStream.showCursor: false/);
+  assert.doesNotMatch(source, /ScreenCaptureKit|SCScreenshotManager|SCShareableContent|SCStream|AVCaptureScreenInput|AVCaptureSession/);
+  assert.match(source, /E_CG_CAPTURE_UNAVAILABLE/);
+  assert.match(source, /E_CG_CAPTURE_TIMEOUT/);
+  assert.match(source, /defer \{ stream.stop\(\)/);
   assert.match(source, /open\(\$0, O_RDONLY \| O_DIRECTORY \| O_NOFOLLOW\)/);
   assert.match(source, /O_WRONLY \| O_CREAT \| O_EXCL \| O_NOFOLLOW, 0o600/);
 });
@@ -144,7 +155,7 @@ test('locked-session guard covers capture, activate, and all input actions; perm
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   assert.match(source, /session\["CGSSessionScreenIsLocked"\]/);
   assert.match(source, /"sessionLocked": sessionLocked\(\)/);
-  assert.equal((source.match(/guard !sessionLocked\(\) else \{ throw DesktopError\(message: "电脑已锁屏，请解锁后重试"\) \}/g) || []).length, 7);
+  assert.match(source.slice(source.indexOf('func capture(_ request:'), source.indexOf('struct VisualROI:')), /guard !sessionLocked\(\)/);
   assert.match(source, /DispatchQueue\.global\(qos: \.userInitiated\)\.async/);
   assert.match(source, /RunLoop\.main\.run\(mode: \.default, before: Date\(timeIntervalSinceNow: 0\.1\)\)/);
 });
@@ -161,14 +172,14 @@ test('type plans reject implicit newlines and controls, emit explicit soft break
   const result = JSON.parse(run.stdout.trim());
   assert.equal(result.selfTest, 'native');
   assert.deepEqual(result.capturePixelSize, [840, 630]);
-  assert.equal(result.windowFit, true);
+  assert.equal(result.captureBackend, 'CGDisplayStream');
   assert.deepEqual(result.rectCases, ['CGWindowBounds', 'lowercase']);
   assert.equal(result.invalidRectsRejected, 5);
   assert.deepEqual(result.multilineEvents, ['text:A', 'shiftEnter', 'text:B', 'shiftEnter', 'text:C']);
   assert.deepEqual(result.surrogateChunkSizes, [19, 3]);
 });
 
-test('generic visual sampling is bounded, commit-based, and never queries application UI', () => {
+test('legacy window sampling is disabled while bounded pixel comparison helpers remain available', () => {
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   const visual = source.slice(source.indexOf('func captureVisualFrame('), source.indexOf('func recognizePNG('));
   assert.match(source, /func normalizedVisualRegions\(_ value: Any\?, defaultMinChangedRatio: Double = 0\.001\)/);
@@ -184,14 +195,14 @@ test('generic visual sampling is bounded, commit-based, and never queries applic
   assert.match(source, /if shouldIncludeVisualImage\(changed: changed, reset: reset/);
   assert.match(source, /shouldIncludeVisualImage\(changed: changed, reset: reset, geometryChanged: geometryChanged,[\s\S]{0,120}hasBaseline: hasBaseline/);
   assert.match(source, /NSRunningApplication\(processIdentifier: pid_t\(pid\)\)\?\.bundleIdentifier/);
-  assert.match(source, /case "visualSample": return try visualSample\(request\)/);
+  assert.match(source, /case "visualSample": throw DesktopError\(message:[^\n]+E_LEGACY_CAPTURE_DISABLED/);
   assert.doesNotMatch(visual, /AXUIElement|AppleScript|NSWorkspace\.shared\.frontmostApplication/);
   assert.match(source, /CGEventSource\.secondsSinceLastEventType\(\.hidSystemState, eventType: anyInput\)/);
   assert.match(source, /CGEventSource\.secondsSinceLastEventType\(\.combinedSessionState, eventType: anyInput\)/);
   const run = spawnSync(nativeTestBinary(), ['--self-test-visual'], { encoding: 'utf8', timeout: 5000 });
   assert.equal(run.status, 0, run.stderr || run.stdout);
   const result = JSON.parse(run.stdout.trim());
-  assert.equal(result.visualSample, true);
+  assert.equal(result.legacyVisualSampleDisabled, true);
   assert.equal(result.visualCapacity, 8);
   assert.equal(result.inputIdleReadOnly, true);
   assert.deepEqual(result.syntheticSidebarBadgePixels, [4, 12, 18]);
@@ -335,7 +346,7 @@ test('stdin errors reject pending requests and response lines have a byte limit'
 
 test('capture timeout reaps bridge and retries once; input is never replayed', async () => {
   const { client, children } = fixture();
-  const result = client.request('capture', { windowId: 7 }, 1000);
+  const result = client.request('capture', { output: 'base64', region: {x: 0, y: 0, width: 20, height: 20} }, 1000);
   const first = children[0];
   first.kill = () => { process.nextTick(() => first.emit('close', null, 'SIGTERM')); return true; };
   const firstRequest = JSON.parse(first.lines[0]);
@@ -345,7 +356,8 @@ test('capture timeout reaps bridge and retries once; input is never replayed', a
   const second = children[1];
   const secondRequest = JSON.parse(second.lines[0]);
   assert.equal(secondRequest.op, 'capture');
-  assert.equal(secondRequest.captureMode, 'displayCrop');
+  assert.equal(Object.hasOwn(secondRequest, 'captureMode'), false);
+  assert.deepEqual(secondRequest.region, {x: 0, y: 0, width: 20, height: 20});
   second.stdout.write(JSON.stringify({ id: secondRequest.id, ok: true, result: { width: 20 } }) + '\n');
   assert.deepEqual(await result, { width: 20 });
   const write = client.request('type', { text: 'x' }, 1000);
@@ -356,10 +368,16 @@ test('capture timeout reaps bridge and retries once; input is never replayed', a
   second.kill = () => { process.nextTick(() => second.emit('close', null, 'SIGTERM')); return true; };
   await client.close();
 });
+test('display pixel timeout retries the same display-only request and never replays input or falls back to a window API',async()=>{
+ const {client,children}=fixture(),result=client.request('displayCapture',{output:'base64'},1000),first=children[0];first.kill=()=>process.nextTick(()=>first.emit('close',null,'SIGTERM'));
+ first.stdout.write(JSON.stringify({id:JSON.parse(first.lines[0]).id,ok:false,error:'截图请求超时：显示像素'})+'\n');await new Promise(resolve=>setImmediate(resolve));assert.equal(children.length,2);
+ const second=children[1],request=JSON.parse(second.lines[0]);assert.equal(request.op,'displayCapture');assert.equal(request.output,'base64');for(const key of ['windowId','expected','bundleId','pid','captureMode'])assert.equal(Object.hasOwn(request,key),false);
+ second.stdout.write(JSON.stringify({id:request.id,ok:true,result:{frame:2}})+'\n');assert.deepEqual(await result,{frame:2});const input=client.request('displayInput',{action:'key'},1000),write=JSON.parse(second.lines.at(-1));second.stdout.write(JSON.stringify({id:write.id,ok:false,error:'截图请求超时：输入回执缺失'})+'\n');await assert.rejects(input,/输入回执缺失/);assert.equal(children.length,2);second.kill=()=>process.nextTick(()=>second.emit('close',0));await client.close();
+});
 
 test('second capture timeout reaps bridge without a third attempt', async () => {
   const { client, children } = fixture();
-  const result = client.request('capture', { windowId: 7 }, 1000);
+  const result = client.request('capture', { output: 'base64', region: {x: 0, y: 0, width: 20, height: 20} }, 1000);
   const fail = child => {
     child.kill = () => { process.nextTick(() => child.emit('close', null, 'SIGTERM')); return true; };
     const request = JSON.parse(child.lines[0]);
@@ -375,7 +393,7 @@ test('second capture timeout reaps bridge without a third attempt', async () => 
 
 test('captureUnavailable is propagated and does not retry or emit input', async () => {
   const { client, children } = fixture();
-  const pending = client.request('capture', { windowId: 7 }, 1000);
+  const pending = client.request('capture', { output: 'base64', region: {x: 0, y: 0, width: 20, height: 20} }, 1000);
   const child = children[0];
   const request = JSON.parse(child.lines[0]);
   child.stdout.write(JSON.stringify({ id: request.id, ok: false, code: 'captureUnavailable', error: '当前窗口截图不可用或受到系统截图限制；已停止视觉操作' }) + '\n');
@@ -384,4 +402,18 @@ test('captureUnavailable is propagated and does not retry or emit input', async 
   assert.equal(child.lines.length, 1);
   child.kill = () => { process.nextTick(() => child.emit('close', null, 'SIGTERM')); return true; };
   await client.close();
+});
+
+
+test('legacy native screenshot requests fail before any permission or target discovery', t => {
+  const binary = process.env.WORKBUNNY_NATIVE_TEST_BINARY;
+  if (!binary) return t.skip('requires the coordinated temporary native build');
+  for (const body of [{op:'capture',windowId:1},{op:'capture',pid:1},{op:'capture',captureMode:'displayCrop'},{op:'visualSample',windowId:1,sampleId:'legacy'}]) {
+    const run = spawnSync(binary, [], {encoding:'utf8',timeout:3000,input:JSON.stringify({id:'legacy',sentAtMs:Date.now(),timeoutMs:1000,...body})+'\n'});
+    assert.equal(run.status, 0, run.stderr);
+    const response=JSON.parse(run.stdout.trim());
+    assert.equal(response.ok, false);
+    assert.equal(response.code, 'E_LEGACY_CAPTURE_DISABLED');
+    assert.equal(response.dispatched, false);
+  }
 });

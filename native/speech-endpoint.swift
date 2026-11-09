@@ -104,9 +104,12 @@ struct SpeechEndpointPolicy {
         guard generation == self.generation else { return .wait }
         guard validConfiguration, now.isFinite, now >= healthAt else { return .unconfirmed }
         if now - healthAt >= vadHealthTimeoutSeconds { return .unconfirmed }
-        if hasText, hasObservedActive, evidence(at: now, generation: generation) == .quiet,
-           quietSeconds + 1e-9 >= silenceSeconds, let changedAt = lastTextChangeAt,
-           now - changedAt + 1e-9 >= silenceSeconds { return .quiet }
+        // A successor may observe a brief sound without recognizing words.
+        // It still needs a real finalizer/results barrier to cover that audio;
+        // otherwise the host can never confirm the preceding spoken turn.
+        if hasObservedActive, evidence(at: now, generation: generation) == .quiet,
+           quietSeconds + 1e-9 >= silenceSeconds,
+           lastTextChangeAt.map({ now - $0 + 1e-9 >= silenceSeconds }) ?? true { return .quiet }
         if let first = firstTextAt, now - first >= maxSeconds { return .unconfirmed }
         return .wait
     }
@@ -203,6 +206,12 @@ extension SpeechEndpointPolicy {
         var idle = policy()
         for second in 0...60 { observe(.quiet, Double(second), Double(second), &idle) }
         try check(idle.decision(at: 60, generation: 7) == .wait)
+        var empty = policy()
+        observe(.active, 0, 1, &empty)
+        observe(.quiet, 0.8, 1.8, &empty)
+        try check(empty.decision(at: 1.8, generation: 7) == .wait)
+        observe(.quiet, 1, 2, &empty)
+        try check(!empty.hasText && empty.decision(at: 2, generation: 7) == .quiet)
         idle.recordText("fixture hallucination", at: 59, generation: 7)
         try check(idle.decision(at: 60, generation: 7) == .wait)
         var blind = policy()
@@ -257,6 +266,13 @@ extension SpeechEndpointPolicy {
             try check(barrier.claim(generation: 7) == "fixture final")
             try check(barrier.claim(generation: 7) == nil)
         }
+        var emptyBarrier = SpeechFinalizationBarrier(generation: 7)
+        emptyBarrier.request(at: 1, generation: 7)
+        emptyBarrier.resultsEnded(confirmed: true, text: "", generation: 7)
+        try check(emptyBarrier.claim(generation: 7) == nil)
+        emptyBarrier.finalizerSucceeded(generation: 7)
+        try check(emptyBarrier.claim(generation: 7) == "")
+        try check(emptyBarrier.claim(generation: 7) == nil)
         for reason in [SpeechFinalizationBarrier.Failure.finalizer, .results, .timeout] {
             var barrier = SpeechFinalizationBarrier(generation: 7)
             barrier.request(at: 1, generation: 7)

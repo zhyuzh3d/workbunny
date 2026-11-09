@@ -20,8 +20,8 @@ test('WeChat receives its innate boundary without CLI or UI-tree probing, includ
  const h=fixture(t);h.task.subjects=[{application:'wechat'},{application:'alias'}];
  const result=await h.run('software.inspect',{application:'wechat'});assert.deepEqual(result.methods,['visual']);assert.equal(h.calls.length,0);
  await h.run('software.inspect',{application:'alias',bundleId:'com.tencent.xinWeChat'});assert.equal(h.calls.length,0);
- assert.throws(()=>h.tools.check('software.interface',{application:'wechat'},h.task),/微信/);
- assert.throws(()=>h.tools.check('software.command',{application:'wechat',command:process.execPath,args:[],impact:'read',purpose:'probe'},h.task),/微信/);
+ assert.throws(()=>h.tools.check('software.interface',{application:'wechat'},h.task),/视觉|结构化/);
+ assert.throws(()=>h.tools.check('software.command',{application:'wechat',command:process.execPath,args:[],impact:'read',purpose:'probe'},h.task),/视觉|结构化/);
 });
 test('semantic editing requires a current interface target and an expected old value',async t=>{
  const h=fixture(t);await assert.rejects(h.run('software.control',{application:'demo',role:'AXButton',label:'运行',action:'press'}),/先读取/);

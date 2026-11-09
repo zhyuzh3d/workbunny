@@ -94,3 +94,16 @@ test('a speculative voice stop remains unexecuted until commit and is cancelled 
   assert.equal(f.dispatches.length, 0); c.activeThought.abort(); assert.equal(await pending, null);
   commit(true); await flush(); assert.equal(f.dispatches.length, 0); assert.equal(c.busy, false);
 });
+test('the real shared task-review entry stays pending while the real foreground think accepts voice and replies',async()=>{
+ const f=fixture(),c=f.context,gate=Promise.withResolvers(),entered=Promise.withResolvers();let reviewSignal;
+ c.llm.chat=async options=>{assert.equal(options.priority,'background');reviewSignal=options.signal;entered.resolve();return gate.promise;};
+ const task={id:'synthetic-task',goal:'continue the original goal',criteria:'actual fixture evidence',scene:'work',domain:'work',visibilityFloor:0,
+  authority:{role:'owner',verified:true,sources:['synthetic-owner']},sources:['synthetic-owner'],subjects:[{application:'system'}],state:{},operations:{},actionRuns:{}};
+ const review=c.selfSystem().reviewTask({task,reviewId:'synthetic-review'});await entered.promise;
+ assert.equal(c.busy,false);assert.equal(c.activeThought,null);
+ const voice={accepted:true,canCommit:()=>true,isCurrent:()=>true,waitForCommit:async()=>true,remember:()=>owner('voice-during-review')};
+ const reply=await c.think({userText:'A new accepted voice message',voiceTurn:voice,allowSpeech:false});
+ assert.equal(reply.text,'fresh reply');assert.equal(c.busy,false);assert.equal(reviewSignal.aborted,false);
+ gate.resolve({text:JSON.stringify({type:'continue',rationaleSummary:'Keep the original goal and verify the alternate explanation',sourceRefs:[],guidance:{verificationIdeas:['read the retained fixture evidence']}})});
+ assert.equal((await review).type,'continue');assert.equal(c.busy,false);assert.equal(c.activeThought,null);assert.equal(f.dispatches.length,0);
+});

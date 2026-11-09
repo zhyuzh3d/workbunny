@@ -6,10 +6,9 @@ import ApplicationServices
 import CoreGraphics
 import Darwin
 import Foundation
-import ScreenCaptureKit
 import CoreImage
-import AVFoundation
 import IOSurface
+import CoreVideo
 import Vision
 
 struct DesktopError: LocalizedError {
@@ -1151,58 +1150,6 @@ func writePrivatePNG(_ data: Data) throws -> String {
     }
     return dir.appendingPathComponent("capture.png").path
 }
-final class LegacyScreenshot: NSObject, SCStreamOutput, SCStreamDelegate {
-    let lock = NSLock()
-    var continuation: CheckedContinuation<CGImage, Error>?
-    var stream: SCStream?
-    func finish(_ result: Result<CGImage, Error>) {
-        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
-        guard let c else { return }; c.resume(with: result)
-        if let stream { Task { try? await stream.stopCapture() } }
-    }
-    func stream(_ stream: SCStream, didStopWithError error: Error) { finish(.failure(error)) }
-    func stream(_ stream: SCStream, didOutputSampleBuffer buffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, buffer.isValid,
-              let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-              let status = attachments.first?[.status] as? Int, SCFrameStatus(rawValue: status) == .complete,
-              let pixel = buffer.imageBuffer else { return }
-        let image = CIImage(cvPixelBuffer: pixel)
-        guard let cg = CIContext().createCGImage(image, from: image.extent) else { return }
-        finish(.success(cg))
-    }
-    func capture(filter: SCContentFilter, config: SCStreamConfiguration) async throws -> CGImage {
-        try await withCheckedThrowingContinuation { c in
-            continuation = c
-            let capture = SCStream(filter: filter, configuration: config, delegate: self); stream = capture
-            do {
-                try capture.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "workbunny.capture"))
-                Task { do { try await capture.startCapture() } catch { self.finish(.failure(error)) } }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 8) { self.finish(.failure(DesktopError(message: "截图超时"))) }
-            } catch { finish(.failure(error)) }
-        }
-    }
-}
-func legacyPixelScale(_ rect: CGRect) -> CGFloat {
-    var display = CGMainDisplayID(), count: UInt32 = 0
-    _ = CGGetDisplaysWithRect(rect, 1, &display, &count)
-    return CGFloat(CGDisplayPixelsWide(display)) / max(1, CGDisplayBounds(display).width)
-}
-// A display crop may be used only when the target is the frontmost app and no
-// visible window above it intersects the requested frame. No app UI is read.
-func unobscuredFrontWindow(_ windowId: UInt32) throws -> (Int, CGRect) {
-    let rows = windowEntries()
-    guard let index = rows.firstIndex(where: { ($0["windowId"] as? UInt32) == windowId }),
-          let pid = rows[index]["pid"] as? Int, let rect = rectFrom(rows[index]["rect"]),
-          (rows[index]["layer"] as? Int) == 0,
-          let front = currentFrontmost(), Int(front.processIdentifier) == pid else {
-        throw DesktopError(message: "整屏裁切要求目标窗口属于前台应用")
-    }
-    for row in rows.prefix(index) {
-        guard let other = rectFrom(row["rect"]) else { throw DesktopError(message: "无法核实窗口遮挡") }
-        if rectIntersects(other, rect) { throw DesktopError(message: "目标窗口可能被遮挡，不能使用整屏裁切") }
-    }
-    return (pid, rect)
-}
 func displayCropPixelRect(_ rect: CGRect, displayRect: CGRect, imageWidth: Int, imageHeight: Int) -> CGRect? {
     guard displayRect.width > 0, displayRect.height > 0, displayRect.contains(rect), imageWidth > 0, imageHeight > 0 else { return nil }
     let sx = CGFloat(imageWidth) / displayRect.width, sy = CGFloat(imageHeight) / displayRect.height
@@ -1214,97 +1161,12 @@ func displayCropPixelRect(_ rect: CGRect, displayRect: CGRect, imageWidth: Int, 
           result.maxX <= CGFloat(imageWidth), result.maxY <= CGFloat(imageHeight) else { return nil }
     return result
 }
-func displayCropSharingAllowed(_ sharing: Int?) -> Bool { sharing != nil && sharing != 0 }
-func captureDisplayCrop(_ windowId: UInt32, content: SCShareableContent) async throws -> (CGImage, CGRect) {
-    // Sharing metadata alone must never reject a successful window capture.
-    // After that capture fails/times out, however, a non-shared or unknown
-    // window cannot be safely reconstructed from pixels of the desktop behind it.
-    let sharing = windowEntries().first(where: { ($0["windowId"] as? UInt32) == windowId })?["sharingState"] as? Int
-    guard displayCropSharingAllowed(sharing) else {
-        throw CaptureUnavailableError(message: "当前窗口截图不可用或受到系统截图限制；已停止视觉操作")
-    }
-    let (pid, rect) = try unobscuredFrontWindow(windowId)
-    guard let display = content.displays.first(where: { CGDisplayBounds($0.displayID).contains(rect) }) else {
-        throw DesktopError(message: "目标窗口跨显示器或不在可用显示器内，不能整屏裁切")
-    }
-    let displayRect = CGDisplayBounds(display.displayID)
-    guard displayRect.width > 0, displayRect.height > 0 else { throw DesktopError(message: "显示器几何无效") }
-    let filter = SCContentFilter(display: display, excludingWindows: [])
-    let config = makeCaptureConfiguration(width: display.width, height: display.height, fitWindow: false)
-    let image: CGImage
-    if #available(macOS 14.0, *) { image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) }
-    else { image = try await LegacyScreenshot().capture(filter: filter, config: config) }
-    let (afterPID, afterRect) = try unobscuredFrontWindow(windowId)
-    guard afterPID == pid, rectsMatch(rect, afterRect), image.width > 0, image.height > 0 else {
-        throw DesktopError(message: "整屏截图期间目标窗口或几何已变化")
-    }
-    guard let pixelRect = displayCropPixelRect(rect, displayRect: displayRect, imageWidth: image.width, imageHeight: image.height),
-          let cropped = image.cropping(to: pixelRect), cropped.width > 0, cropped.height > 0 else {
-        throw DesktopError(message: "整屏截图裁切尺寸或坐标无效")
-    }
-    return (cropped, rect)
-}
-func captureImage(_ windowId: UInt32?, preferDisplayCrop: Bool = false, stage: @escaping (String) -> Void = { _ in }) async throws -> (CGImage, CGRect) {
-    stage("窗口枚举")
-    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-    if preferDisplayCrop, let windowId { stage("整屏采集"); return try await captureDisplayCrop(windowId, content: content) }
-    let filter: SCContentFilter
-    let rect: CGRect
-    let width: Int
-    let height: Int
-    var fitsWindow = false
-    if let windowId {
-        guard let window = content.windows.first(where: { $0.windowID == windowId }) else { throw DesktopError(message: "目标窗口已关闭或不可见") }
-        guard let row = windowEntries().first(where: { ($0["windowId"] as? UInt32) == windowId }),
-              let cgRect = rectFrom(row["rect"]) else { throw DesktopError(message: "目标窗口几何信息不可用") }
-        filter = SCContentFilter(desktopIndependentWindow: window)
-        // Use the same CGRect source exposed by frontmost.windows so callers can
-        // map desktop points to the captured image without a second origin system.
-        rect = cgRect
-        guard let size = capturePixelSize(rect: rect, pointPixelScale: ( { if #available(macOS 14.0, *) { return CGFloat(filter.pointPixelScale) }; return legacyPixelScale(rect) }() )) else {
-            throw DesktopError(message: "目标窗口截图尺寸无效")
-        }
-        width = size.width; height = size.height
-        fitsWindow = true
-    } else {
-        guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first else {
-            throw DesktopError(message: "找不到可用显示器")
-        }
-        filter = SCContentFilter(display: display, excludingWindows: [])
-        rect = CGDisplayBounds(display.displayID)
-        width = display.width; height = display.height
-    }
-    let config = makeCaptureConfiguration(width: width, height: height, fitWindow: fitsWindow)
-    let image: CGImage
-    stage("图像采集")
-    do {
-        if #available(macOS 14.0, *) { image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) }
-        else { image = try await LegacyScreenshot().capture(filter: filter, config: config) }
-    } catch {
-        guard let windowId else { throw error }
-        stage("整屏采集")
-        return try await captureDisplayCrop(windowId, content: content)
-    }
-    return (image, rect)
-}
-
 func capturePixelSize(rect: CGRect, pointPixelScale: CGFloat) -> (width: Int, height: Int)? {
     guard rect.width.isFinite, rect.height.isFinite, rect.width > 0, rect.height > 0,
           pointPixelScale.isFinite, pointPixelScale > 0 else { return nil }
     let width = ceil(rect.width * pointPixelScale), height = ceil(rect.height * pointPixelScale)
     guard width.isFinite, height.isFinite, width <= CGFloat(Int.max), height <= CGFloat(Int.max) else { return nil }
     return (max(1, Int(width)), max(1, Int(height)))
-}
-
-func makeCaptureConfiguration(width: Int, height: Int, fitWindow: Bool) -> SCStreamConfiguration {
-    let config = SCStreamConfiguration()
-    config.width = width; config.height = height; config.capturesAudio = false; config.showsCursor = false
-    if #available(macOS 14.0, *) { config.ignoreShadowsSingleWindow = true; config.ignoreShadowsDisplay = true }
-    if #available(macOS 14.0, *), fitWindow {
-        config.scalesToFit = true
-        config.preservesAspectRatio = true
-    }
-    return config
 }
 
 func recognize(_ image: CGImage, languages: [String]) throws -> [VNRecognizedTextObservation] {
@@ -1385,39 +1247,6 @@ func refineHy3Rows(image: CGImage, bilingual: [VNRecognizedTextObservation], eng
     return additions
 }
 
-// A detached task cannot inherit the main actor, which is occupied by the
-// synchronous JSONL handler while it pumps the run loop. State is synchronized
-// because a timed-out ScreenCaptureKit call may finish after its caller returns.
-final class CaptureProgress: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stageName = "窗口枚举"
-    private var stageStart = DispatchTime.now().uptimeNanoseconds
-    private var result: Result<(CGImage, CGRect), Error>?
-    func advance(_ name: String) { lock.lock(); stageName = name; stageStart = DispatchTime.now().uptimeNanoseconds; lock.unlock() }
-    func finish(_ value: Result<(CGImage, CGRect), Error>) { lock.lock(); result = value; lock.unlock() }
-    func snapshot() -> (String, UInt64, Result<(CGImage, CGRect), Error>?) {
-        lock.lock(); defer { lock.unlock() }; return (stageName, stageStart, result)
-    }
-}
-func boundedCaptureImage(_ windowId: UInt32?, preferDisplayCrop: Bool = false) throws -> (CGImage, CGRect) {
-    let progress = CaptureProgress()
-    let worker = Task.detached {
-        do { progress.finish(.success(try await captureImage(windowId, preferDisplayCrop: preferDisplayCrop, stage: { progress.advance($0) }))) }
-        catch { progress.finish(.failure(error)) }
-    }
-    let began = DispatchTime.now().uptimeNanoseconds
-    while true {
-        let (stage, since, result) = progress.snapshot()
-        if let result { return try result.get() }
-        let now = DispatchTime.now().uptimeNanoseconds
-        let limit: UInt64 = stage == "窗口枚举" ? 4_000_000_000 : 5_000_000_000
-        if now - since >= limit || now - began >= 9_000_000_000 {
-            worker.cancel()
-            throw DesktopError(message: "截图请求超时：\(stage)")
-        }
-        _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
-    }
-}
 // Copy the system BGRA buffer while it is locked. CGImage must own its bytes
 // before the stream stops. This also avoids CoreImage/Metal context startup,
 // and gives the returned image a lifetime independent of the IOSurface.
@@ -1430,19 +1259,11 @@ func copiedBGRA(_ base: UnsafeRawPointer, width: Int, height: Int, rowBytes: Int
         bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue).union(.byteOrder32Little),
         provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
 }
-final class DisplayFrameReceiver: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+final class DisplayFrameReceiver: @unchecked Sendable {
     private let lock = NSLock()
     private var latest: (CGImage, Date)?
     func store(_ image: CGImage) { lock.lock(); latest = (image, Date()); lock.unlock() }
     func frame() -> (CGImage, Date)? { lock.lock(); defer { lock.unlock() }; return latest }
-    func captureOutput(_ output: AVCaptureOutput, didOutput buffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let pixel = buffer.imageBuffer else { return }
-        guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_32BGRA,
-              CVPixelBufferLockBaseAddress(pixel, .readOnly) == kCVReturnSuccess else { return }
-        defer { CVPixelBufferUnlockBaseAddress(pixel, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(pixel) else { return }
-        if let image = copiedBGRA(base, width: CVPixelBufferGetWidth(pixel), height: CVPixelBufferGetHeight(pixel), rowBytes: CVPixelBufferGetBytesPerRow(pixel), colorSpace: CVImageBufferGetColorSpace(pixel)?.takeUnretainedValue() ?? CGColorSpace(name: CGColorSpace.sRGB)!) { store(image) }
-    }
 }
 func waitForDisplayFrame(_ receiver: DisplayFrameReceiver, seconds: Double = 2) throws -> (CGImage, Date) {
     let until = Date(timeIntervalSinceNow: seconds)
@@ -1453,7 +1274,7 @@ func waitForDisplayFrame(_ receiver: DisplayFrameReceiver, seconds: Double = 2) 
     }
     throw DesktopError(message: "外部全屏显示流未返回新画面")
 }
-// These backends capture the entire display and never use an app window filter.
+// All environment screenshots use CGDisplayStream display pixels only.
 func traceDisplay(_ stage: String) { if ProcessInfo.processInfo.environment["BUNNY_DISPLAY_TRACE"] == "1" { fputs("display: \(stage)\n", stderr); fflush(stderr) } }
 func captureExternalDisplay(region: CGRect? = nil) throws -> (CGImage, CGRect, String, Date) {
     try ensureDisplayOwnership()
@@ -1467,7 +1288,7 @@ func captureExternalDisplay(region: CGRect? = nil) throws -> (CGImage, CGRect, S
     let sx = Double(CGDisplayPixelsWide(display)) / screen.width, sy = Double(CGDisplayPixelsHigh(display)) / screen.height
     let width = Int(ceil(rect.width * sx)), height = Int(ceil(rect.height * sy))
     let source = rect.offsetBy(dx: -screen.minX, dy: -screen.minY)
-    if let stream = CGDisplayStream(dispatchQueueDisplay: display, outputWidth: width, outputHeight: height,
+    guard let stream = CGDisplayStream(dispatchQueueDisplay: display, outputWidth: width, outputHeight: height,
         pixelFormat: Int32(kCVPixelFormatType_32BGRA), properties: [CGDisplayStream.showCursor: false,
             CGDisplayStream.colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
             CGDisplayStream.minimumFrameTime: 0.2, CGDisplayStream.sourceRect: source.dictionaryRepresentation] as CFDictionary,
@@ -1478,69 +1299,53 @@ func captureExternalDisplay(region: CGRect? = nil) throws -> (CGImage, CGRect, S
             defer { IOSurfaceUnlock(surface, .readOnly, nil) }
             let image = copiedBGRA(IOSurfaceGetBaseAddress(surface), width: IOSurfaceGetWidth(surface), height: IOSurfaceGetHeight(surface), rowBytes: IOSurfaceGetBytesPerRow(surface))
             if let image { receiver.store(image) }
-        }) {
-        traceDisplay("stream created")
-        if stream.start() == .success {
-            traceDisplay("stream started")
-            do {
-                let (image, at) = try waitForDisplayFrame(receiver)
-                traceDisplay("frame ready")
-                stream.stop(); traceDisplay("stream stopped"); return (image, rect, "CGDisplayStream", at)
-            } catch { stream.stop(); if sessionLocked() { throw error } }
-        }
+        }) else { throw DesktopError(message: "CGDisplayStream 初始化失败，未切换截图后端", code: "E_CG_CAPTURE_UNAVAILABLE", dispatched: false) }
+    traceDisplay("stream created")
+    defer { stream.stop(); traceDisplay("stream stopped") }
+    guard stream.start() == .success else { throw DesktopError(message: "CGDisplayStream 启动失败，未切换截图后端", code: "E_CG_CAPTURE_UNAVAILABLE", dispatched: false) }
+    traceDisplay("stream started")
+    do {
+        let (image, at) = try waitForDisplayFrame(receiver)
+        traceDisplay("frame ready")
+        return (image, rect, "CGDisplayStream", at)
+    } catch {
+        if sessionLocked() { throw error }
+        throw DesktopError(message: "截图请求超时：CGDisplayStream 未返回新画面，未切换截图后端", code: "E_CG_CAPTURE_TIMEOUT", dispatched: false)
     }
-    let fallback = DisplayFrameReceiver(), session = AVCaptureSession()
-    guard let input = AVCaptureScreenInput(displayID: display) else { throw DesktopError(message: "外部全屏捕获后端均不可用") }
-    input.capturesCursor = false; input.minFrameDuration = CMTime(value: 1, timescale: 10)
-    let output = AVCaptureVideoDataOutput()
-    output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-    output.setSampleBufferDelegate(fallback, queue: DispatchQueue(label: "workbunny.display-frame.fallback"))
-    guard session.canAddInput(input), session.canAddOutput(output) else { throw DesktopError(message: "外部全屏备用捕获后端不可用") }
-    session.addInput(input); session.addOutput(output); session.startRunning()
-    defer { session.stopRunning() }
-    let (full, at) = try waitForDisplayFrame(fallback)
-    if region != nil {
-        guard let pixels = displayCropPixelRect(rect, displayRect: screen, imageWidth: full.width, imageHeight: full.height),
-              let image = full.cropping(to: pixels) else { throw DesktopError(message: "备用显示流区域裁切失败") }
-        return (image, rect, "AVCaptureScreenInput", at)
-    }
-    return (full, screen, "AVCaptureScreenInput", at)
 }
+
+func captureDisplayPixels(_ request: [String: Any]) throws -> [String: Any] {
+    let allowed: Set<String> = ["id", "op", "sentAtMs", "timeoutMs", "output", "region"]
+    guard Set(request.keys).isSubset(of: allowed), request["output"] as? String == "base64" else {
+        throw DesktopError(message: "显示像素采集不接受应用、窗口或界面参数", dispatched: false)
+    }
+    guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，已停止显示像素采集", dispatched: false) }
+    guard CGPreflightScreenCaptureAccess() else { throw DesktopError(message: "缺少屏幕录制权限", dispatched: false) }
+    if request["region"] != nil && rectFrom(request["region"]) == nil { throw DesktopError(message: "显示像素区域无效", dispatched: false) }
+    let (image, rect, backend, at) = try captureExternalDisplay(region: rectFrom(request["region"]))
+    return ["width": image.width, "height": image.height, "desktopRect": rectObject(rect), "format": "png",
+            "backend": backend, "capturedAt": at.timeIntervalSince1970 * 1000, "pngBase64": try pngData(image).base64EncodedString()]
+}
+// Compatibility for generic display requests only. Legacy window targeting is
+// rejected before permission checks or any application/window discovery.
 func capture(_ request: [String: Any]) throws -> [String: Any] {
-    guard CGPreflightScreenCaptureAccess() else { throw DesktopError(message: "缺少屏幕录制权限；请在系统设置 → 隐私与安全性 → 屏幕录制中允许 workbunny") }
-    let windowId = uint(request["windowId"])
-    let external = request["captureMode"] as? String == "displayStream"
-    if external && windowId != nil { throw DesktopError(message: "外部全屏捕获不能携带窗口 ID") }
-    if let windowId, windowEntries().contains(where: { ($0["windowId"] as? UInt32) == windowId && ($0["bundleId"] as? String) == "com.tencent.xinWeChat" }) {
-        throw DesktopError(message: "微信必须使用外部全屏捕获，禁止直接截取微信窗口")
+    let allowed: Set<String> = ["id", "op", "sentAtMs", "timeoutMs", "output", "region", "captureMode", "relocate"]
+    guard Set(request.keys).isSubset(of: allowed),
+          request["captureMode"] == nil || request["captureMode"] as? String == "displayStream" else {
+        throw DesktopError(message: "旧窗口截图已停用；请使用 CGDisplayStream 显示像素及像素区域", code: "E_LEGACY_CAPTURE_DISABLED", dispatched: false)
     }
-    let image: CGImage, desktopRect: CGRect
-    var backend = "ScreenCaptureKit", capturedAt = Date()
-    if external {
-        if request["region"] != nil && rectFrom(request["region"]) == nil { throw DesktopError(message: "region 矩形无效") }
-        let region = rectFrom(request["region"]), relocate = request["relocate"] as? Bool == true
-        let (displayImage, sourceRect, sourceBackend, sourceAt) = try captureExternalDisplay(region: relocate ? nil : region)
-        backend = sourceBackend; capturedAt = sourceAt
-        if relocate, let region {
-            guard let pixels = displayCropPixelRect(region, displayRect: sourceRect, imageWidth: displayImage.width, imageHeight: displayImage.height),
-                  let cropped = displayImage.cropping(to: pixels) else { throw DesktopError(message: "全屏中未能锁定软件窗口与菜单区域") }
-            image = cropped; desktopRect = region
-        } else { image = displayImage; desktopRect = sourceRect }
-    }
-    else { (image, desktopRect) = try boundedCaptureImage(windowId, preferDisplayCrop: request["captureMode"] as? String == "displayCrop") }
-    traceDisplay("encoding \(image.width)x\(image.height)")
-    let data = try pngData(image)
-    traceDisplay("encoded \(data.count)")
-    let scaleX = desktopRect.width > 0 ? Double(image.width) / desktopRect.width : 1
-    let scaleY = desktopRect.height > 0 ? Double(image.height) / desktopRect.height : 1
-    var result: [String: Any] = ["width": image.width, "height": image.height,
-        "desktopRect": rectObject(desktopRect), "pixelsPerPoint": ["x": scaleX, "y": scaleY], "format": "png",
-        "backend": backend, "capturedAt": capturedAt.timeIntervalSince1970 * 1000]
+    guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试", dispatched: false) }
+    guard CGPreflightScreenCaptureAccess() else { throw DesktopError(message: "缺少屏幕录制权限", dispatched: false) }
+    if request["region"] != nil && rectFrom(request["region"]) == nil { throw DesktopError(message: "显示像素区域无效", dispatched: false) }
     let output = request["output"] as? String ?? "base64"
+    guard ["base64", "tempFile"].contains(output) else { throw DesktopError(message: "output 只支持 base64 或 tempFile", dispatched: false) }
+    let (image, rect, backend, at) = try captureExternalDisplay(region: rectFrom(request["region"]))
+    let data = try pngData(image)
+    var result: [String: Any] = ["width": image.width, "height": image.height,
+        "desktopRect": rectObject(rect), "pixelsPerPoint": ["x": Double(image.width) / rect.width, "y": Double(image.height) / rect.height],
+        "format": "png", "backend": backend, "capturedAt": at.timeIntervalSince1970 * 1000]
     if output == "base64" { result["pngBase64"] = data.base64EncodedString() }
-    else if output == "tempFile" {
-        result["tempFile"] = try writePrivatePNG(data)
-    } else { throw DesktopError(message: "output 只支持 base64 或 tempFile") }
+    else { result["tempFile"] = try writePrivatePNG(data) }
     return result
 }
 
@@ -1729,44 +1534,7 @@ func shouldIncludeVisualImage(changed: Bool, reset: Bool, geometryChanged: Bool 
 }
 
 func captureVisualFrame(sampleId: String, windowId: UInt32, regions: [VisualROI], expected: [String: Any]?, forceFull: Bool = false) throws -> (VisualFrame, CGImage) {
-    guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
-    guard CGPreflightScreenCaptureAccess() else { throw DesktopError(message: "缺少屏幕录制权限") }
-    guard let before = windowEntries().first(where: { ($0["windowId"] as? UInt32) == windowId }),
-          let pid = before["pid"] as? Int, pid > 0, pid <= Int(Int32.max), let rect = rectFrom(before["rect"]),
-          let app = NSRunningApplication(processIdentifier: pid_t(pid)), let bundle = app.bundleIdentifier else {
-        throw DesktopError(message: "目标窗口当前不可见或进程身份不可用")
-    }
-    if let expected {
-        guard (expected["pid"] as? Int) == pid, (expected["bundleId"] as? String) == bundle else {
-            throw DesktopError(message: "目标窗口进程与 expected 身份不匹配")
-        }
-    }
-    let image: CGImage, capturedRect: CGRect
-    if bundle == "com.tencent.xinWeChat" {
-        let prior = visualSampleStates[sampleId]?.latest
-        let anchored = !forceFull && prior?.windowId == windowId && prior?.pid == pid &&
-            prior.map { visualRectsMatch($0.desktopRect, rect) } == true
-        // First observation / changed geometry starts from the whole display.
-        // Only a previously captured, geometrically verified region is reused.
-        let (displayImage, source, _, _) = try captureExternalDisplay(region: anchored ? rect : nil)
-        if anchored { image = displayImage }
-        else {
-            guard let pixels = displayCropPixelRect(rect, displayRect: source, imageWidth: displayImage.width, imageHeight: displayImage.height),
-                  let crop = displayImage.cropping(to: pixels) else { throw DesktopError(message: "全屏显示中未能锁定微信区域") }
-            image = crop
-        }
-        capturedRect = rect
-    } else { (image, capturedRect) = try boundedCaptureImage(windowId) }
-    guard image.width > 0, image.height > 0, image.width <= visualImageMaxPixels / image.height,
-          visualRectsMatch(rect, capturedRect) else { throw DesktopError(message: "截图尺寸或窗口几何无效") }
-    guard let after = windowEntries().first(where: { ($0["windowId"] as? UInt32) == windowId }),
-          (after["pid"] as? Int) == pid, visualRectsMatch(rect, rectFrom(after["rect"]) ?? .null),
-          NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier == bundle else {
-        throw DesktopError(message: "采样期间目标窗口或进程身份改变")
-    }
-    let samples = try regions.map { try downsampleVisualRegion(image, roi: $0) }
-    return (VisualFrame(sampleId: sampleId, windowId: windowId, pid: pid, bundleId: bundle,
-                        desktopRect: rect, width: image.width, height: image.height, regions: regions, pixels: samples), image)
+    throw DesktopError(message: "旧窗口视觉采样已停用；请使用通用 CGDisplayStream 视觉会话", code: "E_LEGACY_CAPTURE_DISABLED", dispatched: false)
 }
 
 func visualSample(_ request: [String: Any]) throws -> [String: Any] {
@@ -1883,10 +1651,66 @@ func recognizePNG(_ request: [String: Any]) throws -> [String: Any] {
     texts.append(contentsOf: refineHy3Rows(image: image, bilingual: bilingual, english: english))
     return ["texts": texts, "width": width, "height": height]
 }
+// Pixel-only input intentionally has no application/window identity. The host
+// supplies freshly rechecked display evidence and a region located in pixels.
+// This entry must never call windowEntries, targetWindow, AX or app activation.
+func displayInput(_ request: [String: Any]) throws -> [String: Any] {
+    let allowed: Set<String> = ["id", "op", "sentAtMs", "timeoutMs", "action", "visualEvidence", "x", "y", "text", "key", "modifiers", "deltaX", "deltaY", "button", "lineBreak"]
+    guard Set(request.keys).isSubset(of: allowed) else { throw DesktopError(message: "视觉输入不接受应用、窗口或界面参数", dispatched: false) }
+    guard !sessionLocked(),
+          let sent = number(request["sentAtMs"]), let timeout = number(request["timeoutMs"]),
+          Date().timeIntervalSince1970 * 1000 <= sent + min(timeout, 1500),
+          let evidence = request["visualEvidence"] as? [String: Any],
+          Set(evidence.keys) == Set(["frameId", "capturedAt", "displayRect", "region"]),
+          let frameId = evidence["frameId"] as? String, UUID(uuidString: frameId) != nil,
+          let capturedAt = number(evidence["capturedAt"]),
+          Date().timeIntervalSince1970 * 1000 - capturedAt >= 0,
+          Date().timeIntervalSince1970 * 1000 - capturedAt < 1500,
+          let display = rectFrom(evidence["displayRect"]), let region = rectFrom(evidence["region"]),
+          visualRectsMatch(display, CGDisplayBounds(CGMainDisplayID())), display.contains(region), !region.isEmpty,
+          let action = request["action"] as? String, ["click", "scroll", "key", "type"].contains(action) else {
+        throw DesktopError(message: "视觉输入证据无效或过期，未读取窗口信息且未派发", dispatched: false)
+    }
+    guard CGPreflightPostEventAccess() else { throw DesktopError(message: "缺少键鼠输入权限", dispatched: false) }
+    if action == "click" || action == "scroll" {
+        guard let x = number(request["x"]), let y = number(request["y"]), region.contains(CGPoint(x: x, y: y)) else {
+            throw DesktopError(message: "键鼠位置不在视觉确认区域内", dispatched: false)
+        }
+        let point = CGPoint(x: x, y: y)
+        if action == "click" {
+            let button = request["button"] as? String ?? "left"
+            guard ["left", "right"].contains(button) else { throw DesktopError(message: "鼠标按钮无效", dispatched: false) }
+            if button == "right" { try postMouse(.rightMouseDown, point, .right); try postMouse(.rightMouseUp, point, .right) }
+            else { try postMouse(.leftMouseDown, point); try postMouse(.leftMouseUp, point) }
+        } else {
+            let dx = number(request["deltaX"]) ?? 0, dy = number(request["deltaY"]) ?? 0
+            guard abs(dx) <= 2000, abs(dy) <= 2000,
+                  let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0) else { throw DesktopError(message: "滚动参数无效", dispatched: false) }
+            event.location = point; event.post(tap: .cghidEventTap)
+        }
+        return ["performed": true, "frameId": frameId, "point": ["x": x, "y": y], "mode": "display-pixels"]
+    }
+    if action == "key" {
+        guard let name = request["key"] as? String, let code = keyCode(name) else { throw DesktopError(message: "按键无效", dispatched: false) }
+        let flags = try modifiers(request["modifiers"])
+        for down in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { throw DesktopError(message: "无法创建键盘事件") }
+            event.flags = flags; event.post(tap: .cghidEventTap)
+        }
+    } else {
+        guard let value = request["text"] as? String, !value.isEmpty, value.utf16.count <= 4096 else { throw DesktopError(message: "输入文本无效", dispatched: false) }
+        for item in try makeInputPlan(value, lineBreak: request["lineBreak"]) {
+            switch item { case .text(let units): try postUnicodeText(units); case .softLineBreak: try postShiftReturn() }
+        }
+    }
+    return ["performed": true, "frameId": frameId, "mode": "display-pixels"]
+}
 func perform(_ request: [String: Any]) throws -> [String: Any] {
     guard let op = request["op"] as? String else { throw DesktopError(message: "缺少 op") }
     let submissionExpectation = try workBuddySubmissionExpectation(request)
     switch op {
+    case "displayCapture": return try captureDisplayPixels(request)
+    case "displayInput": return try displayInput(request)
     case "workbuddyCapabilities": return ["backgroundAX": true]
     case "softwareInfo": return try softwareInfo(request)
     case "taskProcessIdentity": return ["identity": taskProcessIdentity(pid_t(request["pid"] as? Int ?? 0)) ?? [:]]
@@ -1911,7 +1735,7 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
     case "frontmost": return ["application": appIdentity(currentFrontmost()), "windows": windowEntries()]
     case "inputIdle": return inputIdle()
     case "recognize": return try recognizePNG(request)
-    case "visualSample": return try visualSample(request)
+    case "visualSample": throw DesktopError(message: "旧窗口视觉采样已停用；请使用通用 CGDisplayStream 视觉会话", code: "E_LEGACY_CAPTURE_DISABLED", dispatched: false)
     case "visualCommit": return try visualCommit(request)
     case "visualForget": return try visualForget(request)
     case "workbuddyNavigate": return try workBuddyNavigation(request)
@@ -1923,9 +1747,7 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
         catch let error as DesktopError {
             throw DesktopError(message: error.message, code: error.code ?? "E_GUI_BEFORE_DISPATCH", dispatched: error.dispatched ?? false, diagnostic: error.diagnostic)
         }
-    case "capture":
-        guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
-        return try capture(request)
+    case "capture": return try capture(request)
     case "activate":
         guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
         guard let bundle = request["bundleId"] as? String, !bundle.isEmpty else { throw DesktopError(message: "缺少 bundleId") }
@@ -2304,19 +2126,11 @@ func runNativeSelfTest() -> Never {
         let detachedProbe = DispatchSemaphore(value: 0)
         Task.detached { detachedProbe.signal() }
         guard waitWithRunLoop(detachedProbe, seconds: 1),
-              !displayCropSharingAllowed(nil), !displayCropSharingAllowed(0), displayCropSharingAllowed(1),
               displayCropPixelRect(CGRect(x: -900, y: 100, width: 200, height: 150),
                   displayRect: CGRect(x: -1000, y: 0, width: 1000, height: 800), imageWidth: 2000, imageHeight: 1600) == CGRect(x: 200, y: 200, width: 400, height: 300),
               displayCropPixelRect(CGRect(x: -1100, y: 100, width: 200, height: 150),
                   displayRect: CGRect(x: -1000, y: 0, width: 1000, height: 800), imageWidth: 2000, imageHeight: 1600) == nil else {
             throw DesktopError(message: "截图独立任务或多显示器裁切回归失败")
-        }
-        let windowConfig = makeCaptureConfiguration(width: captureSize.width, height: captureSize.height, fitWindow: true)
-        if #available(macOS 14.0, *) {
-        guard windowConfig.scalesToFit, windowConfig.preservesAspectRatio,
-              windowConfig.ignoreShadowsSingleWindow, windowConfig.ignoreShadowsDisplay, !windowConfig.showsCursor else {
-            throw DesktopError(message: "窗口截图配置未启用适配、等比缩放及无阴影/光标")
-        }
         }
 
         let multiline = try makeInputPlan("A\r\nB\nC", lineBreak: "shiftEnter")
@@ -2335,8 +2149,8 @@ func runNativeSelfTest() -> Never {
         catch let error as DesktopError where error.message == "缺失 lineBreak 时接纳了换行" { throw error }
         catch { /* Expected rejection of implicit newline. */ }
         writeJSON(["ok": true, "selfTest": "native", "rectCases": ["CGWindowBounds", "lowercase"],
-                   "capturePixelSize": [captureSize.width, captureSize.height], "windowFit": true,
-                   "visualSample": true, "visualCapacity": visualSampleCapacity, "inputIdleReadOnly": true,
+                   "capturePixelSize": [captureSize.width, captureSize.height], "captureBackend": "CGDisplayStream",
+                   "legacyVisualSampleDisabled": true, "visualCapacity": visualSampleCapacity, "inputIdleReadOnly": true,
                    "syntheticSidebarBadgePixels": syntheticCounts, "syntheticStableOverlap": stableOverlap,
                    "workBuddyGuards": true, "workBuddyConversationGuard": true, "workBuddyReadbackGuards": true, "workBuddySerializedMatch": true,
                    "workBuddyPostFocusDraftGuards": true,

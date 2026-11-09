@@ -37,6 +37,10 @@ function taskGuidance(task,{handling=false}={}){
  const missing=task.state?.missingPermissions||[],intent=Object.values(task.operations||{}).find(o=>o.effect==='write'&&o.status==='intent');
  if(task.state?.stopRequest)return task.state.stopRequest.phase==='pending'&&(task.state.workOperationId||task.state.job?.jobId||Object.values(task.state.resources||{}).some(entry=>entry.kind!=='controller'&&!['ended','stopped','preserved'].includes(entry.phase)))?{kind:'cleanup',title:'Bunny 已停止，外部清理中',detail:'本地任务已结束，启动名额已释放。仅进行一次、最多30秒的外部清理；结果和错误会保留，可以开始独立新任务。',working:true}:null;
  if(task.status==='waiting_permission')return {kind:'permission',title:'需要开启'+(missing.map(k=>require('./authorization-service').permissionTitles[k]||k).join('、')||'任务权限'),detail:'任务和已有进展已保留。打开授权指引，完成后 Bunny 会继续原任务。',primaryLabel:'打开授权指引'};
+ const reviews=[task.state,...Object.values(task.actionRuns||{})].map(owner=>owner?.recoveryState?.mainReview).filter(Boolean);
+ const review=reviews.find(record=>['requested','running','decided'].includes(record.status));
+ if(review&&!['owner','protection'].includes(task.state?.pauseSource))return {kind:'main-review',title:review.unavailable?'主脑暂不可用，任务已保留':review.resourceDeferred?'恢复资源已让出':'待主脑督导',detail:task.note||'保留原目标、现场和回执，正在评估可继续的路径；尚未判定业务失败。',working:!review.unavailable};
+ if(task.state?.pauseSource==='main-review')return {kind:'main-review-wait',title:'主脑决定暂缓',detail:task.note||'等待已记录的条件与下次检查时机，保留原任务。'};
  if(task.status!=='needs_attention')return null;
  const failure=currentTaskFailure(task),attention=currentWorkAttention(task);
  if(failure?.code==='E_TASK_AUTH')return {kind:'source',title:'原交办已失效',detail:'原交办来源已不可用，Bunny 没有继续操作。请重新说明要做的事。',primaryLabel:'重新交办'};
@@ -48,7 +52,14 @@ function taskGuidance(task,{handling=false}={}){
  }
  if(failure?.code==='E_WORKBUDDY_DRAFT_CONFLICT')return {kind:'retry',title:'等待处理 WorkBuddy 草稿',detail:'WorkBuddy 通用任务页已有未发送内容，已保留。请先保存或处理草稿，再继续这项任务。',primaryLabel:'草稿已处理，继续交办'};
  if(failure?.code==='E_WORKBUDDY_ROUTE_CONFLICT')return {kind:'retry',title:'等待核对 WorkBuddy 工作空间',detail:'指定工作空间不存在或不唯一，已保留任务。请核对工作位置后继续。',primaryLabel:'位置已核对，继续交办'};
- if(failure?.code==='E_APP_CIRCUIT')return {kind:'wechat-unavailable',title:'微信需要恢复后继续',detail:'请在本机恢复原微信账号，确认已登录并显示后重新定位。Bunny 不会自动重启或登录；窗口变化后会重新建立来信基线，主人入口需重新绑定。',primaryLabel:'原账号已恢复，重新定位'};
+ if(failure?.code==='E_APP_CIRCUIT'){
+  const kind=failure.diagnostic?.visualState?.kind,auth=['login','security'].includes(kind);
+  return {kind:'wechat-unavailable',title:auth?'微信登录或安全状态待处理':kind==='identity'?'微信身份待核对':'微信画面待重新核对',detail:(auth?'实际画面显示登录或安全提示，请在本机处理后重新定位。':clean(failure.message||'尚未确认原任务的目标画面')+'。')+'Bunny 已保留原任务，不会自动重启或登录。',primaryLabel:auth?'已处理，重新定位':'重新核对画面'};
+ }
+ if(failure?.code==='E_VISUAL_TARGET'&&!intent){
+  const owner=failure.diagnostic?.visualState?.requiresOwner===true;
+  return {kind:'retry',title:owner?'目标登录或安全状态待处理':'画面仍待核对',detail:clean(failure.message||'尚未确认目标的可见状态或身份')+'。'+(owner?'请在本机处理后继续。':'有限次观察仍未取得充分依据，任务和操作记录已保留；请让目标清晰可见后继续。'),primaryLabel:'重新观察并继续'};
+ }
  if(intent?.tool==='work.submit'){
   const check=task.state?.reconciliation?.[intent.id]||{},pending=handling||['queued','checking','waiting_idle'].includes(check.phase);
   const phase=task.state?.workCheckpoint?.phase;

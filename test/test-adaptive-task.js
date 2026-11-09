@@ -3,6 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const {AgentService}=require('../src/main/agent-service'),{AuthorizationService}=require('../src/main/authorization-service');
 function fixture(decide){const records=new Map(),reports=[];let requests=0;const journal={put:async t=>records.set(t.id,structuredClone(t)),list:async()=>[...records.values()],authorized:async()=>true};
  const agent=new AgentService({journal,ready:()=>true,epoch:()=>1,autoSchedule:false,scene:{metrics:{},native:{request:async()=>({})},close:async()=>{}},authorization:new AuthorizationService({settings:()=>({terminal:true,systemConfiguration:true}),permissions:async()=>({screenCaptureAllowed:true,accessibilityTrusted:true,postEventAllowed:true})}),report:async r=>reports.push(r),request:async options=>({response:{text:JSON.stringify(await decide(requests++,options))}})});
+ agent.runtime.diagnoseRepair=async()=>({action:'change_method',source:'local'});
  return {agent,records,reports,requests:()=>requests,owner:{role:'owner',verified:true,channel:'dialogue',sources:['owner'],scene:'life'}};
 }
 const uname={application:'system',command:'/usr/bin/uname',args:['-s'],impact:'read',purpose:'核对内核'};
@@ -59,6 +60,11 @@ test('invalid primitive arguments are repaired before an operation is persisted 
  const f=fixture(i=>({done:false,tool:'screen.action',args:{application:'workbuddy',action:'click',targetType:'icon',pixelX:400,pixelY:300,...(i?{frameId:'current-frame'}:{})}}));let inputs=0;f.agent.tools.tools.set('screen.action',{...f.agent.tools.get('screen.action'),execute:async()=>{inputs++;return {ok:true,verified:true,receipt:{inputPerformed:true}};}});
  const created=await f.agent.start({skill:'software.execute',goal:'click the actual button',subjects:[{application:'workbuddy'}]},f.owner);await f.agent.runtime.tick(created.id);const task=f.agent.runtime.tasks.get(created.id);assert.equal(f.requests(),2);assert.equal(inputs,1);assert.equal(task.state.stepSequence,1);assert.equal(Object.values(task.operations).filter(o=>o.effect==='write').length,1);await f.agent.close();
 });
+test('a proven visual non-dispatch returns the failed plan to Bunny so she can choose a different observation strategy',async()=>{
+ const f=fixture((i,options)=>{const input=JSON.parse(options.messages[1].content[0].text);if(i===1){assert.equal(input.lastFailure.code,'E_VISUAL_TARGET');assert.equal(input.attempts[0].dispatched,false);assert.equal(input.previousVisualDecision.tool,'screen.observe');assert.equal(input.recoveryGuidance.action,'change_method');}return i<2?{done:false,tool:'screen.observe',args:{application:'workbuddy',...(i?{force:true}:{})}}:{done:true,summary:'已依据重新观察的真实画面确认。'};});
+ let samples=0;f.agent.runtime.diagnoseRepair=async()=>({action:'change_method',nextStep:'重新观察可见目标',source:'llm'});f.agent.tools.tools.set('screen.observe',{...f.agent.tools.get('screen.observe'),execute:async a=>{samples++;if(samples===1)throw Object.assign(Error('small identity text is unclear'),{code:'E_VISUAL_TARGET',dispatched:false});assert.equal(a.force,true);return {available:true,changed:true,frameId:'fresh'};}});
+ const created=await f.agent.start({skill:'software.execute',goal:'核对目标软件当前画面',subjects:[{application:'workbuddy'}]},f.owner);for(let i=0;i<3;i++)await f.agent.runtime.tick(created.id);const task=f.agent.runtime.tasks.get(created.id);assert.equal(task.status,'completed');assert.equal(f.requests(),3);assert.equal(samples,2);assert.equal(task.state.pendingDecision,undefined);await f.agent.close();
+});
 test('the model can retrieve the full scoped experience when a summary is insufficient',async()=>{
  const full='适用系统检查。\n\n'+('详细方法和失效条件。'.repeat(450));let sawFull=false;
  const f=fixture((i,options)=>{const input=JSON.parse(options.messages[1].content[0].text);
@@ -98,7 +104,7 @@ test('revising a task discards its old pending plan while preserving confirmed o
  assert((await f.agent.runtime.update(task.id,{goal:'新目标'},f.owner)).ok);await f.agent.runtime.tick(task.id);assert.equal(task.state.stepSequence,65);assert.equal(task.state.attempts.at(-1).args.command,'/usr/bin/uname');assert.equal(task.state.explorationStart,64);await f.agent.close();
 });
 test('authentication circuit immediately pauses an adaptive task rather than consuming all exploration steps',async()=>{
- const f=fixture(()=>({done:false,tool:'screen.observe',args:{application:'wechat'}}));f.agent.scene.assertHealthy=async()=>{throw Object.assign(Error('请重新登录'),{code:'E_APP_CIRCUIT',dispatched:false});};
+ const f=fixture(()=>({done:false,tool:'screen.observe',args:{application:'wechat'}}));f.agent.scene.visual={observe:async()=>{throw Object.assign(Error('请重新登录'),{code:'E_APP_CIRCUIT',dispatched:false});}};
  const created=await f.agent.start({skill:'software.execute',goal:'观察Alice',subjects:[{application:'wechat',recipient:'Alice'}]},f.owner);await f.agent.runtime.tick(created.id);const task=f.agent.runtime.tasks.get(created.id);
  assert.equal(task.status,'needs_attention');assert.equal(task.state.lastFailure.code,'E_APP_CIRCUIT');assert.equal(task.state.stepSequence,0);assert.equal(f.requests(),1);await f.agent.close();
 });
@@ -109,7 +115,7 @@ for(const changed of [false,true])test('a slow visual decision '+(changed?'repla
  f.agent.tools.tools.set('screen.observe',{...f.agent.tools.get('screen.observe'),execute:async(a,c)=>{assert.equal(a.force,true);checks++;c.task.state.screenAnchors.workbuddy={...c.task.state.screenAnchors.workbuddy,frameId:'fresh',at:now};return {available:true,changed:true,preview:changed?newImage:image,frameId:'fresh',width:800,height:600,at:now};}});
  f.agent.tools.tools.set('screen.action',{...f.agent.tools.get('screen.action'),execute:async a=>{inputs.push(a.frameId);return {ok:true,verified:true,receipt:{inputPerformed:true}};}});
  const started=await f.agent.start({skill:'software.execute',goal:'operate',subjects:[{application:'workbuddy'}]},f.owner),task=f.agent.runtime.tasks.get(started.id);
- task.state.latestImage={application:'workbuddy',preview:image,frameId:'original',width:800,height:600,at:now};task.state.screenAnchors={workbuddy:{frameId:'original',pid:1,windowId:2,rect:{x:0,y:0,width:800,height:600},at:now}};
+ task.state.latestImage={application:'workbuddy',preview:image,frameId:'original',width:800,height:600,at:now};task.state.screenAnchors={workbuddy:{frameId:'original',mode:'visual',sessionId:'fixture-visual-session',rect:{x:0,y:0,width:800,height:600},at:now}};
  await f.agent.runtime.tick(started.id);assert.equal(checks,1);
  if(changed){assert.deepEqual(inputs,[]);assert.equal(task.state.latestImage.preview,newImage);await f.agent.runtime.tick(started.id);}
  assert.deepEqual(inputs,['fresh']);await f.agent.close();

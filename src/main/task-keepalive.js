@@ -1,11 +1,13 @@
 'use strict';
+const recovery=require('./action-recovery');
+const {createBoundedWait}=require('./bounded-wait');
 
 // Called by the existing scheduler, never by an additional timer. This is
 // liveness, not business-progress detection or permission to replay effects.
 const REMINDER='请继续推进当前任务或动作。结合目标、已有结果和已耗时间，判断现在最有价值的下一步并采取行动，避免无明确原因的空等和重复检查。遇到困难时，积极分析现有信息，按需补充关键观察、查阅相关经验和可用工具，灵活调整策略或尝试其它方法，不被旧思路困住。确需等待时，明确等待条件和下次检查时机；持续核对实际进展，努力完成目标。经过判断确实需要主人帮助时，再说明具体缺口。';
 const INACTIVE=new Set(['queued','paused','stopping','stopped','completed','expired','needs_attention','waiting_permission']);
 class TaskKeepalive{
- constructor({clock=Date.now,remind,idleMs=60000}={}){Object.assign(this,{clock,remind,idleMs});this.pending=new Map();this.closed=false;}
+ constructor({clock=Date.now,remind,idleMs=60000,timeoutMs=12000}={}){Object.assign(this,{clock,remind,idleMs,timeoutMs});this.pending=new Map();this.closed=false;}
  key(task,run){return task.id+':'+(run?.id||'task');}
  state(task,run){const state=run?(run.keepalive??={}):(task.state.keepalive??={});if(!Number.isFinite(state.lastActivityAt))state.lastActivityAt=this.clock();return state;}
  touch(task,run,waiting){
@@ -25,6 +27,7 @@ class TaskKeepalive{
   const pendingEffects = Object.values(task.operations).filter(op => op.effect === 'write' && op.status === 'intent');
   for (const run of runs.length ? runs : passive ? [] : [null]) {
     if (run ? workers.some(worker => worker.eventKey === (run.eventKey || undefined)) : workers.length) continue;
+    if(recovery.held(run||task.state)||runtime.mainReviews?.active?.taskId===task.id)continue;
     const key = this.key(task, run);
     if (this.pending.has(key) || pendingEffects.some(op => !run || op.actionId === run.id)) continue;
     const state = this.state(task, run);
@@ -47,27 +50,38 @@ class TaskKeepalive{
     state.lastReminderAt=now;state.reminders=(state.reminders||0)+1;
     const work=(async()=>{
      const event=run?.eventKey?task.inbox.find(e=>e.key===run.eventKey):null;
-     const decision=await this.remind({task,run,event,signal:controller.signal,reminder:REMINDER,idleMs:now-lastActivityAt});
+     const wait=createBoundedWait({signal:controller.signal,timeoutMs:this.timeoutMs,code:'E_KEEPALIVE_TIMEOUT',message:'持续思考判断达到时限'});
+     let decision;try{decision=await wait.run(signal=>this.remind({task,run,event,signal,reminder:require('./action-progress').GUIDANCE+REMINDER,idleMs:now-lastActivityAt}));}finally{wait.close();}
      if(controller.signal.aborted||this.closed||!runtime.current(task,token,true)||INACTIVE.has(task.status)||state.lastActivityAt!==lastActivityAt)return;
-     const action=decision?.action||'continue',guidance={source:'keepalive',action,at:this.clock(),nextStep:decision?.nextStep||REMINDER,actionId:run?.id||null};
-     if(run)run.recovery=guidance;else task.state.keepaliveGuidance=guidance;
-     // The same planning context consumes this advice. No tool is executed here.
-     task.state.recoveryGuidance=guidance;state.lastActivityAt=this.clock();
-     if(action==='wait'&&decision.waitFor&&Number.isFinite(decision.waitMs)&&decision.waitMs>0){state.wait={reason:decision.waitFor,until:this.clock()+Math.min(3600000,decision.waitMs)};task.nextCheckAt=state.wait.until;}
-     else {state.wait=null;task.nextCheckAt=this.clock();}
-     if(action==='ask_owner'){
-      if(run){run.status='needs_attention';run.note=guidance.nextStep;}
-      task.status='needs_attention';task.note=guidance.nextStep;
-      await runtime.report({taskId:task.id,eventId:'keepalive:'+key+':'+now,text:guidance.nextStep,sources:[task.id],scene:task.scene,domain:task.domain,visibilityFloor:task.visibilityFloor,epoch:task.privacyEpoch});
-     }
-     await runtime.save(task);
+     await this.applyDecision(runtime,task,run,state,key,now,decision);
     })().catch(async error=>{
-     if(controller.signal.aborted||this.closed||!runtime.current(task,token,true)||INACTIVE.has(task.status))return;
-     state.lastActivityAt=this.clock();state.lastError=String(error.code||error.name||'E_KEEPALIVE').slice(0,80);await runtime.save(task).catch(()=>{});
+     if(controller.signal.aborted||this.closed||!runtime.current(task,token,true)||INACTIVE.has(task.status)||state.lastActivityAt!==lastActivityAt)return;
+     if(error.code==='E_MODEL_BUSY'){state.lastActivityAt=this.clock();state.wait={reason:'model-capacity',until:this.clock()+15000};await runtime.save(task).catch(()=>{});return;}
+     state.lastError=String(error.code||error.name||'E_KEEPALIVE').slice(0,80);
+     await this.applyDecision(runtime,task,run,state,key,now,{source:'local'},'E_KEEPALIVE_TIMEOUT').catch(()=>{});
     }).finally(()=>{if(this.pending.get(key)===entry)this.pending.delete(key);runtime.schedule();});
     entry.work=work;
    }
   }
+ }
+ async applyDecision(runtime,task,run,state,key,now,decision,code='E_IDLE'){
+     if(decision?.selfSuspension&&runtime.mainReviews?.request(task,run,{reason:'self-suspended',selfSuspension:decision.selfSuspension,assessment:decision.assessment})){await runtime.save(task);return;}
+     const owner=run||task.state,episode=recovery.begin(owner,{progress:run?.progress?{state:run.progress}:null,now:this.clock(),code,policy:runtime.recoveryPolicy});
+     const chosen=recovery.decide(episode,decision,{now:this.clock(),policy:runtime.recoveryPolicy});
+     const action=chosen.action,guidance={...chosen,source:'keepalive',actionId:run?.id||null};
+     if(run)run.recovery=guidance;else task.state.keepaliveGuidance=guidance;
+     // The same planning context consumes this advice. No tool is executed here.
+     task.state.recoveryGuidance=guidance;state.lastActivityAt=this.clock();
+     if(action==='wait'){state.wait={reason:chosen.waitFor,until:chosen.nextCheckAt};task.nextCheckAt=state.wait.until;}
+     else {state.wait=null;task.nextCheckAt=this.clock();}
+     if(action==='ask_owner'){
+      if(runtime.mainReviews?.request(task,run,{reason:'idle-budget'})){await runtime.save(task);return;}
+      const note='持续思考的自动恢复预算已到，尚未取得足够的多角度验证，不能认定真实障碍或永久阻塞；已保留原目标和回执，等待新证据或协助后重新评估。';
+      if(run){run.status='needs_attention';run.note=note;}
+      task.status='needs_attention';task.note=note;
+      await runtime.report({taskId:task.id,eventId:'keepalive:'+key+':'+now,text:note,sources:[task.id],scene:task.scene,domain:task.domain,visibilityFloor:task.visibilityFloor,epoch:task.privacyEpoch});
+     }
+     await runtime.save(task);
  }
  close(){this.closed=true;this.cancel();}
 }

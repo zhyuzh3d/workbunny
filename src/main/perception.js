@@ -25,6 +25,7 @@ registerSensor('owner.text',{channel:'keyboard',originalFormat:'text',format:'te
 registerSensor('local.asr',{channel:'microphone',originalFormat:'audio',format:'text',transforms:['asr']});
 registerSensor('desktop.observer',{channel:'screen',originalFormat:'image',format:'text',transforms:['ocr','vision'],evidenceFormat:'image'});
 registerSensor('desktop.ocr',{channel:'screen',originalFormat:'image',format:'text',transforms:['ocr'],evidenceFormat:'image'});
+registerSensor('display.vision',{channel:'screen',originalFormat:'image',format:'text',transforms:['vision'],evidenceFormat:'image'});
 registerSensor('wechat.asr',{channel:'wechat.voice',originalFormat:'audio',format:'text',transforms:['asr','ocr','vision'],evidenceFormat:'image',sourceChannels:['wechat.voice','screen']});
 const keyboard=()=>fromSensor('owner.text');
 const speech=id=>record({...sensors.get('local.asr'),observationId:id});

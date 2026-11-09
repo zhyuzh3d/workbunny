@@ -18,9 +18,10 @@ class DialogueChannels{
   return job.finally(() => { if (queue.get(channelId) === job) queue.delete(channelId); });
  }
  descriptor(subject,identity){
+  subject={...subject,application:require('./interaction-policy').profile(subject.application)?.application||subject.application};
   if(subject.application==='bunny')return {id:LOCAL,application:'bunny',recipient:'owner',account:'local'};
-  if(!identity||!Number.isInteger(identity.pid)||!Number.isInteger(identity.windowId))throw Error('渠道缺少任务已经核实的账号会话身份');
-  const account=String(identity.pid)+':'+identity.windowId;
+  const account=subject.application==='wechat'?require('./visual-session').visualAccount(identity):identity&&Number.isInteger(identity.pid)&&Number.isInteger(identity.windowId)?String(identity.pid)+':'+identity.windowId:null;
+  if(!account)throw Error('渠道缺少当前已核实的视觉会话身份；不继承旧窗口身份');
   return {id:subject.application+':'+hash(account+'\0'+subject.recipient),application:subject.application,recipient:subject.recipient,account};
  }
  async ensure(subject,identity){

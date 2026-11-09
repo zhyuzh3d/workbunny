@@ -1,0 +1,126 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');
+const {fixture,paint,raster}=require('./support/visual-fixture.cjs');
+test('visual targeting and input use only display pixels and global input, accepting the default Buffer image contract',async()=>{
+ const h=fixture(),shot=await h.visual.observe();assert.equal(shot.identity.mode,'visual');assert.equal(shot.width,160);assert.equal(h.requests.length,1);
+ await h.visual.input(shot.visualFrameId,{action:'click',x:100,y:60});assert.deepEqual(h.calls.map(c=>c.op),['displayCapture','displayCapture','displayInput']);
+ assert.deepEqual(h.calls[0].args,{output:'base64'});assert.equal(h.calls.at(-1).args.visualEvidence.frameId,shot.visualFrameId);assert(!JSON.stringify(h.calls).match(/windowId|bundleId|"pid"|frontmost|recognize/u));
+});
+test('Buffer and resized object previews both locate, while a missing pixel crop fails without another channel',async()=>{
+ const h=fixture({imageResize:preview=>({preview,mime:'image/png',width:200,height:120})});assert((await h.visual.observe()).visualFrameId);
+ const absent=fixture({imageCrop:undefined});await assert.rejects(absent.visual.observe(),/裁切/);assert(absent.calls.every(c=>c.op==='displayCapture'));
+});
+test('unrelated screen activity does not block an action but changes at its actual target do',async()=>{
+ const h=fixture(),shot=await h.visual.observe();paint(h.image,{x:0,y:.9,width:1,height:.1});await h.visual.input(shot.visualFrameId,{action:'click',x:100,y:60});
+ paint(h.image,{x:.46,y:.46,width:.08,height:.08});await assert.rejects(h.visual.input(shot.visualFrameId,{action:'click',x:100,y:60}),e=>e.dispatched===false);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+});
+test('a moved target requires visual identity confirmation and invalidates its old input frame',async()=>{
+ const h=fixture(),old=await h.visual.observe();paint(h.image,{x:.1,y:.1,width:.8,height:.8},200);
+ h.location={...h.location,region:{x:.13,y:.1,width:.8,height:.8},mainRegion:{x:.13,y:.1,width:.8,height:.8},monitorRegions:[{x:.13,y:.1,width:.8,height:.5}]};
+ const moved=await h.visual.observe();assert.equal(h.requests.length,2);assert.equal(moved.identity.sessionId,old.identity.sessionId);await assert.rejects(h.visual.input(old.visualFrameId,{action:'click',x:100,y:60}),/不可用/);await h.visual.input(moved.visualFrameId,{action:'click',x:100,y:60});
+});
+test('small rendering differences are tolerated and a real identity change stops and revokes old frames',async()=>{
+ const h=fixture(),old=await h.visual.observe();paint(h.image,{x:.2,y:.12,width:.3,height:.15},100);const same=await h.visual.observe();assert.equal(h.requests.length,1,'color changes below pixel tolerance reuse visual evidence');
+ paint(h.image,{x:.2,y:.12,width:.3,height:.15},250);h.location.sameIdentity=false;await assert.rejects(h.visual.observe(),/身份/);await assert.rejects(h.visual.input(same.visualFrameId,{action:'click',x:100,y:60}),/不可用/);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,0);assert.equal(old.identity.sessionId,same.identity.sessionId);
+});
+test('tiny VLM region rounding is tolerated, border click validation is clipped, and display changes stop stale input',async()=>{
+ const h=fixture(),old=await h.visual.observe();h.location={...h.location,mainRegion:{...h.location.mainRegion,x:.101,width:.799}};await h.visual.observe({relocate:true});await h.visual.input(old.visualFrameId,{action:'click',x:20.1,y:12.1});
+ h.image=raster(201,120);await assert.rejects(h.visual.input(old.visualFrameId,{action:'click',x:100,y:60}),/几何/);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+});
+test('focus has to be visible, cancellation before dispatch sends nothing, cancellation after dispatch retains truth',async()=>{
+ const h=fixture();h.location.focusRegion=null;h.location.focusEvidence='';const shot=await h.visual.observe();await assert.rejects(h.visual.input(shot.visualFrameId,{action:'key',key:'a',modifiers:[]}),/焦点/);
+ await assert.rejects(h.visual.input(shot.visualFrameId,{action:'key',key:'a',modifiers:[]},{regions:[]}),/焦点/);
+ const before=new AbortController();before.abort();await assert.rejects(h.visual.input(shot.visualFrameId,{action:'click',x:100,y:60},{signal:before.signal}),e=>e.dispatched===false);assert(!h.calls.some(c=>c.op==='displayInput'));
+ const after=new AbortController(),b=fixture({onInput:()=>after.abort()}),next=await b.visual.observe();const result=await b.visual.input(next.visualFrameId,{action:'key',key:'a',modifiers:[]},{signal:after.signal});assert.equal(result.performed,true);assert.equal(result.cancelledAfterDispatch,true);assert.equal(b.calls.filter(c=>c.op==='displayInput').length,1);
+});
+test('ambiguous or security/login screens never dispatch and clear previously reusable input proof',async()=>{
+ const h=fixture(),shot=await h.visual.observe();h.location={available:false,reason:'可见安全登录提示'};await assert.rejects(h.visual.observe({relocate:true}),/安全登录/);await assert.rejects(h.visual.input(shot.visualFrameId,{action:'click',x:100,y:60}),/不可用/);assert(!h.calls.some(c=>c.op==='displayInput'));
+});
+test('an uncertain small target can be reobserved with a fresh candidate enlargement, which never authorizes input',async()=>{
+ const h=fixture(),original={...h.location},candidate={x:.1,y:.1,width:.8,height:.8};h.location={available:false,region:candidate,reason:'整图中文字过小，身份尚不清楚'};
+ await assert.rejects(h.visual.observe(),e=>e.code==='E_VISUAL_TARGET'&&e.diagnostic.visualState.kind==='unclear'&&!e.diagnostic.visualState.requiresOwner);
+ assert.equal(h.requests[0].messages[1].content.filter(p=>p.type==='image_url').length,1);assert.equal(h.visual.anchor,null);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,0);
+ h.advance(100);paint(h.image,{x:.3,y:.3,width:.1,height:.1},200);const fresh=h.crop(h.encode(h.image),{x:20,y:12,width:160,height:96});h.location=original;
+ const shot=await h.visual.observe(),content=h.requests[1].messages[1].content,images=content.filter(p=>p.type==='image_url');assert.equal(images.length,2);assert.equal(images[1].image_url.url,'data:image/png;base64,'+fresh.toString('base64'));assert.match(content.find(p=>p.text?.includes('候选区域放大图')).text,/仍相对于第一张完整截图/);assert.equal(shot.capturedAt,100100);assert.equal(h.visual.recoveryRegion,null);assert(h.calls.every(c=>c.op==='displayCapture'));
+});
+test('login and security classifications require explicit visible evidence; no alternative screen backend is accepted',async()=>{
+ for(const backend of ['ScreenCaptureKit','AVCaptureScreenInput']){const h=fixture(),request=h.native.request;h.native.request=async(op,args)=>({...await request(op,args),backend});await assert.rejects(h.visual.observe(),/CGDisplayStream/);assert.equal(h.requests.length,0);}
+ const h=fixture();h.location={available:false,unavailableKind:'login',reason:'登录状态待核对'};await assert.rejects(h.visual.observe(),e=>!e.diagnostic.visualState.requiresOwner);
+ h.location.evidence='原生窗口中可见扫码登录';await assert.rejects(h.visual.observe(),e=>e.diagnostic.visualState.kind==='login'&&e.diagnostic.visualState.requiresOwner);assert(h.calls.every(c=>c.op==='displayCapture'));
+});
+async function typedFrame(){
+ const h=fixture(),shot=await h.visual.observe();
+ await h.visual.input(shot.visualFrameId,{action:'type',text:'hello'});paint(h.image,h.location.focusRegion,230);
+ return {h,shot};
+}
+test('confirmed typing can continue from the original frame only after fresh vision confirms the same editor and focus',async()=>{
+ const {h,shot}=await typedFrame();
+ await h.visual.input(shot.visualFrameId,{action:'key',key:'enter',modifiers:[]});
+ const inputs=h.calls.filter(c=>c.op==='displayInput');assert.equal(inputs.length,2);assert.equal(inputs[1].args.action,'key');
+ assert.notEqual(inputs[1].args.visualEvidence.frameId,shot.visualFrameId,'the submit uses a newly recognized frame, not the pre-type editor pixels');
+ assert.equal(h.requests.length,2,'refreshing focus does not replan the host action');assert.equal(h.visual.acknowledgedInput,null,'one successful type cannot authorize another refresh');
+ const refresh=h.requests[1].messages[1].content.find(p=>p.type==='image_url').image_url.url;
+ assert.equal(refresh,'data:image/png;base64,'+h.encode(h.image).toString('base64'),'recognition receives the new post-type display pixels');
+});
+test('a changed editor without a confirmed type receipt cannot be refreshed or submitted',async()=>{
+ for(const uncertain of ['not-performed','lost-receipt']){
+  const h=fixture(),shot=await h.visual.observe(),request=h.native.request;
+  h.native.request=async(op,args)=>{const result=await request(op,args);if(op==='displayInput'&&args.action==='type'){paint(h.image,h.location.focusRegion,230);if(uncertain==='lost-receipt')throw Error('type acknowledgement lost');return {performed:false};}return result;};
+  if(uncertain==='lost-receipt')await assert.rejects(h.visual.input(shot.visualFrameId,{action:'type',text:'hello'}),/acknowledgement/);
+  else assert.equal((await h.visual.input(shot.visualFrameId,{action:'type',text:'hello'})).performed,false);
+  await assert.rejects(h.visual.input(shot.visualFrameId,{action:'key',key:'enter'}),e=>e.dispatched===false);
+  assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert.equal(h.requests.length,1,'uncertain input does not authorize a new focus baseline');
+ }
+ const h=fixture(),shot=await h.visual.observe();paint(h.image,h.location.focusRegion,230);
+ await assert.rejects(h.visual.input(shot.visualFrameId,{action:'key',key:'enter'}),e=>e.dispatched===false);assert(!h.calls.some(c=>c.op==='displayInput'));
+});
+test('typing cannot refresh a changed identity, display geometry or additional protected target',async()=>{
+ for(const change of ['identity','geometry','related']){
+  const {h,shot}=await typedFrame(),related={x:.55,y:.3,width:.1,height:.1};
+  if(change==='identity')paint(h.image,h.location.identityRegion,250);
+  if(change==='geometry')h.image=raster(201,120);
+  if(change==='related')paint(h.image,related,250);
+  await assert.rejects(h.visual.input(shot.visualFrameId,{action:'key',key:'enter'},{regions:[related]}),e=>e.dispatched===false);
+  assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert.equal(h.requests.length,1,'changed protected evidence cannot be rebased by recognition');
+ }
+});
+test('refreshed typing focus rejects moved, invisible, inactive or unconfirmed editor identity',async()=>{
+ for(const change of ['moved-focus','missing-focus','inactive','identity','moved-region']){
+  const {h,shot}=await typedFrame();
+  if(change==='moved-focus')h.location.focusRegion={x:.3,y:.65,width:.4,height:.15};
+  if(change==='missing-focus'){h.location.focusRegion=null;h.location.focusEvidence='';}
+  if(change==='inactive')h.location.active=false;
+  if(change==='identity')h.location.sameIdentity=false;
+  if(change==='moved-region')h.location.region={x:.11,y:.1,width:.8,height:.8};
+  await assert.rejects(h.visual.input(shot.visualFrameId,{action:'key',key:'enter'}),e=>e.dispatched===false);
+  assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert.equal(h.visual.frames.size,0,'failed focus renewal revokes all prior input frames');
+ }
+});
+test('a focus change after renewal is bounded and never automatically retries the key',async()=>{
+ const {h,shot}=await typedFrame(),request=h.native.request;
+ h.native.request=async(op,args)=>{if(op==='displayCapture'&&h.requests.length===2)paint(h.image,h.location.focusRegion,170);return request(op,args);};
+ await assert.rejects(h.visual.input(shot.visualFrameId,{action:'key',key:'enter'}),e=>e.dispatched===false);
+ assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert.equal(h.requests.length,2,'there is one bounded focus renewal, not a repeated recovery loop');
+});
+test('a canceled type receipt and cancellation during focus renewal never continue input',async()=>{
+ const controller=new AbortController(),h=fixture({onInput:()=>controller.abort()}),shot=await h.visual.observe();
+ assert.equal((await h.visual.input(shot.visualFrameId,{action:'type',text:'hello'},{signal:controller.signal})).cancelledAfterDispatch,true);paint(h.image,h.location.focusRegion,230);
+ await assert.rejects(h.visual.input(shot.visualFrameId,{action:'key',key:'enter'}),e=>e.dispatched===false);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+ const {h:next,shot:original}=await typedFrame(),stop=new AbortController(),request=next.visual.request;
+ next.visual.request=async options=>{const result=await request(options);stop.abort();return result;};
+ await assert.rejects(next.visual.input(original.visualFrameId,{action:'key',key:'enter'},{signal:stop.signal}),e=>e.dispatched===false);assert.equal(next.calls.filter(c=>c.op==='displayInput').length,1);
+});
+test('host approval runs after the last pixel check and its rejection proves no input was dispatched',async()=>{
+ const {h,shot}=await typedFrame();let guards=0;
+ await assert.rejects(h.visual.input(shot.visualFrameId,{action:'key',key:'enter'},{beforeDispatch:()=>{
+  guards++;assert.equal(h.requests.length,2,'the changed editor was recognized before checking host approval');assert.equal(h.calls.at(-1).op,'displayCapture','the final capture is complete');throw Error('host approval changed');
+ }}),e=>e.dispatched===false&&/host approval changed/u.test(e.message));
+ assert.equal(guards,1);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1,'only the original type was sent');
+});
+test('an asynchronous host guard fails closed without an unhandled rejection or native input',async()=>{
+ for(const rejected of [false,true]){
+  const h=fixture(),shot=await h.visual.observe();
+  await assert.rejects(h.visual.input(shot.visualFrameId,{action:'key',key:'enter'},{beforeDispatch:()=>rejected?Promise.reject(Error('late guard failure')):Promise.resolve()}),e=>e.dispatched===false&&/必须同步/u.test(e.message));
+  assert(!h.calls.some(c=>c.op==='displayInput'));await new Promise(resolve=>setImmediate(resolve));
+ }
+});

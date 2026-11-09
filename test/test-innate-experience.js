@@ -43,3 +43,15 @@ test('an inapplicable innate method gets a learned correction without changing i
  assert.equal(require('../src/main/context-assembler').experienceContext(task).length,0);
  await assert.rejects(review.execute({sourceId:original.id,reason:'not evidenced',operationIds:['foreign']},{task}),/不属于/);
 });
+test('only intact locally installed innate provenance permits learned retrieval, including when direct innate retrieval is disabled',async t=>{
+ const {memory,repo}=await fixture(t),learning=new AgentLearning({memory,packages:loadSoftwarePackages()});await learning.seed();
+ const entry=(await memory.innateExperiences.rows({scene:'life'}))[0],pack=(await require('../src/main/memory-evidence').readRecords(memory,entry.value.sources))[0];
+ const learned=await repo.put({instructions:'此方法来自可核验的本地先天来源。',tags:['software:workbuddy'],origin:'task-learning'},{scene:'life',sources:[entry.id]});
+ assert.equal(await memory.innateExperiences.verifySource(pack),true);assert.equal(await memory.innateExperiences.verifySource(entry),true);
+ assert((await repo.search({query:'software:workbuddy',excludeTaskId:'independent-future-task'})).some(r=>r.id===learned.row.id));
+ const settings=memory.getSettings.bind(memory);memory.getSettings=()=>({...settings(),useInnateExperience:false});assert.equal((await memory.innateExperiences.search({query:'software:workbuddy'})).length,0);
+ assert((await repo.search({query:'software:workbuddy',excludeTaskId:'independent-future-task'})).some(r=>r.id===learned.row.id),'the switch does not invalidate verified learned provenance');
+ const forged={...pack,id:'experience:fake-pack',value:{...pack.value}};await memory.write([forged]);const forgedLesson=await repo.put({instructions:'不信任伪造的origin/type。',tags:['software:forged']},{scene:'life',sources:[forged.id]});assert(!(await repo.search({query:'software:forged',excludeTaskId:'future'})).some(r=>r.id===forgedLesson.row.id));
+ const changed={...entry,value:{...entry.value,instructions:'篡改后的先天内容'}};await memory.write([changed]);assert.equal(await memory.innateExperiences.verifySource(changed),false);assert(!(await repo.search({query:'software:workbuddy',excludeTaskId:'independent-future-task'})).some(r=>r.id===learned.row.id));
+ await memory.write([entry]);await memory.db.request('remove',{recordId:'innate:edition:'+pack.value.hash,epoch:memory.epoch});assert(!(await repo.search({query:'software:workbuddy',excludeTaskId:'independent-future-task'})).some(r=>r.id===learned.row.id),'a missing source never inherits trust');
+});

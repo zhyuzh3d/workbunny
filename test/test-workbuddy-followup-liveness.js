@@ -2,6 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { DesktopService, WECHAT_RULE } = require('../src/main/desktop-service');
+const {boundaryVisual}=require('./support/workbuddy-boundary-visual-fixture.cjs');
 const immediateDelay = async fn => {
   const original = global.setTimeout;
   global.setTimeout = (callback, ms, ...args) => original(callback, ms === 1200 ? 0 : ms, ...args);
@@ -24,27 +25,10 @@ test('a bound monitor that repeatedly disappears pauses without changing task id
 }));
 
 function visualFixture(model) {
-  const rect = { x: 0, y: 0, width: 800, height: 600 }, calls = [];
   const marker = '[workbunny:11111111-1111-4111-8111-111111111111]';
-  let typed = '';
-  const native = {
-    async request(op, payload = {}) {
-      calls.push({ op, payload });
-      if (op === 'frontmost') return { application: { bundleId: 'com.tencent.workbuddy.mac', pid: 11 }, windows: [{ windowId: 1, pid: 11, layer: 0, rect }] };
-      if (op === 'capture') return { pngBase64: Buffer.from('fixture').toString('base64'), desktopRect: rect };
-      if (op === 'recognize') return { texts: [
-        { text: marker, confidence: .99, x: .4, y: .2 },
-        { text: model === 'free' ? 'Hy3' : 'DeepSeek-V4.1-Flash', confidence: .99, x: .4, y: .49, width: .08, height: .02 },
-        ...(model === 'free' ? [{ text: '0.00x', confidence: .99, x: .5, y: .49, width: .03, height: .02 }] : []),
-        { text: typed || '输入消息', confidence: .99, x: .4, y: .75 },
-      ] };
-      if (op === 'type') typed = payload.text;
-      if (op === 'workbuddyInspect') return {scanComplete:true,editorCount:1,conversationReady:true,associationMarkerPresent:payload.marker===marker,draftEmpty:!typed,draftMatchesRequest:typed===payload.text};
-      return {};
-    }, cancel() {}, close() {},
-  };
+  const visual=boundaryVisual({initial:{marker,mode:'conversation',model:model==='free'?'hy3':'deepseek-v4.1-flash'}}),calls=visual.calls;
   let plans = 0;
-  const svc = new DesktopService({ native, planner: async () => ++plans === 1
+  const svc = new DesktopService({ ...visual, planner: async () => ++plans === 1
     ? { action: 'type', purpose: 'task', text: 'placeholder', focus: { x: .5, y: .75 } }
     : { action: 'key', purpose: 'submit', key: 'enter', modifiers: [] },
     observeWorkBuddy: async task => ({ sessionId: 'session-a', taskId: task.followUpAwaitingMonitor ? 2 : 1,
@@ -52,19 +36,20 @@ function visualFixture(model) {
   svc.task = { id: '11111111-1111-4111-8111-111111111111', target: 'workbuddy', scene: 'life', domain: 'work', visibilityFloor: 1,
     workModel: 'hy3', associationMarker: marker, handoffSent: true, sessionId: 'session-a', monitorTaskId: 1,
     monitorMessageKey: 'old', followUpRound: 0, status: 'review', steps: [], goal: 'fixture' };
-  return { svc, calls };
+  return { svc, calls, visual };
 }
 
 test('Hy3 follow-up uses visible free-model proof and preserves the original session', async () => {
-  const { svc, calls } = visualFixture('free');
+  const { svc, calls, visual } = visualFixture('free');
   const result = await svc.followUp({ text: '请核对上一项结果' });
   assert.equal(result.ok, true, result.error); assert.equal(result.sessionId, 'session-a');
   assert.equal(result.submission,'pending');
-  const outbound=calls.find(c=>c.op==='type').payload.text;assert(!outbound.includes(WECHAT_RULE));assert(!outbound.includes('微信'));assert(!outbound.includes('不得操作通讯软件'));
-  assert.equal(calls.filter(c => c.op === 'type').length, 1);
-  assert.equal(calls.filter(c => c.op === 'key').length, 1);
+  const outbound=calls.find(c=>c.op==='displayInput'&&c.payload.action==='type').payload.text;assert(!outbound.includes(WECHAT_RULE));assert(!outbound.includes('微信'));assert(!outbound.includes('不得操作通讯软件'));
+  assert.equal(calls.filter(c => c.op==='displayInput'&&c.payload.action==='type').length, 1);
+  assert.equal(calls.filter(c => c.op==='displayInput'&&c.payload.action==='key').length, 1);
   assert.equal(calls.some(c => ['workbuddyFill','workbuddySend'].includes(c.op)), false);
-  assert.equal(calls.filter(c=>c.op==='workbuddyInspect').length,1);
+  assert.equal(visual.judgments.filter(j=>j.input.evidence.expectedText).length,1);
+  assert(calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
   await svc.close();
 });
 
@@ -72,7 +57,7 @@ test('Hy3 follow-up refuses a visible paid-model selection before typing', async
   const { svc, calls } = visualFixture('paid');
   const result = await svc.followUp({ text: '请核对上一项结果' });
   assert.equal(result.ok, false); assert.match(result.error, /原任务模型/);
-  assert.equal(calls.some(c => ['type', 'key', 'workbuddyFill', 'workbuddySend'].includes(c.op)), false);
+  assert.equal(calls.some(c=>c.op==='displayInput'),false);
   await svc.close();
 });
 
@@ -80,7 +65,7 @@ test('an owner-initiated visual continuation uses the shared production boundary
  const {svc,calls}=visualFixture('free');
  const text='发布已完成的网站并返回真实链接；保留现有文件';
  const result=await svc.followUp({text,ownerInitiated:true});assert.equal(result.ok,true,result.error);
- const outbound=calls.find(c=>c.op==='type').payload.text;assert(outbound.startsWith(text));assert(!outbound.includes(WECHAT_RULE));assert(!outbound.includes('文件传输助手'));assert(!outbound.includes('不得操作通讯软件'));
+ const outbound=calls.find(c=>c.op==='displayInput'&&c.payload.action==='type').payload.text;assert(outbound.startsWith(text));assert(!outbound.includes(WECHAT_RULE));assert(!outbound.includes('文件传输助手'));assert(!outbound.includes('不得操作通讯软件'));
  assert.equal(svc.task.followUpHistory.at(-1).outboundText,outbound);await svc.close();
 });
 test('follow-up protects the complete envelope including criteria before either input path receives it',async()=>{
@@ -88,5 +73,5 @@ test('follow-up protects the complete envelope including criteria before either 
  svc.sensitivePolicy.prepareWorkBuddy=async text=>{prepared=text;return {text:text.replaceAll('private-scope-parameter','protected-parameter')};};
  const text='补充真实结果';const result=await svc.followUp({text});assert.equal(result.ok,true,result.error);
  assert(prepared.includes('private-scope-parameter'));assert(!prepared.includes('不得操作通讯软件'));
- const typed=calls.find(c=>c.op==='type').payload.text;assert(typed.includes('protected-parameter'));assert(!typed.includes('private-scope-parameter'));assert.equal(svc.task.followUpHistory.at(-1).text,text);await svc.close();
+ const typed=calls.find(c=>c.op==='displayInput'&&c.payload.action==='type').payload.text;assert(typed.includes('protected-parameter'));assert(!typed.includes('private-scope-parameter'));assert.equal(svc.task.followUpHistory.at(-1).text,text);await svc.close();
 });

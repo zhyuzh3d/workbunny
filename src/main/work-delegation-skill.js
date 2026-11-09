@@ -12,7 +12,8 @@ const workDelegationSkill={id:'work.delegate',title:'工作委派',version:1,sub
  tools:['work.submit','work.status','result.deliver','result.attach'],capabilities:['work.delegate','work.read','conversation.send','screen.input'],requiredCapabilities:['work.delegate','work.read'],
  capabilitiesFor:spec=>['work.delegate','work.read',...(spec.delivery?.channel==='wechat'?['conversation.send','screen.input']:[])],
  validate:spec=>{fields(spec.parameters,['sourceTaskId'],'工作参数');if(spec.parameters.sourceTaskId!==undefined&&typeof spec.parameters.sourceTaskId!=='string')throw Error('原任务ID无效');if(spec.subjects.length!==1||spec.subjects[0].application!=='workbuddy')throw new Error('请指定WorkBuddy作为工作执行者');if(spec.goal.length>3000||spec.criteria.length>2000)throw new Error('工作交办请控制在3000字、验收条件2000字以内');},
- async run({task,call,report,checkpoint,now}){
+ async run({task,call,report,checkpoint,now,recovery,mainReviewEnabled}){
+  if(recovery?.source==='main-review'&&recovery.guidanceId!==task.state.workGuidance?.guidanceId){task.state.workGuidance=structuredClone(recovery);await checkpoint();}
   if(!task.state.job){task.state.job=await call({tool:'work.submit',key:'submit-work',args:{application:'workbuddy'}});}
   const result=task.state.result?{completed:true,verified:true,report:task.state.result.summary,result:task.state.result}:await call({tool:'work.status',key:'work-status:'+task.counters.wakes,args:{application:'workbuddy',jobId:task.state.job.jobId}});
   if(result.completed&&result.verified){
@@ -20,7 +21,7 @@ const workDelegationSkill={id:'work.delegate',title:'工作委派',version:1,sub
    await require('./result-delivery').deliverResult({task,call,checkpoint,report});
    return {status:'completed',note:task.delivery?.channel==='wechat'?'结果已通过微信发送':task.state.result.summary,state:task.state};
   }
-  if(result.needsAttention){await report(result.report||'WorkBuddy任务需要处理','work-attention');return {status:'needs_attention',note:result.report||'工作需要核对',state:task.state};}
+  if(result.needsAttention){if(!mainReviewEnabled)await report(result.report||'WorkBuddy任务需要处理','work-attention');return {status:'needs_attention',note:result.report||'工作需要核对',state:task.state};}
   return {status:'waiting',note:result.report||'WorkBuddy正在执行，等待真实进展',state:task.state,nextCheckAt:now+task.schedule.intervalSeconds*1000};
  }
 };

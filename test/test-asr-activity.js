@@ -17,3 +17,11 @@ test('ASR forwards activity without transcript logging and discarded process eve
  asr.start({always:true});send(children[0],9);assert.equal(events.length,1);assert.equal(events[0].recognizer,1);asr.kill({discard:true});asr.start({always:true});send(children[0],10);assert.equal(events.length,1);
  send(children[1],1);assert.equal(events.length,2);assert.equal(events[1].recognizer,2);assert.equal(events[1].state,'active');assert(!JSON.stringify(logs).includes('private-canary'));assert(!JSON.stringify(events).includes('private-canary'));
 });
+test('ASR forwards only bounded native empty-final coverage metadata from its current process',t=>{
+ const children=[],events=[],asr=new Asr('/offline',()=>{},()=>{const p=new EventEmitter();Object.assign(p,{pid:children.length+1,stdout:new PassThrough(),stderr:new PassThrough(),stdin:new PassThrough(),kill(){}});children.push(p);return p;});
+ asr.on('audioFinal',value=>events.push(value));asr.on('error',()=>{});t.after(()=>asr.kill({discard:true}));asr.start({always:true});
+ const send=(p,patch={})=>p.stdout.write(JSON.stringify({t:'audioFinal',gen:3,coveredSeq:12,private:'canary',...patch})+'\n');
+ for(const patch of [{gen:-1},{gen:1.5},{coveredSeq:0},{coveredSeq:1.5}])send(children[0],patch);assert.equal(events.length,0);
+ send(children[0]);assert.deepEqual(events,[{sourceGen:3,coveredSeq:12,recognizer:1}]);asr.kill({discard:true});asr.start({always:true});
+ send(children[0]);assert.equal(events.length,1);send(children[1]);assert.equal(events[1].recognizer,2);assert(!JSON.stringify(events).includes('canary'));
+});

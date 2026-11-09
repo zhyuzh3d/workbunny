@@ -236,6 +236,7 @@ struct SpeechEndpointNotifications {
 }
 var endpointNotifications = SpeechEndpointNotifications()
 var activityOutputSequence = 0
+var finalizedActivitySequence = 0
 // Test injection changes only the scheduler/handler, never a model or engine.
 var enqueueEndpointNotification: (@escaping () -> Void) -> Void = { work in DispatchQueue.global().async(execute: work) }
 var handleQuietEndpoint: (Int) -> Void = { beginEnd("quiet", expectedGen: $0) }
@@ -595,6 +596,7 @@ func startSession() async {
     let gen = sessionGen
     endpointPolicy = SpeechEndpointPolicy(generation: gen, silenceMs: silenceMs, maxSeconds: maxSeconds)
     finalizationBarrier = SpeechFinalizationBarrier(generation: gen)
+    finalizedActivitySequence = 0
     endpointNotifications.reset(generation: gen)
     stateLock.unlock()
 
@@ -734,10 +736,16 @@ func endSession(gen: Int, text: String) async {
     ending = true
     inputCont = nil
     let wasFinished = finished
+    let coveredSequence = finalizedActivitySequence
     stateLock.unlock()
     if wasFinished { return }
 
     emitUtterance(text, traceGen: gen)
+    // Empty means this exact delivered audio was finalized and drained with
+    // no words. This is coverage evidence, never a new utterance/authority.
+    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && coveredSequence > 0 {
+        emit(["t": "audioFinal", "gen": gen, "coveredSeq": coveredSequence])
+    }
 
     if alwaysMode {
         if !isFinished() { await startSession() }
@@ -760,6 +768,7 @@ func beginEnd(_ reason: String = "unspecified", expectedGen: Int? = nil) {
     let gen = sessionGen
     let continuation = inputCont
     guard finalizationBarrier.request(at: ProcessInfo.processInfo.systemUptime, generation: gen) else { stateLock.unlock(); return }
+    finalizedActivitySequence = activityOutputSequence
     ending = true
     let activityAtEnd = endpointPolicy.evidence(at: ProcessInfo.processInfo.systemUptime, generation: gen)
     inputCont = nil
@@ -1060,6 +1069,24 @@ func selftestEndpointNotifications() throws -> [String: Any] {
 
 @main struct ASRMain {
 static func main() {
+    if hasFlag("--self-test-empty-audio-final") {
+        Task {
+            sessionGen = 7; ending = true; finished = false
+            activityOutputSequence = 99; finalizedActivitySequence = 42
+            finalizationBarrier = SpeechFinalizationBarrier(generation: 7)
+            finalizationBarrier.request(at: 1, generation: 7)
+            finalizationBarrier.resultsEnded(confirmed: true, text: "", generation: 7)
+            await publishFinalizedSession(gen: 7)
+            guard sessionGen == 7 else { fail("空音频未等收尾成功即上报", code: 1) }
+            finalizationBarrier.finalizerSucceeded(generation: 7)
+            await publishFinalizedSession(gen: 7)
+            await publishFinalizedSession(gen: 7)
+            guard sessionGen == 8 else { fail("空音频收尾未一次性完成", code: 1) }
+            emit(["t":"selfTest", "emptyAudioFinal":true, "barrierRequired":true,
+                  "exactCoverage":true, "onceOnly":true, "recognizerStarted":false])
+        }
+        RunLoop.main.run(); return
+    }
     if hasFlag("--self-test-speech-endpoint-notifications") {
         do { emit(try selftestEndpointNotifications()); return }
         catch { fail("语音端点事件通知离线夹具失败", code: 1) }

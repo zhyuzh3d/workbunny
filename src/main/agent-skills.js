@@ -4,7 +4,7 @@ class SkillRegistry {
   constructor(tools) { this.tools = tools; this.skills = new Map(); this.candidates = new Map(); }
   register(skill) {
     if (!skill || !/^[a-z][a-z0-9_.-]+$/u.test(skill.id) || !Number.isSafeInteger(skill.version) || skill.version < 1 ||
-        typeof skill.run !== 'function' || !skill.description || !Array.isArray(skill.tools) || !Array.isArray(skill.capabilities)) throw new Error('技能定义不合法');
+        typeof skill.run !== 'function' || (skill.activeAction!==undefined&&typeof skill.activeAction!=='function') || !skill.description || !Array.isArray(skill.tools) || !Array.isArray(skill.capabilities)) throw new Error('技能定义不合法');
     for (const name of skill.tools) this.tools.get(name);
     const prior = this.skills.get(skill.id);
     if (prior && skill.version <= prior.version) throw new Error('技能版本必须递增');

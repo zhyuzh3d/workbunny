@@ -4,8 +4,10 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const { JsonLines, MAX_NATIVE_LINE_BYTES } = require('./json-lines');
+const diagnostics=require('./operation-diagnostics');
+const {randomUUID}=require('node:crypto');
 const displayBridges=new Map();
-const DISPLAY_OPS=new Set(['capture','visualSample','visualCommit','visualForget']);
+const DISPLAY_OPS=new Set(['displayCapture','capture','visualSample','visualCommit','visualForget']);
 
 function defaultBinary() {
   return process.resourcesPath
@@ -30,6 +32,8 @@ class DesktopNative extends EventEmitter {
     this.terminal = false;
     this.stopPromise = null;
     this.recoveryGeneration = 0;
+    this.diagnosticId=randomUUID();
+    this.sharedPixelControllers=new Set();
   }
 
   _start() {
@@ -43,6 +47,7 @@ class DesktopNative extends EventEmitter {
     try { child = this.spawnProcess(this.binaryPath, [], { stdio: ['pipe', 'pipe', 'pipe'] }); }
     catch (error) { throw new Error(`桌面原生模块启动失败：${error.message}`); }
     this.proc = child;
+    const processTrace=diagnostics.bind({nativeClientId:this.diagnosticId},{inherit:false});
     child.stdout.on('data', chunk => { if (this.proc === child && !this.closed) this._onData(chunk); });
     child.stdout.on('error', error => this._break(child, new Error(`桌面原生 stdout 错误：${error.message}`)));
     child.stderr.on('data', chunk => this.emit('stderr', String(chunk).trim()));
@@ -57,6 +62,7 @@ class DesktopNative extends EventEmitter {
         this._failAll(new Error(`桌面原生模块已退出（code=${code}, signal=${signal || ''}）`));
       }
       this.emit('close', { code, signal });
+      processTrace.record('native-exit',{status:'closed'});
     });
   }
 
@@ -68,6 +74,7 @@ class DesktopNative extends EventEmitter {
         if (!pending) return;
         this.pending.delete(response.id);
         clearTimeout(pending.timer);
+        pending.trace.record(response.ok?'native-receipt':'native-error',{ok:response.ok,status:response.ok?'acknowledged':response.dispatched===false?'not-dispatched':'uncertain',nativeAcknowledged:response.result?.performed===true,dispatched:response.dispatched,code:response.code});
         if (response.ok) pending.resolve(response.result);
         else {
           const error = new Error(response.error || '桌面原生请求失败');
@@ -100,12 +107,22 @@ class DesktopNative extends EventEmitter {
   _failAll(error) {
     for (const item of this.pending.values()) {
       clearTimeout(item.timer);
+      item.trace.record('native-error',{status:'uncertain'});
       item.reject(error);
     }
     this.pending.clear();
   }
 
   async request(op, payload = {}, timeoutMs = 12000) {
+    const pixelSource=process.env.WORKBUNNY_DISPLAY_PIXEL_SOURCE;
+    if(pixelSource&&DISPLAY_OPS.has(op)){
+      if(this.terminal)throw new Error('桌面原生客户端已关闭');
+      if(op!=='displayCapture')throw Object.assign(Error('共享显示像素模式不允许旧窗口采集或独立显示流；请使用通用视觉观察'),{code:'E_PIXEL_SOURCE_MODE',dispatched:false});
+      const controller=new AbortController(),generation=this.recoveryGeneration;this.sharedPixelControllers.add(controller);
+      const trace=diagnostics.bind({nativeClientId:this.diagnosticId,nativeRequestId:randomUUID(),nativeOperation:op});trace.record('native-dispatch',{status:'requested',timeoutMs:Math.min(1500,timeoutMs)});
+      try{const frame=await require('./shared-display-pixels').readDisplayPixels({manifest:pixelSource,payload,timeoutMs:Math.min(1500,timeoutMs),signal:controller.signal});if(this.terminal||generation!==this.recoveryGeneration)throw Object.assign(Error('共享像素请求已取消'),{code:'E_ABORTED',dispatched:false});trace.record('native-receipt',{status:'acknowledged',ok:true});return frame;}
+      catch(error){trace.record('native-error',{status:'not-dispatched',code:error.code});throw error;}finally{this.sharedPixelControllers.delete(controller);}
+    }
     if(this.shareDisplay&&DISPLAY_OPS.has(op)){
       if(this.terminal)throw new Error('桌面原生客户端已关闭');
       if(!this.displayBridge){
@@ -130,15 +147,16 @@ class DesktopNative extends EventEmitter {
     }
     const generation = this.recoveryGeneration;
     for (let attempt = 0; ; attempt++) {
-      try { return await this._requestOnce(op, attempt && op === 'capture' && payload.windowId ? { ...payload, captureMode: 'displayCrop' } : payload, timeoutMs); }
+      try { return await this._requestOnce(op, payload, timeoutMs); }
       catch (error) {
-        const captureTimeout = (op === 'capture' || op === 'visualSample') &&
+        const captureTimeout = (op === 'displayCapture' || op === 'capture' || op === 'visualSample') &&
           (/^截图请求超时/.test(error.message) || error.message === `桌面原生请求超时：${op}`);
         if (!captureTimeout || generation !== this.recoveryGeneration || this.terminal) throw error;
-        // A stuck SCK call can outlive its response; reap the whole bridge before
+        diagnostics.record('native-recovery',{nativeOperation:op,attempt:attempt+1,status:'started'});
+        // A stuck CG display call can outlive its response; reap the whole bridge before
         // accepting another capture. In-flight writes are rejected, never replayed.
         await this._stop('截图超时恢复');
-        if (op !== 'capture' || attempt !== 0 || generation !== this.recoveryGeneration || this.terminal) throw error;
+        if (!['displayCapture','capture'].includes(op) || attempt !== 0 || generation !== this.recoveryGeneration || this.terminal) throw error;
       }
     }
   }
@@ -152,25 +170,30 @@ class DesktopNative extends EventEmitter {
     }
     try { this._start(); } catch (error) { return Promise.reject(error); }
     const id = this.nextId++;
+    const trace=diagnostics.bind({nativeClientId:this.diagnosticId,nativeRequestId:this.diagnosticId+':'+id,nativeOperation:op,operation:payload.action});
     const message = { ...payload, id, op, timeoutMs, sentAtMs: Date.now() };
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        trace.record('native-error',{code:'E_NATIVE_TIMEOUT',status:'uncertain',timeoutMs});
         reject(new Error(`桌面原生请求超时：${op}`));
       }, timeoutMs + 500);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer,trace });
       try {
+        trace.record('native-dispatch',{status:'requested',timeoutMs,chars:typeof payload.text==='string'?payload.text.length:undefined,key:payload.key,modifiers:payload.modifiers,x:payload.x,y:payload.y});
         this.proc.stdin.write(`${JSON.stringify(message)}\n`, error => {
           if (!error) return;
           const pending = this.pending.get(id);
           if (!pending) return;
           clearTimeout(pending.timer);
           this.pending.delete(id);
+          trace.record('native-error',{status:'uncertain'});
           reject(error);
         });
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(id);
+        trace.record('native-error',{status:'not-dispatched'});
         reject(error);
       }
     });
@@ -207,6 +230,7 @@ class DesktopNative extends EventEmitter {
   }
 
   async close() {
+    for(const controller of this.sharedPixelControllers)controller.abort();this.sharedPixelControllers.clear();
     this.recoveryGeneration++;
     this.terminal = true;
     try {
@@ -231,6 +255,7 @@ class DesktopNative extends EventEmitter {
   }
 
   cancel() {
+    for(const controller of this.sharedPixelControllers)controller.abort();this.sharedPixelControllers.clear();
     this.recoveryGeneration++;
     return this._stop('cancel');
   }

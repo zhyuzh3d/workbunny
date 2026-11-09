@@ -1,49 +1,16 @@
 'use strict';
-const test = require('node:test'), assert = require('node:assert/strict');
-const { DesktopService } = require('../src/main/desktop-service');
-const bundleId = 'com.tencent.xinWeChat', scope = { bundleId, pid: 123, windowId: 7 };
-const screen = { x: 0, y: 0, width: 1920, height: 1080 };
-function fixture({ backend = 'CGDisplayStream', stale = false, move = false, switchApp = false } = {}) {
-  let rect = { x: 100, y: 80, width: 800, height: 600 }, captures = 0, captured = false;
-  const calls = [], crops = [];
-  const native = { async request(op, payload) {
-    calls.push({ op, payload });
-    if (op === 'frontmost') return { application: { bundleId: captured && switchApp ? 'other.app' : bundleId, pid: 123 },
-      windows: [{ windowId: 7, pid: 123, layer: 0, rect: { ...rect } }] };
-    if (op === 'capture') {
-      captured = true; captures++;
-      if (move && captures === 1) rect = { ...rect, x: 200 };
-      return { backend, capturedAt: Date.now() - (stale ? 6000 : 0), desktopRect: screen, width: 3840, height: 2160, pngBase64: Buffer.from('full-display').toString('base64') };
-    }
-    if (op === 'recognize') return { texts: [{ text: '文件传输助手', x: .4, y: .08, confidence: 1 }] };
-    throw Error('unexpected native operation: ' + op);
-  } };
-  const service = new DesktopService({ native, imageCrop: (data, rect) => { crops.push(rect); assert.equal(data.toString(), 'full-display'); return Buffer.from('crop'); } });
-  service.running = true; service.generation = 1;
-  return { service, calls, crops };
-}
-test('WeChat captures full-display pixels without a window ID and crops in pixel coordinates', async () => {
-  const { service, calls, crops } = fixture();
-  const shot = await service.capture(scope, 1);
-  assert.deepEqual(calls.find(c => c.op === 'capture').payload, { captureMode: 'displayStream', output: 'base64' });
-  assert.deepEqual(crops, [{ x: 200, y: 160, width: 1600, height: 1200 }]);
-  assert.equal(shot.captureSource, 'CGDisplayStream'); assert.deepEqual(shot.rect, { x: 100, y: 80, width: 800, height: 600 });
-  assert.deepEqual(shot.sourceRect, screen);
+const test=require('node:test'),assert=require('node:assert/strict');
+const {DesktopService}=require('../src/main/desktop-service'),{fixture,paint}=require('./support/visual-fixture.cjs');
+function setup(){const h=fixture(),service=new DesktopService({native:h.native,imageCrop:h.crop,bitmap:h.bitmap});service.visualSessions=new Map([['wechat',h.visual]]);service.task={target:'wechat',scene:'life',domain:'life',visibilityFloor:1};service.running=true;service.generation=1;return {...h,h,service,scope:{...h.visual.identity(),target:'wechat'}};}
+test('WeChat display pixels are cropped only to a region located by the screenshot VLM',async()=>{
+ const h=setup(),shot=await h.service.capture(h.scope,1);assert.deepEqual(h.calls[0].args,{output:'base64'});assert.equal(shot.captureSource,'CGDisplayStream');assert.deepEqual(shot.rect,{x:20,y:12,width:160,height:96});assert.deepEqual(shot.sourceRect,{x:0,y:0,width:200,height:120});assert.equal(h.requests.length,1);assert(!JSON.stringify(h.calls).match(/windowId|bundleId|"pid"|frontmost|recognize/u));
 });
-test('Unverified and stale display frames cannot authorize WeChat input', async () => {
-  for (const options of [{ backend: 'ScreenCaptureKit' }, { stale: true }]) {
-    const { service, calls, crops } = fixture(options);
-    await assert.rejects(service.capture(scope, 1), /可靠的外部全屏新画面/);
-    assert.equal(crops.length, 0); assert(!calls.some(c => ['click', 'type', 'key'].includes(c.op)));
-  }
+test('unverified backends and stale display frames stop before target input',async()=>{
+ for(const change of [{backend:'ScreenCaptureKit'},{capturedAt:90000}]){const h=setup(),original=h.native.request;h.native.request=async(op,args)=>({...await original(op,args),...change});await assert.rejects(h.service.capture(h.scope,1),e=>e.code==='E_VISUAL_TARGET');assert(!h.calls.some(c=>c.op==='displayInput'));}
 });
-test('Window movement reacquires the full display and uses the new region', async () => {
-  const { service, calls, crops } = fixture({ move: true });
-  const shot = await service.capture(scope, 1);
-  assert.equal(calls.filter(c => c.op === 'capture').length, 2);
-  assert.deepEqual(crops, [{ x: 400, y: 160, width: 1600, height: 1200 }]); assert.equal(shot.rect.x, 200);
+test('target movement is reidentified from pixels and old frame evidence cannot be inherited',async()=>{
+ const h=setup(),old=await h.service.capture(h.scope,1);paint(h.h.image,{x:.1,y:.1,width:.8,height:.8},200);h.h.location={...h.h.location,region:{x:.13,y:.1,width:.8,height:.8},mainRegion:{x:.13,y:.1,width:.8,height:.8},monitorRegions:[{x:.13,y:.1,width:.8,height:.5}]};const shot=await h.service.capture(h.scope,1);assert.equal(shot.rect.x,26);assert.equal(h.requests.length,2);await assert.rejects(h.visual.input(old.visualFrameId,{action:'click',x:100,y:60}),e=>e.dispatched===false);
 });
-test('A foreground switch stops before cropping or input', async () => {
-  const { service, crops } = fixture({ switchApp: true });
-  await assert.rejects(service.capture(scope, 1), {code:'E_GUI_FOCUS_CHANGED',dispatched:false}); assert.equal(crops.length, 0);
+test('lost visual activity or an occluded target stops without asking the OS which application is frontmost',async()=>{
+ const h=setup();h.h.location.active=false;await assert.rejects(h.service.capture(h.scope,1),e=>e.code==='E_VISUAL_TARGET'&&e.dispatched===false);assert(h.calls.every(c=>c.op==='displayCapture'));
 });

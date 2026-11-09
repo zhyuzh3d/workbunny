@@ -1,22 +1,21 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {DesktopService}=require('../src/main/desktop-service');
+const {boundaryVisual}=require('./support/workbuddy-boundary-visual-fixture.cjs');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 test('an unverified work position keeps structural evidence and error code across start and resume without typing',async()=>{
  const calls=[],rect={x:0,y:0,width:961,height:1280},bundleId='com.tencent.workbuddy.mac';
- const native={cancel(){},close(){},request:async(op,a={})=>{
-  calls.push({op,a});
+ const structuredNative={cancel(){},close(){},request:async(op,a={})=>{
   if(op==='permissions')return {accessibilityTrusted:true,screenCaptureAllowed:true,postEventAllowed:true};
   if(op==='workbuddyCapabilities')return {backgroundAX:false};
   if(op==='activate')return {activated:true};
   if(op==='frontmost')return {application:{pid:123,bundleId,name:'WorkBuddy'},windows:[{windowId:7,pid:123,bundleId,layer:0,rect}]};
   if(op==='workbuddyNavigate')return {homeReady:true,pickerAvailable:false,workspace:'',workspacePicker:{editorCount:1,popupCount:2,candidateCount:0}};
   if(op==='workbuddyInspect')return {available:true,editorCount:1,draftEmpty:true};
-  if(op==='capture')return {pngBase64:Buffer.from('fixture').toString('base64'),desktopRect:rect,width:961,height:1280};
-  if(op==='recognize')return {texts:[{text:'DeepSeek-V4.1-Flash',confidence:1,x:.62,y:.5,width:.2,height:.02}]};
   throw Error('unexpected operation: '+op);
  }};
- const service=new DesktopService({native,planner:async()=>({action:'type',purpose:'task',text:'fixture'}),persist:async()=>{},imageResize:x=>x,imageCrop:x=>x});
+ const visual=boundaryVisual({calls,rect,initial:{routeReady:false},nativeRequest:structuredNative.request});
+ const service=new DesktopService({...visual,planner:async()=>({action:'type',purpose:'task',text:'fixture'}),persist:async()=>{},imageResize:x=>x,imageCrop:x=>x});
  try{
   assert((await service.start({target:'workbuddy',goal:'pure website fixture',workModel:'deepseek-v4.1-flash',workContext:{mode:'none'}})).ok);
   for(const resumed of [false,true]){
@@ -26,7 +25,7 @@ test('an unverified work position keeps structural evidence and error code acros
    assert.deepEqual(service.task.workRoute.observation.workspacePicker,{editorCount:1,popupCount:2,candidateCount:0});
    assert(!service.task.draftInserted);assert(!service.task.submitAttemptedAt);
   }
-  assert(!calls.some(c=>['type','workbuddyFill','workbuddySend','key','click'].includes(c.op)));
+  assert(!calls.some(c=>['displayInput','type','workbuddyFill','workbuddySend','key','click'].includes(c.op)));
  }finally{await service.close();}
 });
 

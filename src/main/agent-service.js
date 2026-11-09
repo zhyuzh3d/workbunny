@@ -38,7 +38,7 @@ async function scanRecoveryTasks(service,stage,action){
 }
 class AgentService{
  constructor({desktop,conversationDesktop,memory,contacts,journal,native,imageResize,bitmap,getScene=()=> 'life',ready=()=>true,
-   epoch=()=>memory?.generation??1,canOperate=async()=>true,report=async()=>{},emit=()=>{},log=()=>{},request,scene,autoSchedule=true,verify=verifyDelivery,authorization,taskDirectory,deliveryDirectory,getWeChatOwnership=()=> 'owner',setWeChatOwnership,stopWork,channels,readSubmissionEvidence=async()=>''}={}){
+   epoch=()=>memory?.generation??1,canOperate=async()=>true,report=async()=>{},emit=()=>{},log=()=>{},request,reasoningRequest,reviewTask,mainReviewOptions,scene,autoSchedule=true,verify=verifyDelivery,authorization,taskDirectory,deliveryDirectory,getWeChatOwnership=()=> 'owner',setWeChatOwnership,stopWork,channels,softwareServices=[],readSubmissionEvidence=async()=>''}={}){
   Object.assign(this,{desktop,conversationDesktop,memory,contacts,getScene,ready,epoch,canOperate,report,emit,log,verify,authorization,deliveryDirectory,getWeChatOwnership,setWeChatOwnership,taskDirectory,stopWork,readSubmissionEvidence});
   // Recovery ownership is for this process only. Restoring an attention task
   // may read receipts, but cannot replay GUI work from a previous process.
@@ -50,19 +50,20 @@ class AgentService{
   this.scene=scene||new WeChatScene({native,imageResize,imageCrop:conversationDesktop?.imageCrop||desktop?.imageCrop,bitmap,subjects:()=>this.subjects(),onCircuit:async fault=>{
     this.lastCircuit=fault;this.emit(this.status());
   }});
+  for(const controller of [desktop,conversationDesktop].filter(Boolean)){controller.visualSessions??=new Map();if(this.scene.visual)controller.visualSessions.set('wechat',this.scene.visual);}
   if(channels&&this.scene.verifyLiteralInput&&!channels.verifyInput)channels.verifyInput=(m,o)=>this.scene.verifyLiteralInput(m,o);
   if(channels&&this.scene.readLiteralInput&&!channels.readInput)channels.readInput=(m,o)=>this.scene.readLiteralInput(m,o);
   registerConversationTools(this.tools,{scene:this.scene,lease:desktop?.lease,canOperate:t=>this.canOperateForTask(t),execute:a=>this.executeConversation(a),memoryRelated:(a,t)=>this.relatedMemory(a,t),dispatchOwner:(a,c)=>this.dispatchOwner(a,c),...(channels?{saveAttachment:(a,c)=>this.saveConversationAttachment(a,c)}:{})});
   registerWorkTools(this.tools,{submit:(t,s,a)=>this.submitWork(t,s,a),status:(id,t,s)=>this.workStatus(id,t,s),deliver:(m,t,s)=>this.deliverWork(m,t,s)});
   require('./result-delivery').registerResultTools(this.tools,{deliver:(m,t,s,index,operationId)=>this.deliverWork(m,t,s,index,operationId)});
   require('./system-tools').registerSystemTools(this.tools,{directory:taskDirectory,checkpoint:t=>this.runtime.save(t)});
-  require('./software-tools').registerSoftwareTools(this.tools,{native:this.scene.native,directory:taskDirectoryFallback(this),lease:desktop?.lease,sensitivePolicy:this.sensitivePolicy});
+  require('./software-tools').registerSoftwareTools(this.tools,{native:this.scene.native,directory:taskDirectoryFallback(this),lease:desktop?.lease,sensitivePolicy:this.sensitivePolicy,services:softwareServices});
   require('./file-tools').registerFileTools(this.tools,{directory:taskDirectoryFallback(this),sensitivePolicy:this.sensitivePolicy,checkpoint:t=>this.runtime.save(t)});
-  registerScreenTools(this.tools,{native:this.scene.native,imageResize,wechatScene:this.scene,lease:desktop?.lease,sensitivePolicy:desktop?.sensitivePolicy,canOperate:t=>this.canOperateForTask(t),
+  registerScreenTools(this.tools,{native:this.scene.native,imageResize,imageCrop:conversationDesktop?.imageCrop||desktop?.imageCrop,bitmap,request,wechatScene:this.scene,lease:desktop?.lease,sensitivePolicy:desktop?.sensitivePolicy,canOperate:t=>this.canOperateForTask(t),
     assertWeChatInput:(task,anchor)=>{
       if(task.authority?.channel!=='authenticated-channel'||!this.channels)return;
       const origin=task.state.returnTo?.channelSnapshot;
-      if(!origin?.owner||origin.account!==anchor.pid+':'+anchor.windowId)throw require('./dialogue-channels').stale();
+      if(!origin?.owner||origin.account!==require('./visual-session').visualAccount(anchor.identity||anchor))throw require('./dialogue-channels').stale();
       this.channels.assert(origin);
     }});
   require('./context-assembler').registerExperienceTool(this.tools,{memory});
@@ -78,7 +79,7 @@ class AgentService{
   this.softwarePackages=require('./software-skill-package').loadSoftwarePackages();
   this.learning=new AgentLearning({memory,skills:this.skills,packages:this.softwarePackages,request});if(memory)memory.agentLearning=this.learning;registerLearning(this.tools,this.skills,this.learning);
   this.runtime=new AgentRuntime({journal:journal||createAgentJournal(memory),tools:this.tools,skills:this.skills,ready,epoch,getScene,autoSchedule,prepare:async t=>{if(await this.sensitivePolicy.isSensitive(JSON.stringify([t.goal,t.context,t.state.ownerRequest,t.state.ownerContext,t.state.taskContextEvidence])))t.state.sensitiveContext=true;this.learning.applyPrepared(t,await this.learning.prepare(t));if(t.parameters.sourceTaskId&&t.skill==='work.delegate'){const source=this.runtime.tasks.get(t.parameters.sourceTaskId);if(!source?.state.job||!this.runtime.list().some(r=>r.id===source.id))throw Error('没有可继续的原工作任务');t.state.priorJob=clone(source.state.job);t.state.resultRevision=(source.state.result?.revision||0)+1;const contextEvidence=require('./work-order').mergeTaskContextEvidence(source.state.taskContextEvidence,t.state.taskContextEvidence);if(contextEvidence){t.state.taskContextEvidence=contextEvidence;t.state.ownerContext=require('./work-order').ownerContext(contextEvidence)||t.state.ownerContext;if(await this.sensitivePolicy.isSensitive(JSON.stringify(contextEvidence)))t.state.sensitiveContext=true;}t.sources=[...new Set([...t.sources,source.id,...(contextEvidence?.sourceIds||[])])];t.visibilityFloor=Math.max(t.visibilityFloor,source.visibilityFloor); }if(t.skill==='result.forward'){const source=this.runtime.tasks.get(t.parameters.sourceTaskId);if(!source?.state.result||!this.runtime.list().some(r=>r.id===source.id))throw Error('没有可读取的已回收成果');t.state.result=clone(source.state.result);t.sources=[...new Set([...t.sources,source.id])];t.visibilityFloor=Math.max(t.visibilityFloor,source.visibilityFloor); }if(t.parameters.behavior==='owner'){const binding=this.bindings.get(bindingKey(t.subjects[0],t.scene));if(binding?.wechatIdentity)t.state.sceneIdentity={wechat:clone(binding.wechatIdentity)};}},completed:t=>this.learning.completed(t),settled:(t,r)=>this.learning.settled(t,r),failed:(t,e)=>this.learning.failed(t,e),
-    onRecoveryDiagnostic:(stage,task,error)=>recoveryDiagnostic(this,stage,task,{error}),emit:tasks=>this.emit(this.status(tasks)),report:r=>this.routeReport(r),authorize:(tool,args,task,options)=>this.authorization?.check(tool,args,task,options),stopTask:(t,options)=>this.stopTask(t,options),observeWhileActive:(task,event,signal)=>{const subject=task.skill==='conversation.manage'&&task.subjects.find(s=>subjectKey(s)===event.subjectKey);return subject?this.startConversationObservation(task,subject,{signal}):undefined;},diagnoseRepair:args=>require('./self-repair').advise({...args,request}),remindIdle:args=>this.continueIdle(args,request)});
+    reviewTask,mainReviewOptions,reflectAction:args=>this.reflectRecovery(args,reasoningRequest||request),onRecoveryDiagnostic:(stage,task,error)=>recoveryDiagnostic(this,stage,task,{error}),emit:tasks=>this.emit(this.status(tasks)),report:r=>this.routeReport(r),authorize:(tool,args,task,options)=>this.authorization?.check(tool,args,task,options),stopTask:(t,options)=>this.stopTask(t,options),observeWhileActive:(task,event,signal)=>{const subject=task.skill==='conversation.manage'&&task.subjects.find(s=>subjectKey(s)===event.subjectKey);return subject?this.startConversationObservation(task,subject,{signal}):undefined;},diagnoseRepair:args=>require('./self-repair').advise({...args,request}),remindIdle:args=>this.continueIdle(args,request)});
   this.resources=new(require('./task-resources').TaskResources)({getTask:id=>this.runtime.tasks.get(id),tasks:()=>this.runtime.tasks.values(),save:t=>this.runtime.save(t),native:this.scene.native,lease:desktop?.lease,handlers:{workbuddy:async(entry,signal)=>{
     const task=this.runtime.tasks.get(entry.taskId),physical=task&&await this.workOperation(task,entry.identity.jobId);if(!physical)return {verified:false,reason:'原工作执行记录缺失，未停止其它对话'};
     if(signal.aborted)return {verified:false,reason:'清理总时限已到'};if(!this.stopWork)return {verified:false,reason:'WorkBuddy 停止接口暂不可用'};const receipt=await this.stopWork(physical,{signal});
@@ -110,7 +111,7 @@ class AgentService{
    physical.channelConversation=true;
   }
   if(physical.channelAuthorization){
-   const channel=await this.channels?.ensure({application:'wechat',recipient:physical.recipient},physical.scope||this.scene.knownWindow);
+   const channel=await this.channels?.ensure({application:'wechat',recipient:physical.recipient},physical.scope||this.scene.knownIdentity);
    if(!channel)throw require('./dialogue-channels').stale();
    if(physical.submitAttemptedAt){const current=this.channels.snapshot(channel);if(physical.channelAuthorization.owner&&!current.owner)throw require('./dialogue-channels').stale();physical.channelAuthorization=current;}
    else this.channels.assert(physical.channelAuthorization);
@@ -134,28 +135,47 @@ class AgentService{
  contextModules({scene=this.getScene(),excludeTaskId}={}){
   return [{id:'task_status',description:'Current task monitoring facts, progress, elapsed time and available results. Read only; requesting progress never starts a task.',maxLimit:20,parameters:{limit:6,detail:'summary',maxTokens:2200},load:async p=>this.runtime.list({scene}).filter(t=>t.id!==excludeTaskId).sort((a,b)=>Number(TERMINAL.has(a.status))-Number(TERMINAL.has(b.status))||b.updatedAt-a.updatedAt).slice(0,p.limit).map(t=>({id:t.id,goal:t.goal.slice(0,p.detail==='full'?1500:300),status:t.status,note:t.note.slice(0,p.detail==='full'?1200:300),elapsedMs:Date.now()-t.createdAt,updatedAt:t.updatedAt,...(p.detail==='full'?{counters:t.counters,lastCheckedAt:t.lastCheckedAt,schedule:t.schedule,queuedEvents:t.queuedEvents}:{}),result:t.result?{summary:String(t.result.summary||'').slice(0,p.detail==='full'?1500:300),links:t.result.links}:null}))}];
  }
- async continueIdle({task,run,event,signal,reminder,idleMs},request){
+ async observeSupervision(event){
+  const snapshot=event?.snapshot,physical=snapshot?.task;if(!physical)return false;
+  const ids=new Set([physical.id,physical.bunnyTaskId,physical.jobId].filter(Boolean));
+  const task=[...this.runtime.tasks.values()].find(task=>ids.has(task.id)||ids.has(task.state.workOperationId)||ids.has(task.state.job?.jobId));
+  if(!task||task.privacyEpoch!==this.epoch()||!require('./memory-scope').canRead(this.getScene(),task))return false;
+  // Bound work already has a canonical Task and report route. The old
+  // companion alerts remain for WorkBuddy work created outside Bunny only.
+  if(TERMINAL.has(task.status)||task.state.stopRequest||['owner','protection'].includes(task.state.pauseSource))return true;
+  if(!this.runtime.mainReviews.isEnabled())return false;
+  const known=task.state.supervisionSignals||[];if(known.includes(event.id))return true;
+  const run=Object.values(task.actionRuns).find(run=>!['completed','cancelled'].includes(run.status));
+  if(event.kind==='done'){task.nextCheckAt=Date.now();this.runtime.schedule();}
+  else if(this.runtime.mainReviews.eligible(task,run||task.state))this.runtime.mainReviews.request(task,run,{reason:'executor-'+event.kind,hold:false,assessment:{summary:event.text||'受托执行者的实际进展需要整体评估'}});
+  task.state.supervisionSignals=[...known,event.id].slice(-16);await this.runtime.save(task);this.runtime.schedule();return true;
+ }
+ async reflectRecovery({task,run,event,error,signal,kind},request){
+  return this.continueIdle({task,run,event,signal,idleMs:0,reminder:'这是同一 Action 的卡点反思。一次思考可联合审视多个关键疑点，结合近期操作与实际结果质疑原解释，回顾之前可能做错的步骤，提出能区分假设的观察、补救或新路径。选择最有价值的下一步；只有你当前明确判断卡点成立且已无法自行突破，才提交 selfSuspension（不是最终业务失败）。预算用尽不构成这个判断。',failure:{...error,kind}},request);
+ }
+ async continueIdle({task,run,event,signal,reminder,idleMs,failure},request){
   const assembler=require('./context-assembler');
   const assembled=await assembler.assembleContext({purpose:'task.continue',signal,configuration:task.state.contextTuning,fragments:[
-   {id:'core',required:true,load:async()=>({goal:task.workRequest?.goal||task.goal,criteria:task.workRequest?.criteria||task.criteria,context:task.context,policy:task.policy,subjects:task.subjects,taskId:task.id,actionId:run?.id||null,idleMs,note:task.note,scheduledNextAt:task.nextCheckAt,progress:run?.progress?new(require('./action-progress').ActionProgress)(run.progress).snapshot():null,pendingEvent:event?{type:event.type,key:event.key,subjectKey:event.subjectKey}:null,knownResult:task.state.result?{summary:task.state.result.summary}:null,lastFailure:task.state.lastFailure,confirmedEffects:Object.values(task.operations).filter(o=>o.status==='confirmed'&&o.effect==='write').slice(-8).map(o=>({tool:o.tool,operationId:o.id,receipt:o.result?.receipt,exitCode:o.result?.exitCode})),authority:{channel:task.authority.channel,scene:require('./dialogue-channels').ordinaryScene(task.scene)}})},
+   {id:'core',required:true,load:async()=>({goal:task.workRequest?.goal||task.goal,criteria:task.workRequest?.criteria||task.criteria,context:task.context,policy:task.policy,subjects:task.subjects,taskId:task.id,actionId:run?.id||null,idleMs,note:task.note,failure,recovery:run?.recovery||task.state.recoveryGuidance,episode:run?.recoveryState||task.state.recoveryState,scheduledNextAt:task.nextCheckAt,progress:run?.progress?new(require('./action-progress').ActionProgress)(run.progress).snapshot():null,pendingEvent:event?{type:event.type,key:event.key,subjectKey:event.subjectKey}:null,knownResult:task.state.result?{summary:task.state.result.summary}:null,lastFailure:task.state.lastFailure,confirmedEffects:Object.values(task.operations).filter(o=>o.status==='confirmed'&&o.effect==='write').slice(-8).map(o=>({tool:o.tool,operationId:o.id,receipt:o.result?.receipt,exitCode:o.result?.exitCode})),authority:{channel:task.authority.channel,scene:require('./dialogue-channels').ordinaryScene(task.scene)}})},
    {id:'tools',required:true,load:async()=>this.tools.catalog(undefined,task).map(t=>({name:t.name,description:t.description}))},
    {id:'attempts',recent:true,maxLimit:8,parameters:{limit:6,maxTokens:1600},load:async p=>(task.state.attempts||[]).slice(-p.limit)},
    {id:'knowledge',maxLimit:4,parameters:{limit:4,maxTokens:1800},load:async p=>assembler.experienceContext(task,{mode:p.detail,maxTokens:p.maxTokens,maxItems:p.limit})}
   ]});
-  const result=await require('./agent-json').checkedJSON({signal,inputBudgetTokens:assembled.metadata.inputBudgetTokens,messages:[{role:'system',content:require('./action-progress').GUIDANCE+'\n'+reminder+'\n这是原Task/Action的内部继续思考，非主人新指令。你依据同一目标、已有回执和相关经验判断怎样推进；此轮只给出下一步思路，不宣称已执行，不重新创建任务。输出JSON {"action":"continue|reobserve|change_method|wait|ask_owner","nextStep":"具体下一步及依据"}。选择wait另给waitFor和waitMs，明确等待条件和下次检查间隔；不靠笼统等待续期。'},{role:'user',content:JSON.stringify(assembled.values)}]},v=>{if(!v||!['continue','reobserve','change_method','wait','ask_owner'].includes(v.action)||typeof v.nextStep!=='string'||!v.nextStep.trim()||v.nextStep.length>1000||v.action==='wait'&&(typeof v.waitFor!=='string'||!v.waitFor.trim()||v.waitFor.length>300||!Number.isFinite(v.waitMs)||v.waitMs<=0||v.waitMs>3600000))throw Error('继续思考缺少明确下一步或等待条件');return v;},request?{request}:{});
+  const result=await require('./agent-json').checkedJSON({signal,inputBudgetTokens:assembled.metadata.inputBudgetTokens,messages:[{role:'system',content:require('./action-progress').GUIDANCE+'\n'+reminder+'\n这是原Task/Action的内部继续思考，非主人新指令。你依据同一目标、已有回执和相关经验判断怎样推进；此轮只给出下一步思路，不宣称已执行，不重新创建任务。输出JSON {"action":"continue|reobserve|change_method|wait|ask_owner|self_suspend","nextStep":"具体下一步及依据","assessment":{"summary":"关键判断、相关疑点、历史反思及认识变化","basisRefs":[],"alternativeExplanations":[],"nextInquiry":"下一辨析"}}。选择wait另给waitFor和waitMs，明确等待条件和下次检查间隔；不靠笼统等待续期。只有你明确判断当前确已卡住且自身不能突破时，使用self_suspend并给selfSuspension:{assessmentSummary:判断摘要,basisRefs:[],attemptedPaths:[],remainingUncertainty:仍不确定之处,requestedHelp:主脑需要解决的具体问题,obstacleConfirmed:布尔值}；这不是最终失败，预算耗尽不能冒充此判断。'},{role:'user',content:JSON.stringify(assembled.values)}]},v=>{if(!v||!['continue','reobserve','change_method','wait','ask_owner','self_suspend'].includes(v.action)||typeof v.nextStep!=='string'||!v.nextStep.trim()||v.nextStep.length>1000||v.action==='wait'&&(typeof v.waitFor!=='string'||!v.waitFor.trim()||v.waitFor.length>300||!Number.isFinite(v.waitMs)||v.waitMs<=0||v.waitMs>3600000))throw Error('继续思考缺少明确下一步或等待条件');if(v.action==='self_suspend'&&(!require('./main-review').assessment(v.selfSuspension)?.assessmentSummary||!require('./main-review').assessment(v.selfSuspension)?.requestedHelp))throw Error('自我挂起缺少判断和具体求助');return v;},request?{request}:{});
+  if(signal?.aborted)throw Object.assign(Error('继续思考已取消'),{code:'ABORT_ERR'});
   assembler.consumeInputBudget(task,assembled.metadata.inputBudgetTokens);
   return result.value;
  }
- isOwner(subject,actor){if(this.channels){try{const descriptor=this.channels.descriptor(subject,this.scene.knownWindow),channel=this.channels.channels.get(descriptor.id);return !!channel&&this.channels.snapshot(channel).owner;}catch{return false;}}const binding=this.bindings.get(bindingKey(subject,actor.scene)),identity=binding?.wechatIdentity,actual=this.scene.knownWindow;return !!binding&&binding.enabled&&binding.scene===actor.scene&&(!identity||actual?.pid===identity.pid&&actual?.windowId===identity.windowId);}
+ isOwner(subject,actor){if(this.channels){try{const descriptor=this.channels.descriptor(subject,this.scene.knownIdentity),channel=this.channels.channels.get(descriptor.id);return !!channel&&this.channels.snapshot(channel).owner;}catch{return false;}}const binding=this.bindings.get(bindingKey(subject,actor.scene)),identity=binding?.wechatIdentity,actual=this.scene.knownIdentity;return !!binding&&binding.enabled&&binding.scene===actor.scene&&(!identity||require('./visual-session').visualAccount(actual)===require('./visual-session').visualAccount(identity));}
  async bindOwner(subject,actor,enabled=true){
   actor=validateAuthority(actor,actor.scene||this.getScene());
   if(actor.channel!=='dialogue')throw new Error('请从本机主人对话绑定或解除主人入口');
   if(enabled){await this.scene.assertHealthy();if(this.scene.capture){const view=await this.scene.capture(true);if(view.unavailable)throw new Error(view.reason);}}
-  if(this.channels){const channel=await this.channels.ensure(subject,this.scene.knownWindow);if(!enabled)await this.channels.revoke(channel);return {ok:true,id:channel.id,listenerOnly:enabled};}
+  if(this.channels){const channel=await this.channels.ensure(subject,this.scene.knownIdentity);if(!enabled)await this.channels.revoke(channel);return {ok:true,id:channel.id,listenerOnly:enabled};}
   const key=bindingKey(subject,actor.scene),id='agent-owner-binding-'+crypto.createHash('sha256').update(key+'\0'+actor.scene).digest('hex');
   const value={schema:'bunny.owner-binding/v1',taskType:'agent-owner-binding',subject,scene:actor.scene,enabled,
     capabilities:['screen.read','screen.input','conversation.read','conversation.send','memory.read','owner.command','work.delegate','work.read','terminal.execute','system.configure','files.read','files.write','skill.learn'],
-    sources:[actor.originSourceId||actor.sources.at(-1)],verified:true,createdAt:Date.now(),...(this.scene.knownWindow?{wechatIdentity:{pid:this.scene.knownWindow.pid,windowId:this.scene.knownWindow.windowId}}:{})};
+    sources:[actor.originSourceId||actor.sources.at(-1)],verified:true,createdAt:Date.now(),...(this.scene.knownIdentity?{wechatIdentity:{...this.scene.knownIdentity}}:{})};
   if(this.memory)await this.memory.write([{id,kind:'task',ts:Date.now(),domain:actor.scene,visibilityFloor:actor.visibilityFloor,value}]);
   this.bindings.set(key,{...value,id});return {ok:true,id};
  }
@@ -350,10 +370,10 @@ class AgentService{
   if(task&&Object.values(task.operations).some(o=>o.effect==='write'&&o.status==='intent'))return {ok:false,error:'原操作结果仍不确定，先查看原软件核对；不会跨窗口恢复发送'};
   const recovered=await this.scene.reconnect();if(!recovered.ok)return recovered;
   this.lastCircuit=null;
-  if(task&&this.scene.knownWindow){
-   const window=this.scene.knownWindow,old=task.state.sceneIdentity?.wechat;
-   task.state.sceneIdentity??={};task.state.sceneIdentity.wechat={pid:window.pid,windowId:window.windowId};
-   if(old&&(old.pid!==window.pid||old.windowId!==window.windowId)){
+  if(task&&this.scene.knownIdentity){
+   const window=this.scene.knownIdentity,old=task.state.sceneIdentity?.wechat;
+   task.state.sceneIdentity??={};task.state.sceneIdentity.wechat={...window};
+   if(old&&(require('./visual-session').visualAccount(old)!==require('./visual-session').visualAccount(window))){
     task.state.previousWeChatIdentity={...old,replacedAt:Date.now()};
     delete task.state.conversations;task.inbox=[];
    }
@@ -450,13 +470,16 @@ class AgentService{
   return {...admitted,...(admitted.ok?{stage:'understanding'}:{}),text:admitted.ok?'收到，我先理解你的意思。':admitted.error};
  }
  async resolveCommand({task,signal,now,report,isLive}){
+  let cancellationLogged=false;const cancelled=()=>{if(!cancellationLogged){cancellationLogged=true;this.intakeLog(task,'cancelled');}};
+  signal?.addEventListener('abort',cancelled,{once:true});if(signal?.aborted)cancelled();
+  try{
   const actor={...task.authority,sources:[...new Set([...task.authority.sources,...(task.state.taskContextEvidence?.sourceIds||[])])]},raw=task.state.ownerRequest;
   let decision=task.state.resolvedIntent;
   if(!decision){
     const routingKnowledge=await this.learning.routingContext(task);if(!isLive()||signal.aborted)throw Error('交办已取消');
     const sources=[...new Set([...task.sources,...routingKnowledge.map(r=>r.sourceId).filter(Boolean)])];
     decision=await this.interpreter.interpret(raw,{operatingKnowledge:routingKnowledge,tasks:this.runtime.list().filter(t=>t.id!==task.id),contextSourceIds:sources,context:task.state.commandContext||task.context||'',resolutionIssue:task.state.resolutionIssue,signal,actor,repairProfile:task.state.selfRepair?.profile,perception:task.state.ownerPerception});
-    if(!isLive()||signal.aborted){this.intakeLog(task,'cancelled');throw Error('交办已取消');}
+    if(!isLive()||signal.aborted){cancelled();throw Error('交办已取消');}
     task.state.routingKnowledge=routingKnowledge;task.sources=sources;task.state.resolvedIntent=decision;await this.runtime.save(task);
   }
   if(!isLive()||signal.aborted)throw Error('交办已取消');
@@ -483,6 +506,7 @@ class AgentService{
   if(!isLive()||signal.aborted)throw Error('交办已取消');
   this.intakeLog(task,'responded',decision.kind);
   await report(answer.text||answer.error||'已处理','resolution-response');task.state.resolution={kind:decision.kind};return {status:answer.ok?'completed':'needs_attention',note:answer.text||answer.error,state:task.state};
+  }finally{signal?.removeEventListener('abort',cancelled);}
  }
  async dispatch(decision,actor,{signal,ownerRequest,ownerContext,taskContextEvidence:contextEvidence,excludeTaskId,commitGate,isCurrent=()=>true}={}){
   if(signal?.aborted)return {ok:false,text:'交办已取消，没有开始任务。'};
@@ -533,6 +557,7 @@ class AgentService{
   if(delta.uncertain||!delta.messages.length)return false;
   const nextCursor=cursor.snapshot();
   const result=await this.runtime.enqueue(task.id,{key:`conversation:${key}:${nextCursor.sequence}`,subjectKey:key,type:'conversation.messages',ownerChannel:task.parameters.behavior==='owner'||subject.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',messages:delta.messages}, {
+    recoveryEvidence:delta.messages.some(message=>message.incomingVerified===true||message.observedVerified===true||message.voiceVerified===true),
     current: () => !signal?.aborted && task.state.conversations?.[key]?.cursor === priorCursor,
     advance: target => {
       if (target.state.conversations?.[key]) target.state.conversations[key].cursor = clone(nextCursor);
@@ -564,7 +589,7 @@ class AgentService{
     if(args.signal?.aborted)return {ok:false,dispatched:false,error:'任务已暂停，未执行输入'};
     await this.scene.assertHealthy();
     if(this.channels&&!args.channelAuthorization&&(channelConversation||args.operation==='send')){
-      const channel=await this.channels.ensure({application:'wechat',recipient:args.recipient},args.task.state.sceneIdentity?.wechat||this.scene.knownWindow);
+      const channel=await this.channels.ensure({application:'wechat',recipient:args.recipient},args.task.state.sceneIdentity?.wechat||this.scene.knownIdentity);
       args={...args,channelAuthorization:this.channels.snapshot(channel)};
     }
     if(channelConversation)this.channels.assert(args.channelAuthorization);
@@ -589,7 +614,7 @@ class AgentService{
         goal:args.goal||(attachment?`只向「${recipient}」发送本任务真实附件 ${message} 一次，type purpose:task将触发文件粘贴；确认预览后发送。不能输入文件名充当附件。`:operation==='send'?`只向「${recipient}」发送本任务message字段的完整原文一次。`:`打开微信会话「${recipient}」，核对顶部标题，并显示该会话的最新消息；若有“新消息”按钮可点击，或在聊天内容区向下滚动到末尾。允许搜索该联系人，type必须标记purpose:navigation；禁止输入消息正文、修改草稿或发送。`),
         criteria:args.criteria||(operation==='send'?'本次新增完整右侧已发送气泡，输入框清空；不能只是历史或草稿。':'顶部标题精确匹配指定联系人，聊天内容位于最新消息，未留下新消息跳转提示。'),
         origin:'agent',inputSource:'text',scene:held?.snapshot.scene||args.channelAuthorization?.scene||task.scene,visibilityFloor:Math.max(task.visibilityFloor,args.channelAuthorization?require('./memory-scope').rank(args.channelAuthorization.scene):0),sources:[task.id,...(held?.sources||[])],privacyEpoch:task.privacyEpoch,
-        operatingKnowledge:require('./context-assembler').experienceContext(task,{applications:['wechat'],query:[task.goal,operation,message].join(' '),maxTokens:4000}),repairProfile:task.state.selfRepair?.profile,workModel:attachment?'deepseek-v4.1-flash':'hy3'});
+        useInnateExperience:task.state.useInnateExperience!==false,operatingKnowledge:require('./context-assembler').experienceContext(task,{applications:['wechat'],query:[task.goal,operation,message].join(' '),maxTokens:4000}),repairProfile:task.state.selfRepair?.profile,workModel:attachment?'deepseek-v4.1-flash':'hy3'});
       if(!result.ok)return {...result,dispatched:false};
       task.state.conversationOperationId=service.task.id;
       if(operationId&&task.operations[operationId])task.operations[operationId].physicalId=service.task.id;
@@ -679,8 +704,10 @@ class AgentService{
   // Reuse the existing encrypted task journal as contact history. This adds no
   // separate contact store, extractor, timer or model call. Current account
   // identity and exact contact scope must agree before old dialogue is reused.
-  const identity=task.state.sceneIdentity?.wechat,key=require('./conversation-skill').subjectKey(subject);
-  const history=identity?[...this.runtime.tasks.values()].filter(prior=>prior.createdAt<task.createdAt&&prior.privacyEpoch===task.privacyEpoch&&require('./memory-scope').canRead(require('./dialogue-channels').ordinaryScene(task.scene),prior)&&prior.state.sceneIdentity?.wechat?.pid===identity.pid&&prior.state.sceneIdentity.wechat.windowId===identity.windowId&&prior.subjects.some(s=>s.application===subject.application&&s.recipient===subject.recipient)&&prior.state.conversations?.[key]).sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,2).map(prior=>{
+  const identity=task.state.sceneIdentity?.wechat,account=require('./visual-session').visualAccount(identity),key=require('./conversation-skill').subjectKey(subject);
+  // Legacy process/window identities cannot establish a visual account. In
+  // particular, two missing accounts must never match through null === null.
+  const history=account?[...this.runtime.tasks.values()].filter(prior=>prior.createdAt<task.createdAt&&prior.privacyEpoch===task.privacyEpoch&&require('./memory-scope').canRead(require('./dialogue-channels').ordinaryScene(task.scene),prior)&&require('./visual-session').visualAccount(prior.state.sceneIdentity?.wechat)===account&&prior.subjects.some(s=>s.application===subject.application&&s.recipient===subject.recipient)&&prior.state.conversations?.[key]).sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,2).map(prior=>{
     const conversation=prior.state.conversations[key],messages=(conversation.cursor?.recent||[]).filter(m=>m.kind==='text'&&(m.incomingVerified||m.observedVerified||m.origin==='bunny')).slice(-8).map(m=>({direction:m.direction,text:String(m.text).slice(0,500)}));
     const priorContext={summary:String(conversation.summary||'').slice(0,1000),progress:conversation.progress||{},messages};
     if(JSON.stringify(priorContext.progress).length>1200)priorContext.progress={};
@@ -694,7 +721,7 @@ class AgentService{
  async dispatchOwner(args,context){
   const {task,signal,operationId}=context,binding=this.bindings.get(bindingKey(args,task.scene)),requestKey='owner-dispatch:'+task.id+':'+(operationId||crypto.createHash('sha256').update(subjectKey(args)+'\0'+args.eventKey).digest('hex'));
   if(this.channels){
-   const channel=await this.channels.ensure(args,task.state.sceneIdentity?.wechat||this.scene.knownWindow);
+   const channel=await this.channels.ensure(args,task.state.sceneIdentity?.wechat||this.scene.knownIdentity);
    const event=task.inbox?.find(item=>item.type==='conversation.messages'&&item.key===args.eventKey&&item.subjectKey===subjectKey(args));
    const proof=event?.decision?.ownerCommand,snapshot=proof?.snapshot;
    if(!snapshot?.owner||snapshot.channelId!==channel.id||event.decision.ownerAction?.type!=='task')throw require('./dialogue-channels').stale();
@@ -713,7 +740,7 @@ class AgentService{
  async dialogueDecision(args){
   if(!this.channels)return this.brain.decide(args);
   const {task,subject,incoming=[],phase='incoming',signal}=args;
-  const identity=task.state.sceneIdentity?.wechat||this.scene.knownWindow;
+  const identity=task.state.sceneIdentity?.wechat||this.scene.knownIdentity;
   const channel=await this.channels.ensure(subject,identity);
   const eventKey=task.id+':'+phase+':'+incoming.map(m=>m.sequence).join(',')+':'+(task.state.goalRevision||0);
   const received=phase==='incoming'?await this.channels.ingest(channel,eventKey,incoming,{signal}):{snapshot:this.channels.snapshot(channel),messages:incoming,sourceIds:[]};
@@ -1060,7 +1087,7 @@ class AgentService{
   const original=task.state.ownerRequest||task.goal,brief=require('./work-order').workOrder(task,{goal:step.goal,context:step.context});
   const result=await service.start({executionAuthorization:task.authority.channel==='authenticated-channel'?{taskId:task.id}:undefined,target:'workbuddy',goal:brief+'\n\n默认成果目录：'+task.state.artifactRoot+'。没有指定产物绝对路径时在此目录保存本轮产物；已明确指定路径时遵从原要求。不要修改其它文件。',userRequest:original,authorizationContext:task.state.ownerContext||'',criteria:step.criteria||task.workRequest?.criteria||task.criteria,authorizedArtifactRoots:[task.state.artifactRoot],expectsArtifacts:task.workRequest?.output==='files'||task.workRequest?.output!=='text'&&/(?:生成|创建|新建|制作|写入|create|generate|write)/iu.test(task.workRequest?.goal||task.goal)&&/(?:文件|产物|ppt|pdf|docx|xlsx|\.txt)/iu.test(task.workRequest?.goal||task.goal),deliverEvidenceFiles:task.delivery?.includeFiles===true,workContext:step.workContext||task.workContext||{mode:'none'},origin:'agent',inputSource:'text',
     scene:task.scene,visibilityFloor:task.visibilityFloor,sources:[task.id],privacyEpoch:task.privacyEpoch,
-    operatingKnowledge:require('./context-assembler').experienceContext(task,{applications:['workbuddy'],query:task.goal,maxTokens:4000}),repairProfile:task.state.selfRepair?.profile,workModel:'deepseek-v4.1-flash'});
+    useInnateExperience:task.state.useInnateExperience!==false,operatingKnowledge:require('./context-assembler').experienceContext(task,{applications:['workbuddy'],query:task.goal,maxTokens:4000}),repairProfile:task.state.selfRepair?.profile,workModel:'deepseek-v4.1-flash'});
   if(!result.ok)return {...result,dispatched:false};
   const current=service.task;task.state.workOperationId=current.id;await this.runtime.save(task);
   if(step.operationId){task.state.workOperations??={};task.state.workOperations[step.operationId]=current.id;await this.runtime.save(task);}
@@ -1161,7 +1188,7 @@ class AgentService{
       Array.isArray(value)?value.map(sanitize):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([key,item])=>[key,sanitize(item)])):value;
     const reviewContext={ownerEvidence:{request:task.state.ownerRequest||current.userRequest||task.goal,context:task.state.ownerContext||current.authorizationContext||'',...(task.state.taskContextEvidence?{taskContextEvidence:task.state.taskContextEvidence}:{})},
       authority:{taskId:task.id,role:task.authority?.role,verified:task.authority?.verified===true,channel:task.authority?.channel,scene:task.scene,sourceIds:task.authority?.sources||[],capabilities:task.authority?.capabilities||[],policy:task.policy||'',subjects:task.subjects||[],sourcesValidated:true},
-      deliveryKnowledge:knowledge.knowledge,knowledgeAvailability:knowledge.availability,...(priorRecovery?{submissionRecovery:{available:true,proofId:priorRecovery.proof.id,round:priorRecovery.round,priorRound:priorRecovery.priorRound,origin:priorRecovery.origin,draftText:priorRecovery.draftText,dispatch:'not-dispatched',draftPreserved:true}}:{})};
+      deliveryKnowledge:knowledge.knowledge,knowledgeAvailability:knowledge.availability,...(task.state.workGuidance?{mainBrainGuidance:task.state.workGuidance,guidanceTrust:'revisable-host-guidance-not-authorization-or-result'}:{}),...(priorRecovery?{submissionRecovery:{available:true,proofId:priorRecovery.proof.id,round:priorRecovery.round,priorRound:priorRecovery.priorRound,origin:priorRecovery.origin,draftText:priorRecovery.draftText,dispatch:'not-dispatched',draftPreserved:true}}:{})};
     const result=await this.verify({task:current,screenshot:this.desktop.task?.id===id?this.desktop.publicStatus().screenshot:null,signal,reviewContext,sanitize});assertCurrent();
     await assertEvidence();
     if(physicallyStopped())return stoppedResult();

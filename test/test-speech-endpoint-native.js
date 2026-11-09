@@ -17,3 +17,10 @@ test('activity metadata and asynchronous endpoint notifications preserve short e
 test('missing acoustic evidence exits with explicit unconfirmed feedback without submitting or starting recognition',t=>{
  const result=run(t,'--self-test-unconfirmed-abort');if(!result)return;assert.equal(result.status,25,result.stderr||result.stdout);const rows=result.stdout.trim().split('\n').map(JSON.parse);assert.deepEqual(rows.map(row=>row.t),['error','end']);assert.equal(rows[0].code,25);assert(!rows.some(row=>['auth','ready','utterance','final','tap','capture'].includes(row.t)));
 });
+test('actual empty-session publication waits for the barrier and emits its exact coverage once without a text utterance',t=>{
+ const result=run(t,'--self-test-empty-audio-final');if(!result)return;assert.equal(result.status,0,result.stderr||result.stdout);
+ const rows=result.stdout.trim().split('\n').map(JSON.parse),summary=rows.find(row=>row.t==='selfTest');
+ for(const key of ['emptyAudioFinal','barrierRequired','exactCoverage','onceOnly'])assert.equal(summary[key],true,key);
+ assert.equal(summary.recognizerStarted,false);assert.deepEqual(rows.filter(row=>row.t==='audioFinal'),[{t:'audioFinal',gen:7,coveredSeq:42}]);
+ assert(!rows.some(row=>['auth','ready','utterance','tap','capture'].includes(row.t)));
+});

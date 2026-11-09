@@ -26,8 +26,10 @@ class ToolRegistry {
     // capabilities, the validated target, and the host authorization check
     // remain mandatory for every call.
     if (tool.capabilities.some(c => !task.capabilities.includes(c)) || tool.available && !tool.available(task)) throw new Error('任务未授权此工具：' + name);
-    const input = tool.validate(clone(args ?? {}));
+    const normalized=clone(args??{});if(typeof normalized.application==='string')normalized.application=require('./interaction-policy').profile(normalized.application)?.application||normalized.application;
+    const input = tool.validate(normalized);
     const target = tool.scope?.(input);
+    const channel=require('./interaction-policy').channelForTool(name);if(channel&&target?.application)require('./interaction-policy').assertChannel(target.application,channel,input.bundleId||task.state?.software?.[target.application]?.interactionProfile);
     if (target && !task.subjects.some(s => s.application === target.application && (!target.recipient || s.recipient === target.recipient))) throw new Error('工具对象不属于主人交办范围');
     return { tool, input };
   }

@@ -1,8 +1,6 @@
 'use strict';
 const {fields,text}=require('./agent-contract');
-const {actionWindow,contains}=require('./screen-geometry');
 const {randomUUID}=require('node:crypto');
-const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const leaseOwner=c=>'agent-primitive:'+c.task.id+':'+(c.operationId||randomUUID());
 const labelKey=value=>String(value||'').normalize('NFKC').replace(/\s/gu,'').replace(/^[•·●○◦▪▸►]+/u,'').replace(/[.⋯…]+$/gu,'').toLowerCase();
 const destructiveLabel=value=>/^(?:删除|删除该消息|清空|全部删除|替换|覆盖|退出微信|退出登录|支付|付款|转账|确认付款|delete|deleteall|replace|overwrite|erase|pay|transfer|logout|quitwechat)$/iu.test(labelKey(value));
@@ -17,21 +15,19 @@ function fileDialogKind(rows){
  if(cancel&&labels.some(s=>/^(?:保存|存储|Save)$/iu.test(s))&&labels.some(s=>/^(?:存储为[:：]?|另存为[:：]?|SaveAs[:：]?|文件名[:：]?)$/iu.test(s)))return 'save';
  return null;
 }
-function assertAnchorFront(front,anchor){
- const window=front.windows.find(w=>w.windowId===anchor.windowId&&w.pid===anchor.pid);
- if(front.application?.bundleId!==anchor.bundleId||front.application?.pid!==anchor.pid||!window||['x','y','width','height'].some(k=>Math.abs(window.rect[k]-(anchor.windowRect||anchor.rect)[k])>=1))throw Object.assign(Error('目标窗口改变，重新观察定位'),{dispatched:false});
-}
-function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async()=>true,applications,resolveApplication=(application)=>applications[application],observe,assertWeChatInput=()=>{},sensitivePolicy=require('./sensitive-policy').createSensitivePolicy()}){
+function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async()=>true,applications,resolveApplication=(application)=>applications[application],observe,visualFor,assertWeChatInput=()=>{},sensitivePolicy=require('./sensitive-policy').createSensitivePolicy()}){
  const scope=a=>({application:a.application,...(a.recipient?{recipient:a.recipient}:{})});
- tools.register({name:'screen.activate',description:'打开已授权的目标软件并切到前台；微信只激活已运行进程，不启动或登录。随后重新观察。',effect:'read',capabilities:['screen.input'],scope,available:task=>task.subjects.some(s=>!['system','bunny'].includes(s.application)&&resolveApplication(s.application,task)),
- validate:v=>{fields(v,['application'],'激活应用');if(typeof v.application!=='string'||!v.application)throw Error('缺少目标软件');return v;},
- execute:async(a,c)=>{if(!await canOperate(c.task))throw Object.assign(Error('等待电脑空闲后切换'),{code:'E_GUI_BUSY',dispatched:false});if(a.application==='wechat')await wechatScene.assertHealthy();const owner=leaseOwner(c);await lease?.acquire(owner,c.signal);try{
-  const bundleId=resolveApplication(a.application,c.task),handle=await c.resources?.register({id:'application:'+bundleId,kind:'application',label:a.application,ownership:'unknown',phase:'starting'});
-  if(c.signal?.aborted)throw Object.assign(Error('任务已停止，未启动软件'),{dispatched:false});
-  const result=await native.request('activate',{bundleId,requireRunning:a.application==='wechat'},8000);await handle?.update({identity:result.application,ownership:result.launched===true?'owned':'shared',phase:'running'});if(!c.signal?.aborted)await pause(700);return result;
- }finally{lease?.release(owner);}}
- });
- tools.register({name:'screen.action',description:'执行一个Operation。Bunny可选择observeAfter=true在同次调用带回新画面；无需中间检查时省略或false，由Bunny按Action需要决定。文字优先提供实际OCR标签label；OCR遗漏或错读时，可给实际可见label、targetType=text和预览图pixelX/pixelY进行视觉定位。无文字目标用targetType=icon/region及像素坐标，右键和滚动也用像素坐标。Task与Action完成须自主核查，Operation不必逐次检查；微信正文统一用conversation.send。',effect:'write',capabilities:['screen.input'],scope,
+ tools.register({name:'screen.activate',description:'只按当前截图与视觉模型识别的唯一安全区域点击激活目标，再以新截图核对；不查询或启动应用，不查询前台或窗口。目标不可见或安全区域不明则停止。',effect:'write',capabilities:['screen.input'],scope,available:task=>task.subjects.some(s=>!['system','bunny'].includes(s.application)),validate:v=>{fields(v,['application'],'视觉软件目标');if(typeof v.application!=='string'||!v.application)throw Error('缺少目标软件');return v;},execute:async(a,c)=>{
+  if(!await canOperate(c.task))throw Object.assign(Error('等待电脑空闲后操作'),{code:'E_GUI_BUSY',dispatched:false});
+  const owner=leaseOwner(c);await lease?.acquire(owner,c.signal);try{const visual=visualFor(a.application),frame=await visual.observe({signal:c.signal,allowInactive:true});
+   if(visual.anchor.active===true)return {activated:false,alreadyVisuallyActive:true,identity:frame.identity,method:'display-pixels'};
+   const r=visual.anchor.activationRegion,d=frame.sourceRect;if(!require('./visual-session').validBox(r)||!visual.anchor.activationEvidence)throw Object.assign(Error('画面没有唯一安全激活区域'),{code:'E_VISUAL_TARGET',dispatched:false});
+   const result=await visual.input(frame.visualFrameId,{action:'click',x:d.x+(r.x+r.width/2)*d.width,y:d.y+(r.y+r.height/2)*d.height},{signal:c.signal});
+   const response={activated:false,receipt:{inputPerformed:result.performed===true,method:'display-pixels'}};
+   if(!c.signal?.aborted)try{await require('./action-progress').pauseFor(160,c.signal);const after=await visual.observe({signal:c.signal,relocate:true});response.activated=true;response.identity=after.identity;}catch(error){response.observationError={code:error.code||'E_OBSERVATION',message:error.message};}return response;
+  }finally{lease?.release(owner);}
+ }});
+ tools.register({name:'screen.action',description:'执行一个Operation。Bunny可选择observeAfter=true在同次调用带回新画面；无需中间检查时省略或false，由Bunny按Action需要决定。文字提供实际视觉标签label；无文字目标用targetType=icon/region及预览图像素坐标，右键和滚动也用像素坐标。Task与Action完成须自主核查，Operation不必逐次检查；受控会话正文使用对应收发工具。',effect:'write',capabilities:['screen.input'],scope,
  validate:v=>{fields(v,['application','recipient','frameId','action','pixelX','pixelY','text','key','modifiers','deltaY','purpose','button','label','targetType','observeAfter'],'屏幕动作');if(v.observeAfter!==undefined&&typeof v.observeAfter!=='boolean')throw Error('observeAfter须为布尔值');if(typeof v.application!=='string'||!v.application||!['click','type','key','scroll'].includes(v.action)||v.button!==undefined&&!['left','right'].includes(v.button)||v.targetType!==undefined&&!['text','icon','region'].includes(v.targetType))throw Error('屏幕动作无效');text(v.frameId,'当前画面ID',160);
   if(v.label!==undefined){text(v.label,'可见文字标签',160);if(destructiveLabel(v.label))throw Error('此动作工具仅用于非破坏性操作，不能点击该控件');}
   if(v.action==='click'&&v.button!=='right'&&!v.label&&!['icon','region'].includes(v.targetType))throw Error('文字按钮或菜单必须提供label；仅无文字图标或空白区域使用targetType及坐标');
@@ -48,61 +44,45 @@ function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async(
   }return v;},
  available:task=>task.skill!=='conversation.manage'&&task.subjects.some(s=>!['system','bunny'].includes(s.application)&&resolveApplication(s.application,task)),
  execute:async(a,c)=>{
-  if(c.task.skill==='conversation.manage')throw Object.assign(Error('微信会话请使用对应的收发操作'),{dispatched:false});
-  if(a.action==='type'&&['wechat','workbuddy'].includes(a.application))await sensitivePolicy.check({target:a.application,recipient:a.recipient,text:a.text,ownership:'unknown'});
-  const anchor=c.task.state.screenAnchors?.[a.application];if(!anchor||anchor.frameId!==a.frameId||Date.now()-anchor.at>30000)throw Object.assign(Error('画面定位失效，先重新观察'),{dispatched:false});
+  if(c.task.skill==='conversation.manage')throw Object.assign(Error('会话请使用对应收发操作'),{dispatched:false});
+  const anchor=c.task.state.screenAnchors?.[a.application];if(!anchor||anchor.mode!=='visual'||anchor.frameId!==a.frameId||Date.now()-anchor.at>30000)throw Object.assign(Error('视觉帧失效，先重新观察'),{dispatched:false});
   if(!await canOperate(c.task))throw Object.assign(Error('等待电脑空闲后操作'),{code:'E_GUI_BUSY',dispatched:false});
-  if(a.application==='wechat')await wechatScene.assertTaskIdentity(c.task);
-  const owner=leaseOwner(c);await lease?.acquire(owner,c.signal);
-  let inputStarted=false;
+  const visual=visualFor(a.application);if(visual.identity().sessionId!==anchor.sessionId)throw Object.assign(Error('视觉身份已变化'),{dispatched:false});
+  const owner=leaseOwner(c);await lease?.acquire(owner,c.signal);let inputStarted=false;
   try{
-   if(c.signal?.aborted)throw Object.assign(Error('任务已暂停'),{dispatched:false});const front=await native.request('frontmost');assertAnchorFront(front,anchor);
-   const payload={expected:{bundleId:anchor.bundleId,pid:anchor.pid},windowId:anchor.windowId};
-   let frameRows;
-   if(a.application==='wechat'){
-    const frame=await native.request('capture',{captureMode:'displayStream',region:anchor.rect},12000);frameRows=(await native.request('recognize',{pngBase64:frame.pngBase64},10000)).texts||[];const error=require('./wechat-auth-state').wechatAuthError(frameRows);
-    if(error){await wechatScene.trip?.(error.message);throw error;}
-   }
-   if(a.application==='wechat'&&a.purpose==='file-dialog'){
-    const destinations=c.task.state.fileDestinations||[];if(!destinations.length)throw Object.assign(Error('先用 files.destination 创建本任务的接收位置'),{dispatched:false});
-    const kind=fileDialogKind(frameRows);
-    if(!kind)throw Object.assign(Error('画面不是可确认的文件保存或前往文件夹对话框，先重新观察'),{dispatched:false});
-    if(a.action==='type'&&(kind!=='folder'||!destinations.some(d=>d.directory===a.text)))throw Object.assign(Error('只在前往文件夹对话框输入本任务准备的接收目录'),{dispatched:false});
-    for(const d of destinations){const entries=await require('node:fs/promises').readdir(d.directory);if(entries.some(name=>name!=='.DS_Store'))throw Object.assign(Error('接收目录已有文件，先读取核对，不覆盖'),{dispatched:false});}
-   }
-   if(['click','scroll'].includes(a.action)){
-    let location={x:a.pixelX/anchor.previewWidth,y:a.pixelY/anchor.previewHeight},rows=[];if(!a.label&&(!Number.isFinite(location.x)||!Number.isFinite(location.y)||location.x<0||location.x>=1||location.y<0||location.y>=1))throw Object.assign(Error('像素坐标超出当前预览图，重新观察'),{dispatched:false});
-    if(a.action==='click'&&a.button!=='right'){
-     if(frameRows)rows=frameRows;else{const frame=await native.request('capture',{captureMode:'displayStream',region:anchor.rect},12000);rows=(await native.request('recognize',{pngBase64:frame.pngBase64},10000)).texts||[];}
-     if(a.label){
-      try{location=labelTarget(a.label,rows);}
-      catch(error){
-       // The planner has the actual current screenshot. A missing OCR token
-       // is not a prohibition on acting on a clearly visible text control.
-       if(a.targetType!=='text'||rows.some(r=>labelKey(r.text)===labelKey(a.label))||![location.x,location.y].every(n=>Number.isFinite(n)&&n>=0&&n<1))throw error;
-      }
-     }
-     if(rows.some(r=>r.confidence>=.25&&/^(?:是否|确认)?(?:删除|清空|替换|覆盖).*[?？]$/u.test(String(r.text).trim()))&&labelKey(a.label)!=='取消'&&labelKey(a.label)!=='cancel')throw Object.assign(Error('当前是破坏性确认窗口，只允许取消并重新观察'),{dispatched:false});
-     if(rows.some(r=>r.confidence>=.25&&destructiveLabel(r.text)&&Math.abs(location.x-(r.x+r.width/2))*anchor.rect.width<55&&Math.abs(location.y-(r.y+r.height/2))*anchor.rect.height<20))throw Object.assign(Error('该位置是破坏性或资金控件，未点击；请重新定位目标'),{dispatched:false});
-    }
-    const point={x:anchor.rect.x+location.x*anchor.rect.width,y:anchor.rect.y+location.y*anchor.rect.height},target=actionWindow(anchor,front.windows,point);payload.x=point.x;payload.y=point.y;payload.windowId=target.windowId;
-    const root=anchor.windowRect||anchor.rect;if(a.application==='wechat'&&a.action==='click'&&a.button!=='right'&&a.purpose!=='file-dialog'&&target.windowId===anchor.windowId&&contains(root,point)&&(point.x-root.x)/root.width>.5&&(point.y-root.y)/root.height>.8)throw Object.assign(Error('微信发送区改用对应会话工具'),{dispatched:false});
-    if(a.application==='wechat'&&a.action==='click'&&a.button!=='right'&&target.windowId===anchor.windowId&&(point.x-root.x)/root.width<.09&&(point.y-root.y)/root.height<.04)throw Object.assign(Error('保留微信主窗口，不点击关闭区域'),{dispatched:false});
-   }
-   for(const key of ['text','key','modifiers','deltaY','button'])if(a[key]!==undefined)payload[key]=a[key];
-   const current=await native.request('frontmost');assertAnchorFront(current,anchor);
-   if(['click','scroll'].includes(a.action))actionWindow(anchor,current.windows,{x:payload.x,y:payload.y});
    if(c.signal?.aborted)throw Object.assign(Error('任务已暂停'),{dispatched:false});
-   if(a.application==='wechat')assertWeChatInput(c.task,anchor);
-   inputStarted=true;const result=await native.request(a.action,payload,8000);delete c.task.state.screenAnchors[a.application];
-   const response={ok:result.performed===true,verified:result.performed===true,receipt:{inputPerformed:true,application:a.application,frameId:a.frameId,...(a.label?{targetLabel:a.label}:{}),point:result.point,at:Date.now(),businessResult:'输入已发出，业务结果待自主判断'}};
-   // Return the actual resulting scene in the same tool lifecycle. The next
-   // semantic decision can advance immediately instead of spending a model
-   // turn merely requesting another observation.
-   if(a.observeAfter===true&&observe&&result.performed===true&&!c.signal?.aborted){
-    try{await pause(160);response.observation=await observe({application:a.application,force:true},c);}
-    catch(error){response.observationError={code:error.code||'E_OBSERVATION',message:error.message};}
+   let location={x:a.pixelX/anchor.previewWidth,y:a.pixelY/anchor.previewHeight};
+   if(a.label)try{location=labelTarget(a.label,anchor.ocr||[]);}catch(error){
+    if(a.targetType!=='text'||(anchor.ocr||[]).some(r=>labelKey(r.text)===labelKey(a.label))||![location.x,location.y].every(n=>Number.isFinite(n)&&n>=0&&n<1))throw error;
+    const proof=await visual.judge(anchor.visualFrameId,{question:'给定截图位置是否为实际可见且唯一的指定文字控件？不能把期望文字当成截图内容；错误、遮挡或不唯一时不匹配。',evidence:{label:a.label,point:location}},{signal:c.signal});if(!proof.matched)throw Object.assign(Error('文字目标尚未视觉确认：'+proof.evidence),{code:'E_VISUAL_TARGET',dispatched:false});
    }
+   const payload={action:a.action};for(const k of ['text','key','modifiers','deltaY','button'])if(a[k]!==undefined)payload[k]=a[k];
+   if(['click','scroll'].includes(a.action)){
+    if(![location.x,location.y].every(n=>Number.isFinite(n)&&n>=0&&n<1))throw Object.assign(Error('坐标不在视觉预览内'),{dispatched:false});
+    payload.x=anchor.rect.x+location.x*anchor.rect.width;payload.y=anchor.rect.y+location.y*anchor.rect.height;
+    if((anchor.ocr||[]).some(r=>r.confidence>=.25&&destructiveLabel(r.text)&&Math.abs(location.x-(r.x+r.width/2))*anchor.rect.width<55&&Math.abs(location.y-(r.y+r.height/2))*anchor.rect.height<20))throw Object.assign(Error('此处是破坏性或资金控件，未点击'),{dispatched:false});
+   }
+   if(a.action==='click'&&a.button!=='right'&&(anchor.ocr||[]).some(r=>r.confidence>=.25&&/^(?:是否|确认)?(?:删除|清空|替换|覆盖).*[?？]$/u.test(String(r.text).trim()))&&!['取消','cancel'].includes(labelKey(a.label)))throw Object.assign(Error('破坏性确认界面只允许取消并重新观察'),{dispatched:false});
+   if(a.application==='wechat'){
+    const error=require('./wechat-auth-state').wechatAuthError(anchor.ocr||[]);if(error){await wechatScene.trip(error.message);throw error;}
+    if(a.action==='key'&&a.modifiers.includes('cmd')&&['v','c','x'].includes(a.key.toLowerCase()))throw Object.assign(Error('禁止剪贴板方式操作该软件'),{dispatched:false});
+    if(a.purpose==='file-dialog'){
+     const destinations=c.task.state.fileDestinations||[],kind=fileDialogKind(anchor.ocr||[]);
+     if(!kind||!destinations.length||a.action==='type'&&(kind!=='folder'||!destinations.some(d=>d.directory===a.text)))throw Object.assign(Error('保存界面或本任务目标目录尚未视觉核实'),{dispatched:false});
+     for(const d of destinations){const entries=await require('node:fs/promises').readdir(d.directory);if(entries.some(name=>name!=='.DS_Store'))throw Object.assign(Error('接收目录已有文件，先读取核对，不覆盖'),{dispatched:false});}
+    }
+    if(a.action==='click'&&a.button!=='right'){
+     const r=anchor.mainRegion||{x:0,y:0,width:1,height:1},x=(location.x-r.x)/r.width,y=(location.y-r.y)/r.height;
+     if(x>=0&&x<1&&y>=0&&y<1){if(a.purpose!=='file-dialog'&&x>.5&&y>.8)throw Object.assign(Error('微信发送区改用对应会话工具'),{dispatched:false});if(x<.09&&y<.04)throw Object.assign(Error('保留微信主界面，不点击关闭区域'),{dispatched:false});}
+    }
+    assertWeChatInput(c.task,anchor);
+   }
+   if(a.action==='type'&&['wechat','workbuddy'].includes(a.application))await sensitivePolicy.check({target:a.application,recipient:a.recipient,text:a.text,ownership:'unknown'});
+   if(c.signal?.aborted)throw Object.assign(Error('任务已暂停'),{dispatched:false});
+   inputStarted=true;const result=await visual.input(anchor.visualFrameId,payload,{signal:c.signal});delete c.task.state.screenAnchors[a.application];
+   require('./software-tools').remember(c.task,{application:a.application,channel:'visual',operation:a.action,operationId:c.operationId,outcome:result.performed===true?'input-dispatched':'unconfirmed'});
+   const response={ok:result.performed===true,verified:result.performed===true,receipt:{inputPerformed:result.performed===true,application:a.application,frameId:a.frameId,method:'display-pixels',at:Date.now(),businessResult:'输入已发出，业务结果待自主判断'}};
+   if(a.observeAfter===true&&observe&&!c.signal?.aborted){try{await require('./action-progress').pauseFor(160,c.signal);response.observation=await observe({application:a.application,force:true},c);}catch(error){response.observationError={code:error.code||'E_OBSERVATION',message:error.message};}}
    return response;
   }catch(error){if(!inputStarted)error.dispatched=false;throw error;}finally{lease?.release(owner);}
  }

@@ -24,8 +24,22 @@ function fixture(t){
  function send(message,p=asr.proc){p.stdout.write(JSON.stringify(message)+'\n');}
  function advance(ms){const end=at+ms;let loops=0;for(;;){const due=[...timers].filter(([,v])=>v.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!due)break;if(++loops>10000)throw Error('unbounded host timers');const[id,timer]=due;at=timer.at;timers.delete(id);const old=asr.traceRecognizer;timer.fn();if(old!==asr.traceRecognizer)clock();}at=end;}
  t.after(()=>{ctx.quitting=true;turns.reset();asr.kill({discard:true});timers.clear();});
- return {ctx,asr,turns,children,events,requests,timers,send,advance,activity:state=>send({t:'activity',state,quietSeconds:state==='quiet'?3:0,at:at/1000,emittedAt:at/1000,seq:++seq,gen:1})};
+ return {ctx,asr,turns,children,events,requests,timers,send,advance,
+  activity:(state,extra={})=>send({t:'activity',state,quietSeconds:state==='quiet'?3:0,at:at/1000,emittedAt:at/1000,seq:++seq,gen:1,...extra}),
+  audioFinal:gen=>send({t:'audioFinal',gen,coveredSeq:seq})};
 }
+test('actual host retains one confirmed request after empty audio coverage near its deadline without reconnecting',t=>{
+ const f=fixture(t),child=f.asr.proc;f.activity('active');f.send({t:'partial',v:'synthetic complete owner request'});
+ f.advance(500);f.activity('active');f.send({t:'utterance',v:'synthetic complete owner request'});
+ f.advance(500);f.activity('active',{gen:3});
+ for(let i=0;i<54;i++){f.advance(100);f.activity('active',{gen:3});}
+ for(let i=1;i<=12;i++){f.advance(100);f.activity('quiet',{gen:3,quietSeconds:i/10});}
+ assert.equal(f.requests.length,0);f.audioFinal(3);f.advance(0);
+ assert.equal(f.requests.length,1);assert.equal(f.requests[0].text,'synthetic complete owner request');assert.equal(f.requests[0].canCommit(),true);
+ for(let i=0;i<20;i++){f.advance(100);f.activity('quiet',{gen:5});}
+ assert.equal(f.children.length,1);assert.equal(f.asr.proc,child);assert.deepEqual(child.kills,[]);assert.equal(f.ctx.asrFailStreak,0);
+ assert.equal(f.requests.length,1);assert(!f.events.some(e=>e.type==='toast'));
+});
 test('actual host confirmation timeout discards its child and late text/close cannot enter a replacement',t=>{
  const f=fixture(t),old=f.asr.proc;f.send({t:'partial',v:'unconfirmed synthetic instruction'});f.advance(8000);
  assert.deepEqual(old.kills,['SIGKILL']);assert.equal(f.ctx.asrFailStreak,1);assert.equal(f.asr.running,false);assert.equal(f.requests.length,0);

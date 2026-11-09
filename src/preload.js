@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('pet', {
   listen: (v) => ipcRenderer.send('pet:listen', v),
   asrStatus: (opts) => ipcRenderer.invoke('pet:asr-status', opts || {}),
   speechDiagnostic: args => ipcRenderer.invoke('pet:speech-diagnostic', args),
+  operationEvidence: scope => ipcRenderer.invoke('pet:operation-evidence', scope),
   speakerStatus: () => ipcRenderer.invoke('pet:speaker-status'),
   speakerEnroll: () => ipcRenderer.invoke('pet:speaker-enroll'),
   speakerCancel: () => ipcRenderer.invoke('pet:speaker-cancel'),

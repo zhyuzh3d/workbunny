@@ -1,7 +1,7 @@
 {
   "schema": "bunny.software-skill/v1",
   "id": "common",
-  "version": 16,
+  "version": 18,
   "skills": [
     "software.execute",
     "system.operate",
@@ -17,7 +17,7 @@
   "resources": [
     {
       "path": "guide.md",
-      "sha256": "b9d6d5beac7ab52c8db6b805c62be7dbce42a2e64b931673c4565b815668279a"
+      "sha256": "a508007dfa05ad4e52bb87c6d6d298c154fcbbed454fe1e2130970618f2ce525"
     }
   ],
   "toolProtocol": "bunny.screen/v2"

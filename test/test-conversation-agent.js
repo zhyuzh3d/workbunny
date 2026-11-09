@@ -69,7 +69,7 @@ test('uncertain message order reobserves the visible exact conversation without 
 function harness({behavior='reply',brain,completion='manual',subjects=[{application:'wechat',recipient:'Alice'}],observe,transcribe,onOpen}={}){
  let visible=[message('old')],busy=false;const sent=[],reports=[],records=new Map(),tools=new ToolRegistry();let now=1000;
  tools.register({name:'conversation.observe',description:'pixels',effect:'read',capabilities:['conversation.read'],scope:a=>a,execute:async a=>observe?observe(a,visible):({headerMatched:true,changed:true,messages:visible,draft:''})});
- tools.register({name:'conversation.open',description:'open',effect:'read',capabilities:['screen.input'],scope:a=>a,execute:async()=>{onOpen?.();return {ok:true};}});
+ tools.register({name:'conversation.open',description:'open',effect:'read',capabilities:['screen.input'],scope:a=>a,execute:async(_args,context)=>{await onOpen?.(context);return {ok:true};}});
  tools.register({name:'conversation.transcribe',description:'voice',effect:'read',capabilities:['screen.input','conversation.read'],scope:a=>a,execute:async a=>transcribe?transcribe(a):({pending:true})});
  tools.register({name:'conversation.send',description:'send',effect:'write',capabilities:['conversation.send'],scope:a=>a,execute:async a=>{sent.push(a.message);visible=[...visible,message(a.message,'outgoing')];return {ok:true,verified:true,receipt:{at:now}};}});
  tools.register({name:'memory.related',description:'related shared memories',effect:'read',capabilities:['memory.read'],scope:a=>a,execute:async()=>({items:[]})});
@@ -80,6 +80,55 @@ function harness({behavior='reply',brain,completion='manual',subjects=[{applicat
  const start=()=>runtime.start({skill:'conversation.manage',goal:'照看会话',subjects,completion,parameters:{behavior}}, {role:'owner',verified:true,sources:['owner'],scene:'life'});
  return {runtime,start,sent,reports,decisions,records,setVisible:v=>{visible=v;},incoming:(...texts)=>{visible=[...visible,...texts.map(t=>message(t))];},setBusy:v=>{busy=v;},advance:(ms=60000)=>{now+=ms;}};
 }
+test('active preparation retains one action and recovery through repeated navigation timeouts instead of restarting passive polling',async()=>{
+ let h;const actions=[],diagnoses=[];
+ h=harness({behavior:'inquiry',onOpen:context=>{actions.push(context.action);h.advance(20000);throw Error('synthetic planning timeout');}});
+ h.runtime.diagnoseRepair=async info=>{diagnoses.push(info);return {action:diagnoses.length===1?'change_method':'ask_owner',source:'llm',nextStep:'synthetic alternative observation'};};
+ const {id}=await h.start();await h.runtime.tick(id);const task=h.runtime.tasks.get(id),run=Object.values(task.actionRuns)[0];
+ assert(run);assert.equal(run.attempts,1);assert.equal(diagnoses.length,1);const startedAt=run.progress.startedAt;
+ await h.runtime.tick(id);assert.equal(diagnoses.length,2);assert.equal(diagnoses[0].kind,'stall');assert.equal(run.attempts,2);assert.equal(task.status,'waiting');
+ assert.equal(run.progress.startedAt,startedAt);assert(diagnoses[1].progress.elapsedMs>=40000);
+ await h.runtime.tick(id);assert.equal(task.status,'waiting');assert.equal(run.recovery.action,'wait');h.advance(4000);await h.runtime.tick(id);assert.equal(task.status,'needs_attention');assert.equal(diagnoses.length,3);assert.equal(actions[2].recovery.action,'change_method');
+ assert.equal(actions[1].recovery.nextStep,'synthetic alternative observation');assert.match(actions[2].recovery.nextStep,/获准的观察角度/u,'an early ask-owner opinion cannot substitute for the next actual verification');assert.equal(Object.values(task.actionRuns).length,1);assert.equal(h.sent.length,0);
+ await h.runtime.tick(id);assert.equal(actions.length,4);await h.runtime.close();
+});
+test('successful preparation retires its active action and healthy passive watching does not accumulate stall recovery',async()=>{
+ const h=harness(),{id}=await h.start();let diagnoses=0;h.runtime.diagnoseRepair=async()=>{diagnoses++;return {action:'ask_owner',source:'llm'};};
+ await h.runtime.tick(id);const task=h.runtime.tasks.get(id),run=Object.values(task.actionRuns)[0];assert.equal(run.status,'completed');
+ for(let i=0;i<6;i++){h.advance();await h.runtime.tick(id);}
+ assert.equal(diagnoses,0);assert.equal(task.status,'waiting');assert.equal(Object.values(task.actionRuns).length,1);assert.equal(h.sent.length,0);await h.runtime.close();
+});
+test('pause and restore retain active preparation progress without input until explicit resume',async()=>{
+ let h;let opens=0;h=harness({onOpen:()=>{opens++;h.advance(20000);throw Error('synthetic planning timeout');}});
+ h.runtime.diagnoseRepair=async()=>({action:'change_method',source:'llm'});
+ const {id}=await h.start();await h.runtime.tick(id);await h.runtime.control('pause',id);const saved=h.records.get(id),run=Object.values(saved.actionRuns)[0];
+ const restored=new AgentRuntime({journal:{put:async t=>h.records.set(t.id,structuredClone(t)),list:async()=>[structuredClone(saved)],authorized:async()=>true},tools:h.runtime.tools,skills:h.runtime.skills,epoch:()=>1,clock:h.runtime.clock,autoSchedule:false});
+ await restored.restore();await restored.tick(id);assert.equal(restored.tasks.get(id).status,'paused');assert.equal(opens,1);
+ assert.equal(Object.values(restored.tasks.get(id).actionRuns)[0].progress.startedAt,run.progress.startedAt);
+ await restored.control('resume',id);await restored.tick(id);assert.equal(opens,2);assert.equal(Object.values(restored.tasks.get(id).actionRuns).length,1);
+ assert.equal(h.sent.length,0);await restored.close();await h.runtime.close();
+});
+test('failed active preparation has bounded fallback when the recovery service is unavailable',async()=>{
+ let h;let opens=0;h=harness({onOpen:({action})=>{opens++;action.progress.observe('synthetic.observation',{page:opens});h.advance(20000);throw Error('synthetic planning timeout');}});
+ const {id}=await h.start();for(let i=0;i<9;i++){await h.runtime.tick(id);h.advance(4000);}
+ const task=h.runtime.tasks.get(id);assert.equal(opens,7);assert.equal(task.status,'needs_attention');assert.equal(Object.values(task.actionRuns)[0].recoveryState.totalAttempts,6);
+ assert.equal(h.sent.length,0);assert(h.reports.some(r=>/自动恢复预算已到/.test(r.text)));await h.runtime.close();
+});
+test('pausing during active recovery rejects a late decision and cannot restart preparation',async()=>{
+ let h,entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r);let opens=0;
+ h=harness({onOpen:()=>{opens++;h.advance(20000);throw Error('synthetic planning timeout');}});
+ h.runtime.diagnoseRepair=async()=>{entered();await gate;return {action:'change_method',source:'llm',nextStep:'late synthetic advice'};};
+ const {id}=await h.start();const pending=h.runtime.tick(id);await at;await h.runtime.control('pause',id);release();await pending;
+ await h.runtime.tick(id);const task=h.runtime.tasks.get(id);assert.equal(task.status,'paused');assert.equal(opens,1);assert.equal(Object.values(task.actionRuns)[0].recovery,undefined);
+ assert.equal(h.sent.length,0);await h.runtime.close();
+});
+test('a revised goal retires its superseded preparation without leaving a stale idle action',async()=>{
+ let h;h=harness({onOpen:()=>{h.advance(20000);throw Error('synthetic planning timeout');}});
+ const {id}=await h.start();await h.runtime.tick(id);const task=h.runtime.tasks.get(id),old=Object.values(task.actionRuns)[0];
+ await h.runtime.update(id,{goal:'synthetic revised goal'},{role:'owner',verified:true,sources:['new-owner-request'],scene:'life'});await h.runtime.tick(id);
+ assert.equal(old.status,'cancelled');const current=Object.values(task.actionRuns).find(run=>run.id!==old.id);assert.equal(current.attempts,1);assert.equal(current.activePhase,'prepare:1');
+ assert.equal(h.sent.length,0);await h.runtime.close();
+});
 test('a prepared reply retries GUI admission each second without waiting for the monitor period or regenerating its answer',async()=>{
  const h=harness(),{id}=await h.start();await h.runtime.tick(id);h.incoming('reply promptly');await h.runtime.tick(id);
  const task=h.runtime.tasks.get(id);task.schedule.intervalSeconds=60;

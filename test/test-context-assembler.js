@@ -14,6 +14,14 @@ test('experience selection respects the application and retains relevant complet
  const full=selectExperience(items,{applications:['wechat'],mode:'full',maxTokens:5000});
  assert(full[0].instructions.includes('保存附件'));assert.equal(full[0].truncated,undefined);
 });
+test('current issue relevance is ranked across source sections before item and token limits',()=>{
+ const items=Array.from({length:5},(_,i)=>({sourceId:'early-'+i,tags:['software:demo'],status:'bundled',instructions:'# 无关制作资料\n\n'+('页面颜色与文稿排版。'.repeat(70))}));
+ items.push({sourceId:'late-relevant',tags:['software:demo'],status:'validated',instructions:'## 输入操作经验\n\n输入区位置来自当前画面。\n\n若刚才已聚焦且画面证据仍有效，不重复点击输入框。'});
+ const chosen=selectExperience(items,{applications:['demo'],query:'当前截图聚焦输入框',maxTokens:240,maxItems:2});
+ assert.equal(chosen[0].sourceId,'late-relevant');assert(chosen[0].instructions.includes('已聚焦且画面证据仍有效，不重复点击输入框'));
+ assert(chosen.every(item=>item.instructions.replace(/^#{1,6}[^\n]*\n*/gmu,'').trim().length>6),'a heading or a leftover character is not a useful passage');
+ assert(chosen.reduce((sum,item)=>sum+require('../src/main/context-budget').textTokens(item.instructions),0)<=240);assert(!chosen.some(item=>item.instructions.includes('页面颜色')));
+});
 test('conversation context uses related experience as data without dropping the actual incoming message',async()=>{
  let input;
  const brain=new ConversationBrain({request:async options=>{input=JSON.parse(options.messages[1].content);return {response:{text:JSON.stringify({decision:'reply',reply:'收到',summary:'已回应',completed:false,progress:{},unknown:[]})}};}});

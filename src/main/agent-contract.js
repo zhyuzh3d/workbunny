@@ -4,7 +4,7 @@ const TASK_SCHEMA = 'bunny.task/v4';
 const STATES = new Set(['queued','ready','running','waiting','waiting_permission','paused','needs_attention','stopping','completed','stopped','expired']);
 const TERMINAL = new Set(['completed','stopped','expired']);
 const MAX_ACTIVE_TASKS = 5;
-const occupiesSlot = task => task.skill !== 'task.resolve' && !TERMINAL.has(task.status) && !['queued','paused'].includes(task.status);
+const occupiesSlot = task => task.skill !== 'task.resolve' && !TERMINAL.has(task.status) && (!['queued','paused'].includes(task.status)||task.status==='paused'&&!!task.state?.reviewAdmission);
 const capacityNote = '同时最多启动5个任务。请打开“任务与工作”，停止不需要的任务后，手动启动这项任务。';
 const text = (value, label, max = 3000, empty = false) => {
   if (typeof value !== 'string' || (!empty && !value.trim()) || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) throw new Error(`${label}不合法`);
@@ -22,7 +22,7 @@ function taskSpec(value) {
   if (!Array.isArray(value.subjects) || !value.subjects.length || value.subjects.length > 12) throw new Error('任务需要1到12个明确对象');
   const subjects = value.subjects.map(subject => {
     fields(subject, ['application','recipient'], '任务对象');
-    const application = text(subject.application, '应用', 80);
+    const requested = text(subject.application, '应用', 80),application=require('./interaction-policy').profile(requested)?.application||requested;
     if (!/^[a-z][a-z0-9_.-]*$/u.test(application)) throw new Error('应用标识不合法');
     return { application, ...(subject.recipient === undefined ? {} : { recipient: text(subject.recipient, '联系人', 100) }) };
   });

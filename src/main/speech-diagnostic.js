@@ -70,7 +70,7 @@ class SpeechDiagnostic{
     onRemember:(text,value)=>{record('host-remember-sink',{text,...value});return {id:'diagnostic-only'};},
     onRequest:token=>{const value=this.state(),reason=!meaningful(token.text,value.allowShort===true)?'noise':this.recentEcho(token.text)?'echo':value.wakeOnly&&!wakeHit(token.text)?'wake':'accepted';if(['echo','wake'].includes(reason))token.skip();record('host-request-sink',{text:token.text,turn:token.id,reason,businessDispatch:false});}
    });s.turns=turns;
-   const stoppedTurns={activity(){return false;},partial(){},final(){},reset(){},snapshot:()=>null};
+   const stoppedTurns={activity(){return false;},audioFinal(){return false;},partial(){},final(){},reset(){},snapshot:()=>null};
    const pipeline=this.createPipeline({speakerFilter:this.speakerFilter,state:()=>({...this.state(),alwaysOn:true,asrMode:'continuous',suppressEnrollmentFinal:false}),recentEcho:this.recentEcho,bargeInReady:this.bargeInReady,nameHit:wakeHit,turns:()=>alive()?turns:stoppedTurns,
     trace:value=>record('host-filter-trace',value),onFilter:(stage,text)=>record('host-filter',{stage,text}),onPartial:text=>record('host-partial-sink',{text}),onAcceptedPartial:()=>{},onUtteranceConfirmed:()=>{},setLastLiveText:()=>{},setSuppressEnrollmentFinal:()=>{},onFeatures:()=>{}});
    const asr=this.createAsr(this.bin,()=>{});s.asr=asr;
@@ -78,6 +78,7 @@ class SpeechDiagnostic{
    asr.on('ready',()=>{if(!alive())return;s.phase='capturing';record('host-ready');this.publish();});
    asr.on('partial',text=>{if(alive())pipeline.partial(text);});
    asr.on('utterance',text=>{if(alive())pipeline.utterance(text);});
+   asr.on('audioFinal',value=>{if(alive()){record('host-audio-final',value);pipeline.audioFinal(value);}});
    asr.on('final',text=>{if(alive())pipeline.final(text);});
    asr.on('voiceFeatures',value=>{if(alive())pipeline.voiceFeatures(value);});
    asr.on('activity',value=>{if(alive()){const {seq:activitySeq,...metadata}=value;record('host-activity',{...metadata,activitySeq});pipeline.activity(value);}});

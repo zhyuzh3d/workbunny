@@ -170,6 +170,7 @@ const DEFAULTS = {
   ui: { dialogueVisible: false, dialogueBehind: false, avatarHidden: false },
   memory: { enabled: true, extract: true, useInnateExperience: true, scene: 'life', recentRounds: 8, recentMessages: 20 },
   software: { systemConfiguration: true, terminal: true, wechatAccountOwnership:'owner' },
+  taskSupervision: { enabled: true, proactive: true },
   motions: { disabled: [] },
   avatar: 'builtin_soft_bunny',
   avatarDescriptions: {},
@@ -352,6 +353,7 @@ function validVoiceVolume(value) {
 }
 
 function save(patch, { replaceAvatarDescriptions = false } = {}) {
+  if(patch?.taskSupervision)for(const [key,value] of Object.entries(patch.taskSupervision))if(!['enabled','proactive'].includes(key)||typeof value!=='boolean')throw Error('主脑督导配置只接受明确开关');
   if (patch?.voice && Object.hasOwn(patch.voice, 'volume') && !validVoiceVolume(patch.voice.volume)) throw new Error('音量须为 0 至 100 的整数');
   const next = deepMerge(load(), patch || {});
   if (replaceAvatarDescriptions) next.avatarDescriptions = { ...patch?.avatarDescriptions };

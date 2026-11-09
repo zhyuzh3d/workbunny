@@ -1,6 +1,6 @@
 # WorkBunny 架构与执行 FLOW
 
-流程记录当前源码的逻辑责任与主要路径，更新日期为 2026-11-07。数据字段和实现边界见[架构设计](architecture.md)。
+流程记录当前源码的逻辑责任与主要路径，更新日期为 2026-11-09。数据字段和实现边界见[架构设计](architecture.md)。
 
 ## 1. 系统总览
 
@@ -152,7 +152,10 @@ flowchart TD
     Conflict -->|"是"| Policy["按声明策略合并、排队或替换；已提交效果先核对"]
     Policy --> Start
     Start --> Plan["Bunny 依据目标、经验、当前证据与耗时规划"]
-    Plan --> Group["执行可连贯的一组 Operation"]
+    Plan --> Knowledge["按当前目标、软件和失败上下文检索适用经验"]
+    Knowledge --> Mode["每次 Operation 自主选获准模式；其它方法不适用才视觉"]
+    Mode --> Permit["核对本次目标、模式、授权、取消与未知效果屏障"]
+    Permit --> Group["执行可连贯的一组 Operation"]
     Group --> Decide["Bunny 自主选择何时观察、等待或核查"]
     Decide --> Result{"目标结果有充分证据？"}
     Result -->|"完成"| Done["确认 Action；一次性任务完成，监听任务继续"]
@@ -164,7 +167,9 @@ flowchart TD
     Static["后续静止帧 / 无关对象的新事件"] -.-> Next
 ```
 
-监听和动作是并行职责。LLM 调度的有效性由当前任务、取消与对象规则判断，不能因为后一轮画面无变化就丢弃结果。Operation 不强制逐次核查。
+监听和动作是并行职责。LLM 调度的有效性由当前任务、取消与对象规则判断，不能因为后一轮画面无变化就丢弃结果。Operation 不强制逐次核查。服务、终端/代码、结构化界面与纯视觉键鼠是独立通道，同一 Task/Action 可跨软件组合；经验不增加权限，未知副作用先只读核对。微信的直接 Operation 仅授权视觉键鼠，不将该限制程序继承到独立受托应用内部。
+
+纯视觉链：普通显示像素 → 截图与 VLM 确认身份/区域/焦点/监测区 → 有界帧与局部像素时效 → displayInput 全局键鼠 → 按需要观察与结果核验。没有窗口列表、PID、应用接口或 AX 回落。视觉小区域变化由通用 sample/commit 稳定性机制处理，未知目标或焦点停止；暂停/取消立即使迟到派发失效，已发生输入仍如实保留回执。
 
 ## 6. 写入账本与不确定效果
 
@@ -207,24 +212,28 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Active["活动 Task / Action"] --> Health{"当前运行事实"}
-    Health -->|"工具或模型仍执行；有效等待"| Continue["原超时与等待协议继续负责"]
-    Health -->|"调用异常或重复证据无进展"| Diagnose["按错误类型提供最简上下文、耗时与回执"]
-    Health -->|"到达一分钟空闲期限"| Reminder["任务调度器发起一条内部继续思考提醒"]
-    Reminder --> Original["仍使用同一 Task / Action 的上下文和权限"]
-    Original --> Decide["Bunny 判断下一步"]
-    Diagnose --> Decide
-    Diagnose -->|"同一失败耗尽恢复预算"| Ask
-    Decide -->|"缩减上下文或修复本轮请求"| Tune["调整允许的模块、输出或格式参数"]
-    Decide -->|"补证或换方法"| Replan["保留目标、已确认效果及原对象继续"]
-    Decide -->|"确需等待"| Wait["记录条件和下一检查时机"]
-    Decide -->|"需要主人独有信息或决定"| Ask["清楚说明缺口，任务状态可见"]
-    Tune --> Active
-    Replan --> Active
-    Wait --> Active
-    Inactive["已暂停、结束、无事件监听或未知写入"] --> Exclude["不由保活强行重启"]
-    Global["自主生活 / 主线程健康 / 进程看门狗"] -.-> Separate["独立职责，不冒充任务保活"]
+    Active["原 Task / Action：局部执行与实际回执"] --> Local["按情景联合核实关键疑点、历史反思、探索与补救"]
+    Local -->|"可安全继续"| Active
+    Local -->|"明确无法自行突破"| Suspend["同 episode 自我挂起；原目标、scope 与效果保留"]
+    Local -->|"预算到达；障碍仍不确定"| Yield["让出本轮资源；不冒充自我挂起或失败"]
+    Monitor["原调度器监测：运行期限、无进展、WorkBuddy 异常"] --> Request
+    Suspend --> Request["原 Task / Action.mainReview：登记、持久化、去重"]
+    Yield --> Request
+    Request --> Self["SelfSystem：共享身份、记忆、Summary、经验与最新相关情景；独立调用状态"]
+    Self --> Decision["主脑高层决定与可修订指导；不执行工具"]
+    Decision --> Validate["原 runtime 校验 reviewId、scope、目标、控制、授权及写入效果"]
+    Validate -->|"有效指导"| Commit["原保存串行区提交；新策略获有界窗口；不清空 episode 或账本"]
+    Validate -->|"停止、撤权或依据失效"| Reject["拒绝迟到应用，保留来源与原因"]
+    Commit -->|"原 scope 安全边界消费"| Active
+    Commit -->|"等待具体条件"| Wait["保存条件与下次审阅时间，释放 worker"]
+    Wait --> Request
+    Commit -->|"主脑明确 needs_owner / fail"| Report["保存 disposition，经原渠道说明依据、缺口和继续条件"]
+    New["可信新观察"] -->|"自挂起或暂缓只复评"| Request
+    Owner["主人对话、语音、停止与其它 scope"] --> Independent["独立响应；停止/撤权即时生效"]
+    Services["模型或保存无响应"] --> Bounded["逻辑有界退让；物理请求/实际写入仍被原链跟踪"]
 ```
+
+普通建议不取消正常 worker；仅明确检查点重启且无其它活跃 scope 时可隔离唯一失效调用。所有新输入仍走原权限、GUI lease、操作账本和派发前检查。后台模型满额是普通等待，为主人对话保留容量；主脑督导不直接说话，不借主人对话的 busy 或 controller。主进程与任务系统是程序组织，主脑与任务脑是 LLM 认知用途；不存在第二人格或执行账本。
 
 ## 8. 感知、经验吸收与工具演进
 
@@ -282,3 +291,5 @@ flowchart TB
 私聊记忆不进入任务经验提炼，Task 读取最高生活；导入不等于执行或授权。经验更新和模型解释都不能被当作外部效果已经发生的证据。
 
 任务列表清理：本机主人请求 → 快照旧任务 → 本地同步停止并释放名额 → 至多30秒的一轮外部清理 → 记录错误 → 加密保存列表隐藏标记。终态 X 直接保存同一隐藏标记；“恢复已清理任务”只移除标记，保留终态和取消的旧报告。整个过程不级联删除资料或文件。
+
+操作取证：既有 Operation/控制器上下文 → UTC+单调时钟+序号 → 截图采集/同轮VLM/区域变化/输入预检/派发请求/原生回执或未知 → 白名单异步滚动元数据。异常 → 关联原 Operation 的脱敏引用进入原错误链 → 复用最近已采像素及随后正常观察的有限关联帧 → 有钥匙则异步本地加密，否则记录缺口。该支路不调度额外截图或输入，不解除暂停，不影响业务回执；已有授权内精确单帧读取并校验完整性，重建只报告最近关联动作和证据覆盖范围，不自动给出退出原因。

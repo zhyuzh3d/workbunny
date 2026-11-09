@@ -8,7 +8,8 @@ function fixture(options={}){
  function advance(ms){const end=at+ms;let loops=0;for(;;){const found=[...timers].filter(([,entry])=>entry.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!found)break;if(++loops>10000)throw Error('unbounded timer loop');at=found[1].at;timers.delete(found[0]);found[1].fn();}at=end;}
  function activity(state,quietSeconds=0,extra={}){return c.activity({state,quietSeconds,at,seq:++seq,recognizer:1,sourceGen:1,...extra});}
  function quietFor(ms,extra={}){for(let elapsed=100;elapsed<=ms;elapsed+=100){advance(100);activity('quiet',elapsed/1000,extra);}}
- return {c,advance,activity,quietFor,requests,remembered,errors,errorDetails,invalidations:()=>invalidations,now:()=>at};
+ return {c,advance,activity,quietFor,requests,remembered,errors,errorDetails,invalidations:()=>invalidations,now:()=>at,
+  audioFinal:(extra={})=>c.audioFinal({recognizer:1,sourceGen:1,coveredSeq:seq,...extra})};
 }
 test('partial is display-only; a native final and the original three-second seal precede request and commit',async()=>{
  const f=fixture();f.c.partial('fixture question');f.advance(1000);assert.equal(f.requests.length,0);
@@ -86,6 +87,61 @@ test('post-final activity in a successor analyzer stays unconfirmed and reaches 
  assert.equal(f.requests.length,0);assert.equal(f.c.snapshot().awaitingAudioFinal,true);assert.equal(f.errors.length,0);
  f.advance(2966);assert.equal(f.c.snapshot(),null);assert.equal(f.errors.length,1);assert.equal(f.requests.length,0);assert.deepEqual(f.remembered,[]);
  assert.equal(f.errorDetails[0].reason,'confirmation-timeout');assert.equal(f.errorDetails[0].awaitingAudioFinal,true);assert.equal(f.errorDetails[0].segments,1);
+});
+test('a genuinely finalized empty successor covers ambient activity and admits the preserved words once',()=>{
+ const f=fixture({requireActivity:true});f.activity('active');f.c.partial('synthetic owner request');f.c.final('synthetic owner request.');
+ f.advance(34);f.activity('active',0,{sourceGen:3});f.quietFor(1500,{sourceGen:3});
+ assert.equal(f.requests.length,0);assert.equal(f.c.snapshot().waitingAudio,true);
+ assert.equal(f.audioFinal({sourceGen:3}),true);f.quietFor(1500,{sourceGen:5});
+ assert.equal(f.requests.length,1);assert.equal(f.requests[0].text,'synthetic owner request.');assert.equal(f.errors.length,0);
+ assert.equal(f.audioFinal({sourceGen:3}),false);f.quietFor(5000,{sourceGen:5});assert.equal(f.requests.length,1);
+});
+test('empty coverage reopens the existing accepted token without repeating semantic inference',async()=>{
+ const f=fixture({requireActivity:true});f.c.final('synthetic confirmed owner request');f.quietFor(3000);const token=f.requests[0];
+ f.activity('active',0,{sourceGen:3});const waiting=token.waitForCommit();f.quietFor(1000,{sourceGen:3});
+ assert.equal(token.canCommit(),false);assert.equal(f.audioFinal({sourceGen:3}),true);assert.equal(await waiting,true);
+ assert.equal(token.canCommit(),true);assert.equal(f.requests.length,1);assert.equal(f.invalidations(),0);
+});
+test('empty audio confirmed near the text deadline cannot strand a confirmed turn behind its own covered activity',()=>{
+ const f=fixture({requireActivity:true});f.activity('active');f.c.partial('synthetic complete owner request');
+ f.advance(500);f.activity('active');f.c.final('synthetic complete owner request');
+ f.advance(500);f.activity('active',0,{sourceGen:3});
+ for(let i=0;i<54;i++){f.advance(100);f.activity('active',0,{sourceGen:3});}
+ f.quietFor(1200,{sourceGen:3});assert.equal(f.now(),7600);assert.equal(f.requests.length,0);
+ assert.equal(f.audioFinal({sourceGen:3}),true);f.advance(0);
+ assert.equal(f.requests.length,1);assert.equal(f.requests[0].text,'synthetic complete owner request');assert.equal(f.requests[0].canCommit(),true);
+ f.quietFor(1000,{sourceGen:5});assert.equal(f.errors.length,0);assert.equal(f.requests.length,1);
+});
+test('empty coverage restores the previous speech seal without shortening it or creating another semantic request',()=>{
+ const f=fixture({requireActivity:true});f.activity('active');f.c.partial('synthetic confirmed words');
+ f.advance(500);f.activity('active');f.c.final('synthetic confirmed words');
+ f.advance(100);f.activity('active',0,{sourceGen:3});f.quietFor(1000,{sourceGen:3});assert.equal(f.audioFinal({sourceGen:3}),true);
+ f.advance(0);assert.equal(f.requests.length,0);f.quietFor(1800,{sourceGen:5});assert.equal(f.requests.length,0);
+ f.quietFor(100,{sourceGen:5});assert.equal(f.now(),3500);assert.equal(f.requests.length,1);
+ f.activity('active',0,{sourceGen:5});assert.equal(f.requests[0].canCommit(),false);
+ f.quietFor(1000,{sourceGen:5});assert.equal(f.audioFinal({sourceGen:5}),true);f.advance(0);
+ assert.equal(f.requests[0].canCommit(),true);assert.equal(f.requests.length,1);assert.equal(f.errors.length,0);
+});
+test('empty final never manufactures words, clears a partial, or revives an ended turn',()=>{
+ const idle=fixture({requireActivity:true});idle.activity('active');idle.quietFor(1000);assert.equal(idle.audioFinal(),false);assert.equal(idle.requests.length,0);
+ const partial=fixture({requireActivity:true});partial.c.final('synthetic confirmed prefix');partial.activity('active');partial.c.partial('synthetic unconfirmed condition');partial.quietFor(1000);
+ assert.equal(partial.audioFinal(),false);assert.equal(partial.c.snapshot().finalized,false);assert.equal(partial.requests.length,0);
+ partial.c.reset();assert.equal(partial.audioFinal(),false);partial.advance(10000);assert.equal(partial.requests.length,0);
+});
+test('empty final must cover the exact current native sequence and source, while later active still closes the gate',()=>{
+ const f=fixture({requireActivity:true});f.c.final('synthetic confirmed prefix');f.activity('active');f.quietFor(1000);
+ for(const extra of [{sourceGen:0},{sourceGen:2},{recognizer:0},{recognizer:2},{coveredSeq:1},{coveredSeq:999},{coveredSeq:NaN}]){
+  assert.equal(f.audioFinal(extra),false);assert.equal(f.c.snapshot().waitingAudio,true);
+ }
+ f.activity('unknown');assert.equal(f.audioFinal(),false);f.activity('quiet',1);assert.equal(f.audioFinal(),true);
+ f.activity('active',0,{sourceGen:3});assert.equal(f.c.snapshot().waitingAudio,true);f.quietFor(4000,{sourceGen:3});assert.equal(f.requests.length,0);
+});
+test('a later empty generation cannot erase an earlier uncovered segment rejected by speaker or echo filtering',()=>{
+ const f=fixture({requireActivity:true});f.c.final('synthetic authenticated prefix');
+ f.activity('active',0,{sourceGen:3});f.quietFor(1000,{sourceGen:3});
+ // Gen 3 finished with words, but its partial/final did not pass the pipeline.
+ f.activity('active',0,{sourceGen:5});f.quietFor(1000,{sourceGen:5});
+ assert.equal(f.audioFinal({sourceGen:5}),false);assert.equal(f.c.snapshot().waitingAudio,true);f.quietFor(3000,{sourceGen:5});assert.equal(f.requests.length,0);
 });
 test('unknown and stale activity close effects without revoking semantic tokens or repeating the request',async()=>{
  for(const state of ['unknown','stale']){

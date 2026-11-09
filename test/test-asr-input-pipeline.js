@@ -4,7 +4,7 @@ const {createAsrInputPipeline}=require('../src/main/asr-input-pipeline');
 function fixture(options={}){
  const events=[],privateText=[],ordinary=[],business=[],state={alwaysOn:true,speaking:false,wakeOnly:false,asrMode:'continuous',suppressEnrollmentFinal:false,...options.state};
  const speaker={enrollment:null,enabled:false,acceptsText(){events.push('speaker');return options.speakerAccepted!==false;},heard(){events.push('heard');},offer(){events.push('offer');options.onOffer?.(speaker);return {accepted:options.featureAccepted!==false};},...options.speaker};
- const turns={activity(meta){events.push('activity');return meta;},snapshot(){events.push('snapshot');return {finalized:!!options.finalized};},reset(){events.push('reset');},partial(text){events.push('turn-partial');business.push(['partial',text]);},final(text){events.push('turn-final');business.push(['final',text]);}};
+ const turns={activity(meta){events.push('activity');return meta;},audioFinal(meta){events.push('audio-final');return meta;},snapshot(){events.push('snapshot');return {finalized:!!options.finalized};},reset(){events.push('reset');},partial(text){events.push('turn-partial');business.push(['partial',text]);},final(text){events.push('turn-final');business.push(['final',text]);}};
  const input=createAsrInputPipeline({speakerFilter:speaker,state:()=>state,turns:()=>turns,
   recentEcho:()=>{events.push('echo');return !!options.echo;},bargeInReady:()=>{events.push('barge');return options.bargeReady!==false;},nameHit:()=>{events.push('name');return options.nameHit!==false;},
   trace:meta=>{events.push(meta.stage);ordinary.push(meta);if(options.traceThrow)throw Error('observer failed');return options.traceReject?Promise.reject(Error('observer failed')):undefined;},
@@ -17,6 +17,14 @@ function fixture(options={}){
 }
 test('activity is shared unchanged with the turn coordinator and never dispatches text or business callbacks',()=>{
  const f=fixture(),meta={state:'quiet',quietSeconds:1,at:1000,seq:1,recognizer:1,sourceGen:2};assert.equal(f.input.activity(meta),meta);assert.deepEqual(f.events,['activity']);assert.equal(f.business.length,0);assert.equal(f.privateText.length,0);
+});
+test('empty audio coverage has no text authority and is disabled outside ordinary continuous listening',()=>{
+ const meta={sourceGen:3,coveredSeq:12,recognizer:1},f=fixture();assert.equal(f.input.audioFinal(meta),meta);assert.deepEqual(f.events,['audio-final']);assert.equal(f.business.length,0);
+ for(const options of [{speaker:{enrollment:{}}},{state:{suppressEnrollmentFinal:true}},{state:{alwaysOn:false}},{state:{asrMode:'single'}}]){
+  const denied=fixture(options);assert.equal(denied.input.audioFinal(meta),false);assert.equal(denied.business.length,0);assert(!denied.events.includes('audio-final'));
+ }
+ const rejected=fixture({speakerAccepted:false});rejected.input.utterance('synthetic other speaker');rejected.input.audioFinal(meta);
+ assert.equal(rejected.business.length,0,'coverage cannot turn rejected words into an accepted final');
 });
 test('accepted partial preserves speaker, echo, barge, display, interruption and turn order',()=>{
  const h=fixture({state:{speaking:true,wakeOnly:true}}),text='private sample';assert.equal(h.input.partial(text).accepted,true);

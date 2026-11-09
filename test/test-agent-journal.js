@@ -16,6 +16,9 @@ test('production task state is encrypted, restores with its queue, and cannot be
   assert(created.ok,created.error);await runtime.enqueue(created.id,{key:'event-1',text:'private message marker 8y42'});await runtime.close();
   const restored=new AgentRuntime({journal,tools,skills,epoch:()=>memory.generation,autoSchedule:false});await restored.restore();assert.equal(restored.tasks.get(created.id).inbox.length,1);
   assert(await journal.authorized(restored.tasks.get(created.id)));
+  const request=memory.db.request.bind(memory.db);memory.db.request=async()=>{throw Object.assign(Error('temporary storage read timeout'),{code:'E_VAULT_TIMEOUT'});};
+  await assert.rejects(journal.authorized(restored.tasks.get(created.id)),error=>error.code==='E_TASK_JOURNAL_UNAVAILABLE'&&error.dispatched===false);
+  memory.db.request=request;assert(await journal.authorized(restored.tasks.get(created.id)),'a transient journal failure does not revoke the actual owner source');
   const files=fs.readdirSync(dir).filter(name=>fs.statSync(path.join(dir,name)).isFile());for(const name of files){const bytes=fs.readFileSync(path.join(dir,name));assert(!bytes.includes(Buffer.from('private agent marker')));assert(!bytes.includes(Buffer.from('private message marker')));}
   // List clearing rewrites only the encrypted Task visibility. Native removal
   // would cascade through this real source graph, so exercise the production vault.

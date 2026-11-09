@@ -4,6 +4,7 @@ const {OwnerSecurity,redact,withPrinciples,activate}=require('../src/main/owner-
 const {DialogueChannels}=require('../src/main/dialogue-channels');
 const {MemoryService}=require('../src/main/memory-service');
 const fixtureKey='Fixture-owner-only-728194';
+const visualIdentity=(session=1)=>({mode:'visual',sessionId:'00000000-0000-4000-8000-'+String(session).padStart(12,'0')});
 async function fixture(t,{database=false,enabled=true}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'wb-channel-security-'));let time=1000000,scene='private',channels;
  const wrappingKey=crypto.randomBytes(32),seal=value=>{const iv=crypto.randomBytes(12),cipher=crypto.createCipheriv('aes-256-gcm',wrappingKey,iv);return Buffer.concat([iv,cipher.update(value,'utf8'),cipher.final(),cipher.getAuthTag()]);};
@@ -16,27 +17,56 @@ async function fixture(t,{database=false,enabled=true}={}){
  return {security,channels,memory,dir,setTime:value=>{time=value;},now:()=>time,setScene:value=>{scene=value;}};
 }
 const message=text=>({kind:'text',text,direction:'incoming',incomingVerified:true,sequence:1});
+test('legacy window grants and task identities cannot be silently adopted into a visual channel',async t=>{
+ const f=await fixture(t,{database:true}),subject={application:'wechat',recipient:'Alice'},oldIdentity={pid:41,windowId:21};
+ const account='41:21',id='wechat:'+crypto.createHash('sha256').update(account+'\0'+subject.recipient).digest('hex').slice(0,32);
+ const legacy={id,application:'wechat',recipient:subject.recipient,account,revision:4,scene:'private',grant:{keyVersion:f.security.version,expiresAt:f.now()+3600000},seen:[]};
+ await f.memory.write([f.channels.channelRecord(legacy)]);
+ await f.memory.addMessageOnce('legacy-owner-reply','assistant','Legacy owner-only fixture',{scene:'private',channel:'wechat',channelId:id,conversationId:id,characterId:'bunny',verifiedOwner:true,ownerOnly:true,allowSensitive:true});
+ assert.equal((await f.memory.query('message',20,{scene:'private',channelId:id})).length,1,'the legacy private history fixture is actually persisted');
+ await assert.rejects(f.channels.ensure(subject,oldIdentity),/不继承旧窗口身份/);
+ assert.equal(f.channels.channels.size,0,'rejecting an old identity must not create or restore a channel');
+ const identity=visualIdentity(2),current=await f.channels.ensure(subject,identity),snapshot=f.channels.snapshot(current);
+ assert.equal(snapshot.account,'visual:'+identity.sessionId);assert.notEqual(current.id,legacy.id);assert.equal(snapshot.owner,false);
+ assert(!JSON.stringify(await f.channels.context(current,snapshot,'fixture')).includes('Legacy owner-only fixture'),'legacy channel history does not enter the new visual namespace');
+ const {AgentService}=require('../src/main/agent-service');
+ const agent=new AgentService({memory:f.memory,channels:f.channels,autoSchedule:false,scene:{knownIdentity:identity,metrics:{},native:{},close:async()=>{}},desktop:{},journal:{put:async()=>{},list:async()=>[],authorized:async()=>true},request:async()=>{throw Error('legacy identity must stop before model generation');}});
+ const task={id:'legacy-channel-task',goal:'Watch',criteria:'Reply',parameters:{behavior:'reply'},scene:'life',sources:[],state:{sceneIdentity:{wechat:oldIdentity}}};
+ try{await assert.rejects(agent.dialogueDecision({task,subject,conversation:{},incoming:[message('A new message')]}),/不继承旧窗口身份/);assert.deepEqual(task.state.sceneIdentity.wechat,oldIdentity,'a known visual session cannot silently replace a restored window identity');assert.equal(f.channels.channels.size,1);}
+ finally{await agent.close();}
+});
+test('a new visual session for the same contact does not inherit a live owner grant or channel history',async t=>{
+ const f=await fixture(t,{database:true}),subject={application:'wechat',recipient:'Alice'},first=await f.channels.ensure(subject,visualIdentity(4));
+ const grant=await f.channels.ingest(first,'same-visible-event',[message(fixtureKey)]);assert(grant.snapshot.owner);
+ await f.channels.recordReply(first,grant.snapshot,'owner-only','First visual session private reply',[]);
+ const second=await f.channels.ensure(subject,visualIdentity(5)),ordinary=f.channels.snapshot(second);
+ assert.notEqual(second.id,first.id);assert.notEqual(ordinary.account,grant.snapshot.account);assert.equal(ordinary.owner,false);assert.equal(ordinary.scene,'life');
+ assert(!JSON.stringify(await f.channels.context(second,ordinary,'fixture')).includes('First visual session private reply'));
+ const received=await f.channels.ingest(second,'same-visible-event',[message('Ordinary input in another visual session')]);
+ assert.equal(received.duplicate,undefined,'event receipts are scoped to the actual visual session');assert.equal(received.snapshot.owner,false);assert.equal(received.messages[0].ownerInput,false);
+ assert.equal(f.channels.current({...grant.snapshot,channelId:second.id}),false,'another visual channel cannot accept the old owner snapshot');
+});
 test('identity recognition defaults off, skips candidate checks and keeps local owner authority',async t=>{
- const f=await fixture(t,{enabled:false}),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},{pid:1,windowId:2}),local=await f.channels.ensure({application:'bunny'});
+ const f=await fixture(t,{enabled:false}),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},visualIdentity()),local=await f.channels.ensure({application:'bunny'});
  assert.equal(f.security.status().enabled,false);assert.equal(f.security.matches(fixtureKey),false);assert.equal(f.security.candidate(fixtureKey),null);await assert.rejects(f.security.change(fixtureKey),/先.*打开/);
  f.security.candidate=()=>{throw Error('disabled recognition must not inspect candidates');};f.channels.readInput=()=>{throw Error('disabled recognition must not read credentials');};
  await f.channels.ingest(channel,'disabled-new-input',[message(fixtureKey)]);assert(!f.channels.snapshot(channel).owner);assert(f.channels.snapshot(local).owner);
 });
 test('turning recognition off revokes all grants; reenabling never restores grants or replays old authentication',async t=>{
- const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Group'},{pid:1,windowId:2});await f.channels.ingest(channel,'first-auth',[message(fixtureKey)]);assert(f.channels.snapshot(channel).owner);
+ const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Group'},visualIdentity());await f.channels.ingest(channel,'first-auth',[message(fixtureKey)]);assert(f.channels.snapshot(channel).owner);
  const version=f.security.version;await f.security.setEnabled(false);assert.equal(f.security.enabled,false);assert(f.security.version>version);assert(!f.channels.snapshot(channel).owner);assert.equal(redact(fixtureKey),'********','disabled credentials remain protected at the output boundary');
  const restarted=await new OwnerSecurity({file:f.security.file,encrypt:f.security.encrypt,decrypt:f.security.decrypt}).init();assert.equal(restarted.enabled,false);assert.equal(restarted.key,fixtureKey,'disabling preserves the encrypted credential');
  await f.security.setEnabled(true);assert(!f.channels.snapshot(channel).owner);await f.channels.ingest(channel,'first-auth',[message(fixtureKey)]);assert(!f.channels.snapshot(channel).owner);await f.channels.ingest(channel,'fresh-auth',[message(fixtureKey)]);assert(f.channels.snapshot(channel).owner);
  const legacy=JSON.parse(fs.readFileSync(f.security.file));delete legacy.enabled;fs.writeFileSync(f.security.file,JSON.stringify(legacy));const old=await new OwnerSecurity({file:f.security.file,encrypt:f.security.encrypt,decrypt:f.security.decrypt}).init();assert.equal(old.enabled,false,'existing settings without an explicit switch start disabled');assert.equal(redact(fixtureKey),'********');
 });
 test('disabling recognition rejects a late literal decision before it can regrant owner authority',async t=>{
- const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},{pid:1,windowId:2});let release,entered;const began=new Promise(r=>entered=r);
+ const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},visualIdentity());let release,entered;const began=new Promise(r=>entered=r);
  f.channels.readInput=async()=>{entered();return new Promise(r=>release=r);};const pending=f.channels.ingest(channel,'delayed-auth',[{...message(fixtureKey),visualEvidence:{observationId:'actual-input'}}]);await began;await f.security.setEnabled(false);release({complete:true,text:fixtureKey});await pending;assert(!f.channels.snapshot(channel).owner);assert(!f.security.enabled);
 });
 test('an explicit channel revoke beats a delayed proof while another channel can proceed', async t => {
  const f = await fixture(t);
- const a = await f.channels.ensure({ application: 'wechat', recipient: 'Alice' }, { pid: 1, windowId: 2 });
- const b = await f.channels.ensure({ application: 'wechat', recipient: 'Second fixture' }, { pid: 1, windowId: 2 });
+ const a = await f.channels.ensure({ application: 'wechat', recipient: 'Alice' }, visualIdentity());
+ const b = await f.channels.ensure({ application: 'wechat', recipient: 'Second fixture' }, visualIdentity());
  const reading = Promise.withResolvers(), proof = Promise.withResolvers();
  f.channels.readInput = () => { reading.resolve(); return proof.promise; };
  const pending = f.channels.ingest(a, 'delayed', [{ ...message(fixtureKey), visualEvidence: { observationId: 'fixture' } }]);
@@ -54,7 +84,7 @@ test('an explicit channel revoke beats a delayed proof while another channel can
 
 test('a failed channel receipt commit grants no authority and leaves the event retryable', async t => {
  const f = await fixture(t, { database: true });
- const channel = await f.channels.ensure({ application: 'wechat', recipient: 'Fixture' }, { pid: 1, windowId: 2 });
+ const channel = await f.channels.ensure({ application: 'wechat', recipient: 'Fixture' }, visualIdentity());
  const write = f.memory.write.bind(f.memory);
  let failed = false;
  f.memory.write = (rows, ...options) => {
@@ -78,7 +108,7 @@ test('owner dialogue explicitly classifies intent and carries only a brief task 
  args.channelContext.permission.owner=false;await brain.decide(args);assert.equal(payload.taskOverview,'');assert.equal(payload.taskStatus,undefined);
 });
 test('near identity candidates are data for Bunny; exact input is automatic and 60 percent never grants access',async t=>{
- const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},{pid:1,windowId:2});let reviews=0;
+ const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},visualIdentity());let reviews=0;
  await f.security.change('0123456789');
  assert.equal(f.security.candidate('012345abcd'),null,'exactly 60 percent does not enter review');
  assert.equal(f.security.candidate('prefix 0123456xxx suffix').score,.7);
@@ -89,7 +119,7 @@ test('near identity candidates are data for Bunny; exact input is automatic and 
  await f.channels.revoke(channel);const exact=await f.channels.ingest(channel,'exact',[message('0123456789')]);assert(exact.snapshot.owner);assert.equal(exact.authenticationMethod,'exact');assert.equal(reviews,2,'exact match does not call semantic authentication');
 });
 test('near visual authentication uses the actual scoped source and cannot survive rotation or authorize historical input',async t=>{
- const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},{pid:1,windowId:2});let reviews=0,release,entered;
+ const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},visualIdentity());let reviews=0,release,entered;
  const text=fixtureKey.slice(0,-1)+'x',input={...message(text),visualEvidence:{observationId:'actual-frame'}};
  f.channels.readInput=async()=>({text,complete:true});f.channels.reviewIdentityCandidate=async()=>{reviews++;return {approve:true,reason:'实际字符偏差'}};
  await f.channels.ingest(channel,'old',[{...input,actualNew:false}]);assert.equal(reviews,0);
@@ -106,16 +136,16 @@ test('file-helper self messages are deduplicated by host receipt hash after chan
  const second=cursor.observe([baseline,sent,{...sent}],{ownerChannel:true,sentMessages:[receipt]});assert.equal(second.messages.length,1,'a later actual owner message is distinct from the already consumed Bunny send');
 });
 test('actual new messages grant one channel, including groups, for one absolute hour',async t=>{
- const f=await fixture(t),a=await f.channels.ensure({application:'wechat',recipient:'Alice'},{pid:1,windowId:2}),group=await f.channels.ensure({application:'wechat',recipient:'Group example'},{pid:1,windowId:2});
+ const f=await fixture(t),a=await f.channels.ensure({application:'wechat',recipient:'Alice'},visualIdentity()),group=await f.channels.ensure({application:'wechat',recipient:'Group example'},visualIdentity());
  assert.deepEqual([f.channels.snapshot(a).owner,f.channels.snapshot(a).scene],[false,'life']);
  const grant=await f.channels.ingest(a,'event-1',[message(fixtureKey)]);assert(grant.snapshot.owner);assert.equal(grant.snapshot.scene,'private');assert(!JSON.stringify(grant.messages).includes(fixtureKey));assert(!f.channels.snapshot(group).owner);
  const expiry=grant.snapshot.expiresAt;f.setTime(expiry-1);await f.channels.ingest(a,'event-1',[message(fixtureKey)]);assert.equal(f.channels.snapshot(a).expiresAt,expiry);
  f.setTime(expiry);assert(!f.channels.snapshot(a).owner);assert(!f.channels.current(grant.snapshot));
  await f.channels.ingest(group,'group-new',[message(fixtureKey)]);assert(f.channels.snapshot(group).owner);
- const fake=await f.channels.ensure({application:'wechat',recipient:'Other'},{pid:1,windowId:2});await f.channels.ingest(fake,'not-actual',[{...message(fixtureKey),actualNew:false}]);assert(!f.channels.snapshot(fake).owner);
+ const fake=await f.channels.ensure({application:'wechat',recipient:'Other'},visualIdentity());await f.channels.ingest(fake,'not-actual',[{...message(fixtureKey),actualNew:false}]);assert(!f.channels.snapshot(fake).owner);
 });
 test('visual authentication requires a separately verified literal source and survives key-rotation races',async t=>{
- const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},{pid:1,windowId:2}),input={...message(fixtureKey),visualEvidence:{observationId:'frame-1'}};
+ const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},visualIdentity()),input={...message(fixtureKey),visualEvidence:{observationId:'frame-1'}};
  await f.channels.ingest(channel,'missing-proof',[input]);assert(!f.channels.snapshot(channel).owner);
  f.channels.verifyInput=async()=>false;await f.channels.ingest(channel,'wrong-case',[input]);assert(!f.channels.snapshot(channel).owner);
  f.channels.verifyInput=async(_m,o)=>{assert.equal(o.expected,fixtureKey);assert.equal(o.channel.id,channel.id);return true;};
@@ -126,8 +156,8 @@ test('visual authentication requires a separately verified literal source and su
  assert(!f.channels.snapshot(channel).owner,'a late proof cannot regrant after rotation');
 });
 test('key rotation revokes delayed replies synchronously and ciphertext never contains the key',async t=>{
- const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},{pid:1,windowId:2});
- const group=await f.channels.ensure({application:'wechat',recipient:'Group'},{pid:1,windowId:2}),local=await f.channels.ensure({application:'bunny'});await f.channels.ingest(group,'group-auth',[{...message(fixtureKey),characterId:'member:a',characterName:'Member A'}]);assert(f.channels.snapshot(group).owner);
+ const f=await fixture(t),channel=await f.channels.ensure({application:'wechat',recipient:'Alice'},visualIdentity());
+ const group=await f.channels.ensure({application:'wechat',recipient:'Group'},visualIdentity()),local=await f.channels.ensure({application:'bunny'});await f.channels.ingest(group,'group-auth',[{...message(fixtureKey),characterId:'member:a',characterName:'Member A'}]);assert(f.channels.snapshot(group).owner);
  const grant=await f.channels.ingest(channel,'event-1',[message(fixtureKey)]),held=f.channels.holdReply(channel,grant.snapshot,'reply',{reply:'Private fixture answer'});
  assert(f.channels.validReply(held.channelReply));await f.security.change('Another-fixture-key-991');assert(!f.channels.validReply(held.channelReply));assert.equal(f.channels.snapshot(channel).scene,'life');
  assert(!f.channels.snapshot(group).owner);assert(f.channels.snapshot(local).owner);assert.equal(f.channels.snapshot(local).scene,'private');
@@ -157,7 +187,7 @@ test('dialogue generation uses channel scope, hides private payloads from tasks 
  const f=await fixture(t,{database:true});
  await f.memory.addMessage('user','Private navigation fixture: violet comet 619',{scene:'private'});
  const {AgentService}=require('../src/main/agent-service');let payload,mode='chat',release;
- const agent=new AgentService({memory:f.memory,channels:f.channels,autoSchedule:false,scene:{knownWindow:{pid:1,windowId:2},metrics:{},native:{},close:async()=>{}},
+ const agent=new AgentService({memory:f.memory,channels:f.channels,autoSchedule:false,scene:{knownIdentity:visualIdentity(),metrics:{},native:{},close:async()=>{}},
   desktop:{},journal:{put:async()=>{},list:async()=>[],authorized:async()=>true},request:async options=>{
    payload=JSON.parse(options.messages.at(-1).content);if(mode==='delay')await new Promise(resolve=>{release=resolve;});
    return {response:{text:JSON.stringify({decision:'reply',reply:payload.channel.owner?'Owner answer violet comet 619':'No private disclosure',summary:'done',completed:false,progress:{},unknown:[],ownerAction:mode==='scene'?{type:'scene',scene:'work'}:{type:'none'}})}};
@@ -173,7 +203,7 @@ test('dialogue generation uses channel scope, hides private payloads from tasks 
  await agent.close();
 });
 test('SQLite channel history, privilege and scene isolation survive doze and fresh authentication',async t=>{
- const f=await fixture(t,{database:true}),identity={pid:41,windowId:21},a=await f.channels.ensure({application:'wechat',recipient:'Alice'},identity),b=await f.channels.ensure({application:'wechat',recipient:'File helper'},identity);
+ const f=await fixture(t,{database:true}),identity=visualIdentity(2),a=await f.channels.ensure({application:'wechat',recipient:'Alice'},identity),b=await f.channels.ensure({application:'wechat',recipient:'File helper'},identity);
  const {ContextCompression}=require('../src/main/context-compression');
  f.memory.compression=new ContextCompression({memory:f.memory,channelId:'local',recentMessages:2,summarize:async rows=>({content:rows.map(r=>r.content).join(' / ').slice(0,1000),excerpts:[{sourceId:rows[0].id,quote:rows[0].content.slice(0,30)}]})});
  await f.channels.ingest(a,'ordinary',[message('Public Alice fixture')]);
@@ -195,7 +225,7 @@ test('SQLite channel history, privilege and scene isolation survive doze and fre
 test('host denies forged ordinary actions, admits owner tasks without private history, and rolls back admission revoked during persistence',async t=>{
  const f=await fixture(t,{database:true}),{AgentService}=require('../src/main/agent-service');let revokeDuringSave=false;const saved=[];
  await f.memory.addMessage('user','Private history fixture must never enter task context.',{scene:'private'});
- const agent=new AgentService({memory:f.memory,channels:f.channels,autoSchedule:false,getScene:()=> 'life',scene:{knownWindow:{pid:51,windowId:22},metrics:{},native:{},close:async()=>{}},desktop:{},journal:{list:async()=>[],authorized:async()=>true,put:async row=>{saved.push(structuredClone(row));if(revokeDuringSave&&row.skill==='task.resolve'&&row.status==='ready'){revokeDuringSave=false;await f.security.change('Rotated-during-admission-631');}}}});
+ const agent=new AgentService({memory:f.memory,channels:f.channels,autoSchedule:false,getScene:()=> 'life',scene:{knownIdentity:visualIdentity(3),metrics:{},native:{},close:async()=>{}},desktop:{},journal:{list:async()=>[],authorized:async()=>true,put:async row=>{saved.push(structuredClone(row));if(revokeDuringSave&&row.skill==='task.resolve'&&row.status==='ready'){revokeDuringSave=false;await f.security.change('Rotated-during-admission-631');}}}});
  agent.brain.decide=async()=>({decision:'reply',reply:'I will perform this task.',summary:'task',completed:false,progress:{},unknown:[],ownerAction:{type:'task'}});
  const args={task:{id:'authorized-listener',goal:'Watch authorized chat',criteria:'Reply',policy:'',parameters:{behavior:'reply'},state:{},scene:'life',sources:[]},subject:{application:'wechat',recipient:'Alice'},conversation:{}};
  const stage=async(key,messages)=>{
@@ -219,7 +249,7 @@ test('host denies forged ordinary actions, admits owner tasks without private hi
 });
 test('wechat conversation actions carry their channel to native execution and save one verified attachment',async t=>{
  const f=await fixture(t,{enabled:false});
- const subject={application:'wechat',recipient:'Fixture contact'},identity={pid:51,windowId:22};
+ const subject={application:'wechat',recipient:'Fixture contact'},identity=visualIdentity(3);
  const {subjectKey}=require('../src/main/conversation-skill');
  const starts=[];
  const conversationDesktop={running:false,async start(spec){
@@ -227,7 +257,7 @@ test('wechat conversation actions carry their channel to native execution and sa
   if(spec.readRequest?.kind==='attachment-save')fs.writeFileSync(spec.readRequest.destination.expectedPath,'fixture');
   this.task={id:'physical-'+starts.length,status:'review',readText:'transcription',steps:[]};return {ok:true};
  }};
- const scene={knownWindow:identity,metrics:{},native:{},assertHealthy:async()=>identity,assertTaskIdentity:async()=>{},close:async()=>{}};
+ const scene={knownIdentity:identity,metrics:{},native:{},assertHealthy:async()=>identity,assertTaskIdentity:async()=>{},close:async()=>{}};
  const {AgentService}=require('../src/main/agent-service');
  const agent=new AgentService({channels:f.channels,scene,desktop:{},conversationDesktop,autoSchedule:false,getScene:()=> 'life',
   taskDirectory:f.dir,journal:{put:async()=>{},list:async()=>[]}});
@@ -268,7 +298,7 @@ test('internal screenshot recognition retains the actual key input without outpu
 
 test('every dialogue turn carries current host authority and only the actual authentication event marks the upgrade',async t=>{
  const f=await fixture(t,{database:true}),{AgentService}=require('../src/main/agent-service');let payload,ignore=false;
- const agent=new AgentService({memory:f.memory,channels:f.channels,autoSchedule:false,scene:{knownWindow:{pid:1,windowId:2},metrics:{},native:{},close:async()=>{}},desktop:{},journal:{list:async()=>[],authorized:async()=>true,put:async()=>{}},request:async o=>{payload=JSON.parse(o.messages.find(m=>m.role==='user').content);return {response:{text:JSON.stringify({decision:ignore?'ignore':'reply',reply:ignore?'':'Current authority understood.',summary:'done',completed:false,progress:{},unknown:[],ownerAction:{type:'none'}})}};}});
+ const agent=new AgentService({memory:f.memory,channels:f.channels,autoSchedule:false,scene:{knownIdentity:visualIdentity(),metrics:{},native:{},close:async()=>{}},desktop:{},journal:{list:async()=>[],authorized:async()=>true,put:async()=>{}},request:async o=>{payload=JSON.parse(o.messages.find(m=>m.role==='user').content);return {response:{text:JSON.stringify({decision:ignore?'ignore':'reply',reply:ignore?'':'Current authority understood.',summary:'done',completed:false,progress:{},unknown:[],ownerAction:{type:'none'}})}};}});
  const args={task:{id:'permission-fixture',goal:'Watch',criteria:'Reply',parameters:{behavior:'reply'},state:{contextTuning:{core:{include:false}}},scene:'life',sources:[]},subject:{application:'wechat',recipient:'Contact'},conversation:{}};
  await agent.dialogueDecision({...args,incoming:[message('ordinary input')]});assert.equal(payload.channel.owner,false);assert.deepEqual(payload.authentication,{enabled:true,configured:true});
  ignore=true;await agent.dialogueDecision({...args,incoming:[{...message(fixtureKey),sequence:2}]});assert.equal(payload.channel.owner,true);assert.equal(payload.authenticationEvent.type,'owner-authenticated');const snapshot={...payload.channel};assert(!JSON.stringify(payload).includes(fixtureKey));

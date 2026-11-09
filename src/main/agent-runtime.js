@@ -5,6 +5,8 @@ const { canRead } = require('./memory-scope');
 const { scriptPlan } = require('./agent-tools');
 const {OperationLedger}=require('./operation-ledger');
 const {ActionProgress}=require('./action-progress');
+const recoveryPolicy=require('./action-recovery');
+const {createBoundedWait}=require('./bounded-wait');
 const {assertAdmission,waitAdmission}=require('./task-admission');
 function resolveFailure(task,{operationId,actionId,at,reason}){
   const failure=task.state.lastFailure;
@@ -14,12 +16,15 @@ function resolveFailure(task,{operationId,actionId,at,reason}){
   failure.resolvedAt=at;failure.resolution=reason;
 }
 class AgentRuntime {
-  constructor({ journal, tools, skills, ready = () => true, epoch = () => 0, getScene = () => 'life', emit = () => {}, report = async () => {}, clock = Date.now, autoSchedule = true, prepare = async()=>{}, completed = async()=>{},settled=async()=>{},failed=async()=>{},authorize=async()=>{},stopTask=async()=>{},stopTimeoutMs=30000,stopAckTimeoutMs=1000,diagnoseRepair=null,observeWhileActive=null,remindIdle=null,onRecoveryDiagnostic=()=>{} }) {
-    Object.assign(this, { journal, tools, skills, ready, epoch, getScene, emit, report, clock, autoSchedule, prepare, completed,settled,failed,authorize,stopTask,stopTimeoutMs,stopAckTimeoutMs,diagnoseRepair,observeWhileActive,onRecoveryDiagnostic });
+  constructor({ journal, tools, skills, ready = () => true, epoch = () => 0, getScene = () => 'life', emit = () => {}, report = async () => {}, clock = Date.now, autoSchedule = true, prepare = async()=>{}, completed = async()=>{},settled=async()=>{},failed=async()=>{},authorize=async()=>{},stopTask=async()=>{},stopTimeoutMs=30000,stopAckTimeoutMs=1000,diagnoseRepair=null,reflectAction=null,reviewTask,mainReviewOptions={},observeWhileActive=null,remindIdle=null,onRecoveryDiagnostic=()=>{},recoveryPolicy:recoveryOptions={},recoveryTimeoutMs=12000,stepTimeoutMs=360000 }) {
+    Object.assign(this, { journal, tools, skills, ready, epoch, getScene, emit, report, clock, autoSchedule, prepare, completed,settled,failed,authorize,stopTask,stopTimeoutMs,stopAckTimeoutMs,diagnoseRepair,observeWhileActive,onRecoveryDiagnostic,recoveryTimeoutMs,stepTimeoutMs });
+    this.recoveryPolicy={...recoveryPolicy.DEFAULTS,...recoveryOptions};
     this.tasks = new Map(); this.controllers = new Map(); this.actionGroups = new Map(); this.tokens = new Map(); this.controlRequests = new Map(); this.closed = false; this.admissionEpoch = 0;
     this.admissionTail=Promise.resolve();this.stops=new Map();this.pendingSaves=new Map();this.amending=new Set();
-    this.operations=new OperationLedger({tools,clock,authorize:(...args)=>this.authorize(...args),save:task=>this.save(task)});
+    this.operations=new OperationLedger({tools,clock,authorize:(...args)=>this.authorize(...args),save:task=>this.saveOperation(task)});
     this.keepalive=new(require('./task-keepalive').TaskKeepalive)({clock,remind:remindIdle});
+    this.reflectAction=reflectAction;
+    this.mainReviews=new(require('./main-review').MainReview)(this,{reviewTask,...mainReviewOptions});
   }
   admission(action){const work=this.admissionTail.then(action);this.admissionTail=work.catch(()=>{});return work;}
   capacity(){return {limit:MAX_ACTIVE_TASKS,active:[...this.tasks.values()].filter(occupiesSlot).length,queued:[...this.tasks.values()].filter(t=>t.status==='queued').length};}
@@ -54,20 +59,100 @@ class AgentRuntime {
     if(!this.owns(task)||task.state.stopRequest)return;
     await this.report({taskId:task.id,eventId:'progress:'+actionId,text,sources:[task.id],scene:task.scene,domain:task.domain,visibilityFloor:task.visibilityFloor,epoch:task.privacyEpoch});
   }
+  async diagnose(args){
+    if(!this.diagnoseRepair)return null;
+    const wait=createBoundedWait({signal:args.signal,timeoutMs:this.recoveryTimeoutMs,code:'E_RECOVERY_TIMEOUT',message:'恢复判断达到时限'});
+    try{return await wait.run(signal=>this.diagnoseRepair({...args,signal}));}
+    catch{return null;}
+    finally{wait.close();}
+  }
+  async recoverAction(task,run,progress,{event,error,signal,isCurrent,kind='stall'}={}){
+    const owner=run||task.state,repair=require('./self-repair');
+    const operations=Object.values(task.operations).filter(op=>run?op.actionId===run.id:!op.actionId);
+    const state=recoveryPolicy.begin(owner,{progress,now:this.clock(),code:error?.code||'E_NO_PROGRESS',policy:this.recoveryPolicy,operations});
+    if(this.mainReviews.isEnabled())state.episodeId ||= crypto.randomUUID();
+    const modelKind=kind!=='stall';
+    if(modelKind)task.state.selfRepair={fingerprint:repair.incident(task,error,progress),kind,attempts:state.attempts,status:state.exhausted?'exhausted':'diagnosing',profile:task.state.selfRepair?.profile||{},at:this.clock()};
+    await this.save(task);
+    if(!isCurrent())return null;
+    let advice;
+    if(!state.exhausted){
+      let schemaAudit;if(kind==='schema')try{schemaAudit=repair.auditSchemas(this.tools.catalog(undefined,task));}catch{schemaAudit={checked:0,issues:1};}
+      const code=/^E_[A-Z0-9_]{1,64}$/u.test(String(error?.code||''))?error.code:'E_NO_PROGRESS';
+      if(this.reflectAction&&this.mainReviews.isEnabled()){
+        const wait=createBoundedWait({signal,timeoutMs:this.recoveryTimeoutMs,code:'E_RECOVERY_TIMEOUT'});
+        try{advice=await wait.run(signal=>this.reflectAction({task:clone(task),run:run?clone(run):null,event:clone(event),error:{code,message:String(error?.message||'').slice(0,500),diagnostic:repair.diagnostic(error?.diagnostic)},signal,kind}));}catch{}finally{wait.close();}
+      }
+      if(!advice)advice=await this.diagnose({kind,skill:task.skill,code,attempt:state.attempts,phase:event?'pending_event':task.state.pendingDecision?'pending_decision':'task_step',errorType:['Error','TypeError','RangeError','SyntaxError'].includes(error?.name)?error.name:'Error',schemaAudit,diagnostic:repair.diagnostic(error?.diagnostic),progress:progress?.snapshot(),signal});
+    }
+    if(!isCurrent())return null;
+    if(advice?.assessment){const assessment=require('./main-review').assessment(advice.assessment);if(assessment)state.assessment=assessment;}
+    if(advice?.selfSuspension&&this.mainReviews.request(task,run,{reason:'self-suspended',selfSuspension:advice.selfSuspension,assessment:advice.assessment}))
+      return {status:task.status,note:task.note,nextCheckAt:this.clock(),consumeEvent:false,selfSuspended:true};
+    const requestAction=modelKind&&repair.OPTIONS[kind]?.includes(advice?.action)?advice.action:null;
+    const decision=recoveryPolicy.decide(state,modelKind?{source:advice?.source}:advice,{now:this.clock(),policy:this.recoveryPolicy,requestAction});
+    if(modelKind){
+      const repairState=task.state.selfRepair;repairState.action=requestAction||'defer';repairState.source=advice?.source==='llm'?'llm':'local';
+      if(requestAction)repairState.profile=repair.applyAction(repairState.profile,requestAction,{code:error?.code});
+      repairState.status=decision.exhausted?'exhausted':requestAction&&requestAction!=='defer'?'retrying':'deferred';
+    }
+    const guidance={...decision,scope:run?.scope||null,eventKey:event?.key||null,...(progress?{progress:progress.snapshot()}:{})};
+    if(run)run.recovery=guidance;task.state.recoveryGuidance=guidance;
+    if(decision.exhausted&&this.mainReviews.request(task,run,{reason:'local-budget'}))return {status:task.status,note:task.note,nextCheckAt:this.clock(),consumeEvent:false,awaitingMain:true};
+    const detail=error?.message?'；'+(require('./conversation-input').containsSecret(error.message)?'暂时无法继续':String(error.message).slice(0,180)):'';
+    const note=decision.exhausted?'自动恢复预算已到，尚未取得足够的多角度验证，不能认定真实障碍或永久阻塞；已保留目标、现场和回执，等待新证据后重新评估，或由主人补充信息、协助后继续。':decision.delayed?'暂未确认恢复，已安排有界延时复试，继续响应新消息与任务':'正在核对卡点、反思先前步骤并'+(decision.action==='change_method'?'调整方法继续原任务':'重新观察原任务')+detail;
+    this.keepalive.touch(task,run,{waitReason:decision.delayed?decision.waitFor:undefined,nextCheckAt:decision.nextCheckAt});
+    return {status:decision.exhausted?'needs_attention':'waiting',note:(task.skill==='task.resolve'?'交办已保存，':'')+note,nextCheckAt:decision.nextCheckAt??this.clock(),consumeEvent:false};
+  }
+  async reviewActionProgress(task,run,progress,{event,signal,isCurrent,force=false}){
+    if(!progress||!force&&!progress.reviewDue())return null;
+    progress.reviewed();
+    return this.recoverAction(task,run,progress,{event,signal,isCurrent,kind:'stall'});
+  }
+  async retireTimedOut(task,{event,actionId,error}){
+    if(!this.owns(task)||task.state.stopRequest)return;
+    this.cancelWorker(task);
+    const replacement=clone(task),now=this.clock();
+    for(const run of Object.values(replacement.actionRuns||{}))if(run.status==='running')run.status='waiting';
+    const unknown=Object.values(replacement.operations).some(op=>op.effect==='write'&&op.status==='intent');
+    for(const op of Object.values(replacement.operations))if(op.status==='intent'&&op.effect==='read'){op.status='not_dispatched';op.lifecycle={...op.lifecycle,phase:'cancelled',reason:'retired-caller'};}
+    replacement.status=unknown?'needs_attention':'waiting';
+    replacement.state.lastFailure={code:error.code,message:error.message,at:now,unknown,...(actionId?{actionId}:{})};
+    this.tasks.set(task.id,replacement);this.operations.retire(task);
+    this.actionGroups.delete(task.id);this.controllers.delete(task.id);
+    const run=replacement.actionRuns[actionId],progress=run?new ActionProgress(run.progress??={},this.clock):null;
+    if(unknown){
+      for(const op of Object.values(replacement.operations))if(op.effect==='write'&&op.status==='intent'&&replacement.actionRuns[op.actionId])replacement.actionRuns[op.actionId].status='needs_attention';
+      replacement.note='本轮调用达到时限，已释放本地执行等待；外部副作用尚未确认，保留回执且禁止重放，等待只读核对。';
+      replacement.nextCheckAt=now;await this.save(replacement);return;
+    }
+    const controller=new AbortController(),token=this.tokens.get(task.id);this.controllers.set(task.id,controller);
+    try{
+      const recovery=await this.recoverAction(replacement,run,progress,{event,error,signal:controller.signal,isCurrent:()=>this.current(replacement,token,true)&&!controller.signal.aborted,kind:'stall'});
+      if(!recovery)return;
+      Object.assign(replacement,{status:recovery.status,note:recovery.note,nextCheckAt:recovery.nextCheckAt});
+      if(run)Object.assign(run,{status:recovery.status,note:recovery.note});
+      await this.save(replacement);
+      if(recovery.status==='needs_attention')await this.reportProgress(replacement,progress,actionId,recovery.note);
+    }finally{if(this.controllers.get(task.id)===controller)this.controllers.delete(task.id);this.schedule();}
+  }
   current(task, token, activeAction = false) { return !this.closed && !this.restoring && !this.amending.has(task.id) && this.ready() && this.tasks.get(task.id) === task && this.tokens.get(task.id) === token &&
     task.privacyEpoch === this.epoch() && (canRead(this.getScene(), task)||task.authority?.channel==='authenticated-channel') && !task.state.listArchive && !task.state.stopRequest && !TERMINAL.has(task.status) &&
     !['queued','stopping','paused',...(activeAction?[]:['needs_attention','waiting_permission'])].includes(task.status); }
   eventScope(event) { return typeof event?.subjectKey==='string'&&event.subjectKey ? 'subject:'+event.subjectKey : typeof event?.scope==='string'&&event.scope ? 'scope:'+event.scope : null; }
   selectEvent(task, group) {
-    const active=[...(group?.workers.values()||[])],blocked=Object.values(task.actionRuns||{}).filter(a=>['needs_attention','waiting_permission'].includes(a.status));
+    const active=[...(group?.workers.values()||[])],blocked=Object.values(task.actionRuns||{}).filter(a=>['needs_attention','waiting_permission','paused'].includes(a.status)||recoveryPolicy.held(a));
     return task.inbox.find(event=>{
       const scope=this.eventScope(event);
+      const pending=Object.values(task.actionRuns||{}).find(run=>run.eventKey===event.key);
+      if(recoveryPolicy.deferred(pending,this.clock()))return false;
       if(active.some(a=>a.eventKey===event.key)||blocked.some(a=>a.eventKey===event.key||!a.scope||!scope||a.scope===scope))return false;
       return !active.length||!!scope&&active.every(a=>a.scope&&a.scope!==scope);
     });
   }
-  cancelWorker(task) {
+  cancelWorker(task,{cancelReview=true}={}) {
     this.keepalive.cancel(task.id);
+    if(cancelReview)this.mainReviews.cancel(task);
     this.tokens.set(task.id, (this.tokens.get(task.id) || 0) + 1);
     this.controllers.get(task.id)?.abort();
   }
@@ -76,6 +161,18 @@ class AgentRuntime {
       task.privacyEpoch === this.epoch() && canRead(this.getScene(), task);
   }
   owns(task) { return this.tasks.get(task.id) === task && task.privacyEpoch === this.epoch(); }
+  async saveOperation(task){
+    if(this.closed)return;
+    if(this.owns(task))return this.save(task);
+    const current=this.tasks.get(task.id);
+    if(!current||current.privacyEpoch!==task.privacyEpoch||current.privacyEpoch!==this.epoch())return;
+    const confirmed=Object.values(task.operations).filter(op=>op.effect==='write'&&op.status==='confirmed'&&op.result?.ok===true&&op.result?.verified===true&&
+      current.operations[op.id]?.status==='intent'&&current.operations[op.id].tool===op.tool&&current.operations[op.id].argsHash===op.argsHash);
+    if(!confirmed.length)return;
+    // A retired caller may contribute only a verified receipt for the exact
+    // existing intent. No old task state, pending plan, report or status wins.
+    await this.persist(current,target=>{for(const op of confirmed){const entry=target.operations[op.id];if(entry?.status!=='intent'||entry.argsHash!==op.argsHash)continue;target.operations[op.id]=clone(op);target.counters.writes++;resolveFailure(target,{operationId:op.id,at:this.clock(),reason:'late-operation-confirmed'});}});
+  }
   async writeInOrder(tasks, commit) {
     const ids = tasks.map(task => task.id);
     const pending = ids.map(id => this.pendingSaves.get(id)).filter(Boolean);
@@ -270,7 +367,7 @@ class AgentRuntime {
   }
 
   restoreTask(task) {
-    let changed = false;
+    let changed = this.mainReviews.restore(task);
     if(task.state.admissionPending&&!TERMINAL.has(task.status)&&!task.state.stopRequest){task.status='paused';task.note='上次语音交办的提交确认未完成，原输入已保留；等待重新确认后继续。';changed=true;}
     if(task.state.listArchive&&!TERMINAL.has(task.status)){task.status='stopped';task.state.stopRequest??={at:this.clock(),phase:'failed',cause:'list-clear'};task.note='任务已移出列表并停止；恢复列表不会继续执行';changed=true;}
     if(task.state.stopRequest||task.status==='stopping'||/^停止尚未确认：|^上次停止尚未确认/.test(task.note||'')){
@@ -310,12 +407,13 @@ class AgentRuntime {
     if (!['queued', 'paused', 'needs_attention', 'waiting_permission'].includes(task.status)) {
       task.status = unknown ? 'needs_attention' : 'waiting';
       task.note = unknown ? '上次操作结果不确定；停止重发，等待核对' : '已恢复任务与待处理事件，等待重新观察';
-      task.nextCheckAt = this.clock();
+      const delayed=Object.values(task.actionRuns).filter(run=>recoveryPolicy.deferred(run,this.clock())).map(run=>run.recoveryState.nextAt);
+      task.nextCheckAt = unknown||this.selectEvent(task)?this.clock():delayed.length?Math.min(...delayed):recoveryPolicy.deferred(task.state,this.clock())?task.state.recoveryState.nextAt:this.clock();
       changed = true;
     }
     return changed;
   }
-  async enqueue(id, event, { advance, current } = {}) {
+  async enqueue(id, event, { advance, current,recoveryEvidence=false } = {}) {
     const task = this.tasks.get(id);
     if (!task || typeof event?.key !== 'string' || !event.key || event.key.length > 256) return { ok: false };
     try {
@@ -341,6 +439,31 @@ class AgentRuntime {
             target.inbox.push(clone(stored));
             target.eventKeys.push(stored.key);
             target.nextCheckAt = now;
+            if(recoveryEvidence&&!['queued'].includes(target.status)){
+              const scope=this.eventScope(stored);
+              for(const run of Object.values(target.actionRuns||{})){
+                if((run.recoveryState?.selfSuspension||run.recoveryState?.mainReview)&&(!run.scope||run.scope===scope)){
+                  new ActionProgress(run.progress??={},this.clock).observe('external.event',{type:stored.type,key:stored.key});
+                  if(this.mainReviews.isEnabled()&&!['owner','protection'].includes(target.state.pauseSource)){
+                    const prior=run.recoveryState.mainReview;if(prior){prior.status='cancelled';prior.rejectionReason='new-evidence';}
+                    this.mainReviews.request(target,run,{reason:'new-evidence',hold:run.status==='paused'});
+                  }
+                  continue;
+                }
+                if(target.status==='paused')continue;
+                if(run.recoveryState?.status!=='exhausted'||run.status!=='needs_attention'||run.scope&&run.scope!==scope||
+                  Object.values(target.operations).some(op=>op.actionId===run.id&&op.effect==='write'&&op.status==='intent'))continue;
+                // This flag belongs to trusted observation adapters, never a
+                // model decision. Fresh actual evidence reopens assessment,
+                // while permissions, stop latches and unknown writes still win.
+                new ActionProgress(run.progress??={},this.clock).observe('external.event',{type:stored.type,key:stored.key});
+                run.recoveryState.status='rearmed';run.recoveryState.rearmedAt=now;run.recoveryState.evidenceEvent=stored.key;
+                run.status='waiting';run.recovery={action:'reobserve',source:'new-evidence',at:now,eventKey:stored.key,obstacleConfirmed:false,nextStep:'新的实际证据已到达；重新交叉核对卡点及前序步骤，尚未确认障碍已解决。'};
+                target.state.recoveryGuidance=run.recovery;
+              }
+              if(target.status==='needs_attention'&&!Object.values(target.actionRuns).some(run=>['needs_attention','waiting_permission'].includes(run.status))&&
+                !Object.values(target.operations).some(op=>op.effect==='write'&&op.status==='intent')){target.status='waiting';target.note='已收到新的实际证据，重新评估原任务；尚未宣称卡点已解决';}
+            }
             if (target === task) this.operations.supersede(target, stored);
           }
         };
@@ -363,7 +486,7 @@ class AgentRuntime {
     if (TERMINAL.has(task.status) && task.status !== 'stopped' && !openResources) return { ok:false, error:'任务已结束，无需停止' };
     // Detach the canonical record from closures already running against the old
     // object. They may settle, but cannot mutate or persist the stopped task.
-    task = clone(task); this.tasks.set(id, task);
+    const previous=task;task = clone(task); this.tasks.set(id, task);this.operations.retire(previous);
     // Owner cancellation is a latch, not a recoverable execution failure. Set it
     // before awaiting admission/storage so old workers lose authority at once.
     task.state.stopRequest = { at: task.state.stopRequest?.at || this.clock(), version:2,phase:'pending',cause,deadlineAt:Date.now()+this.stopTimeoutMs };
@@ -397,12 +520,14 @@ class AgentRuntime {
 
   controlRevision(id) { return this.controlRequests.get(id)||0; }
   async control(action, id, {expectedRevision,commitGate,isCurrent=()=>true,signal}={}) {
-    const task = this.tasks.get(id);
+    let task = this.tasks.get(id);
     if (!this.canControl(task)) return { ok: false, error: '请明确要控制的任务' };
     if (action === 'status') return { ok: true, task: this.list().find(t => t.id === id) };
     if(!['pause','resume','stop'].includes(action))return {ok:false,error:'任务控制不合法'};
     if(expectedRevision!==undefined&&expectedRevision!==this.controlRevision(id))return {ok:false,superseded:true,error:'已采用更新的任务控制，本次请求不再执行'};
     const requestRevision=this.controlRevision(id)+1;this.controlRequests.set(id,requestRevision);
+    task.state.controlRevision=(task.state.controlRevision||0)+1;
+    this.mainReviews.cancel(task,'owner-'+action);
     if (action === 'stop') return this.stop(task);
     if(task.state.listArchive)return {ok:false,error:'这项任务已移出列表，请先恢复列表；恢复显示不会自动执行'};
     const resumeAdmission=this.admissionEpoch;
@@ -429,7 +554,11 @@ class AgentRuntime {
 
       const queued = task.status === 'queued', group = this.actionGroups.get(id);
       const active = !!group?.workers.size && !group.parent.signal.aborted;
-      if (action === 'pause' || !active) this.cancelWorker(task);
+      if (action === 'pause') {
+        const old=task;task=clone(task);this.tasks.set(id,task);this.cancelWorker(task);this.operations.retire(old);
+        for(const run of Object.values(task.actionRuns))if(run.status==='running')run.status='waiting';
+        this.actionGroups.delete(id);this.controllers.delete(id);
+      }else if(!active)this.cancelWorker(task);
       else this.keepalive.cancel(id);
       if (action === 'resume') {
         if(commitGate)try{assertAdmission(commitGate,resumeLive);}catch(error){return {ok:false,error:error.message,code:error.code};}
@@ -438,11 +567,18 @@ class AgentRuntime {
         if(requestRevision!==this.controlRevision(id))return {ok:false,superseded:true,error:'已采用更新的任务控制，本次请求不再执行'};
         if (admission !== this.admissionEpoch || !this.canControl(task) || TERMINAL.has(task.status)) return { ok: false, error: '任务状态已变化' };
         for (const run of Object.values(task.actionRuns)) {
-          if (['needs_attention', 'waiting_permission'].includes(run.status)) run.status = 'waiting';
+          if (['needs_attention', 'waiting_permission','paused'].includes(run.status)) run.status = 'waiting';
+          if(run.recoveryState?.episodeId){
+            recoveryPolicy.ownerResumed(run.recoveryState,{key:'owner:'+requestRevision,now:this.clock(),attempts:this.recoveryPolicy.attempts});
+            delete run.visualRecovery;delete run.recovery;continue;
+          }
+          delete run.visualRecovery;delete run.recoveryState;delete run.recovery;
         }
+        delete task.state.visualRecovery;if(!task.state.recoveryState?.episodeId)delete task.state.recoveryState;else recoveryPolicy.ownerResumed(task.state.recoveryState,{key:'owner:'+requestRevision,now:this.clock(),attempts:this.recoveryPolicy.attempts});delete task.state.recoveryGuidance;
       }
       if(action==='resume')delete task.state.admissionPending;
       task.status = action === 'pause' ? 'paused' : active ? 'running' : 'waiting';
+      if(action==='pause')task.state.pauseSource='owner';else delete task.state.pauseSource;
       task.note = action === 'pause' ? '已暂停，保留待处理事项' : '继续原任务与待处理事项';
       task.nextCheckAt = this.clock();
       if (action === 'resume' && queued && task.schedule.durationMinutes) task.expiresAt = this.clock() + task.schedule.durationMinutes * 60000;
@@ -558,7 +694,7 @@ class AgentRuntime {
           if (cadenceOnly) return;
           target.capabilities = [...capabilities];
           target.state.goalRevision = (target.state.goalRevision || 0) + 1;
-          for (const key of ['selfRepair', 'contextTuning', 'pendingDecision', 'recoveryGuidance']) delete target.state[key];
+          for (const key of ['selfRepair', 'contextTuning', 'pendingDecision', 'recoveryGuidance', 'recoveryState']) delete target.state[key];
           for (const event of target.inbox) {
             delete event.decision;
             delete event.decisionAt;
@@ -574,7 +710,13 @@ class AgentRuntime {
           await this.persist(task, apply);
           // An in-flight Operation still owns its receipt. Cancelling its
           // worker prevents it from continuing under the old instructions.
-          if (!cadenceOnly) this.cancelWorker(task);
+          if (!cadenceOnly) {
+            const active=this.controllers.has(id);this.cancelWorker(task);
+            if(active){
+              const replacement=clone(task);for(const run of Object.values(replacement.actionRuns))if(run.status==='running')run.status='waiting';
+              this.tasks.set(id,replacement);this.operations.retire(task);this.actionGroups.delete(id);this.controllers.delete(id);
+            }
+          }
         } finally {
           this.amending.delete(id);
           this.schedule(25);
@@ -586,12 +728,15 @@ class AgentRuntime {
     }
   }
   selectWork(task) {
+    if(recoveryPolicy.held(task.state))return;
     const group = this.actionGroups.get(task.id);
     if(!group&&this.controllers.has(task.id))return;
     if(group?.parent.signal.aborted)return;
     const event = this.selectEvent(task, group);
     if(!event&&(task.inbox.length||group?.workers.size||['needs_attention','waiting_permission'].includes(task.status)))return;
     const pendingRun=Object.values(task.actionRuns).find(run=>run.status==='waiting'&&(event?run.eventKey===event.key:!run.eventKey));
+    if(recoveryPolicy.held(pendingRun))return;
+    if(recoveryPolicy.deferred(pendingRun||task.state,this.clock()))return;
     if(this.keepalive.pending.has(this.keepalive.key(task,pendingRun)))return;
     return { group, event };
   }
@@ -605,33 +750,51 @@ class AgentRuntime {
     if(!group){const parent=new AbortController();group={parent,workers:new Map()};this.actionGroups.set(id,group);this.controllers.set(id,parent);}
     const workerKey=event?.key||'__task__',scope=this.eventScope(event),controller=new AbortController();
     const cancel=()=>controller.abort(group.parent.signal.reason);group.parent.signal.addEventListener('abort',cancel,{once:true});if(group.parent.signal.aborted)cancel();
-    group.workers.set(workerKey,{eventKey:event?.key,scope,controller});let stopObservation,actionRun,progress,failureOperationId,failureOperationError;
-    const actionKind=event?'event':!['task.resolve','conversation.manage','screen.watch'].includes(task.skill)?'goal':null;
-    const actionId=actionKind?crypto.createHash('sha256').update(id+'\0'+actionKind+'\0'+(event?.key||'goal')).digest('hex'):null;
+    group.workers.set(workerKey,{eventKey:event?.key,scope,controller});let stopObservation,actionRun,progress,failureOperationId,failureOperationError,stepWait;
+    let skill,actionKind=null,actionId=null;
     try {
       if(!await this.journal.authorized(task))throw Object.assign(new Error('任务来源已失效'),{code:'E_TASK_AUTH'});
       if(!this.current(task,token,true))return;
-      const skill=this.skills.get(task.skill);
-      if(actionId){task.actionRuns??={};actionRun=task.actionRuns[actionId]??={id:actionId,eventKey:event?.key||null,scope,eventType:event?.type||'task.goal',createdAt:this.clock(),attempts:0};actionRun.status='running';actionRun.attempts++;actionRun.startedAt??=this.clock();progress=new ActionProgress(actionRun.progress??={},this.clock).wait(null);}
+      skill=this.skills.get(task.skill);
+      // Continuous skills may declare a finite active phase without treating
+      // passive observation as endless unfinished work. Its key survives retries.
+      if(event)actionKind='event';
+      else if(typeof skill.activeAction==='function'){
+        const phase=skill.activeAction(task);
+        if(phase!=null&&(typeof phase!=='string'||!phase.trim()||phase.length>200))throw Error('技能主动阶段标识不合法');
+        actionKind=phase??null;
+        for(const run of Object.values(task.actionRuns)){
+          if(run.activePhase&&run.activePhase!==actionKind&&!['completed','cancelled'].includes(run.status)&&
+            !Object.values(task.operations).some(op=>op.actionId===run.id&&op.effect==='write'&&op.status==='intent'))run.status='cancelled';
+        }
+      }else if(!['task.resolve','conversation.manage','screen.watch'].includes(task.skill))actionKind='goal';
+      actionId=actionKind?crypto.createHash('sha256').update(id+'\0'+actionKind+'\0'+(event?.key||'goal')).digest('hex'):null;
+      group.workers.get(workerKey).actionId=actionId;
+      if(actionId){task.actionRuns??={};actionRun=task.actionRuns[actionId]??={id:actionId,eventKey:event?.key||null,scope,eventType:event?.type||'task.goal',...(!event&&typeof skill.activeAction==='function'?{activePhase:actionKind}:{}),createdAt:this.clock(),attempts:0};actionRun.status='running';actionRun.attempts++;actionRun.startedAt??=this.clock();progress=new ActionProgress(actionRun.progress??={},this.clock).wait(null);}
+      recoveryPolicy.checking(actionRun||task.state,this.clock());
       if(!['needs_attention','waiting_permission'].includes(task.status))task.status='running';task.counters.wakes++;await this.save(task);
       if(event?.type==='conversation.messages')stopObservation=this.observeWhileActive?.(task,event,controller.signal);
+      stepWait=createBoundedWait({signal:controller.signal,timeoutMs:this.stepTimeoutMs,code:'E_ACTION_TIMEOUT',message:'本轮执行调用达到时限，保留实际状态并重新分析'});
+      const live=()=>this.current(task,token,true)&&!stepWait.signal.aborted;
       const operationFor=call=>Object.values(task.operations).filter(op=>op.key===call.key&&(actionId?op.actionId===actionId:!op.actionId)).at(-1);
       const call=async call=>{
         try{
-          const result=await this.operations.execute({task,call,signal:controller.signal,actionId,
-            isCurrent:()=>this.current(task,token,true)&&!controller.signal.aborted&&(!task.expiresAt||this.clock()<task.expiresAt)});
+          const result=await this.operations.execute({task,call,signal:stepWait.signal,actionId,
+            isCurrent:()=>live()&&(!task.expiresAt||this.clock()<task.expiresAt)});
           const operation=operationFor(call);
           if(this.current(task,token,true)&&!controller.signal.aborted&&operation?.status==='confirmed')resolveFailure(task,{operationId:operation.id,at:this.clock(),reason:'operation-confirmed'});
           return result;
         }catch(error){const operation=operationFor(call);if(operation?.error===error.message){failureOperationId=operation.id;failureOperationError=error;}throw error;}
       };
       const script=async plan=>{const steps=scriptPlan(plan,this.tools,task,skill),results=[];for(const action of steps)results.push(await call(action));return results;};
-      const result=await skill.run({ task,progress,isLive:()=>this.current(task,token,true), event:clone(event), recovery:actionRun?.recovery,signal:controller.signal, call, script, now:this.clock(),clock:()=>this.clock(),
+      const result=await stepWait.run(()=>skill.run({ task,progress,isLive:live, event:clone(event), recovery:actionRun?actionRun.recovery:task.state.recoveryGuidance,mainReviewEnabled:this.mainReviews.isEnabled(),signal:stepWait.signal, call, script, now:this.clock(),clock:()=>this.clock(),
         availableTools:this.tools.catalog(undefined,task),validateCall:(name,args)=>this.tools.check(name,args,task),
         completedCall:(key,tool)=>{const op=Object.values(task.operations).find(o=>o.key===key&&o.tool===tool&&o.effect==='write'&&o.status==='confirmed'&&(!actionId||o.actionId===actionId));return op?clone(op.result):null;},
-        checkpoint:async()=>{if(!this.current(task,token,true))throw new Error('任务已停止');await this.save(task);},
-        enqueue:(event, options)=>this.current(task,token,true)?this.enqueue(id,event,{...options,current:()=>this.current(task,token,true)&&(!options?.current||options.current())}):Promise.resolve({ok:false}), report:async(text,key,details={})=>{
-          if(!this.owns(task)||task.state.stopRequest||controller.signal.aborted)return;
+        checkpoint:async()=>{if(!live())throw new Error('任务已停止');await this.save(task);},
+        enqueue:(event, options)=>live()?this.enqueue(id,event,{...options,current:()=>live()&&(!options?.current||options.current())}):Promise.resolve({ok:false}), report:async(text,key,details={})=>{
+          // Interpretation may have just adopted a valid queued Task. Reporting
+          // that durable result is allowed even though queued work cannot run.
+          if(this.closed||!this.owns(task)||this.tokens.get(id)!==token||task.state.stopRequest||task.state.listArchive||stepWait.signal.aborted)return;
           if(typeof text!=='string'||!text.trim()||text.length>12000)throw new Error('任务汇报不合法');
           const reportId=crypto.createHash('sha256').update(id+'\0'+key).digest('hex');
           if(task.reports.includes(reportId))return;
@@ -640,10 +803,18 @@ class AgentRuntime {
           if(typeof details.speechText==='string'&&details.speechText.length<=12000)reportDetails.speechText=details.speechText;
           await this.report({taskId:id,eventId:reportId,text,...reportDetails,sources:[id],scene:task.scene,domain:task.domain,visibilityFloor:task.visibilityFloor,epoch:task.privacyEpoch});
           if(!this.current(task,token,true))return;task.reports.push(reportId);await this.save(task);
-        } });
+        } }));
       if(!this.current(task,token,true))return;
       if(!result||!STATES.has(result.status)||['running','ready'].includes(result.status))throw new Error('技能没有返回可持续保存的任务状态');
       if(result.state&&result.state!==task.state)task.state=clone(result.state);
+      if(result.selfSuspension&&this.mainReviews.request(task,actionRun,{reason:'self-suspended',selfSuspension:result.selfSuspension,assessment:result.assessment})){
+        await this.save(task);return;
+      }
+      if(this.mainReviews.isEnabled()&&['stopped','paused','needs_attention'].includes(result.status)&&!result.protection&&!result.clarification&&
+        !Object.values(task.operations).some(op=>op.effect==='write'&&op.status==='intent')){
+        this.mainReviews.request(task,actionRun,{reason:'task-disposition-proposal',assessment:{summary:result.note||'任务脑建议暂缓，等待整体评估'}});
+        await this.save(task);return;
+      }
       if(!['needs_attention','waiting_permission'].includes(result.status)&&!Object.values(task.operations).some(op=>op.effect==='write'&&op.status==='intent'&&(actionId?op.actionId===actionId:!op.actionId)))
         resolveFailure(task,{actionId,at:this.clock(),reason:'action-progressed'});
       if(task.state.selfRepair?.status==='retrying'){
@@ -652,95 +823,71 @@ class AgentRuntime {
         delete task.state.selfRepair.profile;
       }
       if(task.skill==='conversation.manage')task.state.consecutiveReadFailures=0;
+      const activePending=!event&&typeof skill.activeAction==='function'?skill.activeAction(task)===actionKind:!event;
+      if(actionRun)actionRun.failedAttempts=0;
+      delete (actionRun||task.state).visualRecovery;
+      recoveryPolicy.resumed(actionRun||task.state,progress,this.clock());
       // Shared logical-action progress survives retries, wording changes and
       // nested desktop execution. Passive monitors have no action ledger.
-      if(progress&&result.status==='waiting'&&(!event||result.consumeEvent===false)){
+      if(progress&&result.status==='waiting'&&(activePending||event&&result.consumeEvent===false)){
         if(result.waitReason)progress.wait(result.waitReason);
-        if(progress.reviewDue()){
-          const timing=progress.reviewed();await this.save(task);
-          let advice;try{advice=await this.diagnoseRepair?.({kind:'stall',skill:task.skill,code:'E_NO_PROGRESS',attempt:timing.reviews,phase:event?'pending_event':'task_step',errorType:'Error',progress:timing,signal:controller.signal});}catch{}
-          if(!this.current(task,token,true)||controller.signal.aborted)return;
-          const action=advice?.action||'change_method';
-          actionRun.recovery={action,at:this.clock(),source:advice?.source==='llm'?'llm':'local'};
-          task.state.recoveryGuidance={action,scope,eventKey:event?.key||null,at:this.clock(),progress:timing,nextStep:advice?.nextStep};
-          if(action==='ask_owner'||timing.reviews>2&&advice?.source!=='llm'){
-            result.status='needs_attention';result.consumeEvent=false;
-            result.note=action==='ask_owner'?advice.nextStep||'Bunny 判断需要主人提供新的信息':`动作已耗时${Math.ceil(timing.elapsedMs/1000)}秒；恢复判断服务未能返回有效决策，保留原任务与回执`;
-            await this.reportProgress(task,progress,actionId,result.note);
-          }else if(action==='wait'&&advice.waitFor){
-            result.nextCheckAt=this.clock()+Math.max(1000,Math.min(72000,advice.waitMs||3000));
-            progress.wait('external:'+advice.waitFor);
-          }
-        }
+        const review=await this.reviewActionProgress(task,actionRun,progress,{event,signal:controller.signal,isCurrent:()=>this.current(task,token,true)&&!controller.signal.aborted});
+        if(!this.current(task,token,true)||controller.signal.aborted)return;
+        if(review){Object.assign(result,review);if(review.status==='needs_attention'){result.consumeEvent=false;await this.reportProgress(task,progress,actionId,result.note);}}
       }
       if(event&&result.consumeEvent!==false)task.inbox=task.inbox.filter(e=>e.key!==event.key);
       if(task.overflowEvent&&task.inbox.length<200&&Buffer.byteLength(JSON.stringify(task.inbox))+Buffer.byteLength(JSON.stringify(task.overflowEvent))<=300000){task.inbox.push(task.overflowEvent);task.eventKeys.push(task.overflowEvent.key);delete task.overflowEvent;}
-      if(actionRun){actionRun.status=['needs_attention','waiting_permission'].includes(result.status)?result.status:!event&&result.status!=='completed'||result.consumeEvent===false?'waiting':'completed';actionRun.note=String(result.note||'').slice(0,500);actionRun.updatedAt=this.clock();}
+      if(actionRun){actionRun.status=['needs_attention','waiting_permission','paused'].includes(result.status)?result.status:activePending&&result.status!=='completed'||result.consumeEvent===false?'waiting':'completed';actionRun.note=String(result.note||'').slice(0,500);actionRun.updatedAt=this.clock();}
       const blockedRuns=Object.values(task.actionRuns||{}).filter(a=>['needs_attention','waiting_permission'].includes(a.status)),blocked=blockedRuns.map(a=>a.status);
-      task.status=result.status==='completed'?'completed':blocked.includes('needs_attention')?'needs_attention':blocked.includes('waiting_permission')?'waiting_permission':group.workers.size>1?'running':result.status;
+      const unresolvedWrite=Object.values(task.operations).some(op=>op.effect==='write'&&op.status==='intent');
+      task.status=blocked.includes('needs_attention')||result.status==='completed'&&unresolvedWrite?'needs_attention':blocked.includes('waiting_permission')?'waiting_permission':result.status==='completed'?'completed':group.workers.size>1?'running':result.status;
       task.note=String(blockedRuns.find(a=>a.status===task.status)?.note||result.note||'').slice(0,500);
       task.nextCheckAt=result.nextCheckAt??this.clock()+task.schedule.intervalSeconds*1000;
+      if(recoveryPolicy.held(actionRun)&&actionRun.recoveryState.mainReview?.hold)this.mainReviews.hold(task,actionRun,actionRun.recoveryState.selfSuspension?'self-suspension':'main-review');
       this.keepalive.touch(task,actionRun,{waitReason:result.waitReason,nextCheckAt:task.nextCheckAt});
       if(task.inbox.some(e=>e.key!==event?.key&&!group.workers.has(e.key)))task.nextCheckAt=this.clock();
+      const strategy=(actionRun||task.state).recoveryState?.strategy;
+      if(strategy){strategy.outcomeRefs=Object.values(task.operations).filter(op=>op.actionId===actionId&&op.finishedAt>=((actionRun||task.state).recoveryState.mainReview?.appliedAt||0)).slice(-8).map(op=>op.id);strategy.outcome=result.status==='completed'?'progressed':strategy.outcomeRefs.length?'observed':'pending';}
       await this.save(task);
       if(!this.owns(task)||task.state.stopRequest)return;
       if(actionRun&&['completed','needs_attention'].includes(actionRun.status)&&event){try{await this.settled(task,actionRun);}catch{}}
       if(this.owns(task)&&!task.state.stopRequest&&task.status==='completed'){group.parent.abort();await this.completed(task);}
     }catch(error){
       if(this.current(task,token,true)){
+        if(error.code==='E_ACTION_TIMEOUT'){await this.retireTimedOut(task,{event,actionId,error});return;}
         if(error.code==='E_ACTION_SUPERSEDED'&&error.dispatched===false){if(actionRun)actionRun.status='waiting';const blocked=Object.values(task.actionRuns||{}).map(a=>a.status);task.status=blocked.includes('needs_attention')?'needs_attention':blocked.includes('waiting_permission')?'waiting_permission':'waiting';task.note='同一对象有新动态，正在合并后继续';task.nextCheckAt=this.clock();await this.save(task);this.schedule(25);return;}
         const unknown=Object.values(task.operations).some(op=>op.effect==='write'&&op.status==='intent'&&(actionId?op.actionId===actionId:!op.actionId));
         // Resource contention is an ordinary wait, not a model/tool failure.
         // Preserve the event and cached decision without repair or backoff.
-        if(['E_GUI_BUSY','E_CAPTURE_BUSY','E_OPERATION_BUSY'].includes(error.code)&&error.dispatched===false&&!unknown){
+        if(['E_GUI_BUSY','E_CAPTURE_BUSY','E_OPERATION_BUSY','E_MODEL_BUSY'].includes(error.code)&&error.dispatched===false&&!unknown){
           if(actionRun){actionRun.status='waiting';actionRun.note=error.message;}
           const blocked=Object.values(task.actionRuns||{}).map(a=>a.status);
           task.status=blocked.includes('needs_attention')?'needs_attention':blocked.includes('waiting_permission')?'waiting_permission':'waiting';
           task.note=error.message;task.nextCheckAt=this.clock()+1000;await this.save(task);return;
         }
         try{await this.failed(task,error);}catch{}
+        if(!this.current(task,token,true)||controller.signal.aborted)return;
         task.state.lastFailure={message:error.message,code:error.code||'E_STEP',at:this.clock(),unknown,...(actionId?{actionId}:{}),...(failureOperationId&&failureOperationError===error?{operationId:failureOperationId}:{}),...(require('./self-repair').diagnostic(error.diagnostic)?{diagnostic:require('./self-repair').diagnostic(error.diagnostic)}:{})};
-        const failureStatus=error.code==='E_PERMISSION_REQUIRED'?'waiting_permission':unknown||['E_TASK_AUTH','E_APP_CIRCUIT','E_NO_PROGRESS','E_WORKBUDDY_DRAFT_CONFLICT','E_WORKBUDDY_ROUTE_CONFLICT'].includes(error.code)?'needs_attention':'waiting';
+        const boundary=error.code==='E_PERMISSION_REQUIRED'?'waiting_permission':unknown||['E_TASK_AUTH','E_APP_CIRCUIT','E_SUBMISSION_UNCERTAIN','E_WORKBUDDY_DRAFT_CONFLICT','E_WORKBUDDY_ROUTE_CONFLICT','ABORT_ERR','E_ABORTED'].includes(error.code)||error.diagnostic?.visualState?.requiresOwner===true?'needs_attention':null;
+        const failureStatus=boundary||'waiting';
         if(actionRun){actionRun.status=failureStatus;actionRun.note=error.message;actionRun.updatedAt=this.clock();}
         const blocked=Object.values(task.actionRuns||{}).map(a=>a.status);
         task.status=blocked.includes('needs_attention')?'needs_attention':blocked.includes('waiting_permission')?'waiting_permission':failureStatus;task.note=require('./task-presentation').failureNote(task,error,{unknown});
-        if(error.code==='E_NO_PROGRESS')await this.reportProgress(task,progress,actionId,task.note);
-        const repair=require('./self-repair'),kind=!unknown&&this.diagnoseRepair?repair.category(error):null;
-        if(kind&&this.current(task,token,true)&&!controller.signal.aborted){
-          const fingerprint=repair.incident(task,error,progress),previous=task.state.selfRepair||{};
-          const attempts=previous.fingerprint===fingerprint?(previous.attempts||0):0;
-          const recent=(task.state.selfRepairAttempts||[]).filter(at=>Number.isFinite(at)&&this.clock()-at<3600000);
-          if(attempts<2&&recent.length<4){
-            task.state.selfRepairAttempts=[...recent,this.clock()];
-            task.state.selfRepair={fingerprint,kind,attempts:attempts+1,status:'diagnosing',profile:previous.profile||{},at:this.clock()};
-            task.note='遇到异常，正在分析并尝试恢复原任务';await this.save(task);
-            let schemaAudit;if(kind==='schema')try{schemaAudit=repair.auditSchemas(this.tools.catalog(undefined,task));}catch{schemaAudit={checked:0,issues:1};}
-            const code=/^E_[A-Z0-9_]{1,60}$/u.test(String(error.code||''))?error.code:'E_STEP';
-            const errorType=['Error','TypeError','RangeError','SyntaxError'].includes(error.name)?error.name:'Error';
-            const phase=task.state.pendingDecision?'pending_decision':task.inbox.length?'pending_event':'task_step';
-            let advice;try{advice=await this.diagnoseRepair({kind,skill:task.skill,code,attempt:attempts+1,phase,errorType,schemaAudit,diagnostic:repair.diagnostic(error.diagnostic),progress:progress?.snapshot(),signal:controller.signal});}catch{}
-            if(!this.current(task,token,true)||controller.signal.aborted)return;
-            const state=task.state.selfRepair;
-            const allowed=repair.OPTIONS[kind];
-            const action=allowed.includes(advice?.action)?advice.action:'defer';
-            state.action=action;state.source=advice?.source==='llm'?'llm':'local';state.profile=repair.applyAction(state.profile,action,{code:error.code});
-            state.status=action==='defer'?'deferred':'retrying';
-            if(action==='defer')task.note='暂未找到可安全应用的修复，保留原任务、现场和回执；在有限恢复预算内重新核对';
-            if(action!=='defer'){
-              task.note=action==='retry'?'诊断完成，正在重试原任务':'已调整本次请求，继续原任务';task.nextCheckAt=this.clock()+1000;await this.save(task);this.schedule(25);return;
-            }
+        if(!boundary){
+          const kind=require('./self-repair').category(error)||'stall';
+          const recovery=await this.recoverAction(task,actionRun,progress,{event,error,signal:controller.signal,isCurrent:()=>this.current(task,token,true)&&!controller.signal.aborted,kind});
+          if(!recovery)return;
+          if(actionRun){actionRun.status=recoveryPolicy.held(actionRun)&&actionRun.recoveryState.mainReview?.hold?'paused':recovery.status;actionRun.note=recovery.note;actionRun.updatedAt=this.clock();}
+          const otherBlocked=Object.values(task.actionRuns||{}).find(run=>run!==actionRun&&['needs_attention','waiting_permission'].includes(run.status));
+          task.status=otherBlocked?.status||recovery.status;task.note=otherBlocked?.note||recovery.note;task.nextCheckAt=recovery.nextCheckAt;
+          await this.save(task);
+          if(recovery.status==='needs_attention'){
+            await this.reportProgress(task,progress,actionId,recovery.note);
+            if(actionRun)try{await this.settled(task,actionRun);}catch{}
           }
-          // A diagnostic budget is also an execution budget for this unchanged
-          // failure. Otherwise the scheduler repeats forever after diagnosis stops.
-          if(attempts>=2||recent.length>=4){
-            task.status='needs_attention';
-            if(actionRun)actionRun.status='needs_attention';
-            task.note='同一异常的恢复未取得有效进展，已保留原任务和回执；请补充必要信息或明确恢复后继续：'+error.message;
-            if(task.state.selfRepair)task.state.selfRepair.status='exhausted';
-            if(actionRun)actionRun.note=task.note;
-            await this.reportProgress(task,progress,actionId,task.note);
-          }
+          return;
         }
+        if(error.code==='E_NO_PROGRESS')await this.reportProgress(task,progress,actionId,task.note);
         if(error.code==='E_PERMISSION_REQUIRED'){task.state.missingPermissions=error.missing;task.state.permissionRequest=error.permissionRequest;}
         let retrySeconds=Math.max(30,task.schedule.intervalSeconds);
         if(task.skill==='conversation.manage'&&!unknown&&!['E_TASK_AUTH','E_APP_CIRCUIT','E_PERMISSION_REQUIRED'].includes(error.code)){
@@ -753,13 +900,16 @@ class AgentRuntime {
         if(actionRun?.status==='needs_attention'){try{await this.settled(task,actionRun);}catch{}}
       }
     }finally{
+      stepWait?.close();
       this.keepalive.touch(task,actionRun);
-      stopObservation?.();group.parent.signal.removeEventListener('abort',cancel);group.workers.delete(workerKey);
+      try{stopObservation?.();}catch(error){try{this.onRecoveryDiagnostic('observation-cleanup',task,error);}catch{}}
+      group.parent.signal.removeEventListener('abort',cancel);group.workers.delete(workerKey);
       if(actionRun?.status==='running'){actionRun.status=controller.signal.aborted?'cancelled':'waiting';actionRun.updatedAt=this.clock();if(this.tasks.get(id)===task)await this.save(task).catch(()=>{});}
       if(!group.workers.size&&this.actionGroups.get(id)===group){
         this.actionGroups.delete(id);if(this.controllers.get(id)===group.parent)this.controllers.delete(id);
         if(this.tasks.get(id)===task&&task.status==='running'){task.status='waiting';await this.save(task).catch(()=>{});}
       }
+      if(this.owns(task)&&!task.state.stopRequest&&task.inbox.some(item=>item.key!==event?.key)&&this.selectEvent(task,this.actionGroups.get(id)))task.nextCheckAt=Math.min(task.nextCheckAt,this.clock());
       this.schedule();
     }
   }
@@ -767,9 +917,10 @@ class AgentRuntime {
     if (this.closed || this.restoring || !this.ready()) return;
     const now = this.clock();
     const due = id ? [id] : [...this.tasks.values()]
-      .filter(task => task.nextCheckAt <= now || task.expiresAt && task.expiresAt <= now)
+      .filter(task => task.nextCheckAt <= now || recoveryPolicy.due(task,now) || task.expiresAt && task.expiresAt <= now)
       .map(task => task.id);
     const work = Promise.all(due.map(task => this.step(task)));
+    this.mainReviews.inspect();
     this.keepalive.inspect(this);
     this.schedule();
     await work;
@@ -777,11 +928,12 @@ class AgentRuntime {
   schedule() {
     if (this.closed || this.restoring || !this.autoSchedule) return;
     const now = this.clock();
-    let next = Infinity;
+    let next = this.mainReviews.nextWake();
     for (const task of this.tasks.values()) {
       if (!this.current(task, this.tokens.get(task.id), true)) continue;
       if (task.expiresAt) next = Math.min(next, task.expiresAt);
-      if (this.selectWork(task)) next = Math.min(next, task.nextCheckAt);
+      if (this.selectWork(task)) next = Math.min(next,recoveryPolicy.due(task,now)?now:task.nextCheckAt);
+      for(const owner of [task.state,...Object.values(task.actionRuns||{})])if(recoveryPolicy.deferred(owner,now))next=Math.min(next,owner.recoveryState.nextAt);
       next = Math.min(next, this.keepalive.nextWake(this, task, now));
     }
     const wakeAt = Math.max(now + 25, next);
@@ -800,9 +952,12 @@ class AgentRuntime {
     this.admissionEpoch++;
     const writes = [];
     for (const task of this.tasks.values()) {
-      if (TERMINAL.has(task.status) || ['queued', 'stopping', 'paused'].includes(task.status)) continue;
+      if (TERMINAL.has(task.status) || ['queued', 'stopping'].includes(task.status)) continue;
+      this.mainReviews.cancel(task,'runtime-invalidated');
+      if(task.status==='paused'){if(task.state.pauseSource!=='owner')task.state.pauseSource='protection';if(task.privacyEpoch===this.epoch())writes.push(this.save(task));continue;}
       this.cancelWorker(task);
       task.status = 'paused';
+      task.state.pauseSource='protection';
       task.note = reason;
       if (task.privacyEpoch === this.epoch()) writes.push(this.save(task));
     }
@@ -814,6 +969,7 @@ class AgentRuntime {
     this.closed = true;
     this.admissionEpoch++;
     this.keepalive.close();
+    this.mainReviews.close();
     clearTimeout(this.timer);
     this.timer = null;
     for (const controller of this.controllers.values()) controller.abort();

@@ -2,11 +2,20 @@
 // Repairs are small, request-scoped adjustments, never executable code or new authority.
 const crypto=require('node:crypto');
 const {parseStrictJson}=require('./strict-json');
-const BLOCKED=new Set(['E_PERMISSION_REQUIRED','E_TASK_AUTH','E_APP_CIRCUIT','E_GUI_BUSY','E_CAPTURE_BUSY','E_GUI_FOCUS_CHANGED','E_SUBMISSION_UNCERTAIN','E_NO_PROGRESS','E_WORKBUDDY_DRAFT_CONFLICT','E_WORKBUDDY_ROUTE_CONFLICT','ABORT_ERR','E_ABORTED']);
+const BLOCKED=new Set(['E_PERMISSION_REQUIRED','E_TASK_AUTH','E_APP_CIRCUIT','E_GUI_BUSY','E_MODEL_BUSY','E_CAPTURE_BUSY','E_GUI_FOCUS_CHANGED','E_SUBMISSION_UNCERTAIN','E_NO_PROGRESS','E_WORKBUDDY_DRAFT_CONFLICT','E_WORKBUDDY_ROUTE_CONFLICT','ABORT_ERR','E_ABORTED']);
 const OPTIONS={context:['compact_context','retry','defer'],schema:['repair_schema','retry','defer'],output:['increase_output','retry','defer'],response:['compact_response','retry','defer'],unexpected:['retry','defer'],stall:['reobserve','change_method','wait','ask_owner']};
 function diagnostic(value){
  if(!value||typeof value!=='object'||Array.isArray(value))return undefined;
  const result={};for(const key of ['operation','method','model'])if(typeof value[key]==='string'&&/^[a-zA-Z0-9_.:-]{1,80}$/u.test(value[key]))result[key]=value[key];
+ if(value.visualState&&['login','security','occluded','ambiguous','absent','unclear','inactive','identity'].includes(value.visualState.kind)&&typeof value.visualState.requiresOwner==='boolean')result.visualState={kind:value.visualState.kind,requiresOwner:value.visualState.requiresOwner};
+ if(value.operationTrace&&typeof value.operationTrace==='object'){
+  const source=value.operationTrace,trace={};
+  if(typeof source.session==='string'&&/^[a-f0-9-]{36}$/u.test(source.session))trace.session=source.session;
+  if(typeof source.incidentId==='string'&&/^[a-f0-9]{32}$/u.test(source.incidentId))trace.incidentId=source.incidentId;
+  for(const key of ['seq','dropped','pendingBytes'])if(Number.isSafeInteger(source[key])&&source[key]>=0)trace[key]=source[key];
+  if(source.causality==='temporal-association-only')trace.causality=source.causality;
+  if(trace.session&&trace.incidentId)result.operationTrace=trace;
+ }
  if(Number.isSafeInteger(value.candidateCount)&&value.candidateCount>=0&&value.candidateCount<=10000)result.candidateCount=value.candidateCount;
  if(value.guardChecks&&typeof value.guardChecks==='object'&&!Array.isArray(value.guardChecks)){
   const checks=Object.entries(value.guardChecks).filter(([key,passed])=>/^[a-zA-Z][a-zA-Z0-9]{0,47}$/u.test(key)&&typeof passed==='boolean').slice(0,16);
@@ -44,6 +53,7 @@ function diagnostic(value){
 }
 function category(error){
  const code=String(error?.code||'');if(BLOCKED.has(code))return null;
+ if(code==='E_VISUAL_TARGET')return 'stall';
  if(['E_CONTEXT_WINDOW','E_CONTEXT_BUDGET'].includes(code))return 'context';
  if(['E_MODEL_SCHEMA','E_REPLY_PROTOCOL'].includes(code))return 'schema';
  if(['E_OUTPUT_LIMIT','E_EMPTY_RESPONSE'].includes(code))return 'output';
@@ -53,6 +63,7 @@ function category(error){
 }
 function incident(task,error,progress){
  const facts=diagnostic(error.diagnostic);
+ if(facts?.operationTrace)delete facts.operationTrace;
  // Changing timestamps or estimated request sizes does not create new
  // external evidence and must not renew the bounded recovery allowance.
  if(facts?.budget)facts.budget=Object.fromEntries(['context','output','inputBudget','imageCount'].filter(k=>Object.hasOwn(facts.budget,k)).map(k=>[k,facts.budget[k]]));
@@ -62,7 +73,7 @@ async function advise({kind,skill,code,attempt,phase,errorType,schemaAudit,progr
  const choices=OPTIONS[kind];if(!choices)throw Error('unsupported repair category');
  const timing=progress?Object.fromEntries(['elapsedMs','withoutProgressMs','waitingMs','stage','stageElapsedMs','repeatedEvidence','reviews','lastMethod','waitReason','facts','spent'].filter(k=>Object.hasOwn(progress,k)).map(k=>[k,progress[k]])):undefined;
  const safeDiagnostic=diagnostic(methodDiagnostic);
- const context={kind,skill,code,attempt,...(safeDiagnostic?{diagnostic:safeDiagnostic}:{}),...(phase?{phase}:{}),...(errorType?{errorType}:{}),...(schemaAudit?{schemaAudit}:{}),...(timing?{progress:timing}:{}),allowedActions:choices, constraints:'仅诊断可恢复的模型或任务错误；不能修改任务目标、权限、实际数据或已确认操作。连续核查没有新证据时要改变方法，不能用同一检查或笼统等待重复续期；时间只用于决策，不可编造成功或重发未知写入。'};
+ const context={kind,skill,code,attempt,...(safeDiagnostic?{diagnostic:safeDiagnostic}:{}),...(phase?{phase}:{}),...(errorType?{errorType}:{}),...(schemaAudit?{schemaAudit}:{}),...(timing?{progress:timing}:{}),allowedActions:choices, constraints:'先核对卡点是否真实，建议不同获准角度的验证；确认后反思前序步骤是否有误并寻找安全纠正或替代策略。重复调用不等于独立验证，不能仅凭次数声称不可恢复。仅诊断可恢复的模型或任务错误；不能修改任务目标、权限、实际数据或已确认操作。连续核查没有新证据时要改变方法，不能用同一检查或笼统等待重复续期；时间只用于决策，不可编造成功或重发未知写入。'};
  try{
   const invoke=request||require('./verification-transport').requestVerification,controller=new AbortController();
   const cancel=()=>controller.abort();signal?.addEventListener('abort',cancel,{once:true});

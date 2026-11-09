@@ -55,7 +55,7 @@ function makeSentenceSplitter(onSentence) {
 /**
  * @returns {Promise<{text:string,motions:string[],emos:string[],usage:any,ms:number}>}
  */
-function chat(opts) { return require('./owner-security').withPrinciples(chatUnfiltered,opts); }
+function chat(opts) { return require('./model-admission').run(options => require('./owner-security').withPrinciples(chatUnfiltered,options),opts); }
 function chatUnfiltered(opts) {
   if (opts.transport === 'workbuddy') return opts.webSearch === true || opts.recallSession || opts.contextSession
     ? require('./conversation-search').chatWithSearch(opts) : require('./workbuddy').chat(opts);

@@ -65,8 +65,10 @@ function createAgentJournal(memory) {
         const root = found.get(task.id);
         return sources.every(id => found.get(id)?.state === 'active') && root?.state === 'active' &&
           root.value.schema === TASK_SCHEMA && root.value.authority?.verified === true && canRead(task.scene, root);
-      } catch {
-        return false;
+      } catch (cause) {
+        // A failed read is not evidence that the owner/source was revoked.
+        // No operation is authorized until a later successful fresh check.
+        throw Object.assign(new Error('任务来源暂无法核对，已保留任务；取得有效依据前不会执行操作',{cause}),{code:'E_TASK_JOURNAL_UNAVAILABLE',dispatched:false});
       }
     },
   };

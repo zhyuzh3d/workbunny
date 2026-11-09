@@ -340,9 +340,12 @@ test('a previously cached invalid intent is discarded and reinterpreted in the s
 test('contact history reuses prior task evidence without mixing contacts, accounts, future tasks or scene scope',async()=>{
  const h=fixture(),{subjectKey}=require('../src/main/conversation-skill');
  const make=async(name,createdAt,identity,scene='life')=>{const started=await h.agent.start({skill:'conversation.manage',goal:'照看 '+name,subjects:[{application:'wechat',recipient:name}],parameters:{behavior:'reply'}},{...h.owner,scene});const t=h.agent.runtime.tasks.get(started.id);t.createdAt=createdAt;t.updatedAt=createdAt;t.state.sceneIdentity={wechat:identity};t.state.conversations={[subjectKey(t.subjects[0])]:{summary:name+'旧项目上下文',progress:{deadline:'Friday'},cursor:{recent:[{direction:'incoming',kind:'text',text:name+' project Cedar is due Friday.',incomingVerified:true}]}}};return t;};
- const identity={pid:717,windowId:1930};const old=await make('Alice',1,identity),other=await make('Bob',2,identity);await make('Alice',3,{pid:100,windowId:100});await make('Alice',4,identity,'private');const current=await make('Alice',5,identity);await make('Alice',6,identity);
+ const identity={sessionId:'11111111-1111-4111-8111-111111111111'};const old=await make('Alice',1,identity),other=await make('Bob',2,identity);await make('Alice',3,{sessionId:'22222222-2222-4222-8222-222222222222'});await make('Alice',4,identity,'private');const current=await make('Alice',5,identity);await make('Alice',6,identity);
  h.agent.memory={ready:true,search:async()=>[]};const result=await h.agent.relatedMemory({...current.subjects[0],query:'项目进度'},current);
  assert.equal(result.items.length,1);assert.equal(result.items[0].sourceId,old.id);assert.match(result.items[0].text,/Cedar/u);assert.doesNotMatch(result.items[0].text,/Bob/u);assert.equal(JSON.parse(result.items[0].text).progress.deadline,'Friday');assert(current.sources.includes(old.id));assert(!current.sources.includes(other.id));
+ current.state.sceneIdentity={wechat:{pid:717,windowId:1930}};old.state.sceneIdentity={wechat:{pid:717,windowId:1930}};
+ assert.equal((await h.agent.relatedMemory({...current.subjects[0],query:'项目'},current)).items.length,0,'two legacy window identities cannot establish a shared visual account');
+ current.state.sceneIdentity={wechat:identity};assert.equal((await h.agent.relatedMemory({...current.subjects[0],query:'项目'},current)).items.length,0,'a valid current account does not adopt legacy history');
  current.state.sceneIdentity=undefined;assert.equal((await h.agent.relatedMemory({...current.subjects[0],query:'项目'},current)).items.length,0);await h.agent.close();
 });
 test('failed skill preparation leaves the original saved intent and cannot start a half-prepared job',async()=>{
@@ -374,9 +377,10 @@ test('passive monitoring waits only for an actual conflicting GUI operation, the
 
 test('owner reposition refreshes only the selected task and clears stale circuit without replaying old messages',async()=>{
  const h=fixture(),created=await h.agent.start({skill:'conversation.manage',goal:'watch Alice',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{behavior:'reply'}},h.owner),task=h.agent.runtime.tasks.get(created.id);
- task.status='needs_attention';task.state.lastFailure={code:'E_APP_CIRCUIT'};task.state.sceneIdentity={wechat:{pid:77,windowId:1}};task.state.conversations={old:{cursor:{ready:true}}};task.inbox=[{key:'prior-account-message'}];task.state.screenAnchors={wechat:{frameId:'old'}};
- h.agent.lastCircuit={reason:'old circuit'};h.agent.scene.circuit=h.agent.lastCircuit;h.agent.scene.reconnect=async()=>{h.agent.scene.circuit=null;h.agent.scene.knownWindow={pid:77,windowId:2};return {ok:true};};
- assert((await h.agent.resolveAttention(task.id)).ok);assert.deepEqual(task.state.sceneIdentity.wechat,{pid:77,windowId:2});assert.equal(h.agent.status().circuit,null);assert.equal(task.inbox.length,0);assert.equal(task.state.conversations,undefined);assert.equal(task.state.screenAnchors.wechat,undefined);assert.equal(h.outgoing.length,0);await h.agent.close();
+ const previous={mode:'visual',sessionId:'00000000-0000-4000-8000-000000000001'},current={mode:'visual',sessionId:'00000000-0000-4000-8000-000000000002'};
+ task.status='needs_attention';task.state.lastFailure={code:'E_APP_CIRCUIT'};task.state.sceneIdentity={wechat:previous};task.state.conversations={old:{cursor:{ready:true}}};task.inbox=[{key:'prior-account-message'}];task.state.screenAnchors={wechat:{frameId:'old'}};
+ h.agent.lastCircuit={reason:'old circuit'};h.agent.scene.circuit=h.agent.lastCircuit;h.agent.scene.reconnect=async()=>{h.agent.scene.circuit=null;h.agent.scene.knownIdentity=current;return {ok:true};};
+ assert((await h.agent.resolveAttention(task.id)).ok);assert.deepEqual(task.state.sceneIdentity.wechat,current);assert.equal(h.agent.status().circuit,null);assert.equal(task.inbox.length,0);assert.equal(task.state.conversations,undefined);assert.equal(task.state.screenAnchors.wechat,undefined);assert.equal(h.outgoing.length,0);await h.agent.close();
 });
 test('reposition never rebinds an uncertain write to a newly logged-in window',async()=>{
  const h=fixture(),created=await h.agent.start({skill:'conversation.send',goal:'send once',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'hello'}},h.owner),task=h.agent.runtime.tasks.get(created.id);let reconnects=0;

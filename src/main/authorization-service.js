@@ -1,14 +1,14 @@
 'use strict';
 const requirements={
- 'screen.observe':['screenCaptureAllowed'],'screen.activate':['accessibilityTrusted','postEventAllowed'],'screen.action':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
+ 'screen.observe':['screenCaptureAllowed'],'screen.activate':['screenCaptureAllowed','postEventAllowed'],'screen.action':['screenCaptureAllowed','postEventAllowed'],
  'terminal.execute':['terminal'], 'software.command':['terminal'], 'software.interface':['accessibilityTrusted'], 'software.control':['accessibilityTrusted'], 'software.recover':['accessibilityTrusted'], 'system.configure':['systemConfiguration'], 'system.restore':['systemConfiguration'],
- 'work.submit':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
+ 'work.submit':['screenCaptureAllowed','postEventAllowed'],
  'result.deliver':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
  'result.attach':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
- 'conversation.open':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
- 'conversation.transcribe':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
- 'conversation.save':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
- 'conversation.send':['screenCaptureAllowed','accessibilityTrusted','postEventAllowed'],
+ 'conversation.open':['screenCaptureAllowed','postEventAllowed'],
+ 'conversation.transcribe':['screenCaptureAllowed','postEventAllowed'],
+ 'conversation.save':['screenCaptureAllowed','postEventAllowed'],
+ 'conversation.send':['screenCaptureAllowed','postEventAllowed'],
  'conversation.observe':['screenCaptureAllowed']
 };
 const titles={terminal:'非破坏性终端',systemConfiguration:'操作系统配置修改',screenCaptureAllowed:'屏幕录制',accessibilityTrusted:'辅助功能/输入控制',postEventAllowed:'模拟键鼠'};

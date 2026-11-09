@@ -32,3 +32,12 @@ test('the existing runtime tick dispatches continuation and resumes the original
  const runtime=new AgentRuntime({tools,skills,clock:()=>now,epoch:()=>1,autoSchedule:false,journal:{put:async t=>saved.set(t.id,structuredClone(t)),list:async()=>[],authorized:async()=>true},remindIdle:async()=>{nudges++;return {action:'continue',nextStep:'Continue the original action'};}});
  const created=await runtime.start({skill:'fixture.task',goal:'finish original work',subjects:[{application:'bunny'}]},{role:'owner',verified:true,channel:'dialogue',scene:'life',sources:['owner-message']});assert(created.ok,created.error);await runtime.tick();now=60000;await runtime.tick();await flush();assert.equal(nudges,1);assert.equal(runtime.tasks.size,1);await runtime.tick();assert.equal(runtime.tasks.get(created.id).status,'completed');assert.equal(steps,2);await runtime.close();
 });
+test('one unsupported ask-owner decision keeps thinking, while unchanged repeated idle recovery remains bounded',async()=>{
+ const f=fixture(()=>({action:'ask_owner',nextStep:'unsupported permanent obstacle'}));f.keepalive.inspect(f.runtime);
+ for(let i=1;i<=4;i++){f.setTime(i*60000);f.keepalive.inspect(f.runtime);await flush();if(i===1){assert.equal(f.task.status,'waiting');assert.equal(f.task.state.recoveryGuidance.action,'reobserve');assert(!f.task.state.recoveryGuidance.nextStep.includes('unsupported'));}}
+ assert.equal(f.task.status,'needs_attention');assert.equal(f.task.state.recoveryState.status,'exhausted');assert.match(f.task.note,/未取得足够的多角度验证/u);assert.equal(f.task.state.recoveryGuidance.obstacleConfirmed,false);
+});
+test('a continuation service ignoring its signal cannot hold the worker lane or force an endless waiting entry',async()=>{
+ let release;const f=fixture(()=>new Promise(resolve=>release=resolve));f.keepalive.timeoutMs=15;f.keepalive.inspect(f.runtime);f.setTime(60000);f.keepalive.inspect(f.runtime);const entry=[...f.keepalive.pending.values()][0];await entry.work;
+ assert.equal(f.keepalive.pending.size,0);assert.equal(f.task.nextCheckAt,60000);assert.equal(f.task.state.recoveryGuidance.source,'keepalive');const guidance=structuredClone(f.task.state.recoveryGuidance);release({action:'ask_owner',nextStep:'late'});await flush();assert.deepEqual(f.task.state.recoveryGuidance,guidance);
+});

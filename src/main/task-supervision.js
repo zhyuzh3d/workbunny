@@ -16,6 +16,22 @@ function estimateTask(text, defaultMinutes = 12) {
   else if (/简单|一句话|翻译|查一下|确认一下/.test(text)) minutes = Math.min(minutes, 5);
   return { ms: minutes * MINUTE, source: '本地参考估计' };
 }
+// Pure facts for the existing task scheduler. A signal requests assessment;
+// elapsed time and repeated observations never decide business failure.
+function taskMonitorFact(task, run, { now = Date.now(), active = false, stageTimeoutMs = 90000 } = {}) {
+  const owner = run || task.state, recovery = owner?.recoveryState, progress = run?.progress;
+  const wait = owner?.keepalive?.wait;
+  if (recovery?.selfSuspension) return { reason: 'self-suspended', at: recovery.selfSuspension.assessedAt };
+  if (recovery?.status === 'exhausted') return { reason: 'local-budget', at: recovery.startedAt, obstacleConfirmed: false };
+  if (wait?.until > now || recovery?.status === 'delayed' && recovery.nextAt > now) return null;
+  if (!active || !progress) return null;
+  const deadline = Number.isFinite(progress.expectedAt) ? progress.expectedAt : (progress.stageStartedAt ?? run.startedAt ?? now) + stageTimeoutMs;
+  if (progress.waitReason && !Number.isFinite(progress.expectedAt)) return null;
+  if (now >= deadline) return { reason: progress.waitReason ? 'wait-overdue' : 'stage-overdue', at: deadline, stage: progress.stage,
+    withoutProgressMs: Math.max(0, now - (progress.lastProgressAt ?? now)), repeatedEvidence: progress.repeats || 0 };
+  if (progress.repeats >= 3 && now - progress.lastProgressAt >= 30000) return { reason: 'repeated-no-progress', at: progress.lastProgressAt, repeatedEvidence: progress.repeats };
+  return null;
+}
 class TaskSupervision {
   constructor({ clock = Date.now, bootAt, defaultMinutes = () => 12, persist = async () => {} } = {}) {
     this.clock = clock; this.bootAt = bootAt ?? clock(); this.defaultMinutes = defaultMinutes; this.persist = persist;
@@ -123,4 +139,4 @@ class TaskSupervision {
     }).join('\n');
   }
 }
-module.exports = { TaskSupervision, explicitEstimate, estimateTask };
+module.exports = { TaskSupervision, explicitEstimate, estimateTask, taskMonitorFact };

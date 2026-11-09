@@ -5,6 +5,7 @@ const { clone } = require('./agent-contract');
 const { ActionLifecycle } = require('./action-lifecycle');
 const { ActionProgress } = require('./action-progress');
 const { hasNewInput } = require('./conversation-cursor');
+const diagnostics = require('./operation-diagnostics');
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const beforeDispatch = (message, code) => Object.assign(new Error(message), { dispatched: false, code });
@@ -13,7 +14,7 @@ class OperationLedger {
   constructor({ tools, authorize, save, clock }) {
     Object.assign(this, { tools, authorize, save, clock });
     this.lifecycle = new ActionLifecycle();
-    this.inFlight = new Set();
+    this.inFlight = new Map();
   }
 
   supersede(task, event) {
@@ -24,6 +25,15 @@ class OperationLedger {
 
   isRunning(task, operation) {
     return this.inFlight.has(hash(task.id + '\0' + operation.key));
+  }
+
+  retire(task) {
+    // A detached caller has its own task object. Release local reservations,
+    // while durable write intents remain uncertain in the replacement task.
+    // Identity checks in finally keep a late old completion from releasing a
+    // newer reservation with the same logical key.
+    for(const [id,entry] of this.inFlight)if(entry.task===task)this.inFlight.delete(id);
+    for(const [id,entry] of this.lifecycle.active)if(entry.taskId===task.id){entry.controller.abort();this.lifecycle.active.delete(id);}
   }
 
   async execute({ task, call, signal, actionId, isCurrent }) {
@@ -37,11 +47,11 @@ class OperationLedger {
     if (this.inFlight.has(logicalId)) throw beforeDispatch('同一操作正在等待回执', 'E_OPERATION_BUSY');
     // Reserve the logical key before any await, including authorization and
     // recovery. All attempts for this key share the reservation.
-    this.inFlight.add(logicalId);
+    const reservation={task};this.inFlight.set(logicalId,reservation);
     try {
-      return await this.attempt(logicalId, checked, { task, call, signal, actionId, isCurrent });
+      return await diagnostics.scope({taskId:task.id,actionId,operationId:logicalId,tool:checked.tool.name,mode:require('./interaction-policy').channelForTool(checked.tool.name)},()=>this.attempt(logicalId, checked, { task, call, signal, actionId, isCurrent }));
     } finally {
-      this.inFlight.delete(logicalId);
+      if(this.inFlight.get(logicalId)===reservation)this.inFlight.delete(logicalId);
     }
   }
 
@@ -70,6 +80,7 @@ class OperationLedger {
       ...(replaced ? { supersedes: replaced.id } : {}), ...(actionId ? { actionId } : {}) };
     const action = this.lifecycle.start({
       id, taskId: task.id, scope: policy.scope, eventKey: policy.eventKey, policy: policy.policy, parentSignal: signal, progress,
+      recovery:actionId?clone(task.actionRuns[actionId].recovery):undefined,
       onPhase: async phase => { operation.lifecycle.phase = phase; await this.save(task); },
     });
     if (replaced) replaced.replacedBy = id;
@@ -94,6 +105,7 @@ class OperationLedger {
       }
       // Save the intent and its initial phase together before calling the tool.
       await this.save(task);
+      diagnostics.record('operation-intent',{status:'intent'});
       const maxAttempts = Math.max(1, Math.min(2, Number(policy.maxAttempts) || 1));
       for (let attempt = 1; ; attempt++) {
         assertCanDispatch();
@@ -102,6 +114,7 @@ class OperationLedger {
             assertCanDispatch();
             if (typeof permission === 'function') permission();
             mayHaveDispatched = true;
+            diagnostics.record('operation-dispatch',{status:'requested',attempt});
             return tool.execute(input, { task, signal: action.signal, action, operationId: id, attempt,resources:this.resources?.forTask(task,{signal:action.signal,isCurrent}) });
           };
           result = progress ? await progress.stage('tool').measure('tool', execute) : await execute();
@@ -114,6 +127,7 @@ class OperationLedger {
           if (attempt >= maxAttempts || mayHaveDispatched || !['preparing', 'protected'].includes(action.phase) ||
               action.signal.aborted || !policy.shouldRetry?.(error)) throw error;
           operation.status = 'not_dispatched';
+          diagnostics.record('operation-retry',{status:'not-dispatched',attempt,code:error.code});
           Object.assign(operation.lifecycle, { phase: 'recovering', attempt });
           await this.save(task);
           if (action.phase === 'protected') await action.retryBeforeEffect();
@@ -130,12 +144,15 @@ class OperationLedger {
       operation.status = 'confirmed';
       operation.lifecycle.phase = 'completed';
       operation.finishedAt = this.clock();
+      diagnostics.record('operation-receipt',{status:'confirmed',verified:result?.verified===true});
       delete operation.args;
       task.counters[tool.effect === 'write' ? 'writes' : 'reads']++;
       progress?.observe(tool.name, { tool: tool.name, args: input, result },
         { waiting: tool.name === 'work.status' && !result?.completed ? 'external' : undefined });
       await this.save(task);
     } catch (error) {
+      diagnostics.record('operation-error',{status:operation.status==='confirmed'?'confirmed':error.dispatched===false||!mayHaveDispatched?'not-dispatched':'uncertain',code:error.code,mayHaveDispatched});
+      if(!action.signal.aborted&&operation.status!=='confirmed')diagnostics.bind().annotate(error,'operation-failed',{code:error.code,mayHaveDispatched});
       // A downstream checkpoint or cancellation cannot turn a verified effect
       // back into an unsent operation.
       if (operation.status !== 'confirmed') {

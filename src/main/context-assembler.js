@@ -94,30 +94,35 @@ function terms(value){
 // Experience is task data, not instructions or an authorization grant. Keep
 // the original source/status and select complete passages before truncating.
 function selectExperience(items,{applications=[],query='',mode='summary',maxTokens=1800,maxItems=4}={}){
- const allowed=new Set(applications.filter(Boolean)),words=terms(query);
- const candidates=(Array.isArray(items)?items:[]).filter(item=>item&&typeof item.instructions==='string'&&item.instructions.trim()&&
-  experienceApplications(item).every(app=>app==='common'||allowed.has(app)));
- let remaining=Math.max(100,Math.min(MAX_INPUT_TOKENS,Number(maxTokens)||1800));const result=[];
- for(const item of candidates.slice(0,Math.max(0,Math.min(12,maxItems)))){
-  if(remaining<=0)break;
-  const full=item.instructions.trim(),limit=remaining,parts=full.split(/\n\s*\n/u).map(s=>s.trim()).filter(Boolean);
-  let content=full;
-  if(textTokens(full)>limit){
-   const ranked=parts.map((value,index)=>({value,index,score:[...words].reduce((n,word)=>n+(value.toLowerCase().includes(word)?1:0),0)}));
-   // The first substantive passage carries the source's main applicability;
-   // later passages are chosen by the live goal and then restored to order.
-   const chosen=[],first=ranked.find(p=>!/^#/u.test(p.value))||ranked[0];
-   const ordered=[first,...ranked.filter(p=>p!==first).sort((a,b)=>b.score-a.score||a.index-b.index)];
-   let used=0;
-   for(const part of ordered){const size=textTokens(part.value);if(used+size<=limit){chosen.push(part);used+=size;}}
-   if(chosen.length)content=chosen.sort((a,b)=>a.index-b.index).map(p=>p.value).join('\n\n');
-   else content=require('./context-budget').textPrefixWithinBudget(first?.value||full,limit);
+ const allowed=new Set(applications.filter(Boolean)),words=[...terms(query)],limit=Math.max(100,Math.min(MAX_INPUT_TOKENS,Number(maxTokens)||1800)),max=Math.max(0,Math.min(12,maxItems));
+ const candidates=(Array.isArray(items)?items:[]).filter(item=>item&&typeof item.instructions==='string'&&item.instructions.trim()&&experienceApplications(item).every(app=>app==='common'||allowed.has(app))).slice(0,64);
+ const passages=[];
+ for(const [itemIndex,item]of candidates.entries()){
+  let heading='';const parts=item.instructions.trim().split(/\n\s*\n/u).map(value=>value.trim()).filter(Boolean);
+  for(const [index,value]of parts.entries()){
+   if(/^(?:#{1,6}[^\n]*(?:\n|$))+$/u.test(value)){heading=value;continue;}
+   passages.push({itemIndex,index,value,heading,matches:words.filter(word=>value.toLowerCase().includes(word))});
   }
-  const truncated=content!==full;
-  result.push({...item,instructions:content,...(truncated?{truncated:true,detailMode:mode}: {})});
-  remaining-=textTokens(content);
  }
- return result;
+ // Rank actual passages across all scoped sources BEFORE maxItems or budget
+ // truncation. Frequent software/goal terms must not bury a rare live issue in
+ // a later section, and an early long guide must not consume every slot.
+ const weights=new Map(words.map(word=>[word,1+Math.log((passages.length+1)/(passages.filter(p=>p.matches.includes(word)).length+1))]));
+ for(const p of passages)p.score=p.matches.reduce((sum,word)=>sum+weights.get(word),0)/(1+textTokens(p.value)/1200);
+ const ranked=passages.sort((a,b)=>b.score-a.score||a.itemIndex-b.itemIndex||a.index-b.index),chosen=new Map();let used=0;
+ for(const passage of ranked){
+  if(!chosen.has(passage.itemIndex)&&chosen.size>=max)continue;
+  const prior=chosen.get(passage.itemIndex)||[],next=[...prior,passage].sort((a,b)=>a.index-b.index),render=parts=>parts.map((p,index)=>((p.heading&&(!index||parts[index-1].heading!==p.heading))?p.heading+'\n\n':'')+p.value).join('\n\n');
+  const old=render(prior),content=render(next),delta=textTokens(content)-textTokens(old);
+  if(used+delta<=limit){chosen.set(passage.itemIndex,next);used+=delta;}
+ }
+ if(!chosen.size&&max&&ranked.length){
+  const first=ranked[0],content=require('./context-budget').textPrefixWithinBudget(first.value,limit);if(content.trim())chosen.set(first.itemIndex,[{...first,value:content,heading:''}]);
+ }
+ return [...chosen].map(([index,parts])=>{
+  const item=candidates[index],content=parts.map((p,i)=>((p.heading&&(!i||parts[i-1].heading!==p.heading))?p.heading+'\n\n':'')+p.value).join('\n\n'),truncated=content!==item.instructions.trim();
+  return {...item,instructions:content,...(truncated?{truncated:true,detailMode:mode}:{})};
+ });
 }
 
 function experienceApplications(item){return [...new Set([item.application,...(item.tags||[]).filter(t=>typeof t==='string'&&t.startsWith('software:')).map(t=>t.slice(9))].filter(Boolean))];}

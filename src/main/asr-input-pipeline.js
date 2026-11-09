@@ -15,6 +15,13 @@ function createAsrInputPipeline({speakerFilter,state, recentEcho,bargeInReady,na
  };
  return {
   activity(meta){ return turns().activity(meta); },
+  audioFinal(meta){
+   const current=state();
+   if(speakerFilter.enrollment||current.suppressEnrollmentFinal||!current.alwaysOn||current.asrMode!=='continuous')return false;
+   // No text enters here. The existing turn must already contain an accepted
+   // native final; all recognized words still use the speaker/echo filters.
+   return turns().audioFinal(meta);
+  },
   partial(text){
    if(speakerFilter.enrollment){speakerFilter.heard(text);return filtered('partial-drop-enrollment',text);}
    if(state().suppressEnrollmentFinal)return filtered('partial-drop-enrollment',text);

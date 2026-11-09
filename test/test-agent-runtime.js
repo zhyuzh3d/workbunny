@@ -44,6 +44,18 @@ test('GUI contention before dispatch preserves the event and retries promptly wi
  const task=h.runtime.tasks.get(id);assert.equal(task.nextCheckAt,2000);assert.equal(task.inbox.length,1);assert.equal(task.status,'waiting');assert.equal(diagnoses,0);assert.equal(failures,0);assert.equal(task.state.lastFailure,undefined);
  busy=false;await h.runtime.tick(id);assert.equal(task.inbox.length,0);assert.equal(h.calls.length,1);await h.runtime.close();
 });
+test('a transient visual failure is analyzed and reobserved in the same action without losing its event or repeating a write',async()=>{
+ let uncertain=true;const diagnoses=[];
+ const h=setup(async({call,recovery})=>{if(uncertain)throw Object.assign(Error('target occluded'),{code:'E_VISUAL_TARGET',dispatched:false,diagnostic:{visualState:{kind:'occluded',requiresOwner:false}}});assert.equal(recovery.action,'change_method');await call(send);return {status:'completed'};});
+ h.runtime.diagnoseRepair=async info=>{diagnoses.push(info);return {action:'change_method',nextStep:'Use the fresh enlarged candidate',source:'llm'};};
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'visual-event',scope:'one'});await h.runtime.tick(id);const task=h.runtime.tasks.get(id),run=Object.values(task.actionRuns)[0];assert.equal(task.status,'waiting');assert.equal(task.inbox.length,1);assert.equal(diagnoses[0].code,'E_VISUAL_TARGET');assert.equal(diagnoses[0].diagnostic.visualState.kind,'occluded');assert.equal(h.calls.length,0);
+ uncertain=false;await h.runtime.tick(id);assert.equal(task.status,'completed');assert.equal(task.inbox.length,0);assert.equal(h.calls.length,1);assert.equal(run.visualRecovery,undefined);await h.runtime.close();
+});
+test('persistent visual uncertainty has a bounded recovery budget, survives restart and can be retried by the owner',async()=>{
+ let diagnoses=0;const h=setup(async()=>{throw Object.assign(Error('identity text is unreadable'),{code:'E_VISUAL_TARGET',dispatched:false});});h.runtime.diagnoseRepair=async()=>{diagnoses++;return {action:'reobserve',source:'llm'};};
+ const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'retained-event'});await h.runtime.tick(id);await h.runtime.restore();for(let i=0;i<3;i++){h.advance();await h.runtime.tick(id);}const task=h.runtime.tasks.get(id);assert.equal(task.status,'needs_attention');assert.equal(diagnoses,3);assert.equal(task.inbox.length,1);assert.equal(Object.values(task.actionRuns)[0].recoveryState.attempts,3);assert.equal(h.runtime.list()[0].presentation.statusLabel,'画面仍待核对');await h.runtime.tick(id);assert.equal(diagnoses,3);assert.equal(h.calls.length,0);
+ assert((await h.runtime.control('resume',id)).ok);await h.runtime.tick(id);assert.equal(task.status,'waiting');assert.equal(diagnoses,4);await h.runtime.close();
+});
 test('tasks require verified owner provenance and default to low-frequency observation',async()=>{
  const h=setup(async()=>({status:'waiting'}));
  assert.equal((await h.runtime.start(spec,{...owner,role:'contact'})).ok,false);
@@ -174,12 +186,12 @@ test('resolving one action permission does not cancel another running action',as
  await h.runtime.enqueue(id,{key:'b',type:'test.event',scope:'bob'});await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).status,'waiting_permission');
  assert((await h.runtime.control('resume',id)).ok);release();await first;assert.equal(h.runtime.tasks.get(id).inbox.some(e=>e.key==='a'),false);await h.runtime.close();
 });
-test('resume waits for an aborted worker to settle before starting its replacement',async()=>{
+test('resume starts from a detached task while an old cancelled worker remains pending',async()=>{
  let entered,release;const at=new Promise(r=>entered=r),gate=new Promise(r=>release=r),starts=[];
  const h=setup(async({event,signal})=>{starts.push(event.key);if(starts.length===1){entered();await gate;assert(signal.aborted);}return {status:'waiting'};});
  const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'a',type:'test.event',scope:'alice'});const first=h.runtime.tick(id);await at;
- assert((await h.runtime.control('pause',id)).ok);assert((await h.runtime.control('resume',id)).ok);await h.runtime.tick(id);assert.deepEqual(starts,['a']);
- release();await first;await h.runtime.tick(id);assert.deepEqual(starts,['a','a']);await h.runtime.close();
+ assert((await h.runtime.control('pause',id)).ok);assert((await h.runtime.control('resume',id)).ok);await h.runtime.tick(id);assert.deepEqual(starts,['a','a']);
+ release();await first;assert.deepEqual(starts,['a','a']);await h.runtime.close();
 });
 test('polling stores bounded receipts without pixel data',async()=>{
  const h=setup(async({task,call})=>{await call({tool:'screen.read',args:{},key:'sample-'+task.counters.wakes});return {status:'waiting'};});
@@ -240,6 +252,7 @@ test('amending a goal preserves a verified receipt that arrives after the change
   const updated = await h.runtime.update(id, { goal: 'Revised goal' }, owner);
   receipt.resolve();
   await running;
+  await new Promise(resolve=>setImmediate(resolve));
   assert.equal(updated.ok, true);
   const saved = h.records.get(id);
   assert.equal(saved.goal, 'Revised goal');
@@ -358,7 +371,7 @@ test('a verified write that finishes after pause is recorded without continuing 
  const h=setup(async({call})=>{await call(send);return {status:'completed'};});let entered,release;
  const gate=new Promise(r=>release=r),started=new Promise(r=>entered=r),tool=h.tools.get('conversation.send');
  h.tools.tools.set(tool.name,{...tool,execute:async(...args)=>{entered();await gate;return tool.execute(...args);}});
- const {id}=await h.runtime.start(spec,owner),tick=h.runtime.tick(id);await started;await h.runtime.control('pause',id);release();await tick;
+ const {id}=await h.runtime.start(spec,owner),tick=h.runtime.tick(id);await started;await h.runtime.control('pause',id);release();await tick;await new Promise(r=>setImmediate(r));
  const task=h.runtime.tasks.get(id);assert.equal(task.status,'paused');assert.equal(task.counters.writes,1);
  assert.equal(Object.values(task.operations)[0].status,'confirmed');assert((await h.runtime.control('resume',id)).ok);
  await h.runtime.tick(id);assert.equal(h.calls.length,1);
@@ -450,7 +463,7 @@ test('a repeating action keeps its event and timing while Bunny decides recovery
  for(let i=0;i<6;i++){await h.runtime.tick(id);h.advance();}
  const task=h.runtime.tasks.get(id),run=Object.values(task.actionRuns)[0];
  assert.equal(diagnoses.length,3);assert.equal(diagnoses[0].kind,'stall');assert(diagnoses[0].progress.elapsedMs>=120000);assert.equal(task.inbox[0].key,'one-event');
- assert.equal(task.status,'needs_attention');assert.equal(run.recovery.action,'ask_owner');assert.equal(task.state.recoveryGuidance.eventKey,'one-event');assert.match(task.note,/需要主人补充/);assert.equal(run.startedAt,run.createdAt,'retries keep the original start time');
+ assert.equal(task.status,'needs_attention');assert.equal(run.recovery.action,'ask_owner');assert.equal(task.state.recoveryGuidance.eventKey,'one-event');assert.match(task.note,/需要补充信息|协助/);assert.equal(run.startedAt,run.createdAt,'retries keep the original start time');
  await h.runtime.close();
 });
 

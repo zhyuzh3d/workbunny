@@ -3,6 +3,9 @@
 // This product's WeChat scope explicitly excludes payments and process/tool
 // automation. Keep these checks before window activation, including panel use.
 function checkDesktopScope(target, goal) {
+  // This boundary governs Bunny's direct operation target. A delegated
+  // application's internal method selection is not a Bunny operation.
+  if(target!=='wechat')return null;
   const clauses = String(goal || '').split(/[。；;\n]/u).map(value => value.trim()).filter(Boolean);
   const positive = clauses.map(value => value.replace(/(?:不要|不能|禁止|严禁|绝不|不许|不可|不得|无需|不需要|\bdo\s+not\b|\bdon't\b|\bnever\b|\bmust\s+not\b)[^，,。；;.\n]*/giu, '')).join('\n');
   const wechat = target === 'wechat' || /(?:使用|用|在|通过|调用|操作|退出|重启|关闭|kill|quit|restart|\b(?:use|using|in|via|operate|call|close)\b)\s*(?:微信|wechat)/i.test(positive) ||

@@ -1,7 +1,7 @@
 {
   "schema": "bunny.software-skill/v1",
   "id": "wechat",
-  "version": 8,
+  "version": 9,
   "skills": [
     "conversation.manage",
     "conversation.send",
@@ -9,14 +9,42 @@
   ],
   "application": "wechat",
   "methods": [
-    "external-display-visual-keyboard-mouse",
+    "display-pixels-vision-model-keyboard-mouse",
     "continuous-operations-and-asynchronous-voice-results"
   ],
   "resources": [
     {
       "path": "guide.md",
-      "sha256": "da9f97028b42ac3c4f3ebd7c2bb37096d2257beb52fd3c6dc02773199a02f681"
+      "sha256": "51dc29e4552240e5b5abc2d0516713fb6d01b8b721f3ded0280e3e21ed49e86c"
     }
   ],
-  "toolProtocol": "bunny.screen/v2"
+  "toolProtocol": "bunny.screen/v2",
+  "aliases": [
+    "com.tencent.xinWeChat",
+    "微信",
+    "WeChat"
+  ],
+  "interaction": {
+    "allowedChannels": [
+      "visual"
+    ],
+    "input": [
+      "keyboard",
+      "mouse"
+    ],
+    "targetEvidence": "display-pixels-and-vision-model",
+    "forbidden": [
+      "window-metadata",
+      "process-metadata",
+      "accessibility",
+      "clipboard",
+      "private-protocol",
+      "database",
+      "script-control"
+    ],
+    "requiresScopedRecipient": true,
+    "urlSchemes": [
+      "weixin"
+    ]
+  }
 }

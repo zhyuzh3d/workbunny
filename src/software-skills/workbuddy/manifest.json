@@ -1,7 +1,7 @@
 {
   "schema": "bunny.software-skill/v1",
   "id": "workbuddy",
-  "version": 12,
+  "version": 13,
   "skills": [
     "work.delegate"
   ],
@@ -13,7 +13,7 @@
   "resources": [
     {
       "path": "guide.md",
-      "sha256": "6274311ff991f5c91c2d8a04922c3b633944fab397c37d7991f26885659c7224"
+      "sha256": "dba9e74aedce55e376ae9f774010621879c7bc979616d9efc2cd5980062d773f"
     }
   ],
   "toolProtocol": "bunny.screen/v2"
