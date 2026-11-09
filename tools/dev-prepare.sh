@@ -22,8 +22,10 @@ echo "▸ 备份原 Info.plist"
 echo "▸ 写入 usage description"
 /usr/libexec/PlistBuddy -c "Delete :NSMicrophoneUsageDescription" "$PL" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Delete :NSSpeechRecognitionUsageDescription" "$PL" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Delete :NSAudioCaptureUsageDescription" "$PL" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string workbunny（开发版）需要麦克风才能听见你说话。" "$PL"
 /usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string workbunny（开发版）需要语音识别才能把你说的话变成文字。" "$PL"
+/usr/libexec/PlistBuddy -c "Add :NSAudioCaptureUsageDescription string workbunny（开发版）需要读取电脑播放的声音来消除音箱回声，避免把自己的声音当成你说话。" "$PL"
 /usr/libexec/PlistBuddy -c "Add :NSAppleEventsUsageDescription string workbunny 需要唤起 WorkBuddy 窗口。" "$PL" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string workbunny Dev" "$PL" 2>/dev/null || true
 

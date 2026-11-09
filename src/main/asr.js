@@ -69,7 +69,8 @@ class Asr extends EventEmitter {
     this.partial = ''; this.wakeHits = new Map();
     this.log = log;
     this.authWaitTimer = null;
-    this.aec = false;      // 回声消除是否可用（决定能不能边说边听）
+    this.aec = false;
+    this.echoState = null;
     this.lastCaptureAt = 0;
     this.captureTimer = null;
     this.installing = false;
@@ -97,13 +98,13 @@ class Asr extends EventEmitter {
     if (opts.wakeNames?.length) args.push('--wake-names', JSON.stringify(opts.wakeNames));
     if (opts.allowNetwork) args.push('--allow-network');
     if (opts.askSpeech) args.push('--ask-speech');
-    args.push('--aec'); // Native audio tries voice processing once, then falls back automatically.
+    args.push('--aec'); // Acoustic processing health is reported independently of capture readiness.
     if (opts.device) args.push('--mic', String(opts.device));
     if (opts.noMicAsk) args.push('--no-mic-ask');
     if (opts.trace === true) args.push('--speech-trace');
     if(this.diagnostic){args.push('--speech-diagnostic-dir',this.diagnostic.directory,'--speech-diagnostic-ms',String(this.diagnostic.durationMs));if(this.diagnostic.pcm)args.push('--speech-diagnostic-pcm');}
     this.traceEnabled = opts.trace === true;this.traceRecognizer++;this.traceSequence=0;
-    this.activityClock = createActivityClock();
+    this.activityClock = createActivityClock(); this.aec = false; this.echoState = null;
     this.always = !!opts.always;
     let p;
     try {
@@ -268,9 +269,12 @@ class Asr extends EventEmitter {
         this.emit('recycle', m.v || 0);
         break;
       case 'aec':
-        // 系统回声消除开没开：开着就能"边说边听"，主人可以随时打断
-        this.aec = !!m.on;
-        this.emit('aec', this.aec);
+        this.aec = m.engine === 'webrtc-aec3' ? m.on === true && m.state === 'active' : m.on === true;
+        this.echoState = { on: this.aec, engine: m.engine === 'webrtc-aec3' ? 'webrtc-aec3' : 'legacy',
+          state: this.aec ? 'active' : m.state === 'starting' ? 'starting' : 'degraded',
+          ...(Number.isSafeInteger(m.referenceCode) ? { referenceCode: m.referenceCode } : {}),
+          ...(typeof m.systemDucking === 'boolean' ? { systemDucking: m.systemDucking } : {}) };
+        this.emit('aec', this.aec, this.echoState);
         break;
       case 'fmt':
         this.emit('fmt', { hw: m.hw || '', tgt: m.tgt || '' });

@@ -24,7 +24,7 @@ asr_stale=0
 if [ ! -x "$ROOT/bin/asr" ]; then
   asr_stale=1
 else
-  for source in "$ROOT"/native/{asr,speech-transcript,speech-diagnostic,speech-activity,speech-endpoint,speaker-features,wake-name}.swift "$ROOT/tools/build-asr.sh" "$ROOT"/native/vendor/libfvad/**/*(.N); do
+  for source in "$ROOT"/native/{asr*,speech-*,speaker-*,wake-name,audio-*,echo-*}.{swift,c,h,cpp}(N.) "$ROOT/tools/build-asr.sh" "$ROOT"/tools/build-{aec*,echo*}.{sh,py}(N.) "$ROOT"/native/vendor/**/*(.N); do
     if [ "$source" -nt "$ROOT/bin/asr" ]; then asr_stale=1; break; fi
   done
 fi
@@ -91,6 +91,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>WorkBunny 需要麦克风，才能听见你说话。</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>WorkBunny 需要读取电脑正在播放的声音来消除音箱回声，避免把自己的声音当成你说话。</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>WorkBunny 需要语音识别，才能把你说的话变成文字。</string>
   <key>NSAppleEventsUsageDescription</key>

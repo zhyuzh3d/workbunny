@@ -52,11 +52,18 @@ final class SpeakerFeatures {
     deinit { if let fft { vDSP_DFT_DestroySetup(fft) } }
     func speechDetected(_ on: Bool) { lock.lock(); if on { confirmedAt = ProcessInfo.processInfo.systemUptime }; lock.unlock() }
     func process(_ buffer: AVAudioPCMBuffer) {
-        guard let channel = buffer.floatChannelData?[0], buffer.frameLength > 0, buffer.format.sampleRate > 0 else { return }
+        guard buffer.frameLength > 0, buffer.format.sampleRate > 0 else { return }
+        let floats = buffer.floatChannelData?[0], int16 = buffer.int16ChannelData?[0], int32 = buffer.int32ChannelData?[0]
+        guard floats != nil || int16 != nil || int32 != nil else { return }
         let step = buffer.format.sampleRate / 16000, count = Int(buffer.frameLength)
         var position = 0.0
         while Int(position) < count {
-            samples.append(channel[min(count - 1, Int(position))]); position += step
+            let index = min(count - 1, Int(position)) * buffer.stride
+            let sample: Float
+            if let floats { sample = floats[index] }
+            else if let int16 { sample = Float(int16[index]) / 32768 }
+            else { sample = Float(int32![index]) / 2147483648 }
+            samples.append(sample); position += step
         }
         consume()
     }

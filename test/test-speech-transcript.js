@@ -30,7 +30,7 @@ test('optional native speech trace contains only fixed stages and finite numeric
  const run=spawnSync(binary,['--self-test-transcript','--speech-trace'],{encoding:'utf8',timeout:5000});
  assert.equal(run.status,0,run.stderr||run.stdout);assert(!run.stdout.includes('private-trace-canary'));
  const rows=run.stdout.trim().split('\n').map(JSON.parse),trace=rows.filter(row=>row.t==='speechTrace');
- const stages=['tap-vpio','analyzer-input','replay','session-start','result','finish-start','finish-return','results-end','utterance','recycle'];
+ const stages=['tap-capture','echo-output','analyzer-input','replay','session-start','result','finish-start','finish-return','results-end','utterance','recycle'];
  assert.deepEqual(trace.map(row=>row.stage),stages);assert.equal(rows.at(-1).t,'selfTest');
  const fields=new Set(['at','gen','currentGen','frames','rate','channels','measuredChannels','rms','peak','muted','aec','accepted','converted','conversionError','buffers','pendingFrames','pendingSeconds','directBuffers','directFrames','queuedBuffers','queuedFrames','replayedBuffers','replayedFrames','start','end','finalizedThrough','isFinal','textChars','combinedChars','removedSegments','touchesFinalized','confirmed','current','ok','utteranceCount']);
  for(const row of trace){for(const [key,value] of Object.entries(row)){

@@ -8,7 +8,7 @@ function meaningful(text, allowShort = false) {
 // display-only; a request starts only after a confirmed, acoustically quiet seal.
 function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => {}, onError = () => {}, onTrace = null,
   onCheckpoint = null,
-  pauseMs = 1000, turnMs = 3000, finalWaitMs = 8000, requireActivity = false, activityFreshMs = 500,
+  pauseMs = 350, turnMs = 350, finalWaitMs = 8000, requireActivity = false, activityFreshMs = 500,
   now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, sessionId = randomUUID(), allowShort = () => false }) {
   let current = null, serial = 0, requestTimer, confirmationTimer, checkpointTimer, activityTimer, latestActivity = null, rejectedPartialKey = null;
   const reasons = { none: 0, text: 1, reset: 2, epoch: 3, stopped: 4, confirmation: 5, commit: 6, next: 7, active: 8, unknown: 9, stale: 10, completed: 11, acoustic: 12 };
@@ -22,6 +22,8 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
   const activityRequired = () => { try { return typeof requireActivity === 'function' ? requireActivity() === true : requireActivity === true; } catch { return true; } };
   const accepted = t => !!t?.request?.valid;
   const commitReady = t => current === t && !!t?.finalized && !t.awaitingAudioFinal && quiet();
+  const live = (t, phase, text = t ? textOf(t) : '') => onLive(text, { turn: t?.id || 0, turnId: t ? `${sessionId}:${t.id}` : null,
+    phase, final: !!t?.finalized, pending: accepted(t) });
   const trace = (stage, t = current, reasonCode = reasons.none) => { if (typeof onTrace !== 'function') return; try {
     const acoustic = latestActivity ? { activityAgeMs: Math.max(0, now() - latestActivity.at), activitySeq: latestActivity.seq, sourceGen: latestActivity.sourceGen, quietSeconds: latestActivity.quietSeconds } : {};
     for (const key of Object.keys(acoustic)) if (!Number.isFinite(acoustic[key])) delete acoustic[key];
@@ -31,15 +33,15 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
   const quiet = () => !activityRequired() || !!latestActivity && latestActivity.state === 'quiet' &&
     now() >= latestActivity.at && now() - latestActivity.at <= activityFreshMs && latestActivity.quietSeconds >= pauseMs / 1000;
   const ready = t => current === t && t.finalized && !t.awaitingAudioFinal && now() - boundaryAt(t) >= turnMs && quiet();
-  function remember(t) {
+  function remember(t, conversation = false) {
     if (!t || t.skipped) return;
     if (t.remembered) return t.receipt;
-    if (!accepted(t) || !commitReady(t) || !meaningful(textOf(t), allowShort())) return;
+    if (!accepted(t) || current !== t || !t.finalized || (!conversation && !commitReady(t)) || !meaningful(textOf(t), allowShort())) return;
     t.remembered = true; trace('turn-remember', t);
     t.receipt = onRemember(textOf(t), { turnId: `${sessionId}:${t.id}`, heardAt: t.lastTextAt });
     return t.receipt;
   }
-  function clearGate(t) { if (!t) return; clearTimer(t.gateTimer); t.gateClosedAt = null; }
+  function clearGate(t) { if (!t) return; clearTimer(t.gateTimer); t.gateTimer = null; t.gateClosedAt = null; }
   function settle(token, value) { for (const resolve of [...token.waiters]) resolve(value); }
   function invalidate(t = current, reasonCode = reasons.reset) {
     if (!t?.request || !t.request.valid) return;
@@ -51,12 +53,13 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if (!token.isCurrent()) return false;
     token.valid = false; token.completed = true; clearGate(t); settle(token, false);
     clearTurnTimers(); clearTimer(activityTimer); t.request = null; current = null; rejectedPartialKey = null;
-    // The caller has confirmed its final effects. Their own lifecycles now
+    // The caller has finished the response/effect boundary. Its lifecycles now
     // own TTS/Task cancellation; retiring this input must not abort them.
-    trace('turn-completed', t, reasons.completed); return true;
+    trace('turn-completed', t, reasons.completed); live(t, 'completed', ''); return true;
   }
-  function reset(reasonCode = reasons.reset) { trace('turn-reset', current, reasonCode); clearTurnTimers(); clearTimer(activityTimer); invalidate(current, reasonCode); clearGate(current); current = null; rejectedPartialKey = null;
+  function reset(reasonCode = reasons.reset) { const t = current; trace('turn-reset', current, reasonCode); clearTurnTimers(); clearTimer(activityTimer); invalidate(current, reasonCode); clearGate(current); current = null; rejectedPartialKey = null;
     if (latestActivity) latestActivity = { ...latestActivity, state: 'unknown', quietSeconds: 0, at: now() };
+    live(t, 'reset', '');
   }
   function unconfirmed(message, reason, reasonCode) {
     if (!current) return;
@@ -65,7 +68,7 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
       admitted: accepted(current), awaitingAudioFinal: current.awaitingAudioFinal, finalized: current.finalized,
       partialChars: current.partial.length, segments: current.segments.length, chars: text.length,
       lastTextAt: current.lastTextAt, recognizer: latestActivity?.recognizer ?? null, sourceGen: latestActivity?.sourceGen ?? null };
-    trace('turn-unconfirmed', current, reasonCode); reset(reasonCode); onLive('', { final: false, pending: false });
+    trace('turn-unconfirmed', current, reasonCode); reset(reasonCode);
     rejectedPartialKey = rejected;
     if (hasWords) onError(message, metadata);
   }
@@ -79,9 +82,11 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
       if (wasClosed) trace('turn-gate-ready', t);
       settle(t.request, true); return;
     }
-    if (t.gateClosedAt != null) return;
-    t.gateClosedAt = now(); trace('turn-gate-closed', t, reasonCode);
+    if (t.gateClosedAt == null) { t.gateClosedAt = now(); trace('turn-gate-closed', t, reasonCode); }
     const token = t.request;
+    // Ambient uncertainty must not expire an ordinary conversation. Only an
+    // actual effect waiter owns the bounded permission deadline.
+    if (!token.commitRequested || t.gateTimer != null) return;
     t.gateTimer = setTimer(() => {
       if (current !== t || t.request !== token || !token.valid) return;
       if (commitReady(t)) { updateGate(t); return; }
@@ -127,6 +132,7 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
         canCommit: () => token.isCurrent() && commitReady(t),
         waitForCommit: ({ signal } = {}) => {
           if (!token.isCurrent() || signal?.aborted) return Promise.resolve(false);
+          token.commitRequested = true;
           updateGate(t);
           if (token.canCommit()) return Promise.resolve(true);
           return new Promise(resolve => {
@@ -135,9 +141,10 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
           });
         },
         remember: () => { if (token.canCommit()) return remember(t); },
+        rememberConversation: () => { if (token.isCurrent()) return remember(t, true); },
         skip: () => { if (token.isCurrent()) t.skipped = true; },
         complete: () => complete(t, token) };
-      t.request = token; trace('turn-request', t);
+      t.request = token; trace('turn-request', t); live(t, 'pending');
       // Semantic admission is stable across raw acoustic uncertainty. Effects
       // must independently wait for and recheck canCommit at their boundary.
       try { if (token.isCurrent()) Promise.resolve(onRequest(token)).catch(() => {}); } catch {}
@@ -149,7 +156,7 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if(text===current?.partial){if(meta)current.partialSource={recognizer:meta.recognizer,sourceGen:meta.sourceGen};return;}
     rejectedPartialKey = null;
     if (current?.partial && contentKey(text) === contentKey(current.partial)) {
-      current.partial = text; onLive(textOf(current), { final: false, pending: !!current.request }); return;
+      current.partial = text; live(current, 'partial'); return;
     }
     if (current?.remembered || current?.skipped) { invalidate(current, reasons.next); current = null; }
     else invalidate(current, reasons.text);
@@ -158,14 +165,14 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     recordAudio(current, meta);
     current.partial = text; current.partialSource = meta ? {recognizer:meta.recognizer,sourceGen:meta.sourceGen} : null;
     current.finalized = false; current.acousticWaitStartedAt = null; current.lastTextAt = now(); current.skipped = false;
-    trace('turn-partial'); onLive(textOf(current), { final: false, pending: false }); schedule();
+    trace('turn-partial'); live(current, 'partial'); schedule();
   }
   function final(raw, meta) {
     const text = String(raw || '').trim();
     if (!text) return;
     rejectedPartialKey = null;
     if (current?.finalized && !current.partial && contentKey(current.segments.at(-1)) === contentKey(text)) {
-      if (current.awaitingAudioFinal) { current.awaitingAudioFinal = false; current.awaitingAudioSource = null; trace('turn-final'); onLive(textOf(current), { final: true, pending: accepted(current) }); schedule(); }
+      if (current.awaitingAudioFinal) { current.awaitingAudioFinal = false; current.awaitingAudioSource = null; trace('turn-final'); live(current, accepted(current) ? 'pending' : 'final'); schedule(); }
       return;
     }
     if (current?.remembered || current?.skipped) { invalidate(current, reasons.next); current = null; }
@@ -177,7 +184,7 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if (changed || current.acousticWaitStartedAt == null) current.acousticWaitStartedAt = now();
     if (current.segments.at(-1) !== text || current.partial) current.segments.push(text);
     current.partial = ''; current.partialSource = null; current.audioBeforePartial = null; current.finalized = true; current.awaitingAudioFinal = false; current.awaitingAudioSource = null;
-    trace('turn-final'); onLive(textOf(current), { final: true, pending: !!current.request }); schedule();
+    trace('turn-final'); live(current, 'final'); schedule();
   }
   function activity(meta) {
     const clock = now();
@@ -228,10 +235,10 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if (!current?.partial || !meta || !['recognizer','sourceGen'].every(key=>Number.isSafeInteger(meta[key]) && meta[key]>=0 && meta[key]===current.partialSource?.[key])) return false;
     const t=current;invalidate(t,reasons.text);t.partial='';t.partialSource=null;
     Object.assign(t,t.audioBeforePartial||{audioStartAtMs:undefined,audioEndAtMs:undefined});t.audioBeforePartial=null;
-    if(!t.segments.length){reset(reasons.text);onLive('',{final:false,pending:false});return true;}
+    if(!t.segments.length){reset(reasons.text);return true;}
     // Earlier native finals retain their words. Withdrawing text is not an
     // empty finalizer receipt and cannot cover newer, unconfirmed audio.
-    t.finalized=true;trace('turn-retracted');onLive(textOf(t),{final:true,pending:false});schedule();return true;
+    t.finalized=true;trace('turn-retracted');live(t,'final');schedule();return true;
   }
   return { partial, final, activity, audioFinal, reset, retract,
     recognizerStopped: ({ graceful = false } = {}) => {

@@ -1099,6 +1099,20 @@ let aecOn = false;            // 系统回声消除可用 → 她说话时也能
 let pendingHeard = '';        // 刚听到、还没被主人用过的一句 —— 留着填进输入框
 let pendingAt = 0;
 let heardTimer = null;
+let heardTurn = 0;
+let heardTurnClosed = false;
+
+function clearHeard() {
+  clearTimeout(heardTimer); heardTimer = null;
+  liveText = ''; shownHeard = ''; shownState = ''; pendingHeard = ''; pendingAt = 0;
+}
+
+function acceptHeardTurn(turn) {
+  if (!Number.isSafeInteger(turn) || turn <= 0) return true;
+  if (turn < heardTurn || turn === heardTurn && heardTurnClosed) return false;
+  if (turn > heardTurn) { clearHeard(); heardTurn = turn; heardTurnClosed = false; }
+  return true;
+}
 
 function asrHealthy() {
   const micOk = asrStat.mic === true || asrStat.micSystem === 'granted';
@@ -1168,11 +1182,22 @@ function paintEar() {
 }
 
 /** 实时字幕：主人还在说，字先滚出来 —— 让他确信自己被听见了 */
-function paintLive(text) {
-  liveText = String(text || '').slice(0, 120);
+function paintLive(text, state = {}) {
+  if (state.phase === 'reset') {
+    if (Number.isSafeInteger(state.turn) && state.turn > 0 && state.turn < heardTurn) return;
+    clearHeard(); heardTurn = Math.max(heardTurn, state.turn || 0); heardTurnClosed = true; paintEar(); return;
+  }
+  if (!acceptHeardTurn(state.turn)) return;
+  if (state.phase === 'completed') {
+    liveText = ''; pendingHeard = ''; pendingAt = 0; heardTurnClosed = true;
+    if (shownState === 'pending') shownState = 'done';
+    if (!['ready', 'reply'].includes(shownState)) clearHeardLater(shownState === 'skip' ? 2400 : 3200);
+    paintEar(); return;
+  }
+  liveText = String(text || '').slice(0, 180);
   if (liveText) {
-    clearTimeout(heardTimer);
-    shownHeard = ''; shownState = '';
+    clearTimeout(heardTimer); heardTimer = null;
+    shownHeard = ''; shownState = ''; pendingHeard = ''; pendingAt = 0;
   }
   paintEar();
 }
@@ -1396,15 +1421,16 @@ function paintListen() {
 }
 
 /** 听到一句话：脚下那条撑开显示「你说 · …」，主人一眼能确认有没有被听清 */
-function paintHeard(text, replied, reason) {
+function paintHeard(text, replied, reason, turn) {
   if (!text) return;
+  if (!acceptHeardTurn(turn)) return;
   // 完成通知可能属于已被新一句打断的旧请求，不覆盖当前字幕。
   if (reason !== 'not-addressed' && replied !== undefined && shownHeard !== String(text).slice(0, 180)) return;
   liveText = '';
   shownHeard = String(text).slice(0, 180);
-  shownState = reason === 'not-addressed' ? 'not-addressed' : replied === false ? 'skip' : replied === true
+  shownState = reason === 'not-addressed' ? 'not-addressed' : reason === 'error' ? 'done' : replied === false ? 'skip' : replied === true
     ? (speakingNow ? (shownState === 'reply' ? 'reply' : 'ready') : 'done') : 'pending';
-  pendingHeard = reason === 'not-addressed' ? '' : shownHeard;      // 留着，主人点开输入框时能填进去改
+  pendingHeard = replied === undefined && reason !== 'not-addressed' ? shownHeard : '';
   pendingAt = Date.now();
   paintEar();
   clearTimeout(heardTimer);
@@ -1415,9 +1441,10 @@ function paintHeard(text, replied, reason) {
 
 function clearHeardLater(delay = 3200) {
   clearTimeout(heardTimer);
-  heardTimer = setTimeout(() => {
-    shownHeard = '';
-    shownState = '';
+  const turn = heardTurn;
+  const timer = heardTimer = setTimeout(() => {
+    if (turn !== heardTurn || heardTimer !== timer) return;
+    clearHeard();
     paintEar();
   }, delay);
 }
@@ -1683,7 +1710,7 @@ function wire() {
       case 'scene':
         bubbleController.hide();
         clearWebSources();
-        paintHeard('', false); paintLive(''); paintRecallButton([]);
+        clearHeard(); paintEar(); paintRecallButton([]);
         break;
       case 'avatars': setAvatarList(ev.avatars || []); break;
       case 'avatar-pack-probe': {
@@ -1718,10 +1745,10 @@ function wire() {
         break;
       case 'heard':
         // 听到了什么：只做轻提示，不抢气泡
-        paintHeard(ev.text, ev.replied, ev.reason);
+        paintHeard(ev.text, ev.replied, ev.reason, ev.turn);
         break;
       case 'asrLive':
-        paintLive(ev.text);
+        paintLive(ev.text, ev);
         break;
       case 'aec':
         aecOn = !!ev.on;

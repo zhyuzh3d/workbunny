@@ -247,10 +247,7 @@ var pendingAudioTimes: [ObjectIdentifier: TimeInterval] = [:]
 var pendingAudioSeconds = 0.0
 var lastChangeAt = Date()
 var muted = false
-/// 从什么时候开始闭麦的。超过 25 秒没被打开就强制打开 ——
-/// 上层只要有一条路径漏了 unmute，麦克风就永久哑，而且完全没有报错。
-var mutedAt: Date? = nil
-var aecEnabled = false     // 系统回声消除是否开着（开着就可以边说边听）
+var aecEnabled = false     // 真实输出参考新鲜且 AEC3 当前成功处理；不控制收音开关。
 var finished = false
 var ending = false        // 正在收尾当前句
 var starting = false      // 正在起新会话
@@ -261,11 +258,11 @@ var startedAt = Date()
 // Diagnostic-only metadata. Stage names and numeric fields are allowlisted;
 // transcript text, PCM data and device identity cannot enter these events.
 enum SpeechTraceStage: String, CaseIterable {
-    case tapVPIO = "tap-vpio", analyzerInput = "analyzer-input", replay
+    case tapCapture = "tap-capture", echoOutput = "echo-output", analyzerInput = "analyzer-input", replay
     case sessionStart = "session-start", result, finishStart = "finish-start"
     case finishReturn = "finish-return", resultsEnd = "results-end", utterance, recycle
 }
-let speechTraceFields: Set<String> = ["at", "gen", "currentGen", "frames", "rate", "channels", "measuredChannels", "rms", "peak", "muted", "aec", "accepted", "converted", "conversionError", "buffers", "pendingFrames", "pendingSeconds", "directBuffers", "directFrames", "queuedBuffers", "queuedFrames", "replayedBuffers", "replayedFrames", "start", "end", "finalizedThrough", "isFinal", "textChars", "combinedChars", "removedSegments", "touchesFinalized", "confirmed", "current", "ok", "utteranceCount"]
+let speechTraceFields: Set<String> = ["at", "gen", "currentGen", "frames", "rate", "channels", "measuredChannels", "rms", "peak", "muted", "aec", "accepted", "converted", "conversionError", "buffers", "pendingFrames", "pendingSeconds", "directBuffers", "directFrames", "queuedBuffers", "queuedFrames", "replayedBuffers", "replayedFrames", "start", "end", "finalizedThrough", "isFinal", "textChars", "combinedChars", "removedSegments", "touchesFinalized", "confirmed", "current", "ok", "utteranceCount", "sampleStartAt", "sampleEndAt", "aecRenderFrames", "aecCaptureFrames", "aecResets", "aecDelayMs", "aecErleDb", "referenceRms", "referenceAt", "referenceLagMs", "captureHeadroomMs", "capturePendingFrames"]
 var traceDirectBuffers = 0, traceDirectFrames = 0, traceQueuedBuffers = 0, traceQueuedFrames = 0
 var traceReplayedBuffers = 0, traceReplayedFrames = 0
 
@@ -323,6 +320,7 @@ func isFinished() -> Bool {
 
 let speakerFeatures = SpeakerFeatures(output: emit)
 var engine = AVAudioEngine()
+var echoCancellation: SpeechEchoCancellation?
 var tapInstalled = false
 var inputCont: AsyncStream<AnalyzerInput>.Continuation?
 var analyzer: SpeechAnalyzer?
@@ -333,22 +331,7 @@ var curFormat: AVAudioFormat?
 
 // ---------------------------------------------------------------- 音频格式
 
-/// installTap 只吃硬件原生格式，SpeechAnalyzer 要它自己的格式，中间必须转换
-var converter: AVAudioConverter?
-var converterIn: AVAudioFormat?
-var converterOut: AVAudioFormat?
-
-func makeConverter(inF: AVAudioFormat, outF: AVAudioFormat) -> AVAudioConverter? {
-    if inF == outF { return nil }
-    guard let c = AVAudioConverter(from: inF, to: outF) else { return nil }
-    // 声道数不同（立体声 → 单声道）时**必须**给 channelMap，否则转换直接 -50 paramErr。
-    // 长度 = 输出声道数，值 = 取输入的哪个声道。
-    if inF.channelCount != outF.channelCount {
-        let n = Int(min(outF.channelCount, inF.channelCount))
-        c.channelMap = (0..<n).map { NSNumber(value: $0) }
-    }
-    return c
-}
+var analyzerConversion: AudioPCMStreamConverter?
 
 // ---------------------------------------------------------------- 音频启动
 
@@ -402,8 +385,8 @@ func observeDeliveredAudioLocked(_ buffer: AVAudioPCMBuffer, gen: Int, at: TimeI
     requestQuietEndpointLocked(gen: gen)
 }
 
-func enqueueAudio(_ buffer: AVAudioPCMBuffer, diagnosticSequence: Int? = nil) {
-    let capturedAt = ProcessInfo.processInfo.systemUptime
+func enqueueAudio(_ buffer: AVAudioPCMBuffer, diagnosticSequence: Int? = nil, capturedAt: TimeInterval? = nil) {
+    let capturedAt = capturedAt ?? ProcessInfo.processInfo.systemUptime
     stateLock.lock()
     defer { stateLock.unlock() }
     if let continuation = inputCont {
@@ -431,41 +414,78 @@ func enqueueAudio(_ buffer: AVAudioPCMBuffer, diagnosticSequence: Int? = nil) {
     }
 }
 
-/// 按一种「方案」配置并启动音频链路：开/关 AEC、钉/不钉设备。
-///
-/// 为什么要分方案：系统回声消除（VoiceProcessing）和"钉住指定设备"这两件事，
-/// 在 USB 摄像头那种 4 声道 48k 的输入上会互相冲突，engine.start() 直接抛
-/// -10875（FailedInitialization）。以前只有一种写法，一失败就整机哑掉；
-/// 现在由外层按「效果从好到保底」依次试，第一个能起来的就用。
+func deliverAnalyzerChunk(_ chunk: AudioPCMChunk, captureGen: Int, report: Bool, converted: Bool) {
+    let toSend = chunk.buffer
+    let diagnosticSequence = speechDiagnostic?.capture(toSend, gen: captureGen, audioTime: chunk.audioTime)
+    enqueueAudio(toSend, diagnosticSequence: diagnosticSequence, capturedAt: chunk.endAt)
+    speakerFeatures.process(toSend)
+    if speechTraceEnabled && report {
+        var metadata = speechTraceLevels(toSend)
+        metadata.merge(["accepted": true, "converted": converted, "conversionError": false, "sampleStartAt": chunk.at, "sampleEndAt": chunk.endAt]) { _, next in next }
+        traceSpeechState(.analyzerInput, fields: metadata)
+    }
+}
+func deliverSpeechChunk(_ signal: AudioPCMChunk, captureGen: Int, report: Bool) {
+    do {
+        let chunks = try analyzerConversion?.convert(signal.buffer, at: signal.at) ?? [signal]
+        for chunk in chunks { deliverAnalyzerChunk(chunk, captureGen: captureGen, report: report, converted: chunk.buffer !== signal.buffer) }
+        convFail = 0
+    } catch {
+        if speechTraceEnabled && report { traceSpeechState(.analyzerInput, fields: ["frames": 0, "conversionError": true, "accepted": false]) }
+        convFail += 1
+        emit(["t": "error", "v": "麦克风流格式转换失败，正在重新连接", "code": 21])
+        if convFail >= 3 { fail("麦克风格式转换持续失败，重新连接音频输入", code: 21) }
+    }
+}
+// Only after removing the hardware tap: do not race a converter/AEС context
+// against its callback. Normal Analyzer endpoints leave this physical stream
+// running; only an explicit capture stop flushes its remaining samples.
+func flushAudioCapture() {
+    if tapInstalled { engine.inputNode.removeTap(onBus: 0); tapInstalled = false }
+    engine.stop()
+    let gen = stateLock.withLock { sessionGen }
+    do {
+        for chunk in try echoCancellation?.flush() ?? [] { deliverSpeechChunk(chunk, captureGen: gen, report: false) }
+        for chunk in try analyzerConversion?.flush() ?? [] { deliverAnalyzerChunk(chunk, captureGen: gen, report: false, converted: true) }
+    } catch { emit(["t": "error", "v": "麦克风尾部音频转换失败，未伪造确认", "code": 21]) }
+}
+
+/// 原始麦克风 → 独立 AEC3 → 声纹/格式转换 → 同一份 VAD 与 ASR。
+/// 不启用 AVAudioEngine VoiceProcessing：它的 other-audio ducking 会压低
+/// 整台电脑的外放，且 Electron 的实际播放不在这个原生引擎的输出图中。
 func startAudio(aec: Bool, bind: (AudioDeviceID, String)?, target: AVAudioFormat?) throws {
     if tapInstalled { engine.inputNode.removeTap(onBus: 0); tapInstalled = false }
     engine.stop()
+    echoCancellation?.stop(); echoCancellation = nil
 
-    // 每次尝试都用**全新引擎**。一次 setVoiceProcessingEnabled 失败会把输入
-    // 音频单元留在坏状态，同一个引擎上重试只会继续 -10875 / 或者 tap 装了却不回调。
+    // 每次输入设备尝试均新建引擎，避免失败设备留下坏的音频单元。
     engine = AVAudioEngine()
-
-    if aec {
-        try engine.inputNode.setVoiceProcessingEnabled(true)
-    }
-    aecEnabled = aec
+    stateLock.withLock { aecEnabled = false }
     if let b = bind, !bindInputDevice(engine, b.0) {
         throw NSError(domain: "workbunny", code: 23, userInfo: [NSLocalizedDescriptionKey: "无法连接指定麦克风"])
     }
 
-    // 格式必须在配好 AEC / 设备**之后**、且重新取一次 inputNode 再读：
-    // 上面两步都会重建输入节点，旧引用的格式是过期的（这正是 tap 装了不回调的原因）
+    // 设备绑定会重建节点，必须重新读取硬件格式。
     let inp = engine.inputNode
     let hw = inp.outputFormat(forBus: 0)
     guard hw.channelCount > 0, hw.sampleRate > 0 else {
         throw NSError(domain: "workbunny", code: 1,
                       userInfo: [NSLocalizedDescriptionKey: "麦克风输入格式不可用（可能没有输入设备）"])
     }
-    converterIn = hw
-    converterOut = target
-    converter = target.flatMap { makeConverter(inF: hw, outF: $0) }
+    if aec {
+        var recordReference: ((AudioPCMChunk) -> Void)?
+        if speechDiagnostic?.echoPcmEnabled == true {
+            recordReference = { chunk in
+                speechDiagnostic?.captureEcho(chunk.buffer, stream: "speaker-reference", gen: stateLock.withLock { sessionGen }, audioTime: chunk.audioTime)
+            }
+        }
+        echoCancellation = SpeechEchoCancellation(sourceFormat: hw, recordReference: recordReference) { event in
+            stateLock.withLock { aecEnabled = event["on"] as? Bool == true }
+            emit(event)
+        }
+    }
+    analyzerConversion = target.map { AudioPCMStreamConverter(target: $0) }
     if let tf = target { curFormat = tf }
-    let ratio = (target?.sampleRate ?? hw.sampleRate) / hw.sampleRate
 
     emit(["t": "fmt", "hw": "\(hw)", "tgt": target.map { "\($0)" } ?? "nil"])
 
@@ -490,58 +510,36 @@ func startAudio(aec: Bool, bind: (AudioDeviceID, String)?, target: AVAudioFormat
         if report { emit(["t": "capture", "buffers": count, "muted": m]) }
         if var metadata = traceState {
             metadata.merge(speechTraceLevels(buffer)) { _, next in next }
-            metadata.merge(["buffers": count, "muted": m, "aec": aecEnabled, "accepted": !m || aecEnabled]) { _, next in next }
-            traceSpeech(.tapVPIO, metadata)
+            metadata.merge(["buffers": count, "muted": m, "aec": aecEnabled, "accepted": true]) { _, next in next }
+            traceSpeech(.tapCapture, metadata)
         }
-        speakerFeatures.process(buffer)
-        // 有回声消除时不用闭麦：自己说话也能继续听主人
-        if m && !aecEnabled { return }
-
-        var toSend: AVAudioPCMBuffer = buffer
-        if let conv = converter, let tf = target {
-            // ⚠ 两件事一起踩过，都别再改回去：
-            //  1) 容量必须 >= **输入**帧数（convert 内部断言），少了会抛 ObjC 异常，
-            //     Swift 接不住 —— 整个进程被打死，表现是"只有 tap、没有电平、永远听不见"。
-            //  2) 48k → 16k 属于采样率转换，必须用带 block 的 API；
-            //     简单的 convert(to:from:) 直接 -50 paramErr。
-            let inFrames = Double(buffer.frameLength)
-            let cap = AVAudioFrameCount(max(inFrames, inFrames * ratio) + 4096)
-            if let out = AVAudioPCMBuffer(pcmFormat: tf, frameCapacity: cap) {
-                var fed = false
-                var cErr: NSError?
-                let st = conv.convert(to: out, error: &cErr) { _, outStatus in
-                    if fed { outStatus.pointee = .noDataNow; return nil }
-                    fed = true
-                    outStatus.pointee = .haveData
-                    return buffer
-                }
-                if st == .error || cErr != nil {
-                    if speechTraceEnabled && report { traceSpeechState(.analyzerInput, fields: ["frames": 0, "conversionError": true, "accepted": false]) }
-                    convFail += 1
-                    if convFail <= 3 {
-                        emit(["t": "error",
-                              "v": "重采样失败：" + (cErr?.localizedDescription ?? "status=\(st.rawValue)"),
-                              "code": 21])
-                    }
-                    if convFail >= 3 { fail("麦克风格式转换持续失败，重新连接音频输入", code: 21) }
-                    return
-                } else if out.frameLength > 0 {
-                    toSend = out
-                }
-            }
+        // A missing/denied output reference degrades honestly to raw capture;
+        // it never turns a playback notification into microphone suppression.
+        if speechDiagnostic?.echoPcmEnabled == true {
+            speechDiagnostic?.captureEcho(buffer, stream: "raw-microphone", gen: captureGen, audioTime: audioTime)
         }
-        let diagnosticSequence = speechDiagnostic?.capture(toSend, gen: captureGen, audioTime: audioTime)
-        enqueueAudio(toSend, diagnosticSequence: diagnosticSequence)
+        let signalChunk: AudioPCMChunk
+        if let echoCancellation {
+            guard let processed = echoCancellation.processChunk(buffer, at: audioTime) else { return }
+            signalChunk = processed
+        } else {
+            let at = audioTime.isHostTimeValid ? AVAudioTime.seconds(forHostTime: audioTime.hostTime) : now - Double(buffer.frameLength) / buffer.format.sampleRate
+            signalChunk = AudioPCMChunk(buffer: buffer, at: at)
+        }
+        let signal = signalChunk.buffer
         if speechTraceEnabled && report {
-            var metadata = speechTraceLevels(toSend)
-            metadata.merge(["accepted": true, "converted": toSend !== buffer, "conversionError": false]) { _, next in next }
-            traceSpeechState(.analyzerInput, fields: metadata)
+            var metadata = speechTraceLevels(signal)
+            metadata.merge(["accepted": true, "aec": aecEnabled, "sampleStartAt": signalChunk.at, "sampleEndAt": signalChunk.endAt]) { _, next in next }
+            if let echoCancellation { metadata.merge(echoCancellation.diagnostics()) { _, next in next } }
+            traceSpeech(.echoOutput, metadata)
         }
 
-        // 电平必须从**原始硬件缓冲**算（Float32）；转换后的目标格式可能是 Int16，
-        // floatChannelData 直接是 nil —— 之前电平一直是空的，就是这个原因。
-        if count % 3 == 0, let ch = buffer.floatChannelData?[0] {
-            let n = Int(buffer.frameLength)
+        deliverSpeechChunk(signalChunk, captureGen: captureGen, report: report)
+
+        // UI level and speaker features observe the same post-AEC signal;
+        // the final Analyzer format may be Int16 and cannot be read as float.
+        if count % 3 == 0, let ch = signal.floatChannelData?[0] {
+            let n = Int(signal.frameLength)
             var sum: Float = 0
             for i in 0..<n { sum += ch[i] * ch[i] }
             let rms = (n > 0) ? sqrt(sum / Float(n)) : 0
@@ -602,6 +600,7 @@ func teardown() {
     inputCont = nil
     if tapInstalled { engine.inputNode.removeTap(onBus: 0); tapInstalled = false }
     engine.stop()
+    echoCancellation?.stop(); echoCancellation = nil
 }
 
 @available(macOS 26.0, *)
@@ -941,19 +940,12 @@ func run() async {
         picked = devs.first { $0.1.range(of: wantMic, options: .caseInsensitive) != nil }.map { ($0.0, $0.1) }
     }
 
-    // ── 音频方案阶梯 ────────────────────────────────────────────────
-    // 从"效果最好"到"最保底"依次试，第一个起得来的就用。宁可少回声消除，
-    // 也绝不能哑。
-    //
-    // 主程序统一请求回声消除；不支持的设备在启动时自动退回普通输入，
-    // 不要求用户配置，也不根据某一台开发机的结果关闭所有 Mac 的能力。
+    // AEC3 is independent of AVAudioEngine's hardware input mode. Only retry
+    // microphone selection here; reference permission/health never gates ears.
     var plans: [(String, Bool, Bool)] = []   // (名字, 开AEC, 钉设备)
-    if hasFlag("--aec") {
-        if picked != nil { plans.append(("AEC+指定麦", true, true)) }
-        plans.append(("AEC", true, false))
-    }
-    if picked != nil { plans.append(("指定麦", false, true)) }
-    plans.append(("系统默认", false, false))
+    let useEchoCancellation = hasFlag("--aec")
+    if picked != nil { plans.append((useEchoCancellation ? "原始指定麦+AEC3" : "原始指定麦", useEchoCancellation, true)) }
+    plans.append((useEchoCancellation ? "原始系统默认+AEC3" : "原始系统默认", useEchoCancellation, false))
 
     var audioOK = false
     var lastErr = ""
@@ -984,7 +976,8 @@ func run() async {
         }
     }
     if !audioOK { fail("音频启动失败：\(lastErr)", code: 6) }
-    emit(["t": "aec", "on": aecEnabled])
+    emit(["t": "aec", "on": aecEnabled, "engine": useEchoCancellation ? "webrtc-aec3" : "none",
+          "state": useEchoCancellation ? (aecEnabled ? "active" : "degraded") : "off", "systemDucking": false])
     startedAt = Date()
     lastChangeAt = Date()
 
@@ -1002,25 +995,13 @@ func run() async {
             stateLock.unlock()
             fail("麦克风音频输入中断，正在重新连接", code: 22)
         }
-        // 兜底：闭麦超过 25 秒还没被打开，就当上层漏了 unmute，自己开。
-        // 宁可把自己的一句话当成主人说的，也不能让麦克风永久哑掉。
-        if let at = mutedAt, Date().timeIntervalSince(at) > 125 {
-            muted = false
-            mutedAt = nil
-            endpointPolicy.resetActivity(at: ProcessInfo.processInfo.systemUptime, generation: sessionGen)
-            stateLock.unlock()
-            emit(["t": "warn", "v": "闭麦超过 25 秒，自动开麦（上层漏了 unmute）"])
-            lastChangeAt = Date()
-            return
-        }
-        let m = muted
         let now = ProcessInfo.processInfo.systemUptime
         let gen = sessionGen
         let decision = endpointPolicy.decision(at: now, generation: gen)
         let vadUnavailable = now - endpointPolicy.healthAt >= endpointPolicy.vadHealthTimeoutSeconds
         let endingNow = ending || starting
         stateLock.unlock()
-        if m || endingNow { return }
+        if endingNow { return }
         if !alwaysMode && Date().timeIntervalSince(startedAt) > maxSeconds {
             abortUnconfirmedSession(gen: gen, reason: "capture-max-duration"); return
         }
@@ -1213,6 +1194,14 @@ static func main() {
     if hasFlag("--self-test-speech-activity") {
         emit(selftestSpeechActivity()); return
     }
+    if hasFlag("--self-test-echo-routing") {
+        do { emit(try SpeechEchoCancellation.selfTest()); return }
+        catch { emit(["t": "selfTestFailure", "stage": (error as NSError).code]); fail("回声参考路由离线夹具失败", code: 1) }
+    }
+    if hasFlag("--self-test-audio-pcm-stream") {
+        do { emit(try AudioPCMStreamConverter.selfTest()); return }
+        catch { emit(["t": "selfTestFailure", "stage": (error as NSError).code]); fail("PCM流时钟离线夹具失败", code: 1) }
+    }
     if hasFlag("--self-test-speech-diagnostic") {
         do { emit(try SpeechDiagnostic.selfTest()); return }
         catch { emit(["t": "selfTestFailure", "stage": (error as NSError).code, "failure": (error as? SpeechDiagnostic.Failure).map { String(describing: $0) } ?? "assertion"]); fail("私有语音诊断离线夹具失败", code: 1) }
@@ -1278,9 +1267,10 @@ static func main() {
             Darwin._exit(48)
         }
         do {
-            speechDiagnostic = try SpeechDiagnostic(directory: argValue("--speech-diagnostic-dir", ""), durationMs: ms, pcm: hasFlag("--speech-diagnostic-pcm"), onStop: endSpeechDiagnostic)
+            speechDiagnostic = try SpeechDiagnostic(directory: argValue("--speech-diagnostic-dir", ""), durationMs: ms,
+                pcm: hasFlag("--speech-diagnostic-pcm"), echoPcm: hasFlag("--speech-diagnostic-echo-pcm"), onStop: endSpeechDiagnostic)
         } catch { fail("私有语音诊断目录或文件不安全，未启动采集", code: 41) }
-    } else if hasFlag("--speech-diagnostic-pcm") || hasFlag("--speech-diagnostic-ms") {
+    } else if hasFlag("--speech-diagnostic-pcm") || hasFlag("--speech-diagnostic-ms") || hasFlag("--speech-diagnostic-echo-pcm") {
         fail("私有语音诊断缺少专用目录", code: 40)
     }
 // 只枚举设备：不采集、不弹窗，可以随便从命令行跑
@@ -1319,16 +1309,18 @@ DispatchQueue.global().async {
             }
         case "stop":
             if isFinished() { continue }
+            flushAudioCapture()
             beginEnd("stdin-stop")
             return
         case "quit":
             if speechDiagnostic != nil { endSpeechDiagnostic(0); return }
             exitASR(0)
         case "mute":
-            stateLock.lock(); muted = true; mutedAt = Date(); stateLock.unlock()
+            // Compatibility playback hint only. Actual user privacy controls
+            // stop the capture process; playback cannot disable barge-in.
+            stateLock.lock(); muted = true; stateLock.unlock()
         case "unmute":
-            stateLock.lock(); muted = false; mutedAt = nil; lastChangeAt = Date()
-            endpointPolicy.resetActivity(at: ProcessInfo.processInfo.systemUptime, generation: sessionGen); stateLock.unlock()
+            stateLock.lock(); muted = false; stateLock.unlock()
         default:
             break
         }

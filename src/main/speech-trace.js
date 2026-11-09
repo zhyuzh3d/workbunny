@@ -1,7 +1,7 @@
 'use strict';
 // Optional diagnostic metadata only. Never forward native strings, transcript
 // content, raw audio, device identities or arbitrary object keys to logs.
-const stages=new Set(['tap-vpio','analyzer-input','replay','result','session-start','finish-start','finish-return','results-end','utterance','recycle',
+const stages=new Set(['tap-vpio','tap-capture','echo-output','analyzer-input','replay','result','session-start','finish-start','finish-return','results-end','utterance','recycle',
  'raw-partial','raw-utterance','raw-final','partial-accepted','partial-pending-barge','partial-retracted','partial-drop-enrollment','partial-drop-speaker','partial-drop-echo','partial-drop-barge','partial-drop-mode',
  'utterance-accepted','utterance-drop-enrollment','utterance-drop-speaker','utterance-drop-mode','utterance-drop-echo','utterance-drop-barge','final-accepted','final-drop-enrollment','final-drop-speaker','final-drop-mode','final-drop-echo','final-drop-barge',
  'turn-partial','turn-final','turn-retracted','turn-checkpoint','turn-audio-final','turn-request','turn-gate-closed','turn-gate-ready','turn-completed','turn-invalidated','turn-remember','turn-reset','turn-unconfirmed','turn-reset-speaker','history-written','history-unconfirmed','request-drop-noise','request-drop-echo','request-drop-wake','request-accepted',
@@ -9,7 +9,8 @@ const stages=new Set(['tap-vpio','analyzer-input','replay','result','session-sta
 const fields=new Set(['at','gen','currentGen','seq','recognizer','pendingFrames','pendingSeconds','frames','rate','channels','measuredChannels','rms','peak','inputFrames','outputFrames','muted','aec','accepted','converted','conversionError','buffers','current','utteranceCount',
  'directBuffers','directFrames','queuedBuffers','queuedFrames','replayedBuffers','replayedFrames','start','end','finalizedThrough','isFinal','textChars','combinedChars','removedSegments','touchesFinalized','confirmed','ok',
  'chars','turn','segments','partialChars','finalized','requested','remembered','skipped',
- 'commitReady','waitingAudio','gateClosedMs','reasonCode','elapsedMs','taskAdmitted','activityAgeMs','activitySeq','sourceGen','quietSeconds']);
+ 'commitReady','waitingAudio','gateClosedMs','reasonCode','elapsedMs','taskAdmitted','activityAgeMs','activitySeq','sourceGen','quietSeconds',
+ 'sampleStartAt','sampleEndAt','aecRenderFrames','aecCaptureFrames','aecResets','aecDelayMs','aecErleDb','referenceRms','referenceAt','referenceLagMs','captureHeadroomMs','capturePendingFrames']);
 function sanitizeSpeechTrace(value){
  if(!value||!stages.has(value.stage))return null;
  const result={stage:value.stage};

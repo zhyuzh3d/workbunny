@@ -24,6 +24,8 @@ function code(dir) { for (const entry of fs.readdirSync(path.join(root, dir), { 
 code('src');
 for(const pack of require('../src/main/software-skill-package').loadSoftwarePackages()){copy('src/software-skills/'+pack.id+'/manifest.json');for(const resource of pack.resources)copy('src/software-skills/'+pack.id+'/'+resource.path);}
 for (const file of fs.readdirSync(path.join(root, 'licenses'))) copy('licenses/' + file);
+for (const file of fs.readdirSync(path.join(root, 'native/vendor/aec3/LICENSES'))) copy('native/vendor/aec3/LICENSES/' + file);
+for (const file of ['README.md', 'sources.json']) copy('native/vendor/aec3/' + file);
 for (const relative of ['package.json','README.md','LICENSE','THIRD_PARTY_NOTICES.md',...BRAND_FILES,'src/renderer/assets/icons/workbuddy-logo.png']) copy(relative);
 for (const asset of manifest.assets) {
   if (crypto.createHash('sha256').update(fs.readFileSync(path.join(root, asset.path))).digest('hex') !== asset.sha256) throw new Error('资源与许可清单不一致：' + asset.path);

@@ -3,16 +3,6 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const {EventEmitter}=require('node:events'),{PassThrough}=require('node:stream');
 const {SpeechDiagnostic,PrivateJournal,createBundle,MAX_SESSIONS}=require('../src/main/speech-diagnostic'),{SpeakerFilter}=require('../src/main/speaker-filter'),{createVoiceTurns}=require('../src/main/voice-turns'),{Asr}=require('../src/main/asr');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-async function waitForRequest(controller) {
- const deadline=Date.now()+200;
- while(controller.session&&Date.now()<deadline){
-  await controller.session.writer.tail;
-  const text=await fsp.readFile(path.join(controller.session.directory,'host-events.ndjson'),'utf8');
-  if(text.includes('"event":"host-request-sink"'))return;
-  await delay(2);
- }
- throw Error('private request was not admitted within its test deadline');
-}
 function fixture(t,overrides={}){
  const directory=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bunny-private-speech-'))),root=path.join(directory,'diagnostics'),processes=[],calls=[],logs=[];
  const controller=new SpeechDiagnostic({root,bin:'/offline/asr',options:()=>({always:true,lang:'zh-CN',silenceMs:950,maxSeconds:45,device:'unchanged',noMicAsk:true}),speakerFilter:new SpeakerFilter(),suspendNormal:()=>calls.push('normal-killed-and-discarded'),
@@ -25,9 +15,11 @@ test('diagnostic defaults produce no directory, process or ordinary log, and inv
  assert(!fs.existsSync(f.root));assert.deepEqual(f.calls,[]);
 });
 test('isolated destructive transcript can only reach private filters/turn sinks, never a business receiver',async t=>{
- const f=fixture(t),text='立即执行这句测试文字并发送消息';await f.controller.start({durationMs:500,pcm:true});const p=f.processes[0];assert.deepEqual(f.calls,['normal-killed-and-discarded','private-spawn']);
+ t.mock.timers.enable({apis:['Date','setTimeout','setInterval'],now:0});const requests=[];
+ const f=fixture(t,{createTurns:opts=>createVoiceTurns({...opts,pauseMs:1,turnMs:5,finalWaitMs:300,onRequest:token=>{requests.push(token);opts.onRequest(token);}})}),text='立即执行这句测试文字并发送消息';await f.controller.start({durationMs:500,pcm:true});const p=f.processes[0];assert.deepEqual(f.calls,['normal-killed-and-discarded','private-spawn']);
  assert.equal(p.opts.device,'unchanged');assert.equal(p.opts.silenceMs,950);assert.equal(p.opts.maxSeconds,45);assert.equal(p.opts.diagnostic.pcm,true);assert(p.opts.diagnostic.durationMs<=500);
- p.opts.diagnostic.record({t:'utterance',v:text,gen:2});p.emit('partial',text);p.emit('utterance',text);p.activity();await waitForRequest(f.controller);await f.controller.finish();
+ p.opts.diagnostic.record({t:'utterance',v:text,gen:2});p.emit('partial',text);p.emit('utterance',text);p.activity();
+ t.mock.timers.tick(4);assert.equal(requests.length,0);t.mock.timers.tick(1);assert.equal(requests.length,1);await f.controller.finish();
  const directory=await f.controller.directory(),events=(await fsp.readFile(path.join(directory,'host-events.ndjson'),'utf8')).trim().split('\n').map(JSON.parse);
  assert(events.some(row=>row.event==='host-native-receipt'&&row.message.v===text));assert(events.some(row=>row.event==='host-filter'&&row.text===text));assert(events.some(row=>row.event==='host-turn-live'&&row.text===text));assert(events.some(row=>row.event==='host-request-sink'&&row.text===text&&row.businessDispatch===false));
  assert(events.filter(row=>row.event==='host-request-sink').every(row=>row.businessDispatch===false));assert.deepEqual(events.map(row=>row.seq),events.map((_,i)=>i+1));assert.deepEqual(events.filter(row=>row.event==='host-activity').map(row=>row.activitySeq),[1,2]);assert.deepEqual(f.logs,[]);assert.equal(p.running,false);assert.deepEqual(p.killed,{discard:true});assert.equal(f.controller.blocked,true);assert.equal(f.processes.length,1);
@@ -46,13 +38,17 @@ test('unconfirmed private speech closes its recognizer within the turn bound and
  const rows=before.trim().split('\n').map(JSON.parse);assert.equal(rows.filter(row=>row.event==='host-turn-unconfirmed'&&row.reason==='acoustic-timeout').length,1);assert(!rows.some(row=>row.event==='host-request-sink'));
 });
 test('an admitted private turn has a separate bounded commit wait and records the distinct timeout',async t=>{
- const f=fixture(t);await f.controller.start({durationMs:1200});const p=f.processes[0];p.emit('partial','synthetic admitted request');p.emit('utterance','synthetic admitted request.');p.activity();await waitForRequest(f.controller);
- const file=path.join(f.controller.session.directory,'host-events.ndjson');await f.controller.session.writer.tail;
+ t.mock.timers.enable({apis:['Date','setTimeout','setInterval'],now:0});const requests=[];
+ const f=fixture(t,{createTurns:opts=>createVoiceTurns({...opts,pauseMs:1,turnMs:5,finalWaitMs:300,onRequest:token=>{requests.push(token);opts.onRequest(token);}})});await f.controller.start({durationMs:1200});const p=f.processes[0];p.emit('partial','synthetic admitted request');p.emit('utterance','synthetic admitted request.');p.activity();
+ t.mock.timers.tick(4);assert.equal(requests.length,0);t.mock.timers.tick(1);assert.equal(requests.length,1);
+ const session=f.controller.session,file=path.join(session.directory,'host-events.ndjson');await session.writer.tail;
  assert.equal(fs.readFileSync(file,'utf8').trim().split('\n').map(JSON.parse).filter(row=>row.event==='host-request-sink').length,1);
- p.activity('unknown');await delay(350);assert.equal(f.controller.active,false);assert.equal(f.controller.status().reason,'voice-unconfirmed');assert.deepEqual(p.killed,{discard:true});
+ p.activity('unknown');const commit=requests[0].waitForCommit();t.mock.timers.tick(299);assert.equal(f.controller.active,true);assert.equal(requests[0].isCurrent(),true);
+ t.mock.timers.tick(1);assert.equal(await commit,false);assert.equal(session.ending,true);assert.equal(session.reason,'voice-unconfirmed');assert(session.finishing);await session.finishing;
+ assert.equal(f.controller.active,false);assert.equal(f.controller.status().reason,'voice-unconfirmed');assert.deepEqual(p.killed,{discard:true});
  const before=await fsp.readFile(file,'utf8'),rows=before.trim().split('\n').map(JSON.parse);
  assert.equal(rows.filter(row=>row.event==='host-request-sink').length,1);assert(rows.some(row=>row.event==='host-turn-unconfirmed'&&row.reason==='commit-timeout'&&row.admitted===true));
- p.emit('utterance','late synthetic result');await delay(5);assert.equal(await fsp.readFile(file,'utf8'),before);
+ p.emit('utterance','late synthetic result');t.mock.timers.tick(5);assert.equal(await fsp.readFile(file,'utf8'),before);
 });
 test('private diagnostics require both final text and fresh acoustic quiet before their request sink',async t=>{
  const f=fixture(t);await f.controller.start({durationMs:500});const p=f.processes[0];p.emit('partial','private confirmation fixture');await delay(5);p.emit('utterance','private confirmation fixture');await delay(8);

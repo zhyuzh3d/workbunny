@@ -22,3 +22,7 @@ Known raw-file redistribution-restricted motions remain excluded. The reviewed s
 ## libfvad / WebRTC voice activity detection
 
 The native speech activity observer includes unmodified libfvad C sources, pinned to commit `532ab666c20d3cfda38bca63abbb0f152706c369` from https://github.com/dpirch/libfvad. Copyright 2011–2012 The WebRTC project authors and 2016 Daniel Pirch. Distributed under BSD-3-Clause; the complete license, authors, patent grant and source provenance are in `licenses/libfvad-LICENSE`, `libfvad-AUTHORS`, `libfvad-PATENTS` and `libfvad-SOURCE.json`. No model download is required.
+
+## WebRTC AEC3 echo cancellation
+
+The native echo canceller uses webrtc-audio-processing 2.1 (WebRTC M131) and Abseil 20240722.0. Source provenance and the complete licenses and notices, including WebRTC's patent grant and bundled FFT and rnnoise notices, are in `native/vendor/aec3/README.md`, `sources.json`, and `LICENSES/` alongside the application resources.

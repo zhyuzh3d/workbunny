@@ -65,7 +65,7 @@ class SpeechDiagnostic{
    const opts=this.options();s.opts=opts;record('host-clock-start',{durationMs,pcm,options:opts});
    const wakeHit=text=>s.asr?.wakeHit?.(text)===true||this.nameHit(text);
    const turns=this.createTurns({requireActivity:true,allowShort:()=>this.state().allowShort===true,onCheckpoint:metadata=>s.asr?.checkpoint?.(metadata),onTrace:value=>record('host-turn-trace',value),
-    onLive:(text,value)=>record('host-turn-live',{text,...value,turn:turns.snapshot()?.id,reason:value.final&&this.state().wakeOnly&&!wakeHit(text)?'not-addressed':'live'}),
+    onLive:(text,value)=>record('host-turn-live',{text,...value,reason:value.final&&this.state().wakeOnly&&!wakeHit(text)?'not-addressed':'live'}),
     onInvalidate:()=>record('host-turn-invalidated'),onError:(_message,metadata)=>{record('host-turn-unconfirmed',{reason:metadata?.reason||'unconfirmed',admitted:metadata?.admitted===true});if(['confirmation-timeout','acoustic-timeout','commit-timeout'].includes(metadata?.reason))queueMicrotask(()=>{if(this.session===s)void this.finish('voice-unconfirmed');});},
     onRemember:(text,value)=>{record('host-remember-sink',{text,...value});return {id:'diagnostic-only'};},
     onRequest:token=>{const value=this.state(),reason=!meaningful(token.text,value.allowShort===true)?'noise':this.recentEcho(token.text)?'echo':value.wakeOnly&&!wakeHit(token.text)?'wake':'accepted';if(['echo','wake'].includes(reason))token.skip();record('host-request-sink',{text:token.text,turn:token.id,reason,businessDispatch:false});}

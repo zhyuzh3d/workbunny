@@ -961,7 +961,13 @@ function speak(text, { motion, emo, silent = false, messageId,privateSpeech=fals
   if (silent) return;
   const parts = []; let chunk = '';
   const flush = () => { if (chunk.trim()) parts.push(chunk.trim()); chunk = ''; };
-  const splitter = llm.makeSentenceSplitter(sentence => { if (chunk.length + sentence.length > 180) flush(); chunk += sentence; });
+  const splitter = llm.makeSentenceSplitter(sentence => {
+    if (chunk.length + sentence.length > 180) flush();
+    chunk += sentence;
+    // Let the complete opening answer synthesize first. Later sentences keep
+    // the existing larger blocks and are prepared by the same queue prefetch.
+    if (!parts.length) flush();
+  });
   splitter.push(clean); splitter.flush(); flush();
   for (const part of parts) for (let offset = 0; offset < part.length; offset += 400) speechQueue.push({ text: part.slice(offset, offset + 400), emo, messageId,privateSpeech });
   pumpSpeech();
@@ -991,8 +997,8 @@ function dialogueReady() {
   return c.brain.source === 'apikey' ? !!config.resolveLLM(c).apiKey : connection.status().ready;
 }
 
-// This gate owns no business state: an unconfirmed input cannot occupy busy,
-// cancel another request, read memory, call a model or present an error reply.
+// Task admission, explicit memory/self changes and sensitive output require
+// fresh acoustic permission in addition to a still-current accepted input.
 async function committedVoice(voiceTurn, { signal, timeoutMs = 8000 } = {}) {
   if (!voiceTurn) return true;
   const epoch = contextEpoch, generation = memory?.generation;
@@ -1017,13 +1023,14 @@ function selfSystem() {
 }
 async function think({ userText, internal = false, allowSpeech = true, judge = false, voiceTurn, userMessage, perception }) {
   if (voiceTurn && (voiceTurn.accepted !== true || !voiceTurn.isCurrent())) return null;
+  const retireVoice = () => { if(voiceTurn?.isCurrent())voiceTurn.complete?.(); };
   const localTaskControl = internal ? null : dialogueActions.taskControl(userText, agent ? agent.currentTask() : desktop?.task);
-  if (storageBusy || storageError || !localTaskControl && !dialogueReady()) { voiceTurn?.skip(); send('toast', { text: storageError || connection.status().note }); return null; }
+  if (storageBusy || storageError || !localTaskControl && !dialogueReady()) { voiceTurn?.skip(); send('toast', { text: storageError || connection.status().note }); retireVoice(); return null; }
   const c = config.load(), scene = currentScene();
   let requestEpoch = contextEpoch;
-  if (screenLocked || (c.memory.enabled && !memory?.ready)) { send('toast', { text: '请先解锁电脑与记忆，再继续对话。' }); return null; }
+  if (screenLocked || (c.memory.enabled && !memory?.ready)) { send('toast', { text: '请先解锁电脑与记忆，再继续对话。' }); retireVoice(); return null; }
   const L = config.resolveLLM(c), taskControl = localTaskControl;
-  if (!taskControl && L.transport !== 'workbuddy' && !L.apiKey) { send('toast', { text: '请先在设置中配置智力。' }); return null; }
+  if (!taskControl && L.transport !== 'workbuddy' && !L.apiKey) { send('toast', { text: '请先在设置中配置智力。' }); retireVoice(); return null; }
   activeThought?.abort();
   const controller = new AbortController(); activeThought = controller; busy = true;
   const deadline = require('./bounded-wait').createBoundedWait({ controller, timeoutMs: (Number(L.timeoutMs) || 55000) + 15000,
@@ -1068,7 +1075,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
         if(innerSignal.aborted||!record||requestEpoch!==contextEpoch||generation!==memory?.generation||!memory?.ready)return;
         return memory.addMessageOnce('reply:' + record.id, 'assistant', text, { delivery: 'task-receipt', scene, sources: [record.id], turnId: record.value.turnId || record.id });
       }).catch(()=>log('[memory] 任务控制回执暂未保存')).finally(()=>receiptWait.close());
-      if(voiceTurn){send('heard',{text:userText,replied:true});voiceTurn.complete?.();}
+      if(voiceTurn){send('heard',{text:userText,replied:true,turn:voiceTurn.id});voiceTurn.complete?.();}
       return { text, reply: { text }, taskControl: true };
     }
     const preparedSelf = await selfSystem().prepareContext({userText,internal,scene,recent:history,settings:c,signal:controller.signal,isCurrent:current,local,
@@ -1133,11 +1140,17 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     log(`[brain] 完成 ${Date.now() - started}ms（${r.attempts || 1}次请求 · ${L.provider}/${r.model || L.model}）`);
     if (r.cognitionDegraded) log('[brain] 对话协议降级为已校验核心回复' + (['json', 'envelope', 'review', 'reply', 'prediction'].includes(r.cognitionFailureStage) ? '（阶段：' + r.cognitionFailureStage + '）' : ''));
     const reply = internal ? { text: r.text } : r.reply;
-    if (!await admitEffects()) return null;
-    if (reply?.skipped) { voiceTurn?.skip(); send('heard', { text: userText, replied: false });voiceTurn?.complete?.();return { ...r, text: '<skip>' }; }
+    if (!current()) return null;
+    if (reply?.skipped) { voiceTurn?.skip(); send('heard', { text: userText, replied: false, turn: voiceTurn?.id });voiceTurn?.complete?.();return { ...r, text: '<skip>' }; }
+    // A confirmed ordinary answer is conversational output. Raw background
+    // activity may veto an operation, but cannot discard this answer. Accepted
+    // new words still invalidate current() and cancel/merge the real turn.
+    const needsCommit = !!reply?.intent || sensitiveTurn;
+    const admitReply = () => needsCommit ? admitEffects() : Promise.resolve(current());
+    if (!await admitReply()) return null;
     if (voiceTurn) {
-      if (!effectsCurrent()) return null;
-      userMessage = voiceTurn.remember();
+      if (!current()) return null;
+      userMessage = needsCommit ? voiceTurn.remember() : voiceTurn.rememberConversation();
     }
     let userRecord = !internal ? await local(() => userMessage) : null;
     if (!internal && !userRecord && !voiceTurn && c.memory.enabled) userRecord = await local(() => pushHistory('user', userText, { scene,perception:perception||require('./perception').keyboard() }));
@@ -1146,7 +1159,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     const sources = [...new Set([userRecord?.id, ...(memoryContext.sourceIds || []), ...(workContext.sourceIds || []), ...secretaryContext.sourceIds,
       ...(!internal ? cognitionContext.sourceIds : []), ...growthContext.sourceIds, ...(recallSession?.sourceIds || [])].filter(Boolean))];
     if (sources.length > 200) throw new Error('本轮参考资料过多，请缩小范围');
-    if (!await admitEffects()) return null;
+    if (!await admitReply()) return null;
     let text = reply?.taggedText || reply?.text || r.text || '';
     if (reply?.intent) {
       if (internal) return null;
@@ -1183,7 +1196,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     const postureIntent = internal || activeAvatarPack() ? null : require('./posture-intent').postureIntent(userText);
     const gesture = postureIntent || tags.motions[0] || ({ happy: 'cheer', sad: 'sorry', angry: 'angry', surprised: 'surprise', relaxed: 'idle' })[tags.emos[0]];
     if (gesture) {
-      if (!await admitEffects()) return null;
+      if (!await admitReply()) return null;
       const actual = await deadline.run(() => embodiment.perform(gesture, internal ? 'autonomy' : 'reply', { allowPostureChange: !!postureIntent }));
       if (!current()) return null;
       motionStarted = actual.ok;
@@ -1191,7 +1204,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
     }
     let record = null;
     if (!internal && c.memory.enabled) {
-      if (!await admitEffects()) return null;
+      if (!await admitReply()) return null;
       const cognition = r.cognition ? { ...r.cognition, previousReplyId: cognitionContext.previousReplyId, selfRevision: role?.revision || 0, dialogueId } : null;
       if (cognition && !cognitionContext.previousReplyId) cognition.review = { ...cognition.review, grade: 'unassessed' };
       if (cognition && reply.intent) cognition.prediction = null;
@@ -1201,7 +1214,7 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       record = result.record;
       if (['opposite', 'branch_miss'].includes(cognition?.review.grade) || cognitionContext.data.consecutiveMisses >= 2 || /不是这个意思|你误会|先听我说/u.test(userText)) maintenance?.requestReflection('conversation-correction');
     }
-    if (!await admitEffects()) return null;
+    if (!await admitReply()) return null;
     if (!internal) {
       history.push({ role: 'assistant', content: r.text, domain: scene, visibilityFloor: scopePolicy.rank(scene) }); history = history.slice(-24);
       if (record) { presentedReplies.add(record.id); if (presentedReplies.size > 256) presentedReplies.delete(presentedReplies.values().next().value); }
@@ -1211,29 +1224,31 @@ async function think({ userText, internal = false, allowSpeech = true, judge = f
       lastDialogueAt = Date.now();
     }
     if (internal) presentedReplies.clear();
-    if (allowSpeech) { if(!await admitEffects())return null;speak(r.text, { emo: tags.emos[0], messageId: record?.id,privateSpeech:sensitiveTurn }); }
+    if (allowSpeech) { if(!await admitReply())return null;speak(r.text, { emo: tags.emos[0], messageId: record?.id,privateSpeech:sensitiveTurn }); }
     else {
       if (tags.motions[0] && !motionStarted) log('[motion] 本轮动作未确认执行');
       if (tags.emos[0]) send('emo', { key: tags.emos[0] });
     }
-    if(voiceTurn){send('heard',{text:userText,replied:true});voiceTurn.complete?.();}
+    if(voiceTurn){send('heard',{text:userText,replied:true,turn:voiceTurn.id});voiceTurn.complete?.();}
     return r;
   } catch (error) {
     if(voiceTurn&&modelStartedAt!==null&&!modelFinished)voiceMetadata({stage:controller.signal.aborted||!current()?'voice-model-abort':'voice-model-end',turn:voiceTurn.id,ok:false,elapsedMs:Date.now()-modelStartedAt});
     const timedOut = ['E_THINK_TIMEOUT', 'E_LOCAL_WAIT_TIMEOUT'].includes(error.code) && activeThought === controller &&
       requestEpoch === contextEpoch && generation === memory?.generation && (!voiceTurn || voiceTurn.isCurrent());
     if (!current() && !timedOut) return null;
-    if(voiceTurn&&!await committedVoice(voiceTurn,{signal:timedOut?undefined:controller.signal}))return null;
+    if(voiceTurn&&!voiceTurn.isCurrent())return null;
     log('[brain] 请求未完成：' + (error.code || error.name || 'error'));
     if (error.code === 'E_REPLY_PROTOCOL' && ['json', 'envelope', 'review', 'reply', 'prediction'].includes(error.protocolStage)) log('[brain] 格式校验阶段：' + error.protocolStage);
     if (error.code === 'E_CONTEXT_BUDGET' && error.budget) log('[brain] 输入预算', error.budget);
     const failureText = error.code === 'E_REPLY_PROTOCOL' ? '这次没能正常生成回复，请再试一次。' : '暂时没能回复：' + error.message;
     send('chat', { role: 'assistant', text: failureText });
     if (allowSpeech && error.code === 'E_REPLY_PROTOCOL') speak(failureText);
+    if(voiceTurn)send('heard',{text:userText,replied:false,reason:'error',turn:voiceTurn.id});
     voiceTurn?.complete?.();
     return null;
   } finally {
     deadline.close();
+    retireVoice();
     if (activeThought === controller) { activeThought = null; busy = false; send('think', { on: false }); memory?.scheduleExtraction(); }
   }
 }
@@ -1790,10 +1805,12 @@ function worthJudging(text) {
 function nameHit(text) { const c = config.load(); return asr?.wakeHit?.(text) === true || require('./wake-name').hit(text, c.buddy.name, c.asr.wakeAliases || []); }
 
 function publishVoiceLive(text, state) {
+  const lifecycle = { turn: state.turn, turnId: state.turnId, phase: state.phase };
+  if (['reset','completed'].includes(state.phase)) { send('asrLive', { text: '', ...lifecycle }); return; }
   const notAddressed = state.final && config.load().asr.wakeOnly && !nameHit(text);
-  if (notAddressed) send('heard', { text, replied:false, reason:'not-addressed' });
-  else if (state.final && state.pending) send('heard', { text });
-  else send('asrLive', { text });
+  if (notAddressed) send('heard', { text, replied:false, reason:'not-addressed', ...lifecycle });
+  else if (state.final && state.pending) send('heard', { text, ...lifecycle });
+  else send('asrLive', { text, ...lifecycle });
 }
 
 /** 每听到一句 → 先判断是不是在对我说，是就回，不是就闭嘴（一次调用搞定） */
@@ -1846,7 +1863,7 @@ async function handleUtterance(text, voiceTurn) {
     return;
   }
   const c = config.load();
-  if (c.asr.wakeOnly && !nameHit(t)) { traceSpeech({stage:'request-drop-wake',chars:t.length});voiceTurn?.skip();send('heard', { text:t, replied:false, reason:'not-addressed' });voiceTurn?.complete?.();return; }
+  if (c.asr.wakeOnly && !nameHit(t)) { traceSpeech({stage:'request-drop-wake',chars:t.length});voiceTurn?.skip();send('heard', { text:t, replied:false, reason:'not-addressed',turn:voiceTurn?.id });voiceTurn?.complete?.();return; }
   if (speaking) {
     if (!bargeInReady(t)) { voiceTurn?.skip();voiceTurn?.complete?.();return; }
     log('[listen] barge-in');
@@ -1857,7 +1874,7 @@ async function handleUtterance(text, voiceTurn) {
   lastHeardAt = Date.now();
   autonomy?.pause();
   taskNotifications?.invalidate();
-  send('heard', { text: t });
+  send('heard', { text: t, turn: voiceTurn?.id });
   if (voiceTurn) {log(`[listen] 已接纳：停顿 ${Date.now() - voiceTurn.heardAt}ms`);voiceMetadata({stage:'voice-admitted',turn:voiceTurn.id,accepted:true,commitReady:voiceTurn.canCommit()});}
   log(`[listen] heard ${t.length} 字`);
 
@@ -1869,7 +1886,7 @@ async function handleUtterance(text, voiceTurn) {
     stopSpeaking();
     send('chat', { role: 'assistant', text: '（好，我安静。）' });
     log('[quiet] 主人让我安静 10 分钟');
-    send('heard', { text: t, replied: true });
+    send('heard', { text: t, replied: true, turn: voiceTurn?.id });
     if(voiceTurn){asrFailStreak=0;voiceTurn.complete?.();}
     return;
   }
@@ -1879,7 +1896,7 @@ async function handleUtterance(text, voiceTurn) {
     const userMessage = voiceTurn ? undefined : pushHistory('user', t, {perception:require('./perception').speech()});
     log('[listen] name hit -> direct reply');
     const r = await think({ userText: t, voiceTurn, userMessage,perception:require('./perception').speech() });
-    if (r && (!voiceTurn || voiceTurn.isCurrent())) send('heard', { text: t, replied: true });
+    if (r && (!voiceTurn || voiceTurn.isCurrent())) send('heard', { text: t, replied: true, turn: voiceTurn?.id });
     return;
   }
 
@@ -1893,7 +1910,7 @@ async function handleUtterance(text, voiceTurn) {
   const r = await think({ userText: t, judge: true, voiceTurn,perception:require('./perception').speech() });
   if (!r || (voiceTurn && !voiceTurn.isCurrent())) return;
   const skipped = /<\s*skip\s*\/?>/i.test(r.text || '');
-  send('heard', { text: t, replied: !skipped });
+  send('heard', { text: t, replied: !skipped, turn: voiceTurn?.id });
 }
 
 /** 主动要权限：会真的弹系统窗，所以只在用户点「检查权限」时调用 */
@@ -3475,9 +3492,10 @@ if (!lock) {
       log('[asr] 音频链路就绪（方案：' + (plan || '?') + '）');
       send('aec', { on: !!asr.aec, plan });
     });
-    asr.on('aec', (on) => {
-      log('[asr] 回声处理 ' + (on ? '已开启；插话仍须通过声学、文字及播放来源核查' : '不可用；继续聆听并核查声学、文字及播放来源'));
-      send('aec', { on });
+    asr.on('aec', (on, state) => {
+      if (state?.engine === 'webrtc-aec3') log('[asr] 声学回声处理', state);
+      else log('[asr] 回声处理 ' + (on ? '已开启；插话仍须通过声学、文字及播放来源核查' : '不可用；继续聆听并核查声学、文字及播放来源'));
+      send('aec', state || { on });
     });
     asr.on('micDevice', (d) => {
       const device = d.identity || config.load().asr.device || (d.on && d.name) || speakerFilter.device || 'default';
@@ -3490,7 +3508,7 @@ if (!lock) {
     asr.on('fmt', (f) => log(`[asr] 格式 硬件=${f.hw} → 识别=${f.tgt}`));
     const asrInput=require('./asr-input-pipeline').createAsrInputPipeline({
       speakerFilter,state:()=>({alwaysOn,speaking,speechGeneration:speechGen,get wakeOnly(){return config.load().asr.wakeOnly;},asrMode,suppressEnrollmentFinal}),recentEcho,bargeInReady,nameHit,turns:()=>voiceTurns,trace:traceSpeech,
-      onPartial:t=>{send('asrPartial',{text:t});const now0=Date.now();if(t&&now0-lastPartialLogAt>1800){lastPartialLogAt=now0;log(`[asr] 半句 ${String(t).length} 字`);}},
+      onPartial:t=>{const now0=Date.now();if(t&&now0-lastPartialLogAt>1800){lastPartialLogAt=now0;log(`[asr] 半句 ${String(t).length} 字`);}},
       onInterrupt:()=>stopSpeaking('voice'),onUtteranceConfirmed:t=>log(`[asr] 收句确认 ${String(t).length} 字`),
       setLastLiveText:t=>{lastLiveText=t;},setSuppressEnrollmentFinal:value=>{suppressEnrollmentFinal=value;},
       onFeatures:()=>{if(Date.now()-lastSpeakerStatusAt>1500){lastSpeakerStatusAt=Date.now();publishSpeakerStatus();}},

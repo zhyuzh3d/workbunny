@@ -28,6 +28,7 @@ test('real ASR handlers never request partial text; confirmed final waits for se
 test('active acoustic input blocks a final and new recognized words cancel the confirmed response',()=>{
  const f=fixture();f.asr.onMessage({t:'partial',v:'贝比帮我整理'});f.levels(1200,.5);
  assert.equal(f.requests.length,0);
+ f.activity('active');
  f.asr.onMessage({t:'utterance',v:'贝比帮我整理。'});f.levels(2000,.8,'active');assert.equal(f.requests.length,0);
  f.asr.onMessage({t:'utterance',v:'贝比帮我整理。'});f.levels(3000);assert.equal(f.requests.length,1);const old=f.requests[0].turn;
  f.asr.onMessage({t:'partial',v:'再列出待办'});assert.equal(old.isCurrent(),false);

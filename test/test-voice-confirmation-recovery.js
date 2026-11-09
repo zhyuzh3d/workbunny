@@ -83,7 +83,7 @@ test('three admitted turns whose effect gates never recover still exhaust the sh
  for(let attempt=1;attempt<=3;attempt++){
   f.activity('quiet');f.send({t:'partial',v:'synthetic admitted phrase '+attempt});f.send({t:'utterance',v:'synthetic admitted phrase '+attempt});
   for(let i=0;i<30;i++){f.advance(100);f.activity('quiet');}f.advance(0);assert.equal(f.requests.length,attempt);assert.equal(f.ctx.asrFailStreak,attempt-1);
-  f.activity('unknown');f.advance(8000);assert.equal(f.ctx.asrFailStreak,attempt);if(attempt<3)f.advance(1200);
+  f.activity('unknown');void f.requests.at(-1).waitForCommit();f.advance(8000);assert.equal(f.ctx.asrFailStreak,attempt);if(attempt<3)f.advance(1200);
  }
  assert.equal(f.ctx.asrRecoveryBlocked,true);f.advance(60000);assert.equal(f.children.length,3);
  assert(f.events.some(e=>e.type==='toast'&&!/未提交交办/.test(e.text)&&/文字/.test(e.text)));

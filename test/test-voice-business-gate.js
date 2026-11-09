@@ -1,19 +1,19 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),{createRequire}=require('node:module');
 const source=fs.readFileSync(path.resolve('src/main/index.js'),'utf8'),actual=createRequire(path.resolve('src/main/index.js'));
-function fixture({protocolFailure=false}={}){
+function fixture({protocolFailure=false,sensitive=false}={}){
  const calls={model:0,remember:0,task:0,speak:0,chat:0,stop:0,aborts:0},metadata=[];
  const ctx={AbortController,Date,randomUUID:()=> 'offline-fixture',storageBusy:false,storageError:null,dialogueActions:{taskControl:()=>null,RULE:''},agent:null,desktop:null,dialogueReady:()=>true,
   config:{load:()=>({memory:{enabled:false},asr:{wakeOnly:false,judge:false}}),resolveLLM:()=>({transport:'offline-fake',apiKey:'fake',timeoutMs:100}),buildSystemPrompt:()=>''},currentScene:()=> 'life',contextEpoch:1,screenLocked:false,memory:null,
   activeThought:{abort:()=>calls.aborts++},busy:false,send:type=>{if(type==='chat')calls.chat++;},publishWebSources:()=>{},history:[],nowLine:()=>'',monitor:null,
   secretary:{contextSnapshot:()=>({text:'',sourceIds:[]}),dispatch:()=>{calls.task++;}},taskNotifications:{invalidate:()=>{}},presentedReplies:new Set(),activeAvatarPack:()=>false,
   avatarCatalog:{prompt:()=>[]},embodiment:{context:()=>({})},lastInterruption:null,SELF_RULE:'',JUDGE_RULE:'',taskSupervision:{key:()=>'',context:()=>''},inputAdmission:{containsSecret:()=>false},log:()=>{},
-  require:name=>name==='./dialogue-cognition'?{context:()=>({data:{consecutiveMisses:0},sourceIds:[]}),RULE:''}:name==='./perception'?{speech:()=>({}),keyboard:()=>({})}:name==='./sensitive-policy'?{hasProtectedContent:()=>false}:actual(name),
+  require:name=>name==='./dialogue-cognition'?{context:()=>({data:{consecutiveMisses:0},sourceIds:[]}),RULE:''}:name==='./perception'?{speech:()=>({}),keyboard:()=>({})}:name==='./sensitive-policy'?{hasProtectedContent:()=>sensitive}:actual(name),
   speak:()=>calls.speak++,llm:{},requestReply:async()=>{calls.model++;if(protocolFailure)throw Object.assign(Error('offline protocol failure'),{code:'E_REPLY_PROTOCOL',protocolStage:'json'});return {reply:{skipped:true}};},
   worthJudging:()=>true,recentEcho:()=>false,traceSpeech:()=>{},voiceMetadata:value=>metadata.push(value),speaking:false,nameHit:()=>false,turnT0:0,lastHeardAt:0,quietUntil:0,autonomy:{pause:()=>{}},stopSpeaking:()=>calls.stop++};
  vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('async function committedVoice('),source.indexOf('/* ── 主动播报')),ctx);
  vm.runInContext('const QUIET_WORDS = '+source.match(/^const QUIET_WORDS = (.+);$/m)[1]+';\n'+source.slice(source.indexOf('async function handleUtterance('),source.indexOf('/** 主动要权限')),ctx);
- const token=committed=>({accepted:committed,id:1,isCurrent:()=>true,canCommit:()=>committed,waitForCommit:async()=>committed,remember:()=>calls.remember++,skip(){}});
+ const token=committed=>({accepted:committed,id:1,isCurrent:()=>true,canCommit:()=>committed,waitForCommit:async()=>committed,remember:()=>calls.remember++,rememberConversation:()=>calls.remember++,skip(){}});
  return {ctx,calls,token,metadata};
 }
 test('unconfirmed voice cannot reach actual think model, memory, task, presentation or busy ownership',async()=>{
@@ -44,15 +44,15 @@ function controlledToken(f){
  const token={accepted:true,id:1,isCurrent:()=>current,canCommit:()=>current&&ready,
   waitForCommit:({signal}={})=>new Promise(resolve=>{const finish=value=>{waiters.delete(finish);signal?.removeEventListener('abort',abort);resolve(value);},abort=()=>finish(false);if(signal?.aborted||!current)return finish(false);if(ready)return finish(true);waiters.add(finish);signal?.addEventListener('abort',abort,{once:true});}),
   remember:()=>{assert(token.canCommit());f.calls.remember++;return{id:'offline-owner',value:{turnId:'offline:1'}};},skip(){},
+  rememberConversation:()=>{assert(token.isCurrent());f.calls.remember++;return{id:'offline-owner',value:{turnId:'offline:1'}};},
   complete(){if(!current)return false;current=false;token.completed=true;for(const resolve of [...waiters])resolve(false);return true;},
   open(){ready=true;for(const resolve of [...waiters])resolve(true);},invalidate(){current=false;for(const resolve of [...waiters])resolve(false);f.ctx.activeThought?.abort();}};return token;
 }
 const flush=async()=>{for(let i=0;i<30;i++)await Promise.resolve();};
 function completeReply(f){Object.assign(f.ctx,{llm:{extractTags:text=>({clean:text,motions:[],emos:[]})},presentConversation:text=>text,conversationText:text=>text,publishRecall:()=>{},scopePolicy:{rank:()=>0}});}
-test('an admitted input may run the model while its effect gate is closed and reuse that same answer after recovery',async()=>{
+test('an ordinary accepted answer speaks while the acoustic effect gate is closed',async()=>{
  const f=fixture(),token=controlledToken(f);completeReply(f);f.ctx.requestReply=async()=>{f.calls.model++;return {reply:{text:'offline answer'}};};
- const pending=f.ctx.think({userText:'sealed synthetic input',voiceTurn:token});await flush();assert.equal(f.calls.model,1);assert.equal(f.calls.remember,0);assert.equal(f.calls.chat,0);assert.equal(f.calls.speak,0);
- token.open();await pending;assert.equal(f.calls.model,1);assert.equal(f.calls.remember,1);assert.equal(f.calls.chat,1);assert.equal(f.calls.speak,1);
+ await f.ctx.think({userText:'sealed synthetic input',voiceTurn:token});assert.equal(f.calls.model,1);assert.equal(f.calls.remember,1);assert.equal(f.calls.chat,1);assert.equal(f.calls.speak,1);assert.equal(f.calls.task,0);
 });
 test('a semantic change or epoch replacement releases effect waiters and a late model cannot dispatch or write',async()=>{
  for(const replace of ['semantic','epoch']){
@@ -62,9 +62,8 @@ test('a semantic change or epoch replacement releases effect waiters and a late 
   assert.equal(f.calls.remember,0);assert.equal(f.calls.task,0);assert.equal(f.calls.chat,0);assert.equal(f.calls.speak,0);
  }
 });
-test('protocol failure for an admitted input waits for effect recovery without re-running the model',async()=>{
- const f=fixture({protocolFailure:true}),token=controlledToken(f);const pending=f.ctx.think({userText:'sealed synthetic input',voiceTurn:token});await flush();assert.equal(f.calls.model,1);assert.equal(f.calls.chat,0);assert.equal(f.calls.speak,0);
- token.open();await pending;assert.equal(f.calls.model,1);assert.equal(f.calls.chat,1);assert.equal(f.calls.speak,1);
+test('protocol failure for an admitted input reports and retires without waiting for background audio',async()=>{
+ const f=fixture({protocolFailure:true}),token=controlledToken(f);await f.ctx.think({userText:'sealed synthetic input',voiceTurn:token});assert.equal(f.calls.model,1);assert.equal(f.calls.chat,1);assert.equal(f.calls.speak,1);assert.equal(token.completed,true);
 });
 function realTurns(f){
  const {createVoiceTurns}=require('../src/main/voice-turns');let at=0,next=0,seq=0,run;const timers=new Map(),errors=[];
@@ -76,11 +75,31 @@ function realTurns(f){
  const admit=async()=>{activity('quiet');turns.partial('sealed synthetic request');turns.final('sealed synthetic request.');for(let i=0;i<30;i++){await advance(100);activity('quiet');}await advance(0);await flush();};
  return{turns,activity,advance,admit,errors,result:()=>run};
 }
-test('actual VoiceTurns unknown evidence preserves one inference and holds its result until the same token can commit',async()=>{
+test('actual VoiceTurns unknown evidence preserves one inference and delivers its ordinary answer',async()=>{
  const f=fixture();completeReply(f);f.ctx.asrFailStreak=2;let finish,signal;f.ctx.requestReply=options=>{f.calls.model++;signal=options.request.signal;return new Promise(resolve=>{finish=resolve;});};
  const h=realTurns(f);await h.admit();assert.equal(f.calls.model,1);h.activity('unknown');finish({reply:{text:'offline recovered answer'}});await flush();
- assert.equal(signal.aborted,false);assert.equal(f.calls.remember,0);assert.equal(f.calls.chat,0);assert.equal(f.calls.speak,0);
- h.activity('quiet');await h.advance(0);await h.result();assert.equal(f.calls.model,1);assert.equal(f.calls.remember,1);assert.equal(f.calls.chat,1);assert.equal(f.calls.speak,1);assert.equal(f.ctx.asrFailStreak,0);h.turns.reset();
+ assert.equal(signal.aborted,false);await h.result();assert.equal(f.calls.model,1);assert.equal(f.calls.remember,1);assert.equal(f.calls.chat,1);assert.equal(f.calls.speak,1);assert.equal(f.ctx.asrFailStreak,0);assert.equal(h.turns.snapshot(),null);
+});
+test('Task and explicit self/memory commands still wait for acoustic permission before any write or dispatch',async()=>{
+ for(const action of ['agent','self_update','remember','learn_experience']){
+  const f=fixture(),token=controlledToken(f);completeReply(f);f.ctx.requestReply=async()=>{f.calls.model++;return {reply:{intent:{action}}};};
+  const pending=f.ctx.think({userText:'synthetic explicit operation',voiceTurn:token});await flush();
+  assert.equal(f.calls.model,1);assert.equal(f.calls.remember,0);assert.equal(f.calls.task,0);assert.equal(f.calls.chat,0);assert.equal(f.calls.speak,0);
+  token.invalidate();await pending;assert.equal(f.calls.remember,0);assert.equal(f.calls.task,0);
+ }
+});
+test('sensitive spoken content retains its acoustic permission gate',async()=>{
+ const f=fixture({sensitive:true}),token=controlledToken(f);completeReply(f);f.ctx.requestReply=async()=>({reply:{text:'synthetic protected answer'}});
+ const pending=f.ctx.think({userText:'synthetic sensitive question',voiceTurn:token});await flush();assert.equal(f.calls.speak,0);assert.equal(f.calls.remember,0);
+ token.open();await pending;assert.equal(f.calls.speak,1);assert.equal(f.calls.remember,1);assert.equal(token.completed,true);
+});
+test('skip, empty output and unavailable dialogue all retire the accepted input',async()=>{
+ for(const mode of ['skip','empty','unavailable']){
+  const f=fixture(),token=controlledToken(f);completeReply(f);
+  f.ctx.requestReply=async()=>mode==='skip'?{reply:{skipped:true}}:{reply:{text:''}};
+  if(mode==='unavailable'){f.ctx.storageBusy=true;f.ctx.connection={status:()=>({note:'offline unavailable'})};}
+  await f.ctx.think({userText:'synthetic question',voiceTurn:token});assert.equal(token.completed,true);assert.equal(f.calls.speak,0);assert.equal(f.calls.task,0);
+ }
 });
 test('actual new text revokes an admitted inference and an abort-ignoring late answer cannot enter effects',async()=>{
  const f=fixture();completeReply(f);let finish,signal;f.ctx.requestReply=options=>{f.calls.model++;signal=options.request.signal;return new Promise(resolve=>{finish=resolve;});};

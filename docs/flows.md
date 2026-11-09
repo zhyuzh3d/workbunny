@@ -243,16 +243,23 @@ flowchart TB
     Diagnostic["主人开启本机诊断；最长20秒"] --> PrivateSensor["独立识别器；暂停普通聆听及自动重启"]
     PrivateSensor --> PrivateSink["同一过滤与轮次规则 → 私有文件接收端"]
     PrivateSink --> DiagnosticEnd["停止采集并有界排空；不进入对话或Task；手动清理"]
-    Audio["原样送入仅含 Transcriber 的 Analyzer"] --> VAD["独立VAD：随物理音频连续；不随Analyzer冷启，不裁音频"]
+    Mic["AVAudioEngine 原始麦克风"] --> Echo["启用时：固定版 WebRTC AEC3"]
+    Reference["私有 unmuted CoreAudio 全局输出 tap"] --> Echo
+    Echo --> Audio["格式转换 → 同一份最终 PCM"]
+    Echo -.->|"参考拒绝、超时或断流：有界降级并受控恢复"| Audio
+    Audio --> Analyzer["仅含 Transcriber 的 Analyzer"]
+    Audio --> VAD["独立VAD：随物理音频连续；不随Analyzer冷启，不裁音频"]
+    Audio --> Speaker["声纹特征"]
+    Analyzer --> EndGate
     VAD --> EndGate["交付事件异步复核：同代新鲜静音 + 文字稳定；timer兜底"]
     EndGate --> FinalBarrier["finalizer成功 + 结果流确认结束 → 仅上报一次"]
-    FinalBarrier --> TurnGate["整句确认 + 三秒封口 + 新鲜quiet → 业务请求"]
+    FinalBarrier --> TurnGate["整句确认 + 默认350ms收口 + 新鲜quiet → 语义请求"]
     VAD --> TurnGate
     TurnGate --> EntryGate["接纳一次语义轮次；修订/取消/代次使旧结果失效"]
     Partial["partial仅显示；新认可文字修订旧轮次"] --> TurnGate
     Partial --> Unconfirmed["八秒输入未确认或提交门超时：提示重说或文字"]
     VAD --> EffectGate["当前提交门：fresh quiet；新有声须新定稿"]
-    EffectGate --> WaitGate["门关闭：保留同轮推理/结果；独立八秒有界等待"]
+    EffectGate --> WaitGate["实际副作用等待时关门：保留同轮结果；独立八秒有界等待"]
     WaitGate -.-> EffectGate
     WaitGate --> Unconfirmed
     Unconfirmed --> Rearm["丢弃旧识别器；有限重试；旧回调隔离；继续接收新消息"]
@@ -260,6 +267,7 @@ flowchart TB
     VAD --> VoiceFault["四秒无证据 / 最长界：取消未确认片段并有界恢复"]
     Sensor --> Observation["原内容 + perception + 可用证据引用"]
     Observation --> Think["Bunny 综合上下文判断；关键歧义才补证"]
+    Think --> Reply["普通非敏感答复：有效轮次直接展示/朗读；新认可文字取消旧结果"]
     Think --> EffectGate
     EffectGate --> Act["授权内行动及自主核查；真实提交处重核"]
     Act --> Outcome["真实成功、失败、恢复与适用条件"]

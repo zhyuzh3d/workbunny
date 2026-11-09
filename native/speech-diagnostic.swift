@@ -15,6 +15,10 @@ final class SpeechDiagnostic {
     private let writer = DispatchQueue(label: "bunny.speech-diagnostic.writer")
     private let control = DispatchQueue(label: "bunny.speech-diagnostic.control")
     private var eventFD: Int32 = -1, pcmFD: Int32 = -1
+    private var echoFDs: [String: Int32] = [:]
+    private var echoBytes: [String: Int] = [:], echoFrames: [String: Int64] = [:], echoSequences: [String: Int] = [:]
+    private var processedPcmBytes = 0
+    let echoPcmEnabled: Bool
     private var timer: DispatchSourceTimer?
     private var accepting = true, finishing = false
     private var stopCode: Int?
@@ -27,8 +31,10 @@ final class SpeechDiagnostic {
     let startedWallTime = Date().timeIntervalSince1970
     let durationMs: Int
 
-    init(directory: String, durationMs: Int, pcm: Bool, limits: Limits = Limits(), onStop: @escaping (Int) -> Void = { _ in }) throws {
+    init(directory: String, durationMs: Int, pcm: Bool, echoPcm: Bool = false, limits: Limits = Limits(), onStop: @escaping (Int) -> Void = { _ in }) throws {
         guard (1...20000).contains(durationMs) else { throw Failure.invalidDuration }
+        guard !echoPcm || pcm else { throw Failure.invalidDuration }
+        echoPcmEnabled = echoPcm
         self.durationMs = durationMs; self.limits = limits; self.onStop = onStop
         tailReserve = min(4096, max(256, limits.events / 4))
         // Walk every component with openat/no-follow; the host must pass the
@@ -53,7 +59,18 @@ final class SpeechDiagnostic {
             pcmFD = openat(directoryFD, "processed-audio.pcm", flags, 0o600)
             if pcmFD < 0 { Darwin.close(eventFD); eventFD = -1; throw Failure.fileExists }
         }
-        record("clock", ["uptime": startedUptime, "wallTime": startedWallTime, "durationMs": durationMs, "pcmEnabled": pcm])
+        if echoPcm {
+            for stream in ["raw-microphone", "speaker-reference"] {
+                let fd = openat(directoryFD, stream + ".pcm", flags, 0o600)
+                guard fd >= 0 else {
+                    for opened in echoFDs.values { Darwin.close(opened) }; echoFDs.removeAll()
+                    Darwin.close(eventFD); Darwin.close(pcmFD); eventFD = -1; pcmFD = -1
+                    throw Failure.fileExists
+                }
+                echoFDs[stream] = fd
+            }
+        }
+        record("clock", ["uptime": startedUptime, "wallTime": startedWallTime, "durationMs": durationMs, "pcmEnabled": pcm, "echoPcmEnabled": echoPcm])
         // Reserve bounded drain time inside the requested total lifetime.
         let drainMs = min(250, max(1, durationMs / 4))
         let timer = DispatchSource.makeTimerSource(queue: control)
@@ -95,11 +112,12 @@ final class SpeechDiagnostic {
         if pendingBytes + events + pcm > limits.pending { return 44 }
         eventBytes += events; pcmBytes += pcm; pendingBytes += events + pcm; return nil
     }
-    private func submit(_ event: Data, planes: [Data] = []) {
+    private func submit(_ event: Data, planes: [Data] = [], pcmTarget: Int32? = nil) {
         let bytes = event.count + planes.reduce(0) { $0 + $1.count }
+        let target = pcmTarget ?? pcmFD
         writer.async { [self] in
             var ok = write(event, to: eventFD)
-            for plane in planes where ok { ok = write(plane, to: pcmFD) }
+            for plane in planes where ok { ok = write(plane, to: target) }
             lock.lock(); pendingBytes -= bytes; lock.unlock()
             if !ok { requestStop(45) }
         }
@@ -123,7 +141,7 @@ final class SpeechDiagnostic {
             lock.unlock(); requestStop(46); return nil
         }
         let total = list.reduce(0) { $0 + Int($1.mDataByteSize) }, savedBytes = pcmFD >= 0 ? total : 0
-        var position = pcmBytes
+        var position = processedPcmBytes
         let planes: [[String: Any]] = list.enumerated().map { index, plane in
             defer { if pcmFD >= 0 { position += Int(plane.mDataByteSize) } }
             return ["plane": index, "channels": Int(plane.mNumberChannels), "bytes": Int(plane.mDataByteSize), "offset": pcmFD >= 0 ? position : -1]
@@ -140,6 +158,7 @@ final class SpeechDiagnostic {
         }
         guard let event = Self.line(value) else { lock.unlock(); requestStop(46); return nil }
         if let refusal = reserve(event.count, savedBytes) { lock.unlock(); if refusal >= 0 { requestStop(refusal) }; return nil }
+        processedPcmBytes += savedBytes
         var copies: [Data] = []
         if pcmFD >= 0 {
             for plane in list {
@@ -148,6 +167,40 @@ final class SpeechDiagnostic {
             }
         }
         submit(event, planes: copies); lock.unlock(); return seq
+    }
+    // Only the explicit native echo-PCM flag opens these two additional files.
+    // The same byte/pending/deadline budgets cover all three PCM streams.
+    func captureEcho(_ buffer: AVAudioPCMBuffer, stream: String, gen: Int, audioTime: AVAudioTime) {
+        lock.lock()
+        guard accepting, let fd = echoFDs[stream] else { lock.unlock(); return }
+        let list = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let format = buffer.format, f = format.streamDescription.pointee
+        let frameBytes = Int(buffer.frameLength) * Int(f.mBytesPerFrame)
+        guard list.count <= 64, f.mBytesPerFrame > 0, buffer.frameLength > 0,
+              list.allSatisfy({ $0.mData != nil && Int($0.mDataByteSize) == frameBytes }) else {
+            lock.unlock(); requestStop(46); return
+        }
+        let sequence = (echoSequences[stream] ?? 0) + 1, offset = echoFrames[stream] ?? 0
+        var position = echoBytes[stream] ?? 0
+        let planes: [[String: Any]] = list.enumerated().map { index, plane in
+            defer { position += Int(plane.mDataByteSize) }
+            return ["plane": index, "channels": Int(plane.mNumberChannels), "bytes": Int(plane.mDataByteSize), "offset": position]
+        }
+        var value: [String: Any] = ["event": "echo-audio-buffer", "stream": stream, "pcmFile": stream + ".pcm",
+            "uptime": ProcessInfo.processInfo.systemUptime, "seq": sequence, "gen": gen,
+            "frameOffset": offset, "frames": Int(buffer.frameLength), "rate": format.sampleRate,
+            "channels": Int(format.channelCount), "interleaved": format.isInterleaved,
+            "formatID": f.mFormatID, "formatFlags": f.mFormatFlags, "bitsPerChannel": f.mBitsPerChannel,
+            "bytesPerFrame": f.mBytesPerFrame, "planes": planes,
+            "hostTimeValid": audioTime.isHostTimeValid, "sampleTimeValid": audioTime.isSampleTimeValid]
+        if audioTime.isHostTimeValid { value["captureHostSeconds"] = AVAudioTime.seconds(forHostTime: audioTime.hostTime) }
+        if audioTime.isSampleTimeValid { value["captureSampleTime"] = audioTime.sampleTime; value["captureRate"] = audioTime.sampleRate }
+        guard let event = Self.line(value) else { lock.unlock(); requestStop(46); return }
+        let total = list.reduce(0) { $0 + Int($1.mDataByteSize) }
+        if let refusal = reserve(event.count, total) { lock.unlock(); if refusal >= 0 { requestStop(refusal) }; return }
+        echoSequences[stream] = sequence; echoFrames[stream] = offset + Int64(buffer.frameLength); echoBytes[stream] = position
+        let copies = list.map { Data(bytes: $0.mData!, count: Int($0.mDataByteSize)) }
+        submit(event, planes: copies, pcmTarget: fd); lock.unlock()
     }
     static func yieldCategory<T>(_ result: AsyncStream<T>.Continuation.YieldResult) -> String {
         switch result { case .enqueued: return "enqueued"; case .dropped: return "dropped"; case .terminated: return "terminated"; @unknown default: return "unknown" }
@@ -168,6 +221,7 @@ final class SpeechDiagnostic {
             let written = write(tail, to: eventFD)
             if !written { lock.lock(); stopCode = 45; lock.unlock() }
             Darwin.close(eventFD); eventFD = -1; if pcmFD >= 0 { Darwin.close(pcmFD); pcmFD = -1 }
+            for fd in echoFDs.values { Darwin.close(fd) }; echoFDs.removeAll()
             completion()
         }
     }
@@ -245,6 +299,32 @@ final class SpeechDiagnostic {
         let noPCM = try directory("no-pcm"), metadataOnly = try SpeechDiagnostic(directory: noPCM, durationMs: 20000, pcm: false)
         _ = metadataOnly.capture(buffer, gen: 1, audioTime: nil); try finish(metadataOnly)
         try check(!files.fileExists(atPath: noPCM + "/processed-audio.pcm"))
+        try check(!files.fileExists(atPath: good + "/raw-microphone.pcm") && !files.fileExists(atPath: good + "/speaker-reference.pcm"))
+        let echoPath = try directory("echo-pcm")
+        let echo = try SpeechDiagnostic(directory: echoPath, durationMs: 20000, pcm: true, echoPcm: true)
+        let time = AVAudioTime(hostTime: AVAudioTime.hostTime(forSeconds: 1))
+        echo.captureEcho(buffer, stream: "raw-microphone", gen: 1, audioTime: time)
+        _ = echo.capture(buffer, gen: 1, audioTime: time)
+        echo.captureEcho(buffer, stream: "speaker-reference", gen: 1, audioTime: time)
+        _ = echo.capture(buffer, gen: 1, audioTime: time)
+        try finish(echo)
+        let echoEvents = try String(contentsOfFile: echoPath + "/native-events.ndjson", encoding: .utf8).split(separator: "\n")
+            .map { try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any] }
+        let echoBuffers = echoEvents.filter { $0["event"] as? String == "echo-audio-buffer" }
+        let processedBuffers = echoEvents.filter { $0["event"] as? String == "audio-buffer" }
+        try check(echoBuffers.count == 2 && processedBuffers.count == 2)
+        try check((processedBuffers[1]["planes"] as? [[String: Any]])?[0]["offset"] as? Int == 32)
+        for stream in ["raw-microphone", "speaker-reference"] {
+            let data = try Data(contentsOf: URL(fileURLWithPath: echoPath + "/" + stream + ".pcm"))
+            try check(data.count == 32 && data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) } == [3,3,3,3,4,4,4,4])
+            try check((try files.attributesOfItem(atPath: echoPath + "/" + stream + ".pcm")[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+        }
+        let shared = try SpeechDiagnostic(directory: directory("echo-shared-cap"), durationMs: 20000, pcm: true, echoPcm: true,
+            limits: Limits(events: 8192, pcm: 64, pending: 8192))
+        shared.captureEcho(buffer, stream: "raw-microphone", gen: 1, audioTime: time)
+        shared.captureEcho(buffer, stream: "speaker-reference", gen: 1, audioTime: time)
+        _ = shared.capture(buffer, gen: 1, audioTime: time)
+        try check(shared.reasonCode == 43); try finish(shared)
         for duration in [0, 20001] {
             do { _ = try SpeechDiagnostic(directory: noPCM, durationMs: duration, pcm: false); throw TestFailure.assertion }
             catch Failure.invalidDuration { }
@@ -272,6 +352,6 @@ final class SpeechDiagnostic {
         try finish(broken)
         return ["t": "selfTest", "speechDiagnostic": true, "privatePermissions": true, "noOverwrite": true, "symlinkRejected": true,
                 "bufferOrder": true, "planeOffsets": true, "yieldClassification": true, "caps": true, "deadline": true, "writeFailure": true,
-                "disabledNoFiles": true, "recognizerStarted": false]
+                "disabledNoFiles": true, "echoOptIn": true, "echoPlaneOffsets": true, "sharedPcmCap": true, "recognizerStarted": false]
     }
 }

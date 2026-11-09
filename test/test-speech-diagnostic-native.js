@@ -7,7 +7,7 @@ test('private native diagnostic fixtures never request microphone, assets or rec
  const run=spawnSync(binary,['--self-test-speech-diagnostic'],{encoding:'utf8',timeout:5000});
  assert.equal(run.status,0,run.stderr||run.stdout);assert(!run.stdout.includes('private-diagnostic-canary'));
  const result=JSON.parse(run.stdout.trim());
- for(const key of ['speechDiagnostic','privatePermissions','noOverwrite','symlinkRejected','bufferOrder','planeOffsets','yieldClassification','caps','deadline','writeFailure','disabledNoFiles'])assert.equal(result[key],true,key);
+ for(const key of ['speechDiagnostic','privatePermissions','noOverwrite','symlinkRejected','bufferOrder','planeOffsets','yieldClassification','caps','deadline','writeFailure','disabledNoFiles','echoOptIn','echoPlaneOffsets','sharedPcmCap'])assert.equal(result[key],true,key);
  assert.equal(result.recognizerStarted,false);
 });
 test('native diagnostic is opt in and is wired before permissions or language assets',()=>{

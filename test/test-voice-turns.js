@@ -3,7 +3,7 @@ const {test}=require('node:test'),assert=require('node:assert/strict');
 const {createVoiceTurns}=require('../src/main/voice-turns');
 function fixture(options={}){
  let at=0,next=0,seq=0;const timers=new Map(),requests=[],remembered=[],errors=[],errorDetails=[];let invalidations=0;
- const c=createVoiceTurns({now:()=>at,setTimer:(fn,delay)=>{const id=++next;timers.set(id,{fn,at:at+delay});return id;},clearTimer:id=>timers.delete(id),
+ const c=createVoiceTurns({pauseMs:1000,turnMs:3000,now:()=>at,setTimer:(fn,delay)=>{const id=++next;timers.set(id,{fn,at:at+delay});return id;},clearTimer:id=>timers.delete(id),
   onRequest:token=>requests.push(token),onRemember:text=>{remembered.push(text);return {id:'fixture-receipt'};},onInvalidate:()=>invalidations++,onError:(error,details)=>{errors.push(error);errorDetails.push(details);},...options});
  function advance(ms){const end=at+ms;let loops=0;for(;;){const found=[...timers].filter(([,entry])=>entry.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!found)break;if(++loops>10000)throw Error('unbounded timer loop');at=found[1].at;timers.delete(found[0]);found[1].fn();}at=end;}
  function activity(state,quietSeconds=0,extra={}){return c.activity({state,quietSeconds,at,seq:++seq,recognizer:1,sourceGen:1,...extra});}
@@ -11,7 +11,7 @@ function fixture(options={}){
  return {c,advance,activity,quietFor,requests,remembered,errors,errorDetails,invalidations:()=>invalidations,now:()=>at,
   audioFinal:(extra={})=>c.audioFinal({recognizer:1,sourceGen:1,coveredSeq:seq,...extra})};
 }
-test('partial is display-only; a native final and the original three-second seal precede request and commit',async()=>{
+test('partial is display-only; a native final and the configured seal precede request and commit',async()=>{
  const f=fixture();f.c.partial('fixture question');f.advance(1000);assert.equal(f.requests.length,0);
  f.c.final('fixture question.');f.advance(1999);assert.equal(f.requests.length,0);f.advance(1);
  assert.equal(f.requests.length,1);assert.equal(await f.requests[0].waitForCommit(),true);
@@ -334,8 +334,29 @@ test('an aborted commit waiter leaves the semantic token and other waiters intac
  f.activity('quiet',2);assert.equal(await other,true);assert.equal(f.requests.length,1);assert.equal(f.invalidations(),0);
 });
 test('already remembered facts remain preserved when a later acoustic gate times out',()=>{
- const f=fixture({requireActivity:true});f.c.final('synthetic admitted request');f.quietFor(3000);f.requests[0].remember();f.activity('active');f.quietFor(8000);
+ const f=fixture({requireActivity:true});f.c.final('synthetic admitted request');f.quietFor(3000);f.requests[0].remember();f.activity('active');void f.requests[0].waitForCommit();f.quietFor(8000);
  assert.deepEqual(f.remembered,['synthetic admitted request']);assert.equal(f.errorDetails[0].reason,'commit-timeout');assert.doesNotMatch(f.errors[0],/未提交交办/);
+});
+test('default final seal admits confirmed quiet speech within 350ms instead of another three seconds',()=>{
+ const f=fixture({requireActivity:true,pauseMs:undefined,turnMs:undefined});f.activity('active');f.c.partial('synthetic complete question');
+ f.advance(1000);f.c.final('synthetic complete question');f.activity('quiet',.3);f.advance(49);assert.equal(f.requests.length,0);
+ f.activity('quiet',.35);f.advance(0);assert.equal(f.requests.length,1);assert.equal(f.now(),1049);
+});
+test('raw acoustic uncertainty cannot time out an ordinary accepted answer without a pending operation',()=>{
+ for(const state of ['active','unknown']){
+  const f=fixture({requireActivity:true});f.c.final('synthetic normal question');f.quietFor(3000);const token=f.requests[0];
+  for(let i=0;i<100;i++){f.advance(100);f.activity(state);}
+  assert.equal(token.isCurrent(),true);assert.equal(token.canCommit(),false);assert.equal(token.remember(),undefined);
+  assert.deepEqual(f.remembered,[]);assert.equal(token.rememberConversation().id,'fixture-receipt');assert.deepEqual(f.remembered,['synthetic normal question']);
+  assert.equal(f.errors.length,0);assert.equal(token.complete(),true);
+ }
+});
+test('turn lifecycle publishes its id on pending, reset and completion without carrying old words into the next turn',()=>{
+ const events=[],f=fixture({onLive:(text,state)=>events.push({text,...state})});f.c.final('synthetic first question');f.advance(3000);
+ assert.equal(events.at(-1).phase,'pending');assert.equal(events.at(-1).turn,1);f.requests[0].complete();
+ assert.equal(events.at(-1).phase,'completed');assert.equal(events.at(-1).text,'');assert.equal(events.at(-1).turn,1);
+ f.c.partial('synthetic second question');assert.equal(events.at(-1).turn,2);assert.equal(events.at(-1).text,'synthetic second question');
+ f.c.reset();assert.equal(events.at(-1).phase,'reset');assert.equal(events.at(-1).turn,2);assert.equal(events.at(-1).text,'');
 });
 test('successful final effects retire the input without aborting submitted speech or timing out on later ambient audio',async()=>{
  const trace=[],f=fixture({requireActivity:true,onTrace:event=>trace.push(event)});f.c.final('synthetic completed request');f.quietFor(3000);const token=f.requests[0];
