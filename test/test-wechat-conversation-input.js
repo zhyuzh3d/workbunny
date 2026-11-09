@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { approveInput } = require('../src/main/wechat-conversation-input');
 const { DesktopService } = require('../src/main/desktop-service');
+const {fixture}=require('./support/visual-fixture.cjs');
 
 const box = (x, y, width, height) => ({ x, y, width, height });
 const ocr = (text, x, y, width = .08) => ({ text, ...box(x, y, width, .018), confidence: .99 });
@@ -15,6 +16,13 @@ const review = (kind, region, location) => async kinds => {
   return { kind, box: region, location };
 };
 const denied = { code: 'E_WECHAT_CONVERSATION_INPUT', dispatched: false };
+test('control rejection distinguishes missing labels from labels outside the recognized control without recording text',async()=>{
+ for(const [rows,count,within]of [[[],0,false],[[ocr('Fixture contact',.15,.24)],1,false]]){
+  await assert.rejects(approveInput({action:{action:'click',x:.2,y:.35},task,shot:{revision:1,ocr:rows,visualFrameId:'frame',identity:{mode:'visual'}},review:review('contact',box(.13,.33,.16,.05))}),e=>{
+   assert.equal(e.diagnostic.candidateCount,count);assert.equal(e.diagnostic.guardChecks.labelWithinControl,within);assert.equal(e.diagnostic.guardChecks.hasVisualFrame,true);assert(!JSON.stringify(e.diagnostic).includes('Fixture contact'));return e.code==='E_WECHAT_CONVERSATION_INPUT';
+  });
+ }
+});
 
 test('the conversation guard checks the actual UI target and denies links disguised as navigation or submission', async () => {
   const shot = snapshot(1, ocr('Fixture contact', .15, .24), ocr('发送', .65, .5), ocr('发送', .88, .92));
@@ -80,61 +88,25 @@ test('file reception follows a checked menu and a host-chosen save location', as
   assert.equal(saved.next, 'submitted');
 });
 
-test('native dispatch rejects a fabricated menu in the chat and rechecks the grant after observation', async () => {
-  const rect = { x: 0, y: 0, width: 800, height: 600 };
-  const bundleId = 'com.tencent.xinWeChat';
-  const root = { pid: 20, windowId: 30, bundleId, rect };
-  const popup = { ...root, windowId: 31, rect: { x: 400, y: 200, width: 180, height: 100 } };
-  const effects = [];
-  let menuVisible = false, revokeOnCapture = false, current = true;
-  const service = new DesktopService({
-    bitmap: () => ({ width: 100, height: 100, data: Buffer.alloc(40000) }),
-    native: { request: async (name, input) => {
-      if (name === 'frontmost') return { application: root, windows: menuVisible ? [popup, root] : [root] };
-      if (name === 'capture') {
-        if (revokeOnCapture) current = false;
-        return { backend: 'CGDisplayStream', desktopRect: rect, pngBase64: 'YQ==', capturedAt: Date.now() };
-      }
-      effects.push({ name, input });
-      return { performed: true };
-    } },
-    sensitivePolicy: { checkChannel: () => { if (!current) throw require('../src/main/dialogue-channels').stale(); } },
-  });
-  service.task = { scene: 'life', domain: 'life', visibilityFloor: 1, recipient: task.recipient, channelConversation: true, channelAuthorization: { account: '20:30', scene: 'life' } };
-  service.running = true;
-  service.generation = 1;
-  service.conversationInputState = { windows: [30] };
-  const shot = { ...snapshot(2, ocr('转文字', .54, .4)), sourcePixels: Buffer.from('a'), at: Date.now(), rect, sceneWindows: [root, popup] };
-  const action = { action: 'click', x: .58, y: .41 };
-  const approval = { action, shot, target: box(.54, .4, .08, .018), related: [heading], menu: true, next: null };
-  service.screenshot = shot;
-  await assert.rejects(service.act(action, root, shot, 1), denied);
-  await assert.rejects(service.act(action, root, shot, 1, { approval }), denied);
-  menuVisible = true;
-  revokeOnCapture = true;
-  await assert.rejects(service.act(action, root, shot, 1, { approval }), { code: 'E_CHANNEL_CHANGED' });
-  assert.deepEqual(effects, []);
-  current = true;
-  revokeOnCapture = false;
-  await service.act(action, root, shot, 1, { approval });
-  assert.equal(effects[0].input.windowId, 31);
+test('visual dispatch rejects missing or mismatched menu approval and rechecks the grant after fresh pixels', async t => {
+  const h=fixture();h.native.close=()=>{};h.native.cancel=()=>{};h.location.software='WeChat';h.location.texts=[heading,ocr('转文字',.54,.4)];
+  let revokeOnCapture=false,current=true;const request=h.native.request;h.native.request=async(op,args)=>{const result=await request(op,args);if(op==='displayCapture'&&revokeOnCapture)current=false;return result;};
+  const service=new DesktopService({native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap,sensitivePolicy:{checkChannel:()=>{if(!current)throw require('../src/main/dialogue-channels').stale();}}});t.after(()=>service.close());
+  const scope=h.visual.identity();service.visualSessions=new Map([['wechat',h.visual]]);service.task={target:'wechat',scene:'life',domain:'life',visibilityFloor:1,recipient:task.recipient,channelConversation:true,channelAuthorization:{account:require('../src/main/visual-session').visualAccount(scope),scene:'life'}};service.running=true;service.generation=1;service.controller=new AbortController();
+  const shot=await service.captureVisual(scope,1),action={action:'click',x:.58,y:.41},approval={action,shot,target:box(.54,.4,.08,.018),related:[heading],menu:true,next:null};
+  await assert.rejects(service.act(action,scope,shot,1),denied);
+  await assert.rejects(service.act(action,scope,shot,1,{approval:{...approval,shot:{...shot}}}),denied);
+  revokeOnCapture=true;await assert.rejects(service.act(action,scope,shot,1,{approval}),{code:'E_CHANNEL_CHANGED'});assert.equal(h.calls.filter(c=>c.op==='displayInput').length,0);
+  current=true;revokeOnCapture=false;await service.act(action,scope,shot,1,{approval});assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
 });
 
-test('the normal reply executor rejects a message-area click and continues with a scoped reply', async () => {
-  const rect = { x: 0, y: 0, width: 800, height: 600 };
-  const window = { pid: 20, windowId: 30, bundleId: 'com.tencent.xinWeChat', layer: 0, rect };
+test('the normal reply executor rejects a message-area click and continues with a scoped visual reply', async t => {
   const inputs = [];
   let step = 0, draft = false, sent = false;
+  let h;h=fixture({onInput:()=>{}});h.native.close=()=>{};h.native.cancel=()=>{};h.location={...h.location,software:'WeChat',region:box(0,0,1,1),mainRegion:box(0,0,1,1),identityRegion:box(.02,.02,.2,.12),focusRegion:box(.4,.72,.42,.12),texts:[heading,ocr('发送',.88,.92)]};
+  const request=h.native.request;h.native.request=async(op,input)=>{const result=await request(op,input);if(op==='displayInput'){inputs.push(input);if(input.action==='type')draft=true;if(input.action==='click'&&input.y>108){sent=true;draft=false;}h.location.texts=[heading,ocr('发送',.88,.92),...(draft?[ocr(task.message,.46,.78)]:sent?[ocr(task.message,.64,.45)]:[])];h.visual.anchor.needsRelocate=true;}return result;};
   const service = new DesktopService({
-    native: { request: async (name, input) => {
-      if (name === 'frontmost') return { application: window, windows: [window] };
-      if (name === 'capture') return { backend: 'CGDisplayStream', desktopRect: rect, pngBase64: 'YQ==', capturedAt: Date.now() };
-      if (name === 'activate') return { activated: true };
-      inputs.push({ name, input });
-      if (name === 'type') draft = true;
-      if (name === 'click' && input.y > 540) sent = true;
-      return { performed: true };
-    } },
+    native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap,
     planner: async () => {
       if (++step === 1) return { action: 'click', x: .6, y: .4 };
       if (step === 2) return { action: 'type', text: 'Different model text', then: [{ action: 'key', key: 'enter', purpose: 'submit' }] };
@@ -142,26 +114,22 @@ test('the normal reply executor rejects a message-area click and continues with 
       return { action: 'done', completed: true, evidence: 'Confirmed the new reply', receipt: { observed: 'delivered', basis: 'New reply visible' } };
     },
     modelRequest: async options => {
-      const { allowed } = JSON.parse(options.messages.at(-1).content[0].text);
+      const { allowed } = JSON.parse(options.messages.find(m=>m.role==='user').content[0].text);
+      if(!allowed)return {text:JSON.stringify({matched:true,composer:box(.4,.72,.42,.12),nextAction:null})};
       if (allowed.composer) return { text: JSON.stringify({ kind: 'composer', box: box(.4, .72, .42, .12) }) };
       assert(allowed.send);
       return { text: JSON.stringify({ kind: 'send', box: box(.86, .90, .12, .07) }) };
     },
-    bitmap: () => ({ width: 100, height: 100, data: Buffer.alloc(40000) }),
   });
-  service.task = { ...task, id: 'managed-reply', channelConversation: true, channelAuthorization: { account: '20:30', scene: 'life' },
+  t.after(()=>service.close());service.visualSessions=new Map([['wechat',h.visual]]);
+  service.task = { ...task, id: 'managed-reply', channelConversation: true, channelAuthorization: { account: require('../src/main/visual-session').visualAccount(h.visual.identity()), scene: 'life' },
     scene: 'life', domain: 'life', visibilityFloor: 1, target: 'wechat', goal: 'Reply', steps: [], workModel: 'hy3', startedAt: Date.now() };
   service.running = true;
   service.generation = 1;
   service.controller = new AbortController();
-  let revision = 0;
-  service.capture = async () => service.screenshot = {
-    ...snapshot(++revision, ocr('发送', .88, .92), ...(draft ? [ocr(task.message, .46, .78)] : [])),
-    sourcePixels: Buffer.from('a'), at: Date.now(), rect, preview: 'data:image/png;base64,YQ==',
-  };
-  await service.runOwned(1, { ...service.task });
+  await service.run(1, { ...service.task });
   assert.equal(service.task.sendState, 'confirmed');
-  assert.deepEqual(inputs.map(input => input.name), ['click', 'type', 'click']);
-  assert.equal(inputs[1].input.text, task.message);
-  assert(inputs[0].input.y > 400);
+  assert.deepEqual(inputs.map(input => input.action), ['click', 'type', 'click']);
+  assert.equal(inputs[1].text, task.message);assert(inputs[0].y>80);
+  assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
 });

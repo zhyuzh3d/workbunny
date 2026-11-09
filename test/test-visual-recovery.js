@@ -1,8 +1,15 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {DesktopService}=require('../src/main/desktop-service');
-const {raster,encode,crop,bitmap,paint}=require('./support/visual-fixture.cjs');
+const {fixture,raster,encode,crop,bitmap,paint}=require('./support/visual-fixture.cjs');
 const rect={x:0,y:0,width:1000,height:700};
+test('desktop execution reaches its first plan after shared safe visual activation without adding input to capture',async t=>{
+ let h;h=fixture({onInput:()=>{h.location.active=true;}});h.location.active=false;h.location.activationRegion={x:.6,y:.12,width:.1,height:.05};h.location.activationEvidence='visible empty title area';
+ h.native.close=()=>{};h.native.cancel=()=>{};const service=new DesktopService({native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap});t.after(()=>service.close());
+ service.task={id:'fixture-activation',target:'notes',scene:'life',domain:'life',visibilityFloor:1,goal:'fixture goal',steps:[],startedAt:Date.now()};service.running=true;service.generation=1;service.controller=new AbortController();service.visualSessions=new Map([['notes',h.visual]]);
+ const reached=Error('first plan reached');service.capture=async()=>{throw reached;};await service.acquireGuiLease();
+ await assert.rejects(service.runOwned(1,{...service.task}),e=>e===reached);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
+});
 async function scenario({occupied=false,typeFails=false,sendFails=false,readbackFails=false,nativeFallback=false}={}){
  const calls=[],journal=[],outcomes=[],marker='[workbunny:visual-test]';let draft='',submissions=0,plans=0;
  const row=(text,y,x=.3)=>({text,x,y,width:.5,height:.025,confidence:.99});

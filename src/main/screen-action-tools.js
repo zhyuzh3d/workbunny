@@ -19,12 +19,7 @@ function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async(
  const scope=a=>({application:a.application,...(a.recipient?{recipient:a.recipient}:{})});
  tools.register({name:'screen.activate',description:'只按当前截图与视觉模型识别的唯一安全区域点击激活目标，再以新截图核对；不查询或启动应用，不查询前台或窗口。目标不可见或安全区域不明则停止。',effect:'write',capabilities:['screen.input'],scope,available:task=>task.subjects.some(s=>!['system','bunny'].includes(s.application)),validate:v=>{fields(v,['application'],'视觉软件目标');if(typeof v.application!=='string'||!v.application)throw Error('缺少目标软件');return v;},execute:async(a,c)=>{
   if(!await canOperate(c.task))throw Object.assign(Error('等待电脑空闲后操作'),{code:'E_GUI_BUSY',dispatched:false});
-  const owner=leaseOwner(c);await lease?.acquire(owner,c.signal);try{const visual=visualFor(a.application),frame=await visual.observe({signal:c.signal,allowInactive:true});
-   if(visual.anchor.active===true)return {activated:false,alreadyVisuallyActive:true,identity:frame.identity,method:'display-pixels'};
-   const r=visual.anchor.activationRegion,d=frame.sourceRect;if(!require('./visual-session').validBox(r)||!visual.anchor.activationEvidence)throw Object.assign(Error('画面没有唯一安全激活区域'),{code:'E_VISUAL_TARGET',dispatched:false});
-   const result=await visual.input(frame.visualFrameId,{action:'click',x:d.x+(r.x+r.width/2)*d.width,y:d.y+(r.y+r.height/2)*d.height},{signal:c.signal});
-   const response={activated:false,receipt:{inputPerformed:result.performed===true,method:'display-pixels'}};
-   if(!c.signal?.aborted)try{await require('./action-progress').pauseFor(160,c.signal);const after=await visual.observe({signal:c.signal,relocate:true});response.activated=true;response.identity=after.identity;}catch(error){response.observationError={code:error.code||'E_OBSERVATION',message:error.message};}return response;
+  const owner=leaseOwner(c);await lease?.acquire(owner,c.signal);try{const {frame,...response}=await visualFor(a.application).activate({signal:c.signal});return response;
   }finally{lease?.release(owner);}
  }});
  tools.register({name:'screen.action',description:'执行一个Operation。Bunny可选择observeAfter=true在同次调用带回新画面；无需中间检查时省略或false，由Bunny按Action需要决定。文字提供实际视觉标签label；无文字目标用targetType=icon/region及预览图像素坐标，右键和滚动也用像素坐标。Task与Action完成须自主核查，Operation不必逐次检查；受控会话正文使用对应收发工具。',effect:'write',capabilities:['screen.input'],scope,

@@ -19,10 +19,17 @@ test('occlusion preserves the visual identity and can recover without latching a
 test('a visible security/login screen stops before conversation inspection or any login click',async()=>{
  const f=setup();f.h.location={available:false,unavailableKind:'security',evidence:'原生安全提示中可见请重新登录',reason:'实际画面是安全登录提示'};const result=await f.scene.observe({recipient:'Alice'});assert(result.unavailable);assert.equal(f.scene.circuit.kind,'security');assert.equal(f.inspections(),0);assert.equal(f.faults.length,1);const calls=f.h.calls.length;await assert.rejects(f.scene.assertHealthy(),e=>e.code==='E_APP_CIRCUIT'&&e.diagnostic.visualState.kind==='security');assert.equal(f.h.calls.length,calls);assert(f.h.calls.every(c=>c.op==='displayCapture'));
 });
-test('a single unclassified false or inactive target remains an observation failure rather than an account diagnosis',async()=>{
- for(const result of [{available:false,reason:'账户身份小字看不清'},{available:false,unavailableKind:'login',reason:'可能是登录界面'},{...fixture().location,active:false}]){
+test('a single unclassified false remains an observation failure rather than an account diagnosis',async()=>{
+ for(const result of [{available:false,reason:'账户身份小字看不清'},{available:false,unavailableKind:'login',reason:'可能是登录界面'}]){
   const f=setup();f.h.location=result;await assert.rejects(f.scene.assertHealthy(),e=>e.code==='E_VISUAL_TARGET'&&e.diagnostic.visualState.requiresOwner===false);assert.equal(f.scene.circuit,null);assert.equal(f.faults.length,0);assert(f.h.calls.every(c=>c.op==='displayCapture'));
  }
+});
+test('read-only identity checks accept a visible inactive target without granting input or latching a circuit',async()=>{
+ const f=setup(),task={state:{}};f.h.location.active=false;
+ await f.scene.assertTaskIdentity(task);assert.equal(task.state.sceneIdentity.wechat.mode,'visual');assert.equal(f.scene.circuit,null);
+ assert(f.h.calls.every(c=>c.op==='displayCapture'));const frame=[...f.h.visual.frames.values()].at(-1).result;
+ await assert.rejects(f.h.visual.input(frame.visualFrameId,{action:'click',x:100,y:60}),e=>e.code==='E_VISUAL_TARGET');
+ assert(f.h.calls.every(c=>c.op==='displayCapture'));
 });
 test('a restored legacy window identity is not adopted into the new visual session',async()=>{
  const f=setup(),task={state:{sceneIdentity:{wechat:{pid:76,windowId:8}}}};await assert.rejects(f.scene.assertTaskIdentity(task),e=>e.code==='E_APP_CIRCUIT');assert.equal(f.faults.length,1);assert(!f.h.calls.some(c=>c.op==='displayInput'));

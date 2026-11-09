@@ -70,6 +70,15 @@ test('proactive review retires an overdue worker and isolates its late mutations
  const gate=deferred(),entered=deferred();let oldContext;const h=harness(async ctx=>{if(ctx.recovery?.guidanceId)return {status:'completed'};oldContext=ctx;entered.resolve();await gate.promise;ctx.task.state.late='must not win';return {status:'completed'};},{reviewTask:async()=>({...plan(),guidance:{...plan().guidance,restartFromCheckpoint:'retire the unresponsive original invocation, retaining all effects'}}),mainReviewOptions:{stageTimeoutMs:20}});t.after(()=>h.runtime.close());
  const {id}=await h.start(),running=h.runtime.tick(id);await entered.promise;h.time(2000);await h.runtime.tick();await flush();let task=h.runtime.tasks.get(id);assert.equal(oldContext.signal.aborted,true);assert.equal(task.status,'waiting');await running;await h.runtime.tick(id);assert.equal(task.status,'completed');gate.resolve();await flush();assert.equal(task.state.late,undefined);
 });
+test('automatic scheduling supervises a newly started action while its first call is still pending',async t=>{
+ const gate=deferred(),entered=deferred(),reviewed=deferred();let context;
+ const h=harness(async ctx=>{context=ctx;entered.resolve();await gate.promise;return {status:'waiting'};},{clock:Date.now,autoSchedule:true,
+  reviewTask:async()=>{reviewed.resolve();return plan('continue');},mainReviewOptions:{stageTimeoutMs:20,monitorMs:5}});
+ t.after(()=>{gate.resolve();h.runtime.close();});
+ let timer;const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('active action was never supervised by the scheduler')),500);});
+ try{await Promise.race([(async()=>{await h.start();await entered.promise;await reviewed.promise;})(),timeout]);}finally{clearTimeout(timer);}
+ assert.equal(context.signal.aborted,false,'read-only supervision does not itself cancel a healthy caller');
+});
 test('continue waits for a safe boundary, tolerates repeated read receipts and never aborts a healthy worker',async t=>{
  const model=deferred(),worker=deferred(),entered=deferred();let context;
  const h=harness(async ctx=>{context=ctx;entered.resolve();await worker.promise;return {status:'waiting'};},{reviewTask:()=>model.promise,mainReviewOptions:{stageTimeoutMs:20}});t.after(()=>h.runtime.close());

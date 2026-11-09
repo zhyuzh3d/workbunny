@@ -63,7 +63,7 @@ class VisualSession{
     if(v.texts!==undefined&&(!Array.isArray(v.texts)||v.texts.length>120||v.texts.some(r=>typeof r.text!=='string'||r.text.length>1000||!validBox(r)||!(r.confidence>=0&&r.confidence<=1))))throw blocked('可见文字及区域证据无效');
     if(!Array.isArray(v.monitorRegions)||!v.monitorRegions.length||v.monitorRegions.length>12||v.monitorRegions.some(r=>!validBox(r)||r.x<v.region.x||r.y<v.region.y||r.x+r.width>v.region.x+v.region.width||r.y+r.height>v.region.y+v.region.height))throw blocked('缺少来自实际画面的监测区域');
     return v;
-   },{...(this.request?{request:this.request}:{}),onRequestDiagnostic:d=>trace.record('visual-recognition',{status:d.phase,attempt:d.attempt,elapsedMs:d.elapsedMs,code:d.errorCode})});
+   },{...(this.request?{request:this.request}:{}),onRequestDiagnostic:d=>trace.record('visual-recognition',{status:d.phase,attempt:d.attempt,elapsedMs:d.elapsedMs,code:d.errorCode,normalized:d.normalized,discardedChars:d.discardedChars,schemaAudit:d.schemaAudit,completion:d.completion})});
   trace.record('visual-location',{available:checked.value.available,unique:checked.value.unique,active:checked.value.active,sameIdentity:checked.value.sameIdentity,unavailableKind:checked.value.unavailableKind,region:checked.value.region,elapsedMs:this.clock()-began});
   this.current(signal);if(!checked.value.available){
    const candidate=checked.value.region;
@@ -77,6 +77,16 @@ class VisualSession{
  }
  async observeFrame({signal,relocate=false,allowInactive=false}={}){
   return this.observeCapturedFrame(await this.display(signal),{signal,relocate,allowInactive});
+ }
+ async activate({signal}={}){
+  const frame=await this.observe({signal,allowInactive:true});
+  if(this.anchor.active===true)return {activated:false,alreadyVisuallyActive:true,identity:frame.identity,method:'display-pixels',frame};
+  const r=this.anchor.activationRegion,d=frame.sourceRect;
+  if(!validBox(r)||!this.anchor.activationEvidence)throw blocked('画面没有唯一安全激活区域',{kind:'inactive'});
+  const input=await this.input(frame.visualFrameId,{action:'click',x:d.x+(r.x+r.width/2)*d.width,y:d.y+(r.y+r.height/2)*d.height},{signal});
+  const response={activated:false,receipt:{inputPerformed:input.performed===true,method:'display-pixels'}};
+  if(!signal?.aborted)try{await require('./action-progress').pauseFor(160,signal);const after=await this.observe({signal,relocate:true});response.activated=true;response.identity=after.identity;response.frame=after;}catch(error){response.observationError={code:error.code||'E_OBSERVATION',message:error.message};}
+  return response;
  }
  async observeCapturedFrame(full,{signal,relocate=false,allowInactive=false}={}){
   let location=this.anchor;

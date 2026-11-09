@@ -11,8 +11,8 @@ const STAGES=new Set(['host-state','operation-intent','operation-dispatch','oper
  'capture-start','capture-end','capture-error','pixel-frame','visual-recognition','visual-location','visual-change','visual-observation','visual-error','visual-lifecycle',
  'input-intent','input-preflight','input-dispatch','input-receipt','input-error','input-cancel','incident','evidence-pending','evidence-retained','evidence-unavailable','evidence-read','diagnostic-gap']);
 const IDS=new Set(['taskId','actionId','operationId','controllerId','visualSessionId','frameId','captureId','spanId','nativeClientId','nativeRequestId','incidentId','targetRef']);
-const NUMBERS=new Set(['generation','attempt','timeoutMs','elapsedMs','capturedAt','width','height','sourceWidth','sourceHeight','chars','x','y','deltaX','deltaY','bytes','count','dropped','pendingBytes','capturedAgeMs']);
-const FLAGS=new Set(['ok','verified','available','unique','active','sameIdentity','geometryChanged','identityChanged','pixelsChanged','reused','nativeAcknowledged','cancelledAfterDispatch','dispatched','mayHaveDispatched','matched']);
+const NUMBERS=new Set(['generation','attempt','timeoutMs','elapsedMs','capturedAt','width','height','sourceWidth','sourceHeight','chars','x','y','deltaX','deltaY','bytes','count','dropped','pendingBytes','capturedAgeMs','discardedChars']);
+const FLAGS=new Set(['ok','verified','available','unique','active','sameIdentity','geometryChanged','identityChanged','pixelsChanged','reused','nativeAcknowledged','cancelledAfterDispatch','dispatched','mayHaveDispatched','matched','normalized']);
 const CHOICES={mode:['service','terminal','structured-ui','visual'],operation:['click','scroll','key','type'],
  backend:['CGDisplayStream'],imageKind:['display','visual-region','preflight-region'],status:['intent','requested','acknowledged','confirmed','not-dispatched','uncertain','cancelled','failed','completed','started','validated','validation-failed','unavailable','reused','reset','closed'],
  kind:['capture-failed','visual-unavailable','input-failed','operation-failed','native-failed','host-change'],
@@ -29,6 +29,7 @@ function sanitize(value={}){
   if(IDS.has(key)){const id=ref(v);if(id)out[key]=id;}
   else if(NUMBERS.has(key)&&Number.isFinite(v)&&Math.abs(v)<=Number.MAX_SAFE_INTEGER)out[key]=v;
   else if(FLAGS.has(key)&&typeof v==='boolean')out[key]=v;
+  else if(['schemaAudit','completion'].includes(key)){const safe=require('./self-repair').diagnostic({[key]:v});if(safe?.[key])out[key]=safe[key];}
   else if(CHOICES[key]?.includes(v))out[key]=v;
   else if(['tool','nativeOperation'].includes(key)&&typeof v==='string'&&/^[a-zA-Z][a-zA-Z0-9_.-]{0,79}$/u.test(v))out[key]=v;
   else if(key==='code'&&typeof v==='string'&&/^(?:E_[A-Z0-9_]{1,60}|ABORT_ERR)$/u.test(v))out.code=v;

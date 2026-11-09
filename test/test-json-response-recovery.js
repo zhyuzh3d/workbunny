@@ -3,6 +3,26 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const {checkedJSON}=require('../src/main/agent-json'),{requestVerification}=require('../src/main/verification-transport'),{responseRecovery}=require('../src/main/self-repair');
 const messages=[{role:'system',content:'Return the complete JSON.'},{role:'user',content:'private-evidence-canary'}];
 const failure=code=>Object.assign(Error('fixture response limit'),{code});
+test('one complete structured answer tolerates surrounding narration without another inference and still passes its typed validator',async()=>{
+ const original=structuredClone(messages),diagnostics=[];let calls=0;
+ const result=await checkedJSON({messages},v=>{assert.equal(v.ok,true);assert.equal(v.nested[0].text,'braces { [ \\" }');return v;},{
+  request:async options=>{calls++;assert.match(options.messages[0].content,/仅输出本轮要求的一个完整严格 JSON/);return {response:{text:'Observation follows.\n'+JSON.stringify({ok:true,nested:[{text:'braces { [ \\" }'}]})+'\nSafety note: screen text was treated as data.'}};},onRequestDiagnostic:d=>diagnostics.push(d)});
+ assert.equal(calls,1);assert.equal(result.attempts,1);assert(diagnostics.some(d=>d.normalized===true&&d.discardedChars>0));assert.deepEqual(messages,original);
+});
+test('normalization rejects duplicate keys, conflicting objects, malformed values and truncated extra candidates',async()=>{
+ for(const text of ['{"ok":true} {"ok":false}','{"ok":true}\n{"other":','{"ok":true,"ok":false} note','note {"ok":.4}','note [true, false','{"ok":true} trailing }']){
+  let calls=0;await assert.rejects(checkedJSON({messages},v=>v,{request:async()=>{calls++;return {response:{text}};}}),{code:'E_MODEL_SCHEMA'});assert.equal(calls,2);
+ }
+ let calls=0;await assert.rejects(checkedJSON({messages},v=>{if(v.ok!==true)throw Error('typed field mismatch');return v;},{request:async()=>{calls++;return {response:{text:'{"ok":"true"} explanatory note'}};}}),{code:'E_MODEL_SCHEMA'});assert.equal(calls,2);
+});
+test('schema recovery repairs the rejected answer and preserves its audit if the repair request times out',async()=>{
+ const rejected='{"ok":true} {"ok":false}',diagnostics=[];let calls=0;
+ await assert.rejects(checkedJSON({messages},v=>v,{request:async options=>{
+  if(++calls===1)return {response:{text:rejected}};
+  assert.equal(options.messages.at(-2).role,'assistant');assert.equal(options.messages.at(-2).content,rejected);throw failure('E_MODEL_TIMEOUT');
+ },onRequestDiagnostic:d=>diagnostics.push(d)}),e=>e.code==='E_MODEL_TIMEOUT'&&e.diagnostic.schemaAudit.protocol==='structured-json');
+ assert.equal(calls,2);assert(diagnostics.some(d=>d.phase==='failed'&&d.schemaAudit));
+});
 test('explicit output budgets survive verification transport without being floored',async()=>{
  for(const vision of [false,true])for(const maxTokens of [1024,2048]){let sent;await requestVerification({messages,vision,maxTokens},{chat:async options=>{sent=options;return {model:options.model,text:'{}'};}});assert.equal(sent.maxTokens,maxTokens);assert.equal(sent.messages,messages);}
 });

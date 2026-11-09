@@ -1577,6 +1577,11 @@ class DesktopService {
       if(this.task.draftInserted&&!this.task.submitAttemptedAt)taskScope=Object.freeze({...taskScope,draftInserted:true,resumeRequireMatchingDraft:true});
     }
     if(taskScope.target==='wechat'){await this.beforeWeChat();this.assertLive(gen);if(taskScope.channelConversation)this.sensitivePolicy.checkChannel(this.task.channelAuthorization,taskScope.recipient);}
+    // The execution owner can safely activate a visible target using the same
+    // pixel-only mechanism as screen.activate. Read-only capture/identity checks
+    // never acquire this input behavior.
+    const activation=await this.visualFor(taskScope.target).activate({signal:this.operationSignal});this.assertLive(gen);
+    if(!activation.frame)throw Object.assign(Error(activation.observationError?.message||'安全激活后尚未取得可操作画面'),{code:activation.observationError?.code||'E_VISUAL_TARGET',dispatched:false});
     const scope=Object.freeze({...this.visualFor(taskScope.target).identity(),target:taskScope.target});
     this.update({status:'running',application:taskScope.target,scope,note:'正在通过显示像素识别目标区域'});
     let draftInserted = !!this.task.draftInserted || !!taskScope.draftInserted;

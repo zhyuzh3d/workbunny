@@ -587,7 +587,7 @@ class AgentService{
   const channelConversation=!!this.channels&&args.task?.skill==='conversation.manage';
   const execute=async()=>{
     if(args.signal?.aborted)return {ok:false,dispatched:false,error:'任务已暂停，未执行输入'};
-    await this.scene.assertHealthy();
+    await this.scene.assertHealthy({signal:args.signal});
     if(this.channels&&!args.channelAuthorization&&(channelConversation||args.operation==='send')){
       const channel=await this.channels.ensure({application:'wechat',recipient:args.recipient},args.task.state.sceneIdentity?.wechat||this.scene.knownIdentity);
       args={...args,channelAuthorization:this.channels.snapshot(channel)};

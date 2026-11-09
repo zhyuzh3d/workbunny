@@ -18,6 +18,13 @@ test('actual visual sequence links capture, VLM, frame, preflight and one acknow
  assert.deepEqual(h.calls.map(c=>c.op),['displayCapture','displayCapture','displayInput'],'diagnostics add no capture or target interface calls');
  assert.equal(trace.summarizeTimeline(events).recentInputs.at(-1).outcome,'input-acknowledged');
 });
+test('normalized visual replies record format drift and typed diagnostics without retaining model prose',async()=>{
+ const recorder=new trace.OperationDiagnostics(),h=fixture();h.visual.request=async()=>({response:{text:JSON.stringify(h.location)+'\nprivate-model-prose-canary'}});
+ await trace.using(recorder,()=>h.visual.observe());const event=recorder.events.find(e=>e.stage==='visual-recognition'&&e.normalized);
+ assert(event.discardedChars>0);assert(!JSON.stringify(recorder.events).includes('private-model-prose-canary'));
+ recorder.record('visual-recognition',{status:'validation-failed',schemaAudit:{protocol:'structured-json',field:'response',expected:'valid-json',text:'private-schema-canary'},completion:{model:'fixture-model',finishReason:'stop',text:'private-answer-canary'}});
+ const diagnostic=recorder.events.at(-1);assert.equal(diagnostic.schemaAudit.protocol,'structured-json');assert.equal(diagnostic.completion.finishReason,'stop');assert(!JSON.stringify(diagnostic).includes('private-'));
+});
 test('a visible security state is recorded only when actually observed and never supplies an exit time or cause',async()=>{
  let at=1000,mono=0n;const recorder=new trace.OperationDiagnostics({clock:()=>at,monotonic:()=>mono}),h=fixture();
  await trace.using(recorder,async()=>{await h.visual.observe();at=900;mono+=1000000n;h.location={available:false,unavailableKind:'security',reason:'private-contact visible security warning'};await assert.rejects(h.visual.observe({relocate:true}));});

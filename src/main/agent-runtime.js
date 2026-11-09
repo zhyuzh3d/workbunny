@@ -772,7 +772,11 @@ class AgentRuntime {
       group.workers.get(workerKey).actionId=actionId;
       if(actionId){task.actionRuns??={};actionRun=task.actionRuns[actionId]??={id:actionId,eventKey:event?.key||null,scope,eventType:event?.type||'task.goal',...(!event&&typeof skill.activeAction==='function'?{activePhase:actionKind}:{}),createdAt:this.clock(),attempts:0};actionRun.status='running';actionRun.attempts++;actionRun.startedAt??=this.clock();progress=new ActionProgress(actionRun.progress??={},this.clock).wait(null);}
       recoveryPolicy.checking(actionRun||task.state,this.clock());
-      if(!['needs_attention','waiting_permission'].includes(task.status))task.status='running';task.counters.wakes++;await this.save(task);
+      if(!['needs_attention','waiting_permission'].includes(task.status))task.status='running';task.counters.wakes++;
+      // tick() schedules before this worker resumes from its authorization
+      // await. Arm monitoring again now that its active Action actually exists;
+      // otherwise the first pending tool/model call can have no future tick.
+      this.schedule();await this.save(task);
       if(event?.type==='conversation.messages')stopObservation=this.observeWhileActive?.(task,event,controller.signal);
       stepWait=createBoundedWait({signal:controller.signal,timeoutMs:this.stepTimeoutMs,code:'E_ACTION_TIMEOUT',message:'本轮执行调用达到时限，保留实际状态并重新分析'});
       const live=()=>this.current(task,token,true)&&!stepWait.signal.aborted;

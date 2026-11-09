@@ -19,13 +19,13 @@ class WeChatScene{
     if(error.code==='E_APP_CIRCUIT'||state?.requiresOwner===true){await this.trip(error.message,state?.kind||'unclear');error.code='E_APP_CIRCUIT';error.dispatched=false;}
     return error;
   }
-  async assertHealthy(){
+  async assertHealthy({signal}={}){
     if(this.circuit)throw Object.assign(Error('微信操作已停止：'+this.circuit.reason),{code:'E_APP_CIRCUIT',dispatched:false,diagnostic:{visualState:{kind:this.circuit.kind,requiresOwner:true}}});
-    try{await this.visual.observe();this.knownIdentity=this.visual.identity();return this.knownIdentity;}
+    try{await this.visual.observe({signal,allowInactive:true});this.knownIdentity=this.visual.identity();return this.knownIdentity;}
     catch(error){throw await this.classifyFailure(error);}
   }
-  async assertTaskIdentity(task){
-    const identity=await this.assertHealthy(),old=task.state.sceneIdentity?.wechat;
+  async assertTaskIdentity(task,options){
+    const identity=await this.assertHealthy(options),old=task.state.sceneIdentity?.wechat;
     if(old&&visualAccount(old)!==visualAccount(identity)){
       await this.trip('原任务的视觉身份已失效，需主人核对身份后重新视觉定位；不继承旧窗口或进程身份','identity');
       throw Object.assign(Error(this.circuit.reason),{code:'E_APP_CIRCUIT',dispatched:false,diagnostic:{visualState:{kind:'identity',requiresOwner:true}}});

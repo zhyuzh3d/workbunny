@@ -11,7 +11,7 @@ function registerConversationTools(tools,{scene,execute,lease,saveAttachment,can
     validate:v=>({...subject(v,['sampleId','force','relocate']),force:v.force===true,relocate:v.relocate===true}),execute:async(a,c)=>{await scene.assertTaskIdentity?.(c.task);const prior=c.task.state?.conversations?.[require('./conversation-skill').subjectKey(a)]?.cursor?.recent;return scene.observe(a,{force:a.force,relocate:a.relocate,repairProfile:c.task.state?.selfRepair?.profile,referenceMessages:prior?{recipient:a.recipient,messages:prior.slice(-6).map(m=>({direction:m.direction,kind:m.kind,text:String(m.text||'').slice(0,300),time:m.time||''}))}:undefined});}});
   tools.register({name:'conversation.open',description:'仅用视觉和键鼠打开指定会话，核对顶部标题；不输入消息正文。',
     effect:'read',capabilities:['screen.input'],scope:a=>a,validate:v=>subject(v),execute:async(a,c)=>{
-      await scene.assertTaskIdentity?.(c.task);await scene.assertHealthy();const r=await execute({...a,operation:'open',signal:c.signal,action:c.action,task:c.task,operationId:c.operationId});scene.invalidate();
+      await scene.assertTaskIdentity?.(c.task,{signal:c.signal});const r=await execute({...a,operation:'open',signal:c.signal,action:c.action,task:c.task,operationId:c.operationId});scene.invalidate();
       if(!r.ok)throw Object.assign(new Error(r.error||'未能打开会话'),{dispatched:false,...(r.code?{code:r.code}:{})});return {ok:true};
     }});
   tools.register({name:'conversation.transcribe',description:'读取本任务指定的对方语音，复用统一视觉Action执行器，由Bunny自行选择观察、键鼠、等待与恢复方法并返回实际文字。',
@@ -26,7 +26,7 @@ function registerConversationTools(tools,{scene,execute,lease,saveAttachment,can
         signal.addEventListener('abort',aborted,{once:true});
       })}),
     validate:v=>({...subject(v,['message']),message:text(v.message,'待发送消息',3500)}),execute:async(a,c)=>{
-      await scene.assertTaskIdentity?.(c.task);await scene.assertHealthy();
+      await scene.assertTaskIdentity?.(c.task,{signal:c.signal});
       // The shared visual Action owns fresh observation and judgment. Do not
       // parse the whole conversation again before it can even start.
       const r=await execute({...a,operation:'send',signal:c.signal,action:c.action,task:c.task,operationId:c.operationId});scene.invalidate();

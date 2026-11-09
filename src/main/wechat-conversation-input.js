@@ -28,8 +28,8 @@ const TARGETS = {
   save: '当前目录控件显示指定目录时，微信原生保存文件对话框内的保存按钮',
 };
 
-const blocked = (message = '微信会话操作超出允许范围，未发出输入') =>
-  Object.assign(new Error(message), { code: 'E_WECHAT_CONVERSATION_INPUT', dispatched: false });
+const blocked = (message = '微信会话操作超出允许范围，未发出输入', diagnostic) =>
+  Object.assign(new Error(message), { code: 'E_WECHAT_CONVERSATION_INPUT', dispatched: false,...(diagnostic?{diagnostic:require('./self-repair').diagnostic(diagnostic)}:{}) });
 const label = text => String(text || '').normalize('NFKC').replace(/\s/gu, '');
 const validBox = b => !!b && [b.x, b.y, b.width, b.height].every(Number.isFinite) &&
   b.x >= 0 && b.y >= 0 && b.width > 0 && b.height > 0 && b.x + b.width <= 1 && b.y + b.height <= 1;
@@ -89,11 +89,11 @@ async function approveInput({ action, task, shot, state, review }) {
   const destination = task.readRequest?.destination;
   const evidence = await review(spec.kinds, { recipient: task.recipient, readRequest: task.readRequest });
   const { kind, box, location } = evidence || {};
-  if (!spec.kinds.includes(kind) || !validBox(box)) throw blocked('当前画面未能确认允许操作的原生控件');
+  if (!spec.kinds.includes(kind) || !validBox(box)) throw blocked('当前画面未能确认允许操作的原生控件',{guardChecks:{controlRoleAllowed:spec.kinds.includes(kind),controlBoxValid:validBox(box)}});
   const exact = kind === 'contact' ? task.recipient : kind === 'file' ? task.readRequest.fileName : undefined;
   const pattern = exact ? value => value === label(exact) : LABELS[kind] ? value => LABELS[kind].test(value) : null;
   const rows = pattern ? targetRows(shot, pattern, box) : [];
-  if (pattern && rows.length !== 1) throw blocked('当前控件的可见文字不足以唯一定位');
+  if (pattern && rows.length !== 1) throw blocked('当前控件的可见文字不足以唯一定位',{candidateCount:targetRows(shot,pattern).length,guardChecks:{frameHasText:Array.isArray(shot.ocr)&&shot.ocr.length>0,labelWithinControl:rows.length>0,labelUniqueInControl:rows.length===1,hasVisualFrame:typeof shot.visualFrameId==='string',hasFrameIdentity:!!shot.identity}});
   const target = rows.length ? rows[0] : box;
   const point = center(target);
   if (action.action === 'click' && !contains(box, action)) throw blocked('点击位置不属于已确认的控件');

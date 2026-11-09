@@ -36,6 +36,17 @@ test('focus has to be visible, cancellation before dispatch sends nothing, cance
 test('ambiguous or security/login screens never dispatch and clear previously reusable input proof',async()=>{
  const h=fixture(),shot=await h.visual.observe();h.location={available:false,reason:'可见安全登录提示'};await assert.rejects(h.visual.observe({relocate:true}),/安全登录/);await assert.rejects(h.visual.input(shot.visualFrameId,{action:'click',x:100,y:60}),/不可用/);assert(!h.calls.some(c=>c.op==='displayInput'));
 });
+test('the shared activation mechanism uses only a confirmed safe pixel region and reobserves before returning an active frame',async()=>{
+ let h;h=fixture({onInput:()=>{h.location.active=true;}});h.location.active=false;h.location.activationRegion={x:.6,y:.12,width:.1,height:.05};h.location.activationEvidence='visible empty title area';
+ const activated=await h.visual.activate();assert.equal(activated.activated,true);assert(activated.frame.visualFrameId);assert.equal(activated.receipt.inputPerformed,true);
+ const inputs=h.calls.filter(c=>c.op==='displayInput');assert.equal(inputs.length,1);assert.equal(inputs[0].args.x,130);assert.equal(inputs[0].args.y,17.4);assert.equal(h.requests.length,2);
+ const again=await h.visual.activate();assert.equal(again.alreadyVisuallyActive,true);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+ for(const kind of ['missing-region','missing-evidence','security']){const f=fixture();f.location.active=false;
+  if(kind==='missing-evidence')f.location.activationRegion={x:.6,y:.12,width:.1,height:.05};
+  if(kind==='security')f.location={available:false,unavailableKind:'security',evidence:'visible login security notice',reason:'security notice'};
+  await assert.rejects(f.visual.activate(),e=>e.code==='E_VISUAL_TARGET');assert(f.calls.every(c=>c.op==='displayCapture'));
+ }
+});
 test('an uncertain small target can be reobserved with a fresh candidate enlargement, which never authorizes input',async()=>{
  const h=fixture(),original={...h.location},candidate={x:.1,y:.1,width:.8,height:.8};h.location={available:false,region:candidate,reason:'整图中文字过小，身份尚不清楚'};
  await assert.rejects(h.visual.observe(),e=>e.code==='E_VISUAL_TARGET'&&e.diagnostic.visualState.kind==='unclear'&&!e.diagnostic.visualState.requiresOwner);
