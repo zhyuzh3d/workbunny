@@ -27,7 +27,7 @@ WorkBunny 使用 Electron 主进程、隔离的 renderer/preload 和 Swift 原�
 | 感知和证据解释 | [`perception.js`](../src/main/perception.js)、[`screen-evidence.js`](../src/main/screen-evidence.js)、[`judgment.js`](../src/main/judgment.js) |
 | WorkBuddy 制作、监督和交付 | [`software-task-skill.js`](../src/main/software-task-skill.js)、[`workbuddy-observation.js`](../src/main/workbuddy-observation.js)、[`monitor.js`](../src/main/monitor.js)、[`secretary.js`](../src/main/secretary.js)、[`result-delivery.js`](../src/main/result-delivery.js) |
 | 模型请求、响应与校验传输 | [`llm.js`](../src/main/llm.js)、[`workbuddy.js`](../src/main/workbuddy.js)、[`chat-response.js`](../src/main/chat-response.js)、[`model-catalog.js`](../src/main/model-catalog.js)、[`verification-transport.js`](../src/main/verification-transport.js) |
-| 语音与打断 | [`asr.js`](../src/main/asr.js)、[`voice-turns.js`](../src/main/voice-turns.js)、[`speaker-filter.js`](../src/main/speaker-filter.js)、[`tts.js`](../src/main/tts.js)、[`tts-session.js`](../src/main/tts-session.js) |
+| 语音与打断 | [`asr.js`](../src/main/asr.js)、[`voice-turns.js`](../src/main/voice-turns.js)、[`speaker-filter.js`](../src/main/speaker-filter.js)、[`speech-echo.js`](../src/main/speech-echo.js)、[`tts.js`](../src/main/tts.js)、[`tts-session.js`](../src/main/tts-session.js) |
 
 ## 2. 对话、渠道与权限
 
@@ -201,7 +201,11 @@ GUI 准入在未持有资源时检查连续空闲五秒及 lease；动作已持�
 
 本地 SpeechAnalyzer 按音频时间范围合并识别片段；片段 `isFinal` 不表示整句或输入流结束。原生层在停顿收尾后排空结果，收尾和重建期间的音频有界排队，定稿失败不把暂定词作为确认交办。Analyzer 只装入 SpeechTranscriber，保留 volatile/fast reporting；不再加入可能门控输入的 SpeechDetector。对同一已保存处理后 PCM 的单次文件对照中，原配置复现缺句，仅去掉 fastResults 仍缺句，仅去掉 SpeechDetector 则找回完整语句；这支持该改动，不等于实时麦克风质量已验收。
 
-句尾依据独立的 WebRTC VAD（固定 libfvad 提交，默认 quality mode 0），只读同一 `toSend`，不修改 AEC、转换、声道、音量或送给 Analyzer 的样本。按每通道完整 10ms 帧观察：有声、非语音、未知分开；任一通道有声即阻止静音累计，残帧保留，错误、不支持格式、断档或旧代次均不当作无声。VAD 的模型、残帧和时间连续性属于物理音频流，不随 Analyzer 句段重建而冷启动；代次只用于观察归属和拒绝旧回调，真正音频断档或格式失效仍清理状态。端点策略独立按 Analyzer 代次重建，须本代曾有活动、当前证据新鲜且持续非语音达到既有 `silenceMs`，同时文字稳定，才可正常收尾；无检测事件或文字暂时停更不能代替静音。排队 PCM 的 VAD 证据按实际进入的新 Analyzer 代次、与输入同序建立。
+句尾依据独立的 WebRTC VAD（固定 libfvad/WebRTC 内核，工作适配层使用 quality mode 0），只读同一 `toSend`，不修改 AEC、转换、声道、音量或送给 Analyzer 的样本。按每通道完整 10ms 帧观察：有声、非语音、未知分开；任一通道有声即阻止静音累计，残帧保留，错误、不支持格式、断档或旧代次均不当作无声。VAD 的模型、残帧和时间连续性属于物理音频流，不随 Analyzer 句段重建而冷启动；代次只用于观察归属和拒绝旧回调，真正音频断档或格式失效仍清理状态。端点策略独立按 Analyzer 代次重建，须本代曾有活动、当前证据新鲜且持续非语音达到既有 `silenceMs`，同时文字稳定，才可正常收尾；无检测事件或文字暂时停更不能代替静音。排队 PCM 的 VAD 证据按实际进入的新 Analyzer 代次、与输入同序建立。
+
+识别文本另按 Analyzer 的实际输入采样范围核对独立声学支持；持续非语音、未知、孤立瞬态及其 VAD 挂尾不能仅凭模型输出变成主人话语。声学活动与词语支持分别保留直接人声及连续性信息，完整 PCM 仍送入识别器，不通过删除低声或静音样本改变时轴。宽范围临时结果和随后精确修订均须重新核对所属范围；撤回只处理同来源的未定稿部分，不抹除先前已确认语句，也不冒充音频已经排空。
+
+`SpeechEcho` 以实际播放 ID 和角色窗口回执登记播放起止；合成中、排队中和旧 ID 的迟到通知不构成已播放依据。ASR 回调携带采集时段，优先按该时段追溯回声，避免转写迟到时越过短暂尾窗；连续实际播放的队列句可合并核对，未播放或不相邻回复不拼接，缓存及近似匹配计算有界。播放期间的半句须经过短暂稳定确认，partial、整句与旧系统 final 共用声纹、回声、插话及唤醒规则，判断通过后才停止当前朗读；AEC 开启本身不能证明有人插话。声音看门狗按 WAV 实际格式估算时长，正常完成仍以对应 ID 的播放回执为准。
 
 活动证据失效四秒或首段文字达到既有最长时限，取消本段并明确反馈，不提交半句；正常静默持续提供有效非语音观察，不会仅因一直无声报错。静音解除后重置活动证据与健康宽限，保留文字和原最长界。连续三次未确认退出后停止自动语音重试，文字对话与 Task 继续可用；主人可明确重新开启，或改动相关 ASR 设置后重试。启动/就绪、仅原生定稿及语义接纳不清失败计数，须 host 实际发出回复或控制回执；后台自愈也不能绕过该等待主人状态。
 
@@ -209,7 +213,9 @@ GUI 准入在未持有资源时检查连续空闲五秒及 lease；动作已持�
 
 有活动但没有转写文字的后继段，同样在新鲜持续 quiet 后请求真实收尾，不能因缺少文字而永远没有定稿事件。空段只有通过相同 finalizer/结果排空屏障，才发送绑定 Analyzer 代次与最后已交付活动序号的 `audioFinal`。host 仅在已有已过滤确认文本、没有新 partial、证明恰好覆盖首个未确认音频来源及当前 quiet 观察时解除等待；后代空段不能覆盖前代被身份或回声过滤拒绝的非空段。它不创建文字、改变主人认证或复活已取消轮次。新活动仍关门，旧代、旧序号、unknown、定稿失败均不能代替覆盖；纯静默没有活动时不反复创建空段。空段事件接入普通链与私有诊断链。
 
-原生活动元数据在普通和诊断链中统一传至 `VoiceTurns`，只含三态、quiet 时长、观察/发送 uptime、代次与递增序号。host 按每进程的 monotonic 偏移转换观察年龄，旧序号、跨代倒退和过期证据不能放行。partial 仅显示；原生整句确认、距文字修订及最近尚未证明为空的有声均达到既有三秒封口、500ms 内新鲜且至少一秒的 quiet 同时成立后，才接纳一次语义轮次。精确覆盖的空段解除待确认音频时，也恢复该段开始前的有声边界；已排空且没有文字的声音不再推迟语义封口，之前真实语音的封口仍保留，避免已确认文字被空段拖过截止而丢弃。接纳前八秒确认界仍只随真实文字进展移动，同文和活动心跳不续期。正常识别器轮换可保留尚未接纳的已确认末句，未确认 partial 不跨识别器继承。
+原生活动元数据在普通和诊断链中统一传至 `VoiceTurns`，只含三态、quiet 时长、观察/发送 uptime、代次与递增序号。host 按每进程的 monotonic 偏移转换观察年龄，旧序号、跨代倒退和过期证据不能放行。partial 可展示，并在通过统一插话门槛后停止旧朗读，但不能独立发起对话或任务；原生整句确认、距文字修订及最近尚未证明为空的有声均达到既有三秒封口、500ms 内新鲜且至少一秒的 quiet 同时成立后，才接纳一次语义轮次。精确覆盖的空段解除待确认音频时，也恢复该段开始前的有声边界；已排空且没有文字的声音不再推迟语义封口，之前真实语音的封口仍保留，避免已确认文字被空段拖过截止而丢弃。未定稿文字的八秒确认界只随真实文字进展移动；真实 native final 满足该阶段，首次定稿另锚定一次八秒声学等待，原三秒封口仍须满足。同文定稿、活动心跳、unknown/quiet 及空段覆盖均不能刷新该声学截止；真正新文字回到文字确认阶段，撤回临时续句恢复前段既有截止。声学等待超时明确表示正文已定稿、当前音频条件尚不满足，不误报文字未确认，也不因此执行交办。正常识别器轮换可保留尚未接纳的已确认末句，未确认 partial 不跨识别器继承。
+
+原生层对所有非空定稿文本给出一致收尾，单字答复由主机已有 `meaningful/allowShort` 统一判断，不能出现已上报半句而永远不发对应定稿的悬空状态。未定稿文字临近原确认截止时，主机可针对当前识别器与来源代次请求一次 checkpoint，预留原生有界收尾时间；它不刷新文字确认期限、不增加权限，也不替代真实静音或提交许可；真实定稿后才进入独立的一次性声学等待阶段。原生只排空已接收音频，后续 PCM 按序进入下一代；真实续说继续修订或取消旧意图，关耳、停止与旧代请求不能复活输入。独立完整的安静指令可走本地快速控制，包含后续问题或新目标的混合话语交原对话理解路径，不能因局部“别讲”等词吞掉后半请求。
 
 接纳后的语义有效性与副作用提交许可分开：`isCurrent()` 只核对本轮身份、真实文字修订、取消和代次；`canCommit()` 核对当前提交许可，`waitForCommit()` 等待当前门而非复用首次成功值。unknown/过期暂时关门，保留同一模型请求和已算结果；fresh quiet 恢复后继续该轮，不重复推理。raw active 保留已确认片段并登记待确认的新音频，quiet 本身不能解除该等待，须新的原生定稿；真实新文字立即使旧 token 和旧结果失效，再合并理解续说。停止、上下文/资料代次及真正识别器进程代次变化立即取消旧语义轮次，正常 Analyzer 句段重建不混同进程代次。
 

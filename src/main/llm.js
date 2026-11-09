@@ -17,10 +17,20 @@ const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 4 });
 function extractTags(raw) {
   const motions = [];
   const emos = [];
-  const clean = raw
-    .replace(/<m>\s*([A-Za-z0-9_-]+)\s*<\/m>/g, (_, k) => (motions.push(k), ''))
-    .replace(/<e>\s*([A-Za-z0-9_-]+)\s*<\/e>/g, (_, k) => (emos.push(k), ''))
-    .replace(/<\/?[me]>/g, '')
+  const consume = (kind, payload) => {
+    const selector = /^([A-Za-z0-9_-]{1,80})(?::([A-Za-z0-9_-]{1,80}))?$/.exec(payload.trim());
+    // Models may qualify a concrete ID with its category. Normalize that
+    // spelling; the existing catalog/permission checks still own execution.
+    if (selector && kind.toLowerCase() === 'm') motions.push(selector[2] || selector[1]);
+    else if (selector && !selector[2]) emos.push(selector[1]);
+    return '';
+  };
+  const clean = String(raw ?? '')
+    // Consume the complete typed container even when its value is invalid.
+    // Stripping only its brackets would turn control data into spoken prose.
+    .replace(/<([me])(?:\s[^>]*)?>([\s\S]*?)<\/\1\s*>/gi, (_, kind, payload) => consume(kind, payload))
+    .replace(/<([me])\s*>\s*([A-Za-z0-9_:-]+)/gi, (_, kind, payload) => consume(kind, payload))
+    .replace(/<\/?[me](?:\s[^>]*)?>/gi, '')
     .replace(/[ \t]{2,}/g, ' ');
   return { clean, motions, emos };
 }

@@ -1,6 +1,25 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{spawnSync}=require('node:child_process'),fs=require('node:fs'),path=require('node:path');
 const binary=process.env.WORKBUNNY_ASR_TEST_BIN||path.resolve('bin/asr');
+test('a provisional single-word answer receives its native final and leaves eligibility to the host',t=>{
+ if(!fs.existsSync(binary))return t.skip('native ASR is not built');
+ const run=spawnSync(binary,['--self-test-short-final'],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);
+ const rows=run.stdout.trim().split('\n').map(JSON.parse);assert.deepEqual(rows.map(row=>row.t),['partial','utterance','selfTest']);
+ assert.equal(rows[0].v,'好');assert.equal(rows[1].v,'好');assert.equal(rows[1].gen,7);assert.equal(rows[2].recognizerStarted,false);
+});
+test('native publication explicitly retracts withdrawn provisional words without fabricating an audio final',t=>{
+ if(!fs.existsSync(binary))return t.skip('native ASR is not built');
+ const run=spawnSync(binary,['--self-test-transcript-retract'],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);
+ const rows=run.stdout.trim().split('\n').map(JSON.parse);assert.deepEqual(rows.map(row=>row.t),['partial','retract','selfTest']);
+ assert.equal(rows[0].gen,7);assert.equal(rows[1].gen,7);assert.equal(rows[1].v,undefined);assert.equal(rows[1].coveredSeq,undefined);assert.equal(rows[2].transcriptRetraction,true);assert.equal(rows[2].recognizerStarted,false);
+});
+test('recognized ranges require independent multi-frame speech support and preserve capture ownership',t=>{
+ if(!fs.existsSync(binary))return t.skip('native ASR is not built');
+ const run=spawnSync(binary,['--self-test-acoustic-evidence'],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);
+ const result=JSON.parse(run.stdout.trim());
+ for(const key of ['acousticEvidence','quietRejected','unknownRejected','transientRejected','rangeOwnership','captureClock','realSpeechPreserved','partialFrameOwnership'])assert.equal(result[key],true,key);
+ assert.equal(result.recognizerStarted,false);
+});
 test('native speech keeps final phrases, replaces volatile ranges and preserves audio across rollover without microphone access',t=>{
  if(!fs.existsSync(binary))return t.skip('native ASR is not built');
  const run=spawnSync(binary,['--self-test-transcript'],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);

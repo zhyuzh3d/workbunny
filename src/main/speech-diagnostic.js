@@ -64,9 +64,9 @@ class SpeechDiagnostic{
    const record=(event,fields={})=>{if(alive())s.writer.record({event,recognizer:s.asr?.traceRecognizer||1,nativeGen:s.nativeGen??null,...fields});};
    const opts=this.options();s.opts=opts;record('host-clock-start',{durationMs,pcm,options:opts});
    const wakeHit=text=>s.asr?.wakeHit?.(text)===true||this.nameHit(text);
-   const turns=this.createTurns({requireActivity:true,allowShort:()=>this.state().allowShort===true,onTrace:value=>record('host-turn-trace',value),
+   const turns=this.createTurns({requireActivity:true,allowShort:()=>this.state().allowShort===true,onCheckpoint:metadata=>s.asr?.checkpoint?.(metadata),onTrace:value=>record('host-turn-trace',value),
     onLive:(text,value)=>record('host-turn-live',{text,...value,turn:turns.snapshot()?.id,reason:value.final&&this.state().wakeOnly&&!wakeHit(text)?'not-addressed':'live'}),
-    onInvalidate:()=>record('host-turn-invalidated'),onError:(_message,metadata)=>{record('host-turn-unconfirmed',{reason:metadata?.reason||'unconfirmed',admitted:metadata?.admitted===true});if(['confirmation-timeout','commit-timeout'].includes(metadata?.reason))queueMicrotask(()=>{if(this.session===s)void this.finish('voice-unconfirmed');});},
+    onInvalidate:()=>record('host-turn-invalidated'),onError:(_message,metadata)=>{record('host-turn-unconfirmed',{reason:metadata?.reason||'unconfirmed',admitted:metadata?.admitted===true});if(['confirmation-timeout','acoustic-timeout','commit-timeout'].includes(metadata?.reason))queueMicrotask(()=>{if(this.session===s)void this.finish('voice-unconfirmed');});},
     onRemember:(text,value)=>{record('host-remember-sink',{text,...value});return {id:'diagnostic-only'};},
     onRequest:token=>{const value=this.state(),reason=!meaningful(token.text,value.allowShort===true)?'noise':this.recentEcho(token.text)?'echo':value.wakeOnly&&!wakeHit(token.text)?'wake':'accepted';if(['echo','wake'].includes(reason))token.skip();record('host-request-sink',{text:token.text,turn:token.id,reason,businessDispatch:false});}
    });s.turns=turns;
@@ -76,10 +76,12 @@ class SpeechDiagnostic{
    const asr=this.createAsr(this.bin,()=>{});s.asr=asr;
    asr.on('error',()=>{void this.finish('native-error');});
    asr.on('ready',()=>{if(!alive())return;s.phase='capturing';record('host-ready');this.publish();});
-   asr.on('partial',text=>{if(alive())pipeline.partial(text);});
-   asr.on('utterance',text=>{if(alive())pipeline.utterance(text);});
+   asr.on('partial',(text,meta)=>{if(alive())pipeline.partial(text,meta);});
+   asr.on('retract',meta=>{if(alive())pipeline.retract(meta);});
+   asr.on('inputReset',()=>pipeline.reset());
+   asr.on('utterance',(text,meta)=>{if(alive())pipeline.utterance(text,meta);});
    asr.on('audioFinal',value=>{if(alive()){record('host-audio-final',value);pipeline.audioFinal(value);}});
-   asr.on('final',text=>{if(alive())pipeline.final(text);});
+   asr.on('final',(text,meta)=>{if(alive())pipeline.final(text,meta);});
    asr.on('voiceFeatures',value=>{if(alive())pipeline.voiceFeatures(value);});
    asr.on('activity',value=>{if(alive()){const {seq:activitySeq,...metadata}=value;record('host-activity',{...metadata,activitySeq});pipeline.activity(value);}});
    asr.on('micDevice',value=>{if(!alive())return;this.speakerFilter.device=value.identity||opts.device||(value.on&&value.name)||this.speakerFilter.device||'default';});

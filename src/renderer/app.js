@@ -512,7 +512,7 @@ function ensureAudio() {
   voiceGain.connect(audioCtx.destination);
   analyserData = new Uint8Array(analyser.fftSize);
   pcmPlayer = createPCMPlayer({ context: audioCtx, destination: analyser,
-    onStart: () => { markReplyStarted(); pet.audioStarted(); },
+    onStart: id => { markReplyStarted(); pet.audioStarted(id); },
     onDone: id => { closeMouth(); pet.audioDone(true, id); },
     onUnderrun: () => pet.log('[tts] 流式播放缓冲不足'),
   });
@@ -548,7 +548,7 @@ async function playWav(u8, id) {
   };
   currentSource = src;
   src.start();
-  markReplyStarted(); pet.audioStarted();
+  markReplyStarted(); pet.audioStarted(id);
 }
 
 function stopAudio(keepQuiet) {

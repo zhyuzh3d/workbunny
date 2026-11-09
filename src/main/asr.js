@@ -20,7 +20,7 @@ const MAX_ASR_LINE_BYTES = 512 * 1024;
 // minimum receive offset preserves both native observation age and pipe delay.
 function createActivityClock({ wallNow = () => Date.now(), monoNow = () => Number(process.hrtime.bigint()) / 1e6 } = {}) {
   let offset = Infinity, sequence = 0, generation = -1, emittedAt = -Infinity;
-  return (message, recognizer) => {
+  const clock = (message, recognizer) => {
     const wall = wallNow(), mono = monoNow();
     const validSeq = Number.isSafeInteger(message.seq) && message.seq > 0;
     const validGen = Number.isSafeInteger(message.gen) && message.gen >= 0;
@@ -38,6 +38,20 @@ function createActivityClock({ wallNow = () => Date.now(), monoNow = () => Numbe
     return { state: age <= 500 ? message.state : 'unknown', quietSeconds: message.state === 'quiet' && age <= 500 ? message.quietSeconds : 0,
       at: wall - age, seq: message.seq, recognizer, sourceGen: message.gen };
   };
+  clock.range = (message, recognizer) => {
+    const value = { recognizer };
+    if (Number.isSafeInteger(message.gen) && message.gen >= 0) value.sourceGen = message.gen;
+    const start = message.audioStartAt, end = message.audioEndAt, emitted = message.emittedAt;
+    const wall = wallNow(), mono = monoNow();
+    if (![start,end,emitted,wall,mono].every(Number.isFinite) || start < 0 || end < start || emitted < end) return value;
+    offset = Math.min(offset, mono - emitted * 1000);
+    const from = wall - (mono - (start * 1000 + offset)), to = wall - (mono - (end * 1000 + offset));
+    if (Number.isFinite(from) && Number.isFinite(to) && from >= 0 && to >= from && to <= wall) {
+      value.audioStartAtMs = from; value.audioEndAtMs = to;
+    }
+    return value;
+  };
+  return clock;
 }
 
 class Asr extends EventEmitter {
@@ -46,6 +60,8 @@ class Asr extends EventEmitter {
     this.bin = binPath;
     this.spawnProcess = typeof spawnProcess === 'function' ? spawnProcess : spawn;
     this.proc = null;
+    this.stopping = false;
+    this.inputGeneration = -1;
     this.discarded = new WeakSet();
     this.retiring = new WeakSet();
     this.ready = false;
@@ -98,6 +114,8 @@ class Asr extends EventEmitter {
       return;
     }
     this.proc = p;
+    this.stopping = false;
+    this.inputGeneration = -1;
     this.ready = false;
     this.partial = '';
     this.aec = false;
@@ -172,6 +190,8 @@ class Asr extends EventEmitter {
 
   onMessage(m, sourceProc = null) {
     if (sourceProc && (this.proc !== sourceProc || this.discarded.has(sourceProc))) return;
+    if(this.stopping&&this.always&&['partial','utterance','retract','final','activity','audioFinal','voiceFeatures'].includes(m.t))return;
+    if(['partial','utterance','retract','final','activity','audioFinal'].includes(m.t)&&Number.isSafeInteger(m.gen)&&m.gen>=0)this.inputGeneration=Math.max(this.inputGeneration,m.gen);
     if(this.diagnostic)try{this.diagnostic.record?.(m);}catch{this.kill({discard:true});return;}
     if(['partial','utterance','final'].includes(m.t))this.emitSpeechTrace({stage:'raw-'+m.t,chars:typeof m.v==='string'?m.v.length:0});
     if (typeof m.wakeNameHit === 'boolean' && typeof m.v === 'string' && m.v.length <= 4000 && ['partial','utterance','final'].includes(m.t)) {
@@ -229,14 +249,20 @@ class Asr extends EventEmitter {
         break;
       case 'partial':
         this.partial = m.v || '';
-        this.emit('partial', this.partial);
+        this.emit('partial', this.partial, this.activityClock.range(m, this.traceRecognizer));
+        break;
+      case 'retract':
+        if (Number.isSafeInteger(m.gen) && m.gen >= 0) {
+          this.partial = '';
+          this.emit('retract', {recognizer:this.traceRecognizer,sourceGen:m.gen});
+        }
         break;
       case 'voiceFeatures':
         this.emit('voiceFeatures', m);
         break;
       case 'utterance':
         this.partial = '';
-        this.emit('utterance', m.v || '');
+        this.emit('utterance', m.v || '', this.activityClock.range(m, this.traceRecognizer));
         break;
       case 'recycle':
         this.emit('recycle', m.v || 0);
@@ -267,7 +293,7 @@ class Asr extends EventEmitter {
         this.emit('level', m.v || 0);
         break;
       case 'final':
-        this.emit('final', m.v || '');
+        this.emit('final', m.v || '', this.activityClock.range(m, this.traceRecognizer));
         break;
       case 'end':
         this.emit('end');
@@ -302,7 +328,9 @@ class Asr extends EventEmitter {
   }
 
   stop() {
+    this.emit('inputReset');
     if (!this.proc) return;
+    this.stopping = this.always;
     this.ready = false;
     try {
       this.proc.stdin.write(this.always ? 'quit\n' : 'stop\n');
@@ -319,7 +347,14 @@ class Asr extends EventEmitter {
     }, 2500);
   }
 
+  checkpoint({recognizer,sourceGen}={}) {
+    if(!this.proc||this.stopping||!this.always||recognizer!==this.traceRecognizer||!Number.isSafeInteger(sourceGen)||sourceGen<0||sourceGen!==this.inputGeneration)return false;
+    try{this.proc.stdin.write('checkpoint '+sourceGen+'\n');return true;}catch{return false;}
+  }
+
   kill({ discard = false } = {}) {
+    this.emit('inputReset');
+    this.stopping = true;
     if (this.captureTimer) { clearInterval(this.captureTimer); this.captureTimer = null; }
     if (this.authWaitTimer) { clearTimeout(this.authWaitTimer); this.authWaitTimer = null; }
     if (this.proc) {

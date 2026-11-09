@@ -12,7 +12,9 @@ for source in native/vendor/libfvad/src/fvad.c native/vendor/libfvad/src/signal_
   xcrun clang -O2 -std=c11 -target arm64-apple-macos26.0 -I native/vendor/libfvad/include -I native/vendor/libfvad/src -c "$source" -o "$object"
   vad_objects+=("$object")
 done
+xcrun clang -O2 -std=c11 -target arm64-apple-macos26.0 -I native/vendor/libfvad/src -c native/speech-vad.c -o "$vad_build/speech-vad.o"
+vad_objects+=("$vad_build/speech-vad.o")
 xcrun ar rcs "$vad_build/libfvad.a" "${vad_objects[@]}"
-xcrun swiftc -O -parse-as-library -target arm64-apple-macos26.0 -I native/vendor/libfvad native/speaker-features.swift native/wake-name.swift native/speech-transcript.swift native/speech-diagnostic.swift native/speech-activity.swift native/speech-endpoint.swift native/asr.swift "$vad_build/libfvad.a" -o bin/asr \
+xcrun swiftc -O -parse-as-library -target arm64-apple-macos26.0 -import-objc-header native/speech-vad.h native/speaker-features.swift native/wake-name.swift native/speech-transcript.swift native/speech-diagnostic.swift native/speech-activity.swift native/speech-endpoint.swift native/asr.swift "$vad_build/libfvad.a" -o bin/asr \
   -framework Accelerate -framework Speech -framework AVFoundation -framework AudioToolbox -framework CoreAudio
 chmod +x bin/asr

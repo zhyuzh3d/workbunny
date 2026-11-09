@@ -674,36 +674,11 @@ function waitForSpeech(operation, signal) {
     if (signal.aborted) abort();
   });
 }
-let recentSpeech = '';    // 最近说过的字，用来识别"这句其实是自己的回声"
+const speechEcho = new (require('./speech-echo').SpeechEcho)();
 let lastSpokeAt = 0;
-
-/** 刚出口的话留个尾巴，用于回声判定 */
-function noteSpoken(text) {
-  recentSpeech = (recentSpeech + ' ' + text).slice(-1200);
-  lastSpokeAt = Date.now();
-}
-
-/** 比较最近播报内容与识别结果，容忍少量识别错误和标点差异。 */
-function echoLike(text) {
-  const clean = (s) => String(s || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-  const a = clean(text).slice(-160);
-  const b = clean(recentSpeech).slice(-1200);
-  if (a.length < 2 || b.length < 2) return false;
-  if (b.includes(a)) return true;
-  if (a.length < 4) return false;
-  // Semiglobal edit distance: the recognized fragment can start anywhere in
-  // the playback text. Bound both input size and tolerated ASR substitutions.
-  let prev = new Uint16Array(b.length + 1);
-  for (let i = 1; i <= a.length; i++) {
-    const row = new Uint16Array(b.length + 1); row[0] = i;
-    for (let j = 1; j <= b.length; j++) {
-      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    }
-    prev = row;
-  }
-  return Math.min(...prev) <= Math.min(3, Math.floor(a.length / 4));
-}
-function recentEcho(text) { return (speaking || Date.now() - lastSpokeAt < 2600) && echoLike(text); }
+function noteSpoken(text) { speechEcho.prepare(activeAudioId, text); }
+function echoLike(text, metadata) { return speechEcho.matches(text, metadata); }
+function recentEcho(text, metadata) { return echoLike(text, metadata); }
 function bargeInReady(text) {
   const value = String(text || '').normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
   return value.length >= 3 || /^(停下|等等|等下|打住|闭嘴|别说)$/u.test(value);
@@ -713,6 +688,8 @@ let activeAudioId = null, playbackTest = null;
 let composing = false, lastInterruption = null;
 function stopSpeaking(reason, { keepThought = false } = {}) {
   if (speaking) lastSpokeAt = Date.now();
+  const endedPlayback = speechEcho.end(activeAudioId);
+  if (endedPlayback) voiceMetadata({stage:'voice-playback-end',ok:false,...endedPlayback});
   if (['voice', 'typing', 'text', 'click', 'user'].includes(reason)) {
     const ids = new Set([activeSpeechReplyId, ...speechQueue.map(item => item.messageId)].filter(Boolean));
     if (ids.size) lastInterruption = { at: Date.now(), by: reason, replyId: activeSpeechReplyId || [...ids][0] };
@@ -919,7 +896,7 @@ async function pumpSpeech() {
       }
       // 看门狗：万一渲染层没回 audio-done（窗口崩了/解码失败），别让队列永远卡住
       if (speakWatchdog) clearTimeout(speakWatchdog);
-      const durMs = Math.max(1500, ((buffer.length - 44) / (24000 * 2)) * 1000) + 2500;
+      const durMs = Math.max(1500, (tts.durationMs(buffer) ?? ((buffer.length - 44) / 48000 * 1000))) + 2500;
       speakWatchdog = setTimeout(() => {
         if (gen === speechGen && speaking) finishSpeech(false);
       }, durMs);
@@ -956,6 +933,8 @@ function finishSpeech(confirmed = true) {
     send('audio', { stop: true });
   }
   if (speaking) lastSpokeAt = Date.now();
+  const endedPlayback = speechEcho.end(activeAudioId);
+  if (endedPlayback) voiceMetadata({stage:'voice-playback-end',ok:confirmed,...endedPlayback});
   if (playbackTest) { playbackTest.resolve(confirmed); playbackTest = null; }
   activeAudioId = null;
   activeInteractionAvatar = null;
@@ -1275,7 +1254,7 @@ let quietUntil = 0;     // 「别烦我」之后安静到什么时候
 
 /* 主人明确让我闭嘴的说法。命中就安静 10 分钟，只留一行字，不出声 —— 
  * 这时候再"好的一声"本身就是烦人的一部分。 */
-const QUIET_WORDS = /别(再)?(说|念|烦|吵|唠叨|讲)了?|安静(点|一下)?|闭嘴|不要说话|先别说|别打扰/;
+const QUIET_WORDS = /^\s*(?:请\s*)?(?:你\s*)?(?:先\s*)?(?:别(?:再)?(?:说(?:话)?|念|烦(?:我)?|吵(?:我)?|唠叨|讲(?:话)?)(?:了)?|安静(?:点|一下|一会儿?)?|闭嘴|不要(?:再)?(?:说话|打扰(?:我)?)|别打扰(?:我)?)(?:吧|好吗|好么|可以吗)?[。.!！?？~～\s]*$/u;
 let workSpanStart = 0;
 let lastWorkSeenAt = 0;
 let restNoticedAt = 0;
@@ -1728,7 +1707,7 @@ function startListen(reason) {
   if(['user','permission'].includes(reason)){asrFailStreak=0;asrRecoveryBlocked=false;}
   alwaysOn = true;
   send('listen', { on: true, reason: reason || '' });
-  if (asr.running && !asr.always) asr.kill({ discard: true });
+  if (asr.running && (!asr.always || asr.stopping)) asr.kill({ discard: true });
   if (asr.running) return;
   asrStatus = { ...asrStatus, captureReady: false, note: 'starting' };
   send('asrStatus', asrStatus);
@@ -1791,7 +1770,7 @@ function recoverListening(code) {
 
 function recoverVoiceConfirmation(metadata) {
   const owner = voiceInputOwner;
-  if (!['confirmation-timeout','commit-timeout'].includes(metadata?.reason) || !owner || metadata.turn !== owner.turn ||
+  if (!['confirmation-timeout','acoustic-timeout','commit-timeout'].includes(metadata?.reason) || !owner || metadata.turn !== owner.turn ||
       owner.proc !== asr?.proc || owner.recognizer !== asr?.traceRecognizer ||
       owner.epoch !== contextEpoch || owner.generation !== memory?.generation || !asr?.running || !mayRecoverListening()) return false;
   voiceInputOwner = null;
@@ -1822,6 +1801,7 @@ const voiceTurns = require('./voice-turns').createVoiceTurns({
   requireActivity: () => asrMode === 'continuous',
   allowShort: () => Date.now() - lastDialogueAt < 90_000,
   onRequest: (turn) => handleUtterance(turn.text, turn),
+  onCheckpoint: metadata => asr?.checkpoint(metadata),
   onInvalidate: () => stopSpeaking(),
   onRemember: (text, metadata) => {
     const receipt=pushHistory('user', text, { turnId: metadata.turnId,perception:require('./perception').speech(metadata.turnId) });
@@ -1858,20 +1838,20 @@ async function handleUtterance(text, voiceTurn) {
   const t = String(text || '').trim();
   if (!worthJudging(t)) { traceSpeech({stage:'request-drop-noise',chars:t.length});log('[listen] drop noise');voiceTurn?.skip();voiceTurn?.complete?.();return; }
   // 这句可能就是我自己刚说的（回声消除没吃干净）→ 当没听见
-  if (recentEcho(t)) {
+  if (recentEcho(t, voiceTurn)) {
     log('[listen] drop self echo');
     traceSpeech({stage:'request-drop-echo',chars:t.length});
     voiceTurn?.skip();
     voiceTurn?.complete?.();
     return;
   }
+  const c = config.load();
+  if (c.asr.wakeOnly && !nameHit(t)) { traceSpeech({stage:'request-drop-wake',chars:t.length});voiceTurn?.skip();send('heard', { text:t, replied:false, reason:'not-addressed' });voiceTurn?.complete?.();return; }
   if (speaking) {
-    // 主人在我说话的时候开口 → 立刻收声，听他说完
+    if (!bargeInReady(t)) { voiceTurn?.skip();voiceTurn?.complete?.();return; }
     log('[listen] barge-in');
     stopSpeaking('voice');
   }
-  const c = config.load();
-  if (c.asr.wakeOnly && !nameHit(t)) { traceSpeech({stage:'request-drop-wake',chars:t.length});voiceTurn?.skip();send('heard', { text:t, replied:false, reason:'not-addressed' });voiceTurn?.complete?.();return; }
   traceSpeech({stage:'request-accepted',chars:t.length});
   turnT0 = voiceTurn?.heardAt || Date.now();
   lastHeardAt = Date.now();
@@ -2631,7 +2611,9 @@ ipcMain.on('pet:audio-done', (e, value) => {
   if (e.sender !== win?.webContents || !value || value.id !== activeAudioId || !speaking) return;
   finishSpeech(value.success === true);
 });
-ipcMain.on('pet:audio-started', () => {
+ipcMain.on('pet:audio-started', (event, value) => {
+  if (event.sender !== win?.webContents || !speaking || !value || value.id !== activeAudioId || !speechEcho.start(value.id)) return;
+  voiceMetadata({stage:'voice-playback-start',gen:speechGen});
   if (turnT0 && speaking) { log(`[turn] 停顿→开始播放 ${Date.now() - turnT0}ms`); turnT0 = 0; }
 });
 ipcMain.on('pet:listen', (_e, v) => {
@@ -2958,7 +2940,7 @@ ipcMain.handle('pet:tts-test', async () => {
       if (asr && !asr.aec) muteAsr('开始试听');
       send('audio', { id: playback.id, buffer: r.buffer, text: '' });
     }
-    speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(false); }, Math.max(1500, ((r.buffer.length - 44) / 48000) * 1000) + 2500);
+    speakWatchdog = setTimeout(() => { if (gen === speechGen) finishSpeech(false); }, Math.max(1500, (tts.durationMs(r.buffer) ?? ((r.buffer.length - 44) / 48000 * 1000))) + 2500);
     if (!await completed) return { ok: false, error: '试听未完成或已停止，请检查音频输出' };
     return { ok: true, played: true, engine: r.engine, voice: r.voice, ms: r.ms, bytes: r.buffer.length,
       degraded: r.degraded, reason: r.reason };
@@ -3494,7 +3476,7 @@ if (!lock) {
       send('aec', { on: !!asr.aec, plan });
     });
     asr.on('aec', (on) => {
-      log('[asr] 回声消除 ' + (on ? '已开启，可用人声活动及时打断' : '不可用，持续聆听通过识别文字过滤回声并打断'));
+      log('[asr] 回声处理 ' + (on ? '已开启；插话仍须通过声学、文字及播放来源核查' : '不可用；继续聆听并核查声学、文字及播放来源'));
       send('aec', { on });
     });
     asr.on('micDevice', (d) => {
@@ -3507,13 +3489,13 @@ if (!lock) {
     });
     asr.on('fmt', (f) => log(`[asr] 格式 硬件=${f.hw} → 识别=${f.tgt}`));
     const asrInput=require('./asr-input-pipeline').createAsrInputPipeline({
-      speakerFilter,state:()=>({alwaysOn,speaking,get wakeOnly(){return config.load().asr.wakeOnly;},asrMode,suppressEnrollmentFinal}),recentEcho,bargeInReady,nameHit,turns:()=>voiceTurns,trace:traceSpeech,
+      speakerFilter,state:()=>({alwaysOn,speaking,speechGeneration:speechGen,get wakeOnly(){return config.load().asr.wakeOnly;},asrMode,suppressEnrollmentFinal}),recentEcho,bargeInReady,nameHit,turns:()=>voiceTurns,trace:traceSpeech,
       onPartial:t=>{send('asrPartial',{text:t});const now0=Date.now();if(t&&now0-lastPartialLogAt>1800){lastPartialLogAt=now0;log(`[asr] 半句 ${String(t).length} 字`);}},
-      onAcceptedPartial:t=>{if(t&&speaking)stopSpeaking('voice');},onUtteranceConfirmed:t=>log(`[asr] 收句确认 ${String(t).length} 字`),
+      onInterrupt:()=>stopSpeaking('voice'),onUtteranceConfirmed:t=>log(`[asr] 收句确认 ${String(t).length} 字`),
       setLastLiveText:t=>{lastLiveText=t;},setSuppressEnrollmentFinal:value=>{suppressEnrollmentFinal=value;},
       onFeatures:()=>{if(Date.now()-lastSpeakerStatusAt>1500){lastSpeakerStatusAt=Date.now();publishSpeakerStatus();}},
     });
-    asr.on('activity',asrInput.activity);asr.on('audioFinal',asrInput.audioFinal);asr.on('partial',asrInput.partial);asr.on('voiceFeatures',asrInput.voiceFeatures);
+    asr.on('activity',asrInput.activity);asr.on('audioFinal',asrInput.audioFinal);asr.on('partial',asrInput.partial);asr.on('retract',asrInput.retract);asr.on('voiceFeatures',asrInput.voiceFeatures);asr.on('inputReset',asrInput.reset);asr.on('exit',asrInput.reset);
     asr.on('level', (v) => {
       send('asrLevel', { v });
       // 麦克风电平自检：安静时也会走动，方便判断"到底有没有收到声音"。
@@ -3532,7 +3514,7 @@ if (!lock) {
         micPeakAt = now;
       }
     });
-    asr.on('utterance',text=>{asrInput.utterance(text);});asr.on('final',asrInput.final);
+    asr.on('utterance',asrInput.utterance);asr.on('final',asrInput.final);
     asr.on('recycle', (n) => log('[asr] recycled after ' + n + ' utterances'));
     asr.on('error', (m) => {
       if (speakerFilter.enrollment) speakerFilter.cancel('麦克风暂时中断，请重新朗读');

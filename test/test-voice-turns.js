@@ -22,6 +22,85 @@ test('multiple native segments before the seal retain their text in one request'
  f.advance(2999);assert.equal(f.requests.length,0);f.advance(1);assert.equal(f.requests.length,1);
  assert.equal(f.requests[0].text,'first segment.\nsecond segment.');assert.equal(await f.requests[0].waitForCommit(),true);assert.deepEqual(f.remembered,[]);
 });
+test('voice admission preserves the capture interval across segment finalization for delayed echo checks',()=>{
+ const f=fixture();f.c.partial('first owner phrase',{audioStartAtMs:100,audioEndAtMs:500});
+ f.c.final('first owner phrase.',{audioStartAtMs:100,audioEndAtMs:600});f.advance(100);
+ f.c.final('second owner phrase.',{audioStartAtMs:900,audioEndAtMs:1200});f.advance(3000);
+ assert.equal(f.requests.length,1);assert.equal(f.requests[0].audioStartAtMs,100);assert.equal(f.requests[0].audioEndAtMs,1200);
+});
+test('same-source withdrawal removes provisional words and ignores stale generations without admitting or timing out',()=>{
+ const f=fixture(),meta={recognizer:1,sourceGen:3};f.c.partial('provisional hallucination',meta);
+ assert.equal(f.c.retract({...meta,sourceGen:1}),false);assert(f.c.snapshot());assert.equal(f.c.retract(meta),true);
+ assert.equal(f.c.snapshot(),null);f.advance(9000);assert.equal(f.requests.length,0);assert.equal(f.errors.length,0);
+});
+test('one source-bound checkpoint precedes the original deadline and cannot admit unconfirmed words or renew the wait',()=>{
+ const checkpoints=[],f=fixture({requireActivity:true,onCheckpoint:meta=>checkpoints.push(meta)}),meta={recognizer:1,sourceGen:3};
+ f.activity('active',0,{sourceGen:3});f.c.partial('complete but unfinalized owner request',meta);f.advance(4799);assert.equal(checkpoints.length,0);
+ f.advance(1);assert.equal(checkpoints.length,1);assert.equal(checkpoints[0].sourceGen,3);assert.equal(f.requests.length,0);
+ for(let i=0;i<31;i++){f.advance(100);f.activity('active',0,{sourceGen:3});}
+ assert.equal(f.errors.length,0);f.advance(100);assert.equal(f.errors.length,1);assert.equal(f.c.snapshot(),null);assert.equal(checkpoints.length,1);
+});
+test('checkpoint finalization still waits for real quiet, and a real continuation retains all confirmed words',()=>{
+ const checkpoints=[],f=fixture({requireActivity:true,onCheckpoint:meta=>checkpoints.push(meta)}),meta={recognizer:1,sourceGen:3};
+ f.activity('active',0,{sourceGen:3});f.c.partial('complete owner request',meta);f.advance(4800);assert.equal(checkpoints.length,1);
+ f.c.final('complete owner request',meta);assert.equal(f.requests.length,0);
+ f.activity('active',0,{sourceGen:5});f.c.partial('and its actual continuation',{recognizer:1,sourceGen:5});assert.equal(f.requests.length,0);
+ f.c.final('and its actual continuation',{recognizer:1,sourceGen:5});f.quietFor(3000,{sourceGen:7});assert.equal(f.requests.length,1);
+ assert.equal(f.requests[0].text,'complete owner request\nand its actual continuation');assert.equal(checkpoints.length,1);
+});
+test('cancelled or finalized turns cannot dispatch a delayed checkpoint into a replacement',()=>{
+ for(const finish of [f=>f.c.reset(),f=>f.c.final('already finalized')]){
+  const checkpoints=[],f=fixture({requireActivity:true,onCheckpoint:meta=>checkpoints.push(meta)});f.c.partial('pending',{recognizer:1,sourceGen:1});f.advance(4700);finish(f);f.advance(200);assert.equal(checkpoints.length,0);
+ }
+});
+test('a native final at 7.2 seconds satisfies word confirmation while quiet after 8 seconds still preserves the request',()=>{
+ const f=fixture({requireActivity:true});f.activity('active');f.c.partial('complete confirmed owner request');
+ f.advance(7200);f.activity('active');f.c.final('complete confirmed owner request');assert.equal(f.c.snapshot().acousticWaitStartedAt,7200);
+ f.advance(950);f.activity('quiet',.95);assert(f.c.snapshot());assert.equal(f.errors.length,0);assert.equal(f.requests.length,0);
+ f.advance(50);f.activity('quiet',1);f.quietFor(2000);assert.equal(f.requests.length,1);assert.equal(f.requests[0].text,'complete confirmed owner request');
+ assert.equal(f.errors.length,0);assert.equal(f.requests[0].canCommit(),true);
+});
+test('continued activity after a late native final has one bounded acoustic deadline and executes nothing',()=>{
+ const f=fixture({requireActivity:true});f.activity('active');f.c.partial('confirmed words waiting for acoustic coverage');
+ f.advance(7200);f.activity('active');f.c.final('confirmed words waiting for acoustic coverage');
+ for(let i=0;i<79;i++){f.advance(100);f.activity('active');}
+ assert(f.c.snapshot());assert.equal(f.errors.length,0);f.advance(100);
+ assert.equal(f.c.snapshot(),null);assert.equal(f.errorDetails.length,1);assert.equal(f.errorDetails[0].reason,'acoustic-timeout');
+ assert.equal(f.errorDetails[0].finalized,true);assert.equal(f.errorDetails[0].admitted,false);assert.match(f.errors[0],/文字已定稿/);
+ assert.equal(f.requests.length,0);assert.deepEqual(f.remembered,[]);
+});
+test('same-text finals, unknown/quiet oscillation and heartbeats cannot renew acoustic confirmation',()=>{
+ const text='native confirmed fixed revision',f=fixture({requireActivity:true});f.c.partial(text);f.advance(7200);f.c.final(text);
+ for(let i=1;i<80;i++){f.advance(100);f.activity(i%2?'unknown':'quiet',.5);if(i%10===0)f.c.final(text);assert.equal(f.c.snapshot().acousticWaitStartedAt,7200);}
+ f.advance(100);assert.equal(f.c.snapshot(),null);assert.equal(f.errorDetails[0].reason,'acoustic-timeout');assert.equal(f.requests.length,0);
+});
+test('retracting an unconfirmed continuation restores the earlier final acoustic deadline instead of renewing it',()=>{
+ const f=fixture({requireActivity:true});f.c.final('previous confirmed words');f.advance(6000);
+ const meta={recognizer:1,sourceGen:3};f.c.partial('unreliable later words',meta);assert.equal(f.c.snapshot().acousticWaitStartedAt,null);
+ f.advance(1000);assert.equal(f.c.retract(meta),true);assert.equal(f.c.snapshot().acousticWaitStartedAt,0);
+ f.advance(1000);assert.equal(f.errorDetails[0].reason,'acoustic-timeout');assert.equal(f.requests.length,0);
+});
+test('a real new text revision has its own word deadline and only its native final starts the next acoustic phase',()=>{
+ const f=fixture({requireActivity:true});f.activity('active');f.c.partial('confirmed original words');f.advance(7200);f.c.final('confirmed original words');
+ f.advance(6800);f.c.partial('actual new owner continuation');assert.equal(f.c.snapshot().finalized,false);assert.equal(f.c.snapshot().acousticWaitStartedAt,null);
+ f.advance(7000);f.activity('active',0,{sourceGen:3});f.c.final('actual new owner continuation');assert.equal(f.c.snapshot().acousticWaitStartedAt,21000);
+ assert.equal(f.requests.length,0);f.quietFor(3000,{sourceGen:5});assert.equal(f.requests.length,1);
+ assert.equal(f.requests[0].text,'confirmed original words\nactual new owner continuation');assert.equal(f.errors.length,0);
+});
+test('reset or recognizer stop immediately cancels the fixed acoustic phase and all delayed callbacks',()=>{
+ for(const cancel of [f=>f.c.reset(),f=>f.c.recognizerStopped()]){
+  const f=fixture({requireActivity:true});f.c.partial('complete words');f.advance(7200);f.c.final('complete words');f.advance(100);cancel(f);
+  assert.equal(f.c.snapshot(),null);const errors=f.errors.length;f.advance(16000);assert.equal(f.errors.length,errors);assert.equal(f.requests.length,0);
+ }
+});
+test('withdrawal preserves earlier native finals and cannot cover newly active audio',()=>{
+ const f=fixture({requireActivity:true}),first={recognizer:1,sourceGen:1,audioStartAtMs:10,audioEndAtMs:100},next={recognizer:1,sourceGen:3,audioStartAtMs:200,audioEndAtMs:300};
+ f.activity('active');f.c.final('confirmed owner request',first);f.advance(100);f.activity('active',0,{sourceGen:3});f.c.partial('unreliable continuation',next);
+ assert.equal(f.c.retract(next),true);assert.equal(f.c.snapshot().text,'confirmed owner request');assert.equal(f.c.snapshot().awaitingAudioFinal,true);
+ f.quietFor(3000,{sourceGen:3});assert.equal(f.requests.length,0,'withdrawing words is not finalizer coverage');
+ assert.equal(f.audioFinal({sourceGen:3}),true);f.advance(0);assert.equal(f.requests.length,1);assert.equal(f.requests[0].text,'confirmed owner request');
+ assert.equal(f.requests[0].audioStartAtMs,10);assert.equal(f.requests[0].audioEndAtMs,100);
+});
 test('new text revokes the old semantic request and retains its confirmed prefix until the combined revision is accepted',async()=>{
  const f=fixture();f.c.partial('first question');f.c.final('first question.');f.advance(3000);const old=f.requests[0];
  f.c.partial('second question');assert.deepEqual(f.remembered,[]);assert.equal(old.isCurrent(),false);assert.equal(await old.waitForCommit(),false);
@@ -81,12 +160,12 @@ test('activity before a request requires another native final even after quiet r
  assert.equal(f.requests.length,0);assert.equal(f.c.snapshot().awaitingAudioFinal,true);
  f.c.final('confirmed prefix.');f.advance(0);assert.equal(f.requests.length,1);assert.equal(f.requests[0].text,'confirmed prefix.');
 });
-test('post-final activity in a successor analyzer stays unconfirmed and reaches the original bounded failure',()=>{
+test('post-final activity in a successor analyzer reaches its fixed acoustic failure without being called unfinalized text',()=>{
  const f=fixture({requireActivity:true});f.activity('active');f.c.partial('synthetic confirmed prefix');f.c.final('synthetic confirmed prefix.');
  f.advance(34);f.activity('active',0,{sourceGen:3});f.quietFor(5000,{sourceGen:3});
  assert.equal(f.requests.length,0);assert.equal(f.c.snapshot().awaitingAudioFinal,true);assert.equal(f.errors.length,0);
  f.advance(2966);assert.equal(f.c.snapshot(),null);assert.equal(f.errors.length,1);assert.equal(f.requests.length,0);assert.deepEqual(f.remembered,[]);
- assert.equal(f.errorDetails[0].reason,'confirmation-timeout');assert.equal(f.errorDetails[0].awaitingAudioFinal,true);assert.equal(f.errorDetails[0].segments,1);
+ assert.equal(f.errorDetails[0].reason,'acoustic-timeout');assert.equal(f.errorDetails[0].awaitingAudioFinal,true);assert.equal(f.errorDetails[0].segments,1);
 });
 test('a genuinely finalized empty successor covers ambient activity and admits the preserved words once',()=>{
  const f=fixture({requireActivity:true});f.activity('active');f.c.partial('synthetic owner request');f.c.final('synthetic owner request.');

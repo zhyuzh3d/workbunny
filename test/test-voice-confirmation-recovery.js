@@ -11,7 +11,7 @@ function fixture(t){
   config:{load:()=>({memory:{enabled:false},voice:{alwaysListen:true},asr:{wakeOnly:false}})},systemPreferences:{getMediaAccessStatus:()=> 'granted'},fs:{existsSync:()=>true},ASR_BIN:'/offline/asr',asrOpts:()=>({always:true}),
   Date:{now:()=>at},setTimeout:schedule,clearTimeout:cancel,send:(type,value)=>events.push({type,...value}),log:()=>{},speakerFilter:new SpeakerFilter(),lastLiveText:'',lastDialogueAt:0,
   speechTraceEnabled:false,traceSpeech:()=>{},voiceMetadata:()=>{},handleUtterance:(_text,token)=>requests.push(token),stopSpeaking:()=>{},pushHistory:()=>{},publishSpeakerStatus:()=>{},
-  suppressEnrollmentFinal:false,speaking:false,lastPartialLogAt:0,lastSpeakerStatusAt:0,recentEcho:()=>false,bargeInReady:()=>true,nameHit:()=>true,micPeak:0,micPeakAt:0,micQuietLoggedAt:0,
+  suppressEnrollmentFinal:false,speaking:false,speechGen:0,lastPartialLogAt:0,lastSpeakerStatusAt:0,recentEcho:()=>false,bargeInReady:()=>true,nameHit:()=>true,micPeak:0,micPeakAt:0,micQuietLoggedAt:0,
   require:name=>name==='./voice-turns'?{createVoiceTurns:options=>createVoiceTurns({...options,now:()=>at,setTimer:schedule,clearTimer:cancel})}:name==='./asr-input-pipeline'?{createAsrInputPipeline}:require(name)};
  ctx.applyStatus=value=>{ctx.asrStatus={...ctx.asrStatus,...value};};vm.createContext(ctx);
  vm.runInContext(source.slice(source.indexOf('function startListen(reason)'),source.indexOf('/** 本地小门槛')),ctx);
@@ -39,6 +39,22 @@ test('actual host retains one confirmed request after empty audio coverage near 
  for(let i=0;i<20;i++){f.advance(100);f.activity('quiet',{gen:5});}
  assert.equal(f.children.length,1);assert.equal(f.asr.proc,child);assert.deepEqual(child.kills,[]);assert.equal(f.ctx.asrFailStreak,0);
  assert.equal(f.requests.length,1);assert(!f.events.some(e=>e.type==='toast'));
+});
+test('the host keeps a late native final through quiet and empty coverage after the old text deadline without reconnecting or repeating inference',t=>{
+ const f=fixture(t),child=f.asr.proc,text='complete owner request preserved across the two phases';f.activity('active');f.send({t:'partial',v:text,gen:1});
+ f.advance(7200);f.activity('active');f.send({t:'utterance',v:text,gen:1});f.advance(100);f.activity('active',{gen:3});
+ f.advance(850);f.activity('quiet',{gen:3,quietSeconds:.85});assert.equal(f.asr.proc,child);assert(f.turns.snapshot());assert.equal(f.requests.length,0);
+ f.advance(200);f.activity('quiet',{gen:3,quietSeconds:1.05});f.audioFinal(3);
+ for(let i=0;i<19;i++){f.advance(100);f.activity('quiet',{gen:5});}
+ assert.equal(f.requests.length,1);assert.equal(f.requests[0].text,text);assert.equal(f.requests[0].canCommit(),true);
+ assert.equal(f.asr.proc,child);assert.deepEqual(child.kills,[]);assert.equal(f.ctx.asrFailStreak,0);assert(!f.events.some(event=>event.type==='toast'));
+});
+test('a late final with continuous successor activity reaches acoustic timeout and uses the existing bounded host recovery',t=>{
+ const f=fixture(t),child=f.asr.proc;f.activity('active');f.send({t:'partial',v:'confirmed words waiting for quiet',gen:1});
+ f.advance(7200);f.activity('active');f.send({t:'utterance',v:'confirmed words waiting for quiet',gen:1});
+ for(let i=0;i<79;i++){f.advance(100);f.activity('active',{gen:3});}
+ assert.equal(f.asr.proc,child);f.advance(100);assert.deepEqual(child.kills,['SIGKILL']);assert.equal(f.ctx.asrFailStreak,1);assert.equal(f.requests.length,0);
+ assert(f.events.some(event=>event.type==='toast'&&/文字已定稿/.test(event.text)));
 });
 test('actual host confirmation timeout discards its child and late text/close cannot enter a replacement',t=>{
  const f=fixture(t),old=f.asr.proc;f.send({t:'partial',v:'unconfirmed synthetic instruction'});f.advance(8000);

@@ -19,7 +19,7 @@ contextBridge.exposeInMainWorld('pet', {
   inputRegions: value=>ipcRenderer.send('pet:input-regions',value),
   hit: (v, taskUi=false,ui=false) => ipcRenderer.send('pet:hit', {inside:v===true,taskUi:taskUi===true,ui:ui===true}),
   audioDone: (success = true, id) => ipcRenderer.send('pet:audio-done', { success: success === true, id }),
-  audioStarted: () => ipcRenderer.send('pet:audio-started'),
+  audioStarted: id => ipcRenderer.send('pet:audio-started', { id }),
   listen: (v) => ipcRenderer.send('pet:listen', v),
   asrStatus: (opts) => ipcRenderer.invoke('pet:asr-status', opts || {}),
   speechDiagnostic: args => ipcRenderer.invoke('pet:speech-diagnostic', args),

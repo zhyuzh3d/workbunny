@@ -1,6 +1,5 @@
 import Foundation
 import AVFoundation
-import CLibfvad
 
 // Independent acoustic evidence only. Reads the exact ASR input without
 // conversion, channel selection, gain changes or edits to that input.
@@ -11,6 +10,7 @@ final class SpeechActivity {
         let state: State
         let quietSeconds: Double
         let at: TimeInterval
+        let frames: [SpeechAcousticFrame]
     }
     private let lock = NSLock()
     private var generation: Int?
@@ -20,15 +20,18 @@ final class SpeechActivity {
     private var models: [OpaquePointer] = []
     private var partial: [[Int16]] = []
     private var quietFrames = 0
+    private var directFrames = 0
+    private var confirmedSpeech = false
     private func clear() {
-        for model in models { fvad_free(model) }
+        for model in models { wb_speech_vad_free(model) }
         models.removeAll(); partial.removeAll(); rate = 0; channels = 0; quietFrames = 0
+        directFrames = 0; confirmedSpeech = false
     }
     deinit { clear() }
     func observe(_ buffer: AVAudioPCMBuffer, generation requested: Int,
                  at: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Observation {
         lock.lock(); defer { lock.unlock() }
-        func unknown() -> Observation { Observation(generation: requested, state: .unknown, quietSeconds: 0, at: at.isFinite ? at : 0) }
+        func unknown() -> Observation { Observation(generation: requested, state: .unknown, quietSeconds: 0, at: at.isFinite ? at : 0, frames: []) }
         guard requested >= 0 else { return unknown() }
         // A delayed old callback cannot reset a newer acoustic generation.
         if let generation, requested < generation { return unknown() }
@@ -59,14 +62,14 @@ final class SpeechActivity {
         if models.isEmpty {
             rate = wantedRate; channels = channelCount; interleaved = format.isInterleaved
             for _ in 0..<channels {
-                guard let model = fvad_new() else { clear(); return unknown() }
+                guard let model = wb_speech_vad_new(Int32(rate)) else { clear(); return unknown() }
                 models.append(model)
-                guard fvad_set_mode(model, 0) == 0, fvad_set_sample_rate(model, Int32(rate)) == 0 else { clear(); return unknown() }
             }
             partial = (0..<channels).map { _ in var samples: [Int16] = []; samples.reserveCapacity(rate / 100); return samples }
         }
         let frameLength = rate / 100
-        var last: State = .unknown, completeFrames = 0
+        var last: State = .unknown, completeFrames = 0, anyActive = false, anyPending = false
+        var classified: [SpeechAcousticFrame] = []
         for index in 0..<count {
             for channel in 0..<channels {
                 let plane = interleaved ? 0 : channel, position = interleaved ? index * channels + channel : index
@@ -74,24 +77,34 @@ final class SpeechActivity {
                 partial[channel].append(source[position])
             }
             if partial[0].count == frameLength {
-                var active = false
+                var active = false, directSpeech = false
                 for channel in 0..<channels {
-                    let result = partial[channel].withUnsafeBufferPointer { fvad_process(models[channel], $0.baseAddress!, $0.count) }
-                    guard result == 0 || result == 1 else { clear(); return unknown() }
-                    active = active || result == 1
+                    let result = partial[channel].withUnsafeBufferPointer { wb_speech_vad_process(models[channel], $0.baseAddress!, $0.count) }
+                    guard result >= 0 else { clear(); return unknown() }
+                    active = active || result > 0
+                    directSpeech = directSpeech || result == 1
                     partial[channel].removeAll(keepingCapacity: true)
                 }
                 completeFrames += 1
-                if active { quietFrames = 0; last = .active }
-                else { quietFrames += 1; last = .quiet }
+                classified.append(SpeechAcousticFrame(start: Double(index + 1 - frameLength) / Double(rate),
+                    end: Double(index + 1) / Double(rate), active: directSpeech))
+                if directSpeech {
+                    directFrames += 1
+                    if directFrames >= 6 { confirmedSpeech = true }
+                } else { directFrames = 0 }
+                if confirmedSpeech && active { quietFrames = 0; last = .active; anyActive = true }
+                else if directSpeech { quietFrames = 0; last = .unknown; anyPending = true }
+                else { if !active { confirmedSpeech = false }; quietFrames += 1; last = .quiet }
             }
         }
         guard completeFrames > 0 else { return unknown() }
         // Only complete, jointly classified channel frames contribute. Keep
         // the <10ms remainder for the next call, never zero-pad it as silence.
         let remainderSeconds = Double(partial[0].count) / Double(rate)
-        return Observation(generation: requested, state: last, quietSeconds: last == .quiet ? Double(quietFrames) / 100 : 0,
-                           at: max(0, at - remainderSeconds))
+        let state: State = anyActive ? .active : (anyPending ? .unknown : last)
+        return Observation(generation: requested, state: state,
+                           quietSeconds: state == .quiet ? Double(quietFrames) / 100 : 0,
+                           at: max(0, at - remainderSeconds), frames: classified)
     }
 }
 
@@ -124,6 +137,20 @@ func selftestSpeechActivity() -> [String: Any] {
         let observer = SpeechActivity(), result = observer.observe(buffer(rate: rate, frames: Int(rate / 100)), generation: 1, at: 1)
         check(result.state == .quiet && abs(result.quietSeconds - 0.01) < 0.000001)
     }
+    let burst = buffer(frames: 4800, voiceChannel: 0)
+    for index in 160..<4800 { burst.int16ChannelData![0][index] = 0 }
+    let burstResult = SpeechActivity().observe(burst, generation: 1, at: 1)
+    check(burstResult.frames.contains { $0.active } && burstResult.frames.last?.active == false)
+    check(burstResult.state == .unknown && burstResult.quietSeconds == 0)
+    // A real sustained run followed by quiet inside one hardware buffer must
+    // still report active; a detector-generated tail cannot create that run.
+    let sustained = buffer(frames: 4800, voiceChannel: 0)
+    for index in 1600..<4800 { sustained.int16ChannelData![0][index] = 0 }
+    let sustainedResult = SpeechActivity().observe(sustained, generation: 1, at: 1)
+    check(sustainedResult.frames.last?.active == false && sustainedResult.state == .active)
+    let impulse = SpeechActivity()
+    check(impulse.observe(burst, generation: 1, at: 1).state == .unknown)
+    check(impulse.observe(buffer(frames: 1600), generation: 1, at: 1.1).state == .quiet)
     let fragmented = SpeechActivity()
     check(fragmented.observe(buffer(frames: 80), generation: 1, at: 1).state == .unknown)
     check(fragmented.observe(buffer(frames: 80), generation: 2, at: 1.005).quietSeconds == 0.01)
@@ -136,7 +163,7 @@ func selftestSpeechActivity() -> [String: Any] {
         check(abs(last.at - (now - Double(total % 160) / 16000)) < 0.000001)
     }
     for interleaved in [true,false] {
-        let observer = SpeechActivity(), continuous = SpeechActivity(), input = buffer(channels: 2, interleaved: interleaved, voiceChannel: 1)
+        let observer = SpeechActivity(), continuous = SpeechActivity(), input = buffer(channels: 2, frames: 1600, interleaved: interleaved, voiceChannel: 1)
         let planes = UnsafeMutableAudioBufferListPointer(input.mutableAudioBufferList), before = planes.map { Data(bytes: $0.mData!, count: Int($0.mDataByteSize)) }
         check(observer.observe(input, generation: 3, at: 2).state == .active)
         _ = continuous.observe(input, generation: 3, at: 2)
@@ -167,5 +194,6 @@ func selftestSpeechActivity() -> [String: Any] {
     check(observer.observe(floatBuffer, generation: 2, at: 3.4).state == .unknown)
     return ["t":"selfTest", "speechActivity":passed, "mode":0, "frameMs":10, "partialFrames":true, "allChannels":true,
             "generationIsolation":true, "physicalStreamContinuity":true, "gapReset":true,
-            "inputUnchanged":true, "resourceBounds":true, "recognizerStarted":false]
+            "inputUnchanged":true, "resourceBounds":true, "withinBufferActivity":true,
+            "directSpeechConfirmation":true, "hangoverIsNotSpeech":true, "transientRejected":true, "recognizerStarted":false]
 }

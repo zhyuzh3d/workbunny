@@ -29,6 +29,23 @@ const custom = require('./tts-http');
 const cache = new Map(); // hash -> Buffer
 const CACHE_MAX = 40;
 
+// WAV may contain extra chunks and remote engines may use another sample rate.
+// Its byte rate, rather than an assumed mono/24kHz layout, owns playback time.
+function durationMs(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12 || buffer.toString('ascii', 0, 4) !== 'RIFF' ||
+      buffer.toString('ascii', 8, 12) !== 'WAVE') return null;
+  let byteRate = 0, dataBytes = 0;
+  for (let offset = 12; offset + 8 <= buffer.length;) {
+    const size = buffer.readUInt32LE(offset + 4), start = offset + 8;
+    if (start + size > buffer.length) return null;
+    const chunk = buffer.toString('ascii', offset, offset + 4);
+    if (chunk === 'fmt ' && size >= 16) byteRate = buffer.readUInt32LE(start + 8);
+    if (chunk === 'data') dataBytes += size;
+    offset = start + size + size % 2;
+  }
+  return byteRate > 0 && dataBytes > 0 ? dataBytes / byteRate * 1000 : null;
+}
+
 /* ═══════════ 1. 系统语音 ═══════════ */
 function createSystemTTS({ execFileImpl = execFile, tmpdir = os.tmpdir, timeoutMs = 20000 } = {}) {
   return function systemTTS(text, voice, rate, { signal } = {}) {
@@ -283,7 +300,7 @@ module.exports = {
   systemVoices, pickSystemVoice,
   downloadQwen: (...args) => { require('./runtime-capabilities').requireQwen(); return downloadQwen(...args); }, downloadState, cancelDownload, qwenReady, QWEN_FILES, qwenVoices,
   findSpeechRuntime, reset, clearSpeechCache, prewarm,
-  createSystemTTS,
+  createSystemTTS, durationMs,
   runtimeStatus: qwenRuntime.status, cancel: () => { qwenRuntime.cancel(); chp.cancel(); custom.cancel(); }, shutdown: () => { qwenRuntime.close(); chp.cancel(); custom.cancel(); },
   deleteQwen: qwenDownload.deleteQwen,
   checkQwen: qwenDownload.checkQwen,

@@ -1,6 +1,33 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{EventEmitter}=require('node:events'),{PassThrough}=require('node:stream');
 const {Asr,createActivityClock}=require('../src/main/asr');
+test('recognition audio ranges retain capture age even when finalization and pipe delivery are delayed',()=>{
+ let wall=100000,mono=1000;const clock=createActivityClock({wallNow:()=>wall,monoNow:()=>mono});
+ clock({state:'active',quietSeconds:0,at:10,emittedAt:10,gen:1,seq:1},2);
+ wall+=5000;mono+=5000;
+ assert.deepEqual(clock.range({gen:1,audioStartAt:9,audioEndAt:10,emittedAt:12},2),{recognizer:2,sourceGen:1,audioStartAtMs:99000,audioEndAtMs:100000});
+ for(const patch of [{audioStartAt:NaN},{audioStartAt:11},{audioEndAt:20},{emittedAt:9}]){
+  assert.deepEqual(clock.range({gen:1,audioStartAt:9,audioEndAt:10,emittedAt:12,...patch},2),{recognizer:2,sourceGen:1});
+ }
+});
+test('ASR text events pass only validated range metadata and retain text compatibility',()=>{
+ const asr=new Asr('/offline'),events=[];for(const type of ['partial','utterance','final'])asr.on(type,(text,meta)=>events.push({type,text,meta}));
+ const now=Number(process.hrtime.bigint())/1e9;
+ for(const type of ['partial','utterance','final'])asr.onMessage({t:type,v:'fixture',gen:7,audioStartAt:now-2,audioEndAt:now-1,emittedAt:now,private:'canary'});
+ assert.equal(events.length,3);for(const row of events){assert.equal(row.text,'fixture');assert.equal(row.meta.sourceGen,7);assert(row.meta.audioEndAtMs-row.meta.audioStartAtMs>=999);assert(!JSON.stringify(row.meta).includes('canary'));}
+});
+test('native withdrawals carry only validated source ownership and clear the recognizer partial',()=>{
+ const asr=new Asr('/offline'),events=[];asr.traceRecognizer=2;asr.on('retract',meta=>events.push(meta));asr.partial='pending';
+ for(const gen of [-1,1.5,null])asr.onMessage({t:'retract',gen});assert.equal(events.length,0);
+ asr.onMessage({t:'retract',gen:3,private:'canary'});assert.equal(asr.partial,'');assert.deepEqual(events,[{recognizer:2,sourceGen:3}]);
+});
+test('checkpoint commands require the live recognizer, exact input generation and continuous listening ownership',()=>{
+ const commands=[],asr=new Asr('/offline');asr.proc={stdin:{write:value=>commands.push(value)}};asr.always=true;asr.traceRecognizer=2;
+ asr.onMessage({t:'partial',v:'pending',gen:3});assert.equal(asr.checkpoint({recognizer:2,sourceGen:3}),true);assert.deepEqual(commands,['checkpoint 3\n']);
+ for(const meta of [{recognizer:1,sourceGen:3},{recognizer:2,sourceGen:1},{recognizer:2,sourceGen:3.5}])assert.equal(asr.checkpoint(meta),false);
+ asr.stopping=true;assert.equal(asr.checkpoint({recognizer:2,sourceGen:3}),false);asr.stopping=false;asr.always=false;assert.equal(asr.checkpoint({recognizer:2,sourceGen:3}),false);
+ assert.equal(commands.length,1);
+});
 test('activity projection retains observation and queued delivery age using a per-process minimum offset',()=>{
  let wall=100000,mono=1000;const clock=createActivityClock({wallNow:()=>wall,monoNow:()=>mono}),message={state:'quiet',quietSeconds:1,at:9.9,emittedAt:10,gen:1,seq:1};
  let value=clock(message,3);assert.equal(value.state,'quiet');assert.equal(value.at,99900);assert.equal(value.sourceGen,1);assert.equal(value.recognizer,3);

@@ -24,6 +24,11 @@ test('actual quiet branch waits for confirmed current voice before changing quie
  const f=fixture();await f.ctx.handleUtterance('请先安静一下',f.token(false));assert.equal(f.ctx.quietUntil,0);assert.equal(f.calls.stop,0);assert.equal(f.calls.chat,0);
  await f.ctx.handleUtterance('请先安静一下',f.token(true));assert(f.ctx.quietUntil>Date.now());assert.equal(f.calls.stop,1);assert.equal(f.calls.chat,1);
 });
+test('a mixed stop-and-new-question utterance reaches dialogue without entering ten-minute quiet mode',async()=>{
+ const f=fixture(),heard=[];f.ctx.think=async request=>{heard.push(request.userText);return {text:'fixture answer'};};
+ const text='等一下先别讲故事了，你用一句话告诉我晚上吃点什么比较简单。';await f.ctx.handleUtterance(text,f.token(true));
+ assert.equal(f.ctx.quietUntil,0);assert.deepEqual(heard,[text]);
+});
 test('actual protocol error cannot speak from uncommitted voice but confirmed failure still reports',async()=>{
  const f=fixture({protocolFailure:true});await f.ctx.think({userText:'未定稿',voiceTurn:f.token(false)});assert.equal(f.calls.model,0);assert.equal(f.calls.speak,0);assert.equal(f.calls.chat,0);
  await f.ctx.think({userText:'已定稿',voiceTurn:f.token(true)});assert.equal(f.calls.model,1);assert.equal(f.calls.speak,1);assert.equal(f.calls.chat,1);

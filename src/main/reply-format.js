@@ -17,7 +17,7 @@ const intent = { anyOf: [
   }, ['action', 'target', 'goal', 'criteria']),
 ] };
 const schema = { anyOf: [
-  object({ kind: { const: 'chat' }, text: string(8000) }, ['kind', 'text']),
+  object({ kind: { const: 'chat' }, text: { ...string(8000), description: '自然对话正文。动作或情绪控制仅放<m>单个分类ID或具体动作ID</m>、<e>单个情绪ID</e>标签中；分类和具体ID不拼接，控制ID不写入普通正文。' } }, ['kind', 'text']),
   object({ kind: { const: 'action' }, intent }, ['kind', 'intent']),
   object({ kind: { const: 'skip' } }, ['kind']),
 ] };
