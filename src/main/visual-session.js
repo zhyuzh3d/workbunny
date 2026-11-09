@@ -19,6 +19,15 @@ const blocked=(message,{kind='unclear',evidence=''}={})=>{
  return Object.assign(Error(message),{code:'E_VISUAL_TARGET',dispatched:false,diagnostic:{visualState:{kind,requiresOwner}}});
 };
 const locationError=(field,expected,value,message)=>Object.assign(blocked(message),{schemaAudit:{protocol:'visual-location',field,expected,actualType:value===null?'null':Array.isArray(value)?'array':typeof value}});
+const boxIssue=(field,box,region)=>!validBox(box)?locationError(field,'normalized-box',box,'视觉区域的字段或几何无效'):region&&(box.x<region.x||box.y<region.y||box.x+box.width>region.x+region.width||box.y+box.height>region.y+region.height)?locationError(field,'box-inside-region',box,'视觉锚点不在目标区域'):null;
+function retainAuxiliary(field,source,{max,min=0,validate},trace){
+ const items=Array.isArray(source)&&source.length<=max?source:[],retained=[];let firstIssue;
+ if(source!==undefined&&items!==source)firstIssue=locationError(field,'bounded-observation-array',source,'辅助观察列表无效');
+ for(const [i,item]of items.entries()){const issue=validate(item,i);if(issue){firstIssue??=issue;continue;}retained.push(item);}
+ if(firstIssue){const observedItems=Array.isArray(source)?source.length:1;trace.record('visual-aux-filter',{observedItems,retainedItems:retained.length,discardedItems:observedItems-retained.length,schemaAudit:firstIssue.schemaAudit});}
+ if(retained.length<min)throw firstIssue||locationError(field,'non-empty-valid-box-array',source,'缺少有效的必要观察区域');
+ return retained;
+}
 const inputDiagnostic=(error,receipt)=>require('./self-repair').diagnostic({...error?.diagnostic,inputReceipt:receipt});
 const nearBox=(a,b,width,height)=>a&&b&&['x','y','width','height'].every(k=>Math.abs(a[k]-b[k])*(k==='x'||k==='width'?width:height)<=2);
 const around=(x,y)=>{const left=Math.max(0,x-.02),top=Math.max(0,y-.02);return {x:left,y:top,width:Math.min(1,x+.02)-left,height:Math.min(1,y+.02)-top};};
@@ -62,19 +71,17 @@ class VisualSession{
     const policy=require('./interaction-policy'),expected=policy.profile(this.application),seen=policy.profile(v.software);
     if(expected&&seen?.application!==expected.application||seen&&this.application&&seen.application!==(expected?.application||this.application))throw blocked('画面软件身份与本次授权目标不匹配');
     if(prior&&v.sameIdentity!==true)throw blocked('无法从前后实际画面确认同一身份');
-    for(const field of ['mainRegion','identityRegion',...(v.focusRegion?['focusRegion']:[]),...(v.activationRegion?['activationRegion']:[])]){const r=v[field];if(!validBox(r)||r.x<v.region.x||r.y<v.region.y||r.x+r.width>v.region.x+v.region.width||r.y+r.height>v.region.y+v.region.height)throw locationError(field,'box-inside-region',r,'视觉锚点不在目标区域');}
-    if(!Array.isArray(v.monitorRegions)||!v.monitorRegions.length||v.monitorRegions.length>12)throw locationError('monitorRegions','non-empty-box-array',v.monitorRegions,'缺少来自实际画面的监测区域');
-    for(const [i,r]of v.monitorRegions.entries())if(!validBox(r)||r.x<v.region.x||r.y<v.region.y||r.x+r.width>v.region.x+v.region.width||r.y+r.height>v.region.y+v.region.height)throw locationError('monitorRegions['+i+']','box-inside-region',r,'监测区域不在目标区域');
-    // Coarse text is optional perception, not an identity/input anchor. Reject
-    // bad rows from the observation without rerunning a valid target location.
-    const sourceTexts=Array.isArray(v.texts)&&v.texts.length<=120?v.texts:[],texts=[];let textAudit;
-    if(v.texts!==undefined&&sourceTexts!==v.texts)textAudit=locationError('texts','visible-text-array',v.texts,'可见文字列表无效').schemaAudit;
-    for(const [i,r]of sourceTexts.entries()){
-     const expected=typeof r?.text!=='string'||r.text.length>1000||!validBox(r)||typeof r.confidence!=='number'||!(r.confidence>=0&&r.confidence<=1)?'visible-text-row':r.x<v.region.x||r.y<v.region.y||r.x+r.width>v.region.x+v.region.width||r.y+r.height>v.region.y+v.region.height?'box-inside-region':null;
-     if(expected){textAudit??=locationError('texts['+i+']',expected,r,'可选粗文字无效').schemaAudit;continue;}texts.push(r);
+    for(const field of ['mainRegion','identityRegion']){const issue=boxIssue(field,v[field],v.region);if(issue)throw issue;}
+    // Core identity stays strict. Auxiliary observations share one filtering
+    // policy; no discarded box is clipped, substituted or allowed into input.
+    const clean={...v};
+    clean.monitorRegions=retainAuxiliary('monitorRegions',v.monitorRegions,{max:12,min:1,validate:(r,i)=>boxIssue('monitorRegions['+i+']',r,v.region)},trace);
+    clean.texts=retainAuxiliary('texts',v.texts,{max:120,validate:(r,i)=>typeof r?.text!=='string'||r.text.length>1000||typeof r.confidence!=='number'||!(r.confidence>=0&&r.confidence<=1)?locationError('texts['+i+']','visible-text-row',r,'可选粗文字无效'):boxIssue('texts['+i+']',r,v.region)},trace);
+    for(const [field,evidenceField]of [['focusRegion','focusEvidence'],['activationRegion','activationEvidence']]){
+     const kept=v[field]==null?[]:retainAuxiliary(field,[v[field]],{max:1,validate:r=>boxIssue(field,r,v.region)||(typeof v[evidenceField]!=='string'||!v[evidenceField].trim()?locationError(evidenceField,'non-empty-string',v[evidenceField],'辅助输入依据无效'):null)},trace);
+     clean[field]=kept[0]||null;clean[evidenceField]=kept.length?v[evidenceField]:'';
     }
-    if(textAudit){const observedTextRows=Array.isArray(v.texts)?v.texts.length:1;trace.record('visual-text-filter',{observedTextRows,retainedTextRows:texts.length,discardedTextRows:observedTextRows-texts.length,schemaAudit:textAudit});}
-    return {...v,texts};
+    return clean;
    },{...(this.request?{request:this.request}:{}),repairInstructions:'全部坐标（包括texts）一律相对于第一张完整截图归一化，不使用目标region或放大图的局部坐标。mainRegion、全部锚点、监测区域与texts文字框必须完整位于region内。修正指出的字段，保留同一目标和像素依据，不能因校验失败改认另一个相似界面。',onRequestDiagnostic:d=>trace.record('visual-recognition',{status:d.phase,attempt:d.attempt,elapsedMs:d.elapsedMs,code:d.errorCode,normalized:d.normalized,discardedChars:d.discardedChars,schemaAudit:d.schemaAudit,completion:d.completion})});
   trace.record('visual-location',{available:checked.value.available,unique:checked.value.unique,active:checked.value.active,sameIdentity:checked.value.sameIdentity,unavailableKind:checked.value.unavailableKind,region:checked.value.region,elapsedMs:this.clock()-began});
   this.current(signal);if(!checked.value.available){

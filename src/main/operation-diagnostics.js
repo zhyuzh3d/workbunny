@@ -8,10 +8,10 @@ const {AsyncLocalStorage}=require('node:async_hooks');
 const context=new AsyncLocalStorage();
 const STAGES=new Set(['host-state','operation-intent','operation-dispatch','operation-receipt','operation-error','operation-retry',
  'native-dispatch','native-receipt','native-error','native-recovery','native-exit',
- 'capture-start','capture-end','capture-error','pixel-frame','visual-recognition','visual-text-filter','visual-location','visual-change','visual-observation','visual-error','visual-lifecycle',
+ 'capture-start','capture-end','capture-error','pixel-frame','visual-recognition','visual-text-filter','visual-aux-filter','visual-location','visual-change','visual-observation','visual-error','visual-lifecycle',
  'input-intent','input-preflight','input-dispatch','input-receipt','input-error','input-cancel','incident','evidence-pending','evidence-retained','evidence-unavailable','evidence-read','diagnostic-gap']);
 const IDS=new Set(['taskId','actionId','operationId','controllerId','visualSessionId','frameId','captureId','spanId','nativeClientId','nativeRequestId','incidentId','targetRef']);
-const NUMBERS=new Set(['generation','attempt','timeoutMs','elapsedMs','capturedAt','width','height','sourceWidth','sourceHeight','chars','x','y','deltaX','deltaY','bytes','count','dropped','pendingBytes','capturedAgeMs','discardedChars','observedTextRows','retainedTextRows','discardedTextRows']);
+const NUMBERS=new Set(['generation','attempt','timeoutMs','elapsedMs','capturedAt','width','height','sourceWidth','sourceHeight','chars','x','y','deltaX','deltaY','bytes','count','dropped','pendingBytes','capturedAgeMs','discardedChars','observedTextRows','retainedTextRows','discardedTextRows','observedItems','retainedItems','discardedItems']);
 const FLAGS=new Set(['ok','verified','available','unique','active','sameIdentity','geometryChanged','identityChanged','pixelsChanged','reused','nativeAcknowledged','cancelledAfterDispatch','dispatched','mayHaveDispatched','matched','normalized']);
 const CHOICES={mode:['service','terminal','structured-ui','visual'],operation:['click','scroll','key','type'],
  backend:['CGDisplayStream'],imageKind:['display','visual-region','preflight-region'],status:['intent','requested','acknowledged','confirmed','not-dispatched','uncertain','cancelled','failed','completed','started','validated','validation-failed','unavailable','reused','reset','closed'],
