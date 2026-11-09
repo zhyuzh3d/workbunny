@@ -1580,8 +1580,11 @@ class DesktopService {
     // The execution owner can safely activate a visible target using the same
     // pixel-only mechanism as screen.activate. Read-only capture/identity checks
     // never acquire this input behavior.
-    const activation=await this.visualFor(taskScope.target).activate({signal:this.operationSignal});this.assertLive(gen);
-    if(!activation.frame)throw Object.assign(Error(activation.observationError?.message||'安全激活后尚未取得可操作画面'),{code:activation.observationError?.code||'E_VISUAL_TARGET',dispatched:false});
+    const activationGuidance=this.actionControl?.recovery,activationRetry=activationGuidance?.action==='change_method'&&['llm','main-review'].includes(activationGuidance.source);
+    const activationKey=activationGuidance?.guidanceId||(Number.isFinite(activationGuidance?.at)?String(activationGuidance.at):undefined);
+    const activation=await this.visualFor(taskScope.target).activate({signal:this.operationSignal,retry:activationRetry&&!!activationKey,retryKey:activationRetry?activationKey:undefined});
+    try{this.assertLive(gen);}catch(error){error.diagnostic=require('./self-repair').diagnostic({...error.diagnostic,inputReceipt:activation.receipt});throw error;}
+    if(!activation.frame)throw Object.assign(Error(activation.observationError?.message||'安全激活后尚未取得可操作画面'),{code:activation.observationError?.code||'E_VISUAL_TARGET',dispatched:false,diagnostic:require('./self-repair').diagnostic({...activation.observationError?.diagnostic,inputReceipt:activation.receipt})});
     const scope=Object.freeze({...this.visualFor(taskScope.target).identity(),target:taskScope.target});
     this.update({status:'running',application:taskScope.target,scope,note:'正在通过显示像素识别目标区域'});
     let draftInserted = !!this.task.draftInserted || !!taskScope.draftInserted;

@@ -3,6 +3,13 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const {ToolRegistry}=require('../src/main/agent-tools'),{registerScreenActions,fileDialogKind,labelTarget,destructiveLabel}=require('../src/main/screen-action-tools'),{GuiLease}=require('../src/main/gui-lease');
 const {fixture,paint}=require('./support/visual-fixture.cjs');
 const row=text=>({text,confidence:1,x:.2,y:.3,width:.2,height:.1});
+test('an explicit new activation operation can retry a confirmed inactive target once, while default and duplicate decisions only observe',async()=>{
+ const h=fixture(),tools=new ToolRegistry(),lease=new GuiLease(),task={id:'activation-choice',subjects:[{application:'demo'}]};h.location={...h.location,active:false,activationRegion:{x:.6,y:.12,width:.1,height:.05},activationEvidence:'synthetic safe title area'};
+ registerScreenActions(tools,{native:h.native,lease,visualFor:()=>h.visual});const tool=tools.get('screen.activate'),context=id=>({task,operationId:id,signal:new AbortController().signal});
+ assert.equal((await tool.execute(tool.validate({application:'demo'}),context('first'))).activated,false);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+ await tool.execute(tool.validate({application:'demo'}),context('read-only-retry'));await tool.execute(tool.validate({application:'demo',retry:true}),context('first'));assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+ await tool.execute(tool.validate({application:'demo',retry:true}),context('new-decision'));assert.equal(h.calls.filter(c=>c.op==='displayInput').length,2);assert(lease.isFree());
+});
 async function setup(application='demo',options={}){
  const h=fixture(options),tools=new ToolRegistry(),lease=new GuiLease(),task={id:'visual-primitive',skill:'software.execute',state:{}},faults=[];
  registerScreenActions(tools,{native:h.native,lease,applications:{demo:'unused',wechat:'unused'},wechatScene:{trip:async reason=>faults.push(reason)},visualFor:()=>h.visual,...options});

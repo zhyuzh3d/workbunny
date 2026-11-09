@@ -8,6 +8,13 @@ function diagnostic(value){
  if(!value||typeof value!=='object'||Array.isArray(value))return undefined;
  const result={};for(const key of ['operation','method','model'])if(typeof value[key]==='string'&&/^[a-zA-Z0-9_.:-]{1,80}$/u.test(value[key]))result[key]=value[key];
  if(value.visualState&&['login','security','occluded','ambiguous','absent','unclear','inactive','identity'].includes(value.visualState.kind)&&typeof value.visualState.requiresOwner==='boolean')result.visualState={kind:value.visualState.kind,requiresOwner:value.visualState.requiresOwner};
+ if(value.inputReceipt&&typeof value.inputReceipt==='object'&&!Array.isArray(value.inputReceipt)){
+  const source=value.inputReceipt,receipt={};
+  if(['acknowledged','not-dispatched','unconfirmed'].includes(source.state))receipt.state=source.state;
+  if(source.method==='display-pixels')receipt.method=source.method;
+  for(const key of ['inputPerformed','cancelledAfterDispatch'])if(typeof source[key]==='boolean')receipt[key]=source[key];
+  if(Object.keys(receipt).length)result.inputReceipt=receipt;
+ }
  if(value.operationTrace&&typeof value.operationTrace==='object'){
   const source=value.operationTrace,trace={};
   if(typeof source.session==='string'&&/^[a-f0-9-]{36}$/u.test(source.session))trace.session=source.session;

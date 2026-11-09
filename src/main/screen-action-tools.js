@@ -17,9 +17,9 @@ function fileDialogKind(rows){
 }
 function registerScreenActions(tools,{native,wechatScene,lease,canOperate=async()=>true,applications,resolveApplication=(application)=>applications[application],observe,visualFor,assertWeChatInput=()=>{},sensitivePolicy=require('./sensitive-policy').createSensitivePolicy()}){
  const scope=a=>({application:a.application,...(a.recipient?{recipient:a.recipient}:{})});
- tools.register({name:'screen.activate',description:'只按当前截图与视觉模型识别的唯一安全区域点击激活目标，再以新截图核对；不查询或启动应用，不查询前台或窗口。目标不可见或安全区域不明则停止。',effect:'write',capabilities:['screen.input'],scope,available:task=>task.subjects.some(s=>!['system','bunny'].includes(s.application)),validate:v=>{fields(v,['application'],'视觉软件目标');if(typeof v.application!=='string'||!v.application)throw Error('缺少目标软件');return v;},execute:async(a,c)=>{
+ tools.register({name:'screen.activate',description:'只按当前截图与视觉模型识别的唯一安全区域点击激活目标，再以新截图核对；不查询或启动应用，不查询前台或窗口。目标不可见或安全区域不明则停止。先前激活后未能核实结果时默认只观察；自主重新选择激活可显式retry=true，仍须本次新鲜同身份画面确认未激活及安全区域，每个新Operation只重选一次，不能越过需要主人处理的安全/登录提示。',effect:'write',capabilities:['screen.input'],scope,available:task=>task.subjects.some(s=>!['system','bunny'].includes(s.application)),validate:v=>{fields(v,['application','retry'],'视觉软件目标');if(typeof v.application!=='string'||!v.application||v.retry!==undefined&&typeof v.retry!=='boolean')throw Error('缺少目标软件或retry无效');return v;},execute:async(a,c)=>{
   if(!await canOperate(c.task))throw Object.assign(Error('等待电脑空闲后操作'),{code:'E_GUI_BUSY',dispatched:false});
-  const owner=leaseOwner(c);await lease?.acquire(owner,c.signal);try{const {frame,...response}=await visualFor(a.application).activate({signal:c.signal});return response;
+  const owner=leaseOwner(c);await lease?.acquire(owner,c.signal);try{const {frame,...response}=await visualFor(a.application).activate({signal:c.signal,retry:a.retry===true,retryKey:c.operationId});return response;
   }finally{lease?.release(owner);}
  }});
  tools.register({name:'screen.action',description:'执行一个Operation。Bunny可选择observeAfter=true在同次调用带回新画面；无需中间检查时省略或false，由Bunny按Action需要决定。文字提供实际视觉标签label；无文字目标用targetType=icon/region及预览图像素坐标，右键和滚动也用像素坐标。Task与Action完成须自主核查，Operation不必逐次检查；受控会话正文使用对应收发工具。',effect:'write',capabilities:['screen.input'],scope,

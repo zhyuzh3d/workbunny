@@ -12,7 +12,7 @@ function registerConversationTools(tools,{scene,execute,lease,saveAttachment,can
   tools.register({name:'conversation.open',description:'仅用视觉和键鼠打开指定会话，核对顶部标题；不输入消息正文。',
     effect:'read',capabilities:['screen.input'],scope:a=>a,validate:v=>subject(v),execute:async(a,c)=>{
       await scene.assertTaskIdentity?.(c.task,{signal:c.signal});const r=await execute({...a,operation:'open',signal:c.signal,action:c.action,task:c.task,operationId:c.operationId});scene.invalidate();
-      if(!r.ok)throw Object.assign(new Error(r.error||'未能打开会话'),{dispatched:false,...(r.code?{code:r.code}:{})});return {ok:true};
+      if(!r.ok)throw Object.assign(new Error(r.error||'未能打开会话'),{dispatched:false,...(r.code?{code:r.code}:{}),...(r.diagnostic?{diagnostic:r.diagnostic}:{})});return {ok:true};
     }});
   tools.register({name:'conversation.transcribe',description:'读取本任务指定的对方语音，复用统一视觉Action执行器，由Bunny自行选择观察、键鼠、等待与恢复方法并返回实际文字。',
     effect:'read',capabilities:['conversation.read','screen.input'],scope:a=>a,validate:v=>({...subject(v,['sequence']),sequence:Number.isSafeInteger(v.sequence)&&v.sequence>0?v.sequence:0}),execute:async(a,c)=>{await scene.assertTaskIdentity?.(c.task);return require('./wechat-voice').transcribeVoice({execute:async args=>{try{return await execute({...args,action:c.action});}finally{scene.invalidate();}},subject:a,task:c.task,operationId:c.operationId,signal:c.signal,sequence:a.sequence});}});

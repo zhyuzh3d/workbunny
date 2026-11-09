@@ -647,7 +647,9 @@ class AgentService{
       if(current.channelRevoked&&!current.submitAttemptedAt&&(!draftMayExist||current.supersededCleanup?.state==='cleared'))return {ok:false,dispatched:false,code:'E_CHANNEL_CHANGED',error:'渠道权限已变化，未发送旧回复'};
       if(current.status!=='review'){
         if(!current.submitAttemptedAt&&!draftMayExist){const outgoing=task.state.outboundMessages?.find(m=>m.id===current.id);if(outgoing){outgoing.status='not_dispatched';await this.runtime.save(task);}}
-        return {ok:false,dispatched:!current.submitAttemptedAt&&!draftMayExist?false:undefined,error:current.note,...((action?.superseded&&!current.submitAttemptedAt&&!draftMayExist)?{code:'E_ACTION_SUPERSEDED'}:current.errorCode?{code:current.errorCode}:{})};
+        let failure=Object.assign(Error(current.note||'操作尚未完成'),{...(current.errorCode?{code:current.errorCode}:{}),...(current.errorDiagnostic?{diagnostic:require('./self-repair').diagnostic(current.errorDiagnostic)}:{})});
+        if(this.scene.classifyFailure)failure=await this.scene.classifyFailure(failure);
+        return {ok:false,dispatched:!current.submitAttemptedAt&&!draftMayExist?false:undefined,error:failure.message,...(failure.diagnostic?{diagnostic:failure.diagnostic}:{}),...((action?.superseded&&!current.submitAttemptedAt&&!draftMayExist)?{code:'E_ACTION_SUPERSEDED'}:failure.code?{code:failure.code}:{})};
       }
       if(operation==='send'){
         if(current.sendState!=='confirmed')return {ok:false,error:'未能核实本次发送'};

@@ -7,6 +7,19 @@ function modelJSON(text){
   if(fenced)body=fenced[1].trim();
   return parseStrictJson(body);
 }
+const valueType=value=>value===null?'null':Array.isArray(value)?'array':typeof value;
+function standaloneScalars(text){
+  return text.split(/\r?\n/u).some(line=>{
+    let rest=line.trim(),count=0;
+    while(rest){
+      const end=rest[0]==='"'?stringEnd(rest,0):/^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=\s|$)/u.exec(rest)?.[0].length;
+      if(!(end>0)||end<rest.length&&!/\s/u.test(rest[end]))return false;
+      try{const value=parseStrictJson(rest.slice(0,end));if(value!==null&&typeof value==='object')return false;}catch{return false;}
+      count++;rest=rest.slice(end).trimStart();
+    }
+    return count>0;
+  });
+}
 function structuredJSON(text){
   try{return {value:modelJSON(text),discardedChars:0};}catch(original){
     // Model narration is not executable data. Accept one complete structured
@@ -24,6 +37,10 @@ function structuredJSON(text){
     }
     if(stack.length||ranges.length!==1)throw original;
     const [from,to]=ranges[0],candidate=source.slice(from,to);
+    // A standalone scalar/string (or scalar sequence) is a second JSON value,
+    // even though it has no braces. Ordinary prose containing numbers or quotes
+    // remains narration; a line consisting only of JSON values is ambiguous.
+    if(standaloneScalars(source.slice(0,from))||standaloneScalars(source.slice(to)))throw original;
     return {value:parseStrictJson(candidate),discardedChars:source.length-candidate.length};
   }
 }
@@ -53,10 +70,11 @@ async function checkedJSON(options,validate,{request=requestVerification,onReque
       if(repaired){const reminder='上次回答'+(e.code==='E_PAYLOAD_TOO_LARGE'?'超过转发字节限制，本次缩减输出和推理预算':'达到token额度上限，本次提高输出额度')+'。保留同一份证据与目标，仅返回所需完整JSON；依据写简短结论，不复述输入、不展开推理过程，不添加其它内容。';if(system)system.content+='\n'+reminder;else messages.unshift({role:'system',content:reminder});}
       await new Promise(r=>setTimeout(r,500));continue;
     }
-    try{const parsed=structuredJSON(checked.response.text),value=await validate(parsed.value);report('validated',undefined,undefined,undefined,undefined,undefined,parsed.discardedChars);return {value,model:checked.model,attempts:attempt+1};}
+    let parsed;
+    try{parsed=structuredJSON(checked.response.text);const value=await validate(parsed.value);report('validated',undefined,undefined,undefined,undefined,undefined,parsed.discardedChars);return {value,model:checked.model,attempts:attempt+1};}
     catch(e){
       error=e;
-      const schemaAudit=require('./self-repair').diagnostic({schemaAudit:e.schemaAudit||{protocol:'structured-json',field:'response',expected:'valid-json',actualType:typeof checked.response?.text}})?.schemaAudit;
+      const schemaAudit=require('./self-repair').diagnostic({schemaAudit:e.schemaAudit||{protocol:'structured-json',field:'response',expected:parsed?'schema-valid-value':'valid-json',actualType:parsed?valueType(parsed.value):typeof checked.response?.text}})?.schemaAudit;
       if(schemaAudit)e.schemaAudit=schemaAudit;
       report('validation-failed',undefined,'E_MODEL_SCHEMA',undefined,undefined,schemaAudit);
       if(attempt===0){

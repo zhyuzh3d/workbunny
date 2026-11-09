@@ -10,6 +10,18 @@ test('desktop execution reaches its first plan after shared safe visual activati
  const reached=Error('first plan reached');service.capture=async()=>{throw reached;};await service.acquireGuiLease();
  await assert.rejects(service.runOwned(1,{...service.task}),e=>e===reached);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
 });
+test('desktop activation failures preserve owner-required diagnostics and acknowledged input for the task owner',async t=>{
+ let h;h=fixture({onInput:()=>{h.location={available:false,unavailableKind:'security',evidence:'synthetic visible security notice',reason:'synthetic security notice'};}});h.location={...h.location,active:false,activationRegion:{x:.6,y:.12,width:.1,height:.05},activationEvidence:'synthetic safe title area'};h.native.close=()=>{};h.native.cancel=()=>{};
+ const service=new DesktopService({native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap});t.after(()=>service.close());service.task={id:'fixture-activation-failure',target:'notes',scene:'life',domain:'life',visibilityFloor:1,goal:'fixture goal',steps:[],startedAt:Date.now()};service.running=true;service.generation=1;service.controller=new AbortController();service.visualSessions=new Map([['notes',h.visual]]);
+ await assert.rejects(service.run(1,{...service.task}),e=>e.diagnostic.visualState.requiresOwner===true&&e.diagnostic.inputReceipt.inputPerformed===true);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+});
+test('the fixed desktop entry consumes one renewed task-brain or main-brain strategy but never a local counter retry',async t=>{
+ for(const source of ['local','llm','main-review']){
+  const h=fixture();h.native.close=()=>{};h.native.cancel=()=>{};let decision;const stop=Error('activation options captured');h.visual.activate=async options=>{decision=options;throw stop;};
+  const service=new DesktopService({native:h.native});t.after(()=>service.close());service.task={id:'fixture-guidance-'+source,target:'notes',scene:'life',domain:'life',visibilityFloor:1,steps:[]};service.running=true;service.generation=1;service.controller=new AbortController();service.visualSessions=new Map([['notes',h.visual]]);service.actionControl={recovery:{action:'change_method',source,guidanceId:'strategy-one'}};
+  await assert.rejects(service.run(1,{...service.task}),e=>e===stop);assert.equal(decision.retry,source!=='local');assert.equal(decision.retryKey,source==='local'?undefined:'strategy-one');
+ }
+});
 async function scenario({occupied=false,typeFails=false,sendFails=false,readbackFails=false,nativeFallback=false}={}){
  const calls=[],journal=[],outcomes=[],marker='[workbunny:visual-test]';let draft='',submissions=0,plans=0;
  const row=(text,y,x=.3)=>({text,x,y,width:.5,height:.025,confidence:.99});

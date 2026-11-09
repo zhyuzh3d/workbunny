@@ -47,6 +47,31 @@ test('the shared activation mechanism uses only a confirmed safe pixel region an
   await assert.rejects(f.visual.activate(),e=>e.code==='E_VISUAL_TARGET');assert(f.calls.every(c=>c.op==='displayCapture'));
  }
 });
+test('failed activation observation preserves the security finding and input receipt without another automatic click',async()=>{
+ let h;h=fixture({onInput:()=>{h.location={available:false,unavailableKind:'security',evidence:'synthetic visible security notice',reason:'synthetic security notice'};}});const original={...h.location,active:false,activationRegion:{x:.6,y:.12,width:.1,height:.05},activationEvidence:'synthetic safe title area'};h.location=original;
+ const result=await h.visual.activate();assert.equal(result.activated,false);assert.equal(result.observationError.diagnostic.visualState.requiresOwner,true);assert.equal(result.observationError.diagnostic.inputReceipt.state,'acknowledged');assert.equal(result.receipt.inputPerformed,true);
+ h.location=original;const again=await h.visual.activate();assert.equal(again.frame,undefined);assert.equal(again.receipt.inputPerformed,true);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+ assert.equal((await h.visual.activate({retry:true,retryKey:'cannot-clear-owner-boundary'})).frame,undefined);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+ h.location={...original,active:true};h.visual.anchor.needsRelocate=true;assert.equal((await h.visual.activate()).frame,undefined,'a new active view does not override an owner-required finding');h.visual.reset();assert((await h.visual.activate()).frame);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+ const unknown=fixture({onInput:()=>{throw Error('synthetic lost input receipt');}});unknown.location={...unknown.location,active:false,activationRegion:original.activationRegion,activationEvidence:original.activationEvidence};
+ await assert.rejects(unknown.visual.activate(),e=>e.diagnostic.inputReceipt.state==='unconfirmed');assert.equal((await unknown.visual.activate()).frame,undefined);assert.equal(unknown.calls.filter(c=>c.op==='displayInput').length,1);
+ await assert.rejects(unknown.visual.activate({retry:true,retryKey:'new-fixture-decision'}),e=>e.diagnostic.inputReceipt.state==='unconfirmed');assert.equal(unknown.calls.filter(c=>c.op==='displayInput').length,2);
+ assert.equal((await unknown.visual.activate({retry:true,retryKey:'new-fixture-decision'})).frame,undefined);assert.equal(unknown.calls.filter(c=>c.op==='displayInput').length,2,'one renewed decision cannot loop');
+});
+test('visual geometry failures retain their exact typed field and permit one targeted same-frame correction',async()=>{
+ for(const [field,value,expected,type]of [['mainRegion',{x:0,y:0,width:1,height:1},'box-inside-region','object'],['region',null,'normalized-box','null'],['monitorRegions',[{x:0,y:0,width:1,height:1}],'box-inside-region','object']]){
+  const h=fixture();h.location[field]=value;await assert.rejects(h.visual.observe(),e=>e.diagnostic.schemaAudit.field===(field==='monitorRegions'?'monitorRegions[0]':field)&&e.diagnostic.schemaAudit.expected===expected&&e.diagnostic.schemaAudit.actualType===type);assert(h.calls.every(c=>c.op==='displayCapture'));
+ }
+ const h=fixture(),valid={...h.location};let calls=0;h.visual.request=async options=>{calls++;if(calls===1)return {response:{text:JSON.stringify({...valid,mainRegion:{x:0,y:0,width:1,height:1}})}};assert.match(options.messages.at(-1).content,/mainRegion/);assert.match(options.messages.at(-1).content,/box-inside-region/);return {response:{text:JSON.stringify(valid)}};};
+ assert((await h.visual.observe()).visualFrameId);assert.equal(calls,2);assert.equal(h.calls.filter(c=>c.op==='displayCapture').length,1);
+});
+test('location output has one full-display coordinate reference and the host alone projects text into the crop',async()=>{
+ const h=fixture(),wire={...h.location,texts:[{text:'synthetic-label',x:.26,y:.34,width:.16,height:.08,confidence:.9}]};
+ h.visual.request=async options=>{assert.match(options.messages[0].content,/不能使用目标region局部坐标/);return {response:{text:JSON.stringify(wire)}};};
+ const frame=await h.visual.observe(),row=frame.texts[0];for(const [key,value]of Object.entries({x:.2,y:.3,width:.2,height:.1}))assert(Math.abs(row[key]-value)<1e-12,key);assert.equal(h.visual.anchor.texts[0].x,.26);assert(h.calls.every(c=>c.op==='displayCapture'));
+ const invalid=fixture();invalid.visual.request=async()=>({response:{text:JSON.stringify({...invalid.location,texts:[{text:'synthetic-label',x:.02,y:.04,width:.03,height:.01,confidence:.9}]})}});
+ await assert.rejects(invalid.visual.observe(),e=>e.diagnostic.schemaAudit.field==='texts[0]'&&e.diagnostic.schemaAudit.expected==='box-inside-region');assert(invalid.calls.every(c=>c.op==='displayCapture'));
+});
 test('an uncertain small target can be reobserved with a fresh candidate enlargement, which never authorizes input',async()=>{
  const h=fixture(),original={...h.location},candidate={x:.1,y:.1,width:.8,height:.8};h.location={available:false,region:candidate,reason:'整图中文字过小，身份尚不清楚'};
  await assert.rejects(h.visual.observe(),e=>e.code==='E_VISUAL_TARGET'&&e.diagnostic.visualState.kind==='unclear'&&!e.diagnostic.visualState.requiresOwner);

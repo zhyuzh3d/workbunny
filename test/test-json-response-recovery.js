@@ -10,10 +10,14 @@ test('one complete structured answer tolerates surrounding narration without ano
  assert.equal(calls,1);assert.equal(result.attempts,1);assert(diagnostics.some(d=>d.normalized===true&&d.discardedChars>0));assert.deepEqual(messages,original);
 });
 test('normalization rejects duplicate keys, conflicting objects, malformed values and truncated extra candidates',async()=>{
- for(const text of ['{"ok":true} {"ok":false}','{"ok":true}\n{"other":','{"ok":true,"ok":false} note','note {"ok":.4}','note [true, false','{"ok":true} trailing }']){
+ for(const text of ['{"ok":true} {"ok":false}','{"ok":true}\n{"other":','{"ok":true,"ok":false} note','note {"ok":.4}','note [true, false','{"ok":true} trailing }','{"ok":true}\nfalse','null\n{"ok":true}','{"ok":true} 123','{"ok":true}\n"another value"','false 123\n{"ok":true}']){
   let calls=0;await assert.rejects(checkedJSON({messages},v=>v,{request:async()=>{calls++;return {response:{text}};}}),{code:'E_MODEL_SCHEMA'});assert.equal(calls,2);
  }
  let calls=0;await assert.rejects(checkedJSON({messages},v=>{if(v.ok!==true)throw Error('typed field mismatch');return v;},{request:async()=>{calls++;return {response:{text:'{"ok":"true"} explanatory note'}};}}),{code:'E_MODEL_SCHEMA'});assert.equal(calls,2);
+});
+test('ordinary surrounding narration may contain numbers and quoted labels without being another JSON value',async()=>{
+ let calls=0;const result=await checkedJSON({messages},v=>v,{request:async()=>{calls++;return {response:{text:'Observed 2 regions; label "Search".\n{"ok":true}\nConfidence: 0.95; no input was issued.'}};}});assert.equal(result.value.ok,true);assert.equal(calls,1);
+ await assert.rejects(checkedJSON({messages},()=>{throw Error('typed fixture mismatch');},{request:async()=>({response:{text:'{"ok":true}'}})}),e=>e.diagnostic.schemaAudit.actualType==='object'&&e.diagnostic.schemaAudit.expected==='schema-valid-value');
 });
 test('schema recovery repairs the rejected answer and preserves its audit if the repair request times out',async()=>{
  const rejected='{"ok":true} {"ok":false}',diagnostics=[];let calls=0;

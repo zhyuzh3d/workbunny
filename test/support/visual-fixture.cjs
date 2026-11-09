@@ -8,7 +8,9 @@ function paint(image,r,value=250){for(let y=Math.floor(r.y*image.height);y<Math.
 function fixture(options={}){
  let now=100000, image=raster(),location={software:'Demo',available:true,unique:true,active:true,sameIdentity:true,confidence:.71,region:{x:.1,y:.1,width:.8,height:.8},mainRegion:{x:.1,y:.1,width:.8,height:.8},monitorRegions:[{x:.1,y:.1,width:.8,height:.5}],identityRegion:{x:.2,y:.12,width:.3,height:.15},focusRegion:{x:.2,y:.65,width:.4,height:.15},focusEvidence:'可见输入光标',evidence:'目标文档标题及当前身份唯一可见',texts:[]};const calls=[],requests=[];
  const native={request:async(op,args)=>{calls.push({op,args});if(op==='displayCapture'){await options.beforeCapture?.();return {pngBase64:encode(image).toString('base64'),width:image.width,height:image.height,desktopRect:{x:0,y:0,width:image.width,height:image.height},backend:'CGDisplayStream',capturedAt:now};}if(op==='displayInput'){await options.onInput?.();return {performed:true};}throw Error('Forbidden native operation: '+op);}};
- const request=async opts=>{requests.push(opts);await options.beforeModel?.();return {response:{text:JSON.stringify(location)}};};
+ // Tests describe text rows in the target crop; model wire output uses the
+ // same full-display reference as every other location field.
+ const request=async opts=>{requests.push(opts);await options.beforeModel?.();const r=location.region,texts=r&&location.texts?.map(b=>({...b,x:r.x+b.x*r.width,y:r.y+b.y*r.height,width:b.width*r.width,height:b.height*r.height}));return {response:{text:JSON.stringify(texts?{...location,texts}:location)}};};
  const args={native,bitmap,imageCrop:crop,request,clock:()=>now,...options};delete args.beforeCapture;delete args.beforeModel;delete args.onInput;
  const visual=new VisualSession(args);
  return {visual,native,calls,requests,bitmap,encode,crop,paint,get image(){return image;},set image(v){image=v;},get location(){return location;},set location(v){location=v;},advance(ms){now+=ms;}};

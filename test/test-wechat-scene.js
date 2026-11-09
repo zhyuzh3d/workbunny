@@ -34,3 +34,10 @@ test('read-only identity checks accept a visible inactive target without grantin
 test('a restored legacy window identity is not adopted into the new visual session',async()=>{
  const f=setup(),task={state:{sceneIdentity:{wechat:{pid:76,windowId:8}}}};await assert.rejects(f.scene.assertTaskIdentity(task),e=>e.code==='E_APP_CIRCUIT');assert.equal(f.faults.length,1);assert(!f.h.calls.some(c=>c.op==='displayInput'));
 });
+test('a physical activation failure reaches the shared scene with its security classification and actual input receipt',async()=>{
+ const f=setup(),{AgentService}=require('../src/main/agent-service'),service=Object.create(AgentService.prototype),task={id:'synthetic-conversation-task',skill:'conversation.manage',state:{},operations:{},scene:'life',visibilityFloor:1};
+ const diagnostic={visualState:{kind:'security',requiresOwner:true},inputReceipt:{state:'acknowledged',inputPerformed:true,method:'display-pixels'}};
+ Object.assign(service,{scene:f.scene,getWeChatOwnership:()=> 'owner',canOperateForTask:async()=>true,conversationTail:Promise.resolve(),runtime:{tasks:new Map([[task.id,task]]),save:async()=>{}},conversationDesktop:{running:false,task:{id:'synthetic-operation',status:'paused',note:'synthetic security notice',errorCode:'E_VISUAL_TARGET',errorDiagnostic:diagnostic,steps:[]},start:async()=>({ok:true})}});
+ const result=await service.executeConversation({task,operation:'open',recipient:'Alice',signal:new AbortController().signal});assert.equal(result.code,'E_APP_CIRCUIT');assert.equal(result.diagnostic.inputReceipt.inputPerformed,true);assert.equal(f.scene.circuit.kind,'security');assert(f.h.calls.every(c=>c.op==='displayCapture'));
+ const {ToolRegistry}=require('../src/main/agent-tools'),tools=new ToolRegistry();require('../src/main/conversation-tools').registerConversationTools(tools,{scene:{assertTaskIdentity:async()=>{},invalidate(){}},execute:async()=>result});const tool=tools.get('conversation.open');await assert.rejects(tool.execute({application:'wechat',recipient:'Alice'},{task}),e=>e.diagnostic.visualState.requiresOwner&&e.diagnostic.inputReceipt.inputPerformed);
+});
