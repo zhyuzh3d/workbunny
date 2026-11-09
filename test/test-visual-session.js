@@ -70,11 +70,16 @@ test('location output has one full-display coordinate reference and the host alo
  h.visual.request=async options=>{assert.match(options.messages[0].content,/不能使用目标region局部坐标/);return {response:{text:JSON.stringify(wire)}};};
  const frame=await h.visual.observe(),row=frame.texts[0];for(const [key,value]of Object.entries({x:.2,y:.3,width:.2,height:.1}))assert(Math.abs(row[key]-value)<1e-12,key);assert.equal(h.visual.anchor.texts[0].x,.26);assert(h.calls.every(c=>c.op==='displayCapture'));
  const invalid=fixture();invalid.visual.request=async()=>({response:{text:JSON.stringify({...invalid.location,texts:[{text:'synthetic-label',x:.02,y:.04,width:.03,height:.01,confidence:.9}]})}});
- await assert.rejects(invalid.visual.observe(),e=>e.diagnostic.schemaAudit.field==='texts[0]'&&e.diagnostic.schemaAudit.expected==='box-inside-region');assert(invalid.calls.every(c=>c.op==='displayCapture'));
+ assert.deepEqual((await invalid.visual.observe()).texts,[]);assert(invalid.calls.every(c=>c.op==='displayCapture'));
+});
+test('invalid optional coarse text rows are filtered once without weakening critical location anchors',async()=>{
+ const trace=require('../src/main/operation-diagnostics'),recorder=new trace.OperationDiagnostics(),h=fixture();let calls=0;
+ h.visual.request=async()=>{calls++;return {response:{text:JSON.stringify({...h.location,texts:[{text:'valid',x:.26,y:.34,width:.16,height:.08,confidence:.9},{text:'private-filter-canary',x:.01,y:.01,width:.03,height:.01,confidence:.9},null,{text:'invalid-confidence',x:.26,y:.34,width:.16,height:.08,confidence:'0.9'}]})}};};
+ const frame=await trace.using(recorder,()=>h.visual.observe());assert.equal(calls,1);assert.deepEqual(frame.texts.map(r=>r.text),['valid']);assert.equal(frame.identity.sessionId,h.visual.sessionId);const audit=recorder.events.find(e=>e.stage==='visual-text-filter');assert.equal(audit.observedTextRows,4);assert.equal(audit.retainedTextRows,1);assert.equal(audit.discardedTextRows,3);assert.equal(audit.schemaAudit.field,'texts[1]');assert(!JSON.stringify(recorder.events).includes('private-filter-canary'));assert(h.calls.every(c=>c.op==='displayCapture'));
 });
 test('generic text refinement reads only retained region pixels and binds complete projected rows to their original frame',async()=>{
  const h=fixture(),frame=await h.visual.observe(),region={x:.25,y:.2,width:.5,height:.4};let reads=0;
- h.visual.request=async options=>{reads++;const body=options.messages.find(m=>m.role==='user').content;assert.equal(JSON.parse(body[0].text).purpose,'visual-text-region');assert(!JSON.stringify(options.messages).includes('expectedLabel'));
+ h.visual.request=async options=>{reads++;const body=options.messages.find(m=>m.role==='user').content,system=options.messages.filter(m=>m.role==='system').map(m=>m.content).join('\n');assert.equal(JSON.parse(body[0].text).purpose,'visual-text-region');assert(!JSON.stringify(options.messages).includes('expectedLabel'));assert(!/内部证据复核器|不复述证据|依据用简短结论/u.test(system));assert.equal(options.maxTokens,4096);
   assert.equal(body[1].image_url.url,'data:image/png;base64,'+h.visual.crop(frame,region).toString('base64'));return {response:{text:JSON.stringify({complete:true,texts:[{text:'Label',x:.1,y:.2,width:.2,height:.1,confidence:.9},{text:'Label',x:.1,y:.6,width:.2,height:.1,confidence:.9}]})}};};
  const result=await h.visual.readTextRegion(frame.visualFrameId,{region});assert.equal(result.frameId,frame.visualFrameId);assert.deepEqual(result.identity,frame.identity);assert.equal(result.texts.length,2);assert.equal(result.complete,true);assert(Math.abs(result.texts[0].x-(result.region.x+.1*result.region.width))<1e-12);assert.equal(reads,1);assert.deepEqual(h.calls.map(c=>c.op),['displayCapture']);
 });
