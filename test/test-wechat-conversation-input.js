@@ -16,6 +16,23 @@ const review = (kind, region, location) => async kinds => {
   return { kind, box: region, location };
 };
 const denied = { code: 'E_WECHAT_CONVERSATION_INPUT', dispatched: false };
+test('missing or conflicting coarse labels are refined once over the whole list, retaining exact and duplicate guards',async()=>{
+ const identity={mode:'visual',sessionId:'synthetic-session'},control=box(.13,.22,.16,.05),action={action:'click',x:.2,y:.25};
+ for(const coarse of [[],[ocr(task.recipient,.03,.09)]]){
+  const shot={...snapshot(1,...coarse),visualFrameId:'frame',identity};let reads=0;
+  const approval=await approveInput({action,task,shot,review:review('contact',control),refineText:async region=>{reads++;assert.deepEqual(region,box(0,0,.33,1));return {frameId:'frame',identity,region,complete:true,texts:[ocr(task.recipient,.15,.24)]};}});
+  assert.equal(reads,1);assert.equal(approval.action.x,.19);assert.equal(shot.ocr.filter(r=>r.text===task.recipient&&r.x<.33).length,1);
+ }
+ const shot={...snapshot(1),visualFrameId:'frame',identity};let reads=0;
+ await assert.rejects(approveInput({action,task,shot,review:review('contact',control),refineText:async region=>{reads++;return {frameId:'frame',identity,region,complete:true,texts:[ocr(task.recipient,.15,.24),ocr(task.recipient,.15,.6)]};}}),e=>e.code==='E_WECHAT_CONVERSATION_INPUT'&&e.diagnostic.candidateCount===2);assert.equal(reads,1);
+});
+test('incomplete, partial-region, wrong-frame and wrong-identity refinements never approve an input',async()=>{
+ const identity={mode:'visual',sessionId:'synthetic-session'};
+ for(const change of ['incomplete','partial','frame','identity']){
+  const shot={...snapshot(1),visualFrameId:'frame',identity};let reads=0;
+  await assert.rejects(approveInput({action:{action:'click',x:.2,y:.25},task,shot,review:review('contact',box(.13,.22,.16,.05)),refineText:async region=>{reads++;return {frameId:change==='frame'?'old-frame':'frame',identity:change==='identity'?{mode:'visual',sessionId:'other'}:identity,region:change==='partial'?box(.13,.22,.16,.05):region,complete:change!=='incomplete',texts:[ocr(task.recipient,.15,.24)]};}}),denied);assert.equal(reads,1);
+ }
+});
 test('control rejection distinguishes missing labels from labels outside the recognized control without recording text',async()=>{
  for(const [rows,count,within]of [[[],0,false],[[ocr('Fixture contact',.15,.24)],1,false]]){
   await assert.rejects(approveInput({action:{action:'click',x:.2,y:.35},task,shot:{revision:1,ocr:rows,visualFrameId:'frame',identity:{mode:'visual'}},review:review('contact',box(.13,.33,.16,.05))}),e=>{
@@ -98,6 +115,18 @@ test('visual dispatch rejects missing or mismatched menu approval and rechecks t
   await assert.rejects(service.act(action,scope,shot,1,{approval:{...approval,shot:{...shot}}}),denied);
   revokeOnCapture=true;await assert.rejects(service.act(action,scope,shot,1,{approval}),{code:'E_CHANNEL_CHANGED'});assert.equal(h.calls.filter(c=>c.op==='displayInput').length,0);
   current=true;revokeOnCapture=false;await service.act(action,scope,shot,1,{approval});assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
+});
+test('the production desktop guard invokes same-frame text refinement only when its contact label is missing',async t=>{
+ for(const known of [false,true]){
+  const h=fixture();h.native.close=()=>{};h.native.cancel=()=>{};h.location={...h.location,software:'WeChat',region:box(0,0,1,1),mainRegion:box(0,0,1,1),texts:[heading,...(known?[ocr(task.recipient,.15,.24)]:[])]};
+  let refined=0,clicked=false;const visualRequest=h.visual.request,nativeRequest=h.native.request;
+  h.visual.request=async options=>{let input;try{input=JSON.parse(options.messages.find(m=>m.role==='user').content[0].text);}catch{}
+   if(input?.purpose==='visual-text-region'){refined++;return {response:{text:JSON.stringify({complete:true,texts:[ocr(task.recipient,.15/.33,.24,.08/.33)]})}};}return visualRequest(options);};
+  h.native.request=async(op,args)=>{const result=await nativeRequest(op,args);if(op==='displayInput'){assert.equal(args.action,'click');clicked=true;}return result;};
+  const service=new DesktopService({native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap,planner:async()=>clicked?{action:'done',completed:true,evidence:'synthetic target opened'}:{action:'click',x:.2,y:.25},modelRequest:async()=>({text:JSON.stringify({kind:'contact',box:box(.13,.22,.16,.05)})})});t.after(()=>service.close());
+  service.visualSessions=new Map([['wechat',h.visual]]);service.task={id:'synthetic-open-'+known,target:'wechat',operation:'open',recipient:task.recipient,goal:'open synthetic contact',scene:'life',domain:'life',visibilityFloor:1,steps:[],channelConversation:true,channelAuthorization:{account:require('../src/main/visual-session').visualAccount(h.visual.identity()),scene:'life'},workModel:'hy3',startedAt:Date.now()};service.running=true;service.generation=1;service.controller=new AbortController();
+  await service.run(1,{...service.task});assert.equal(service.task.status,'review');assert.equal(refined,known?0:1);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
+ }
 });
 
 test('the normal reply executor rejects a message-area click and continues with a scoped visual reply', async t => {

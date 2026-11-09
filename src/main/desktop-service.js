@@ -1682,6 +1682,7 @@ class DesktopService {
         try {
           approval=await conversationInput.approveInput({
             action, task:taskScope, shot, state:this.conversationInputState,
+            refineText:region=>this.visualSession.readTextRegion(shot.visualFrameId,{region,signal:this.controller.signal}),
             review:(kinds,context)=>conversationInput.reviewTarget({kinds,context,shot,signal:this.controller.signal,
               request:async options=>({response:await (this.modelRequest||wb.chat)({...options,model:taskScope.workModel,thinking:'low',extraBody:{reasoning_effort:'low',response_format:{type:'json_object'}}})})}),
           });

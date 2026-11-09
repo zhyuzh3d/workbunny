@@ -72,6 +72,19 @@ test('location output has one full-display coordinate reference and the host alo
  const invalid=fixture();invalid.visual.request=async()=>({response:{text:JSON.stringify({...invalid.location,texts:[{text:'synthetic-label',x:.02,y:.04,width:.03,height:.01,confidence:.9}]})}});
  await assert.rejects(invalid.visual.observe(),e=>e.diagnostic.schemaAudit.field==='texts[0]'&&e.diagnostic.schemaAudit.expected==='box-inside-region');assert(invalid.calls.every(c=>c.op==='displayCapture'));
 });
+test('generic text refinement reads only retained region pixels and binds complete projected rows to their original frame',async()=>{
+ const h=fixture(),frame=await h.visual.observe(),region={x:.25,y:.2,width:.5,height:.4};let reads=0;
+ h.visual.request=async options=>{reads++;const body=options.messages.find(m=>m.role==='user').content;assert.equal(JSON.parse(body[0].text).purpose,'visual-text-region');assert(!JSON.stringify(options.messages).includes('expectedLabel'));
+  assert.equal(body[1].image_url.url,'data:image/png;base64,'+h.visual.crop(frame,region).toString('base64'));return {response:{text:JSON.stringify({complete:true,texts:[{text:'Label',x:.1,y:.2,width:.2,height:.1,confidence:.9},{text:'Label',x:.1,y:.6,width:.2,height:.1,confidence:.9}]})}};};
+ const result=await h.visual.readTextRegion(frame.visualFrameId,{region});assert.equal(result.frameId,frame.visualFrameId);assert.deepEqual(result.identity,frame.identity);assert.equal(result.texts.length,2);assert.equal(result.complete,true);assert(Math.abs(result.texts[0].x-(result.region.x+.1*result.region.width))<1e-12);assert.equal(reads,1);assert.deepEqual(h.calls.map(c=>c.op),['displayCapture']);
+});
+test('text refinement cannot return late data after its frame is reset or its caller cancels',async()=>{
+ for(const change of ['reset','cancel']){
+  const h=fixture(),frame=await h.visual.observe(),controller=new AbortController(),gate=Promise.withResolvers();h.visual.request=()=>gate.promise;
+  const work=h.visual.readTextRegion(frame.visualFrameId,{region:{x:0,y:0,width:.33,height:1},signal:controller.signal});await new Promise(r=>setImmediate(r));if(change==='reset')h.visual.reset();else controller.abort();gate.resolve({response:{text:'{"complete":true,"texts":[]}'}});
+  await assert.rejects(work,e=>e.dispatched===false);assert.deepEqual(h.calls.map(c=>c.op),['displayCapture']);
+ }
+});
 test('an uncertain small target can be reobserved with a fresh candidate enlargement, which never authorizes input',async()=>{
  const h=fixture(),original={...h.location},candidate={x:.1,y:.1,width:.8,height:.8};h.location={available:false,region:candidate,reason:'整图中文字过小，身份尚不清楚'};
  await assert.rejects(h.visual.observe(),e=>e.code==='E_VISUAL_TARGET'&&e.diagnostic.visualState.kind==='unclear'&&!e.diagnostic.visualState.requiresOwner);

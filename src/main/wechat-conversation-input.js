@@ -69,7 +69,7 @@ function actionTarget(action, task, stage) {
   throw blocked();
 }
 
-async function approveInput({ action, task, shot, state, review }) {
+async function approveInput({ action, task, shot, state, review, refineText }) {
   if (state?.stage && shot.revision <= state.revision) throw blocked('微信界面变化后须重新观察当前菜单或对话框');
   const spec = actionTarget(action, task, state?.stage);
   if (spec.scroll) return { action };
@@ -92,8 +92,21 @@ async function approveInput({ action, task, shot, state, review }) {
   if (!spec.kinds.includes(kind) || !validBox(box)) throw blocked('当前画面未能确认允许操作的原生控件',{guardChecks:{controlRoleAllowed:spec.kinds.includes(kind),controlBoxValid:validBox(box)}});
   const exact = kind === 'contact' ? task.recipient : kind === 'file' ? task.readRequest.fileName : undefined;
   const pattern = exact ? value => value === label(exact) : LABELS[kind] ? value => LABELS[kind].test(value) : null;
-  const rows = pattern ? targetRows(shot, pattern, box) : [];
-  if (pattern && rows.length !== 1) throw blocked('当前控件的可见文字不足以唯一定位',{candidateCount:targetRows(shot,pattern).length,guardChecks:{frameHasText:Array.isArray(shot.ocr)&&shot.ocr.length>0,labelWithinControl:rows.length>0,labelUniqueInControl:rows.length===1,hasVisualFrame:typeof shot.visualFrameId==='string',hasFrameIdentity:!!shot.identity}});
+  let rows = pattern ? targetRows(shot, pattern, box) : [];
+  const inUniqueScope=row=>kind==='contact'?row.x<mainX(.33)&&row.y>=mainY(.07):kind==='file'?row.x>mainX(.33)&&row.y>mainY(.11)&&row.y<mainY(.85):true;
+  const refinement={refinementRequested:false,refinementComplete:false,refinementBound:false};
+  if(pattern&&refineText&&(rows.length!==1||['contact','file'].includes(kind)&&targetRows(shot,pattern).filter(inUniqueScope).length!==1)){
+    // Reobserve the entire existing uniqueness scope, not just the chosen row.
+    // Replace coarse rows only inside that same-frame, fully covered region.
+    const region=kind==='contact'?{x:main.x,y:main.y,width:main.width*.33,height:main.height}:kind==='file'?{x:mainX(.33),y:mainY(.11),width:main.width*.67,height:main.height*.74}:box;
+    refinement.refinementRequested=true;const fresh=await refineText(region);
+    const covered=fresh?.region;refinement.refinementComplete=fresh?.complete===true;
+    refinement.refinementBound=typeof shot.visualFrameId==='string'&&fresh?.frameId===shot.visualFrameId&&shot.identity?.mode==='visual'&&fresh?.identity?.mode==='visual'&&fresh?.identity?.sessionId===shot.identity.sessionId&&validBox(covered)&&covered.x<=region.x&&covered.y<=region.y&&covered.x+covered.width>=region.x+region.width&&covered.y+covered.height>=region.y+region.height;
+    if(refinement.refinementComplete&&refinement.refinementBound&&Array.isArray(fresh.texts)&&fresh.texts.every(r=>typeof r?.text==='string'&&validBox(r)&&r.confidence>=0&&r.confidence<=1&&contains(covered,center(r)))){
+      shot.ocr=[...(shot.ocr||[]).filter(r=>!validBox(r)||!contains(covered,center(r))),...fresh.texts];rows=targetRows(shot,pattern,box);
+    }else throw blocked('局部文字补证未能完整绑定当前视觉区域',{candidateCount:targetRows(shot,pattern).length,guardChecks:refinement});
+  }
+  if (pattern && rows.length !== 1) throw blocked('当前控件的可见文字不足以唯一定位',{candidateCount:targetRows(shot,pattern).length,guardChecks:{frameHasText:Array.isArray(shot.ocr)&&shot.ocr.length>0,labelWithinControl:rows.length>0,labelUniqueInControl:rows.length===1,hasVisualFrame:typeof shot.visualFrameId==='string',hasFrameIdentity:!!shot.identity,...refinement}});
   const target = rows.length ? rows[0] : box;
   const point = center(target);
   if (action.action === 'click' && !contains(box, action)) throw blocked('点击位置不属于已确认的控件');
@@ -103,8 +116,8 @@ async function approveInput({ action, task, shot, state, review }) {
   if (kind === 'composer' && !(point.x > mainX(.34) && point.y > mainY(.65) && point.y < mainY(.94))) throw blocked();
   if (kind === 'send' && !(point.x > mainX(.55) && point.y > mainY(.84))) throw blocked();
   if (['voice', 'file'].includes(kind) && !(point.x > mainX(.33) && point.x < mainX(.76) && point.y > mainY(.11) && point.y < mainY(.85))) throw blocked();
-  if (kind === 'contact' && targetRows(shot, pattern).filter(row => row.x < mainX(.33) && row.y >= mainY(.07)).length !== 1) throw blocked('会话列表存在同名目标');
-  if (kind === 'file' && targetRows(shot, pattern).filter(row => row.x > mainX(.33) && row.y > mainY(.11) && row.y < mainY(.85)).length !== 1) throw blocked('当前会话中有同名文件，无法唯一定位');
+  if (kind === 'contact' && targetRows(shot, pattern).filter(inUniqueScope).length !== 1) throw blocked('会话列表存在同名目标',{candidateCount:targetRows(shot,pattern).filter(inUniqueScope).length,guardChecks:refinement});
+  if (kind === 'file' && targetRows(shot, pattern).filter(inUniqueScope).length !== 1) throw blocked('当前会话中有同名文件，无法唯一定位',{candidateCount:targetRows(shot,pattern).filter(inUniqueScope).length,guardChecks:refinement});
   if (kind === 'composer' && (shot.ocr || []).some(row => validBox(row) && row.confidence >= .6 &&
       contains(box, center(row)) && !/^(?:输入消息|输入文字|Typeamessage)$/iu.test(label(row.text)))) {
     throw blocked('编辑区可能已有草稿，未输入');
