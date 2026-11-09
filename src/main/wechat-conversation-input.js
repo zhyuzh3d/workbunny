@@ -99,7 +99,7 @@ async function approveInput({ action, task, shot, state, review, refineText }) {
     // Reobserve the entire existing uniqueness scope, not just the chosen row.
     // Replace coarse rows only inside that same-frame, fully covered region.
     const region=kind==='contact'?{x:main.x,y:main.y,width:main.width*.33,height:main.height}:kind==='file'?{x:mainX(.33),y:mainY(.11),width:main.width*.67,height:main.height*.74}:box;
-    refinement.refinementRequested=true;const fresh=await refineText(region);
+    refinement.refinementRequested=true;const fresh=await refineText(region,box);
     const covered=fresh?.region;refinement.refinementComplete=fresh?.complete===true;
     refinement.refinementBound=typeof shot.visualFrameId==='string'&&fresh?.frameId===shot.visualFrameId&&shot.identity?.mode==='visual'&&fresh?.identity?.mode==='visual'&&fresh?.identity?.sessionId===shot.identity.sessionId&&validBox(covered)&&covered.x<=region.x&&covered.y<=region.y&&covered.x+covered.width>=region.x+region.width&&covered.y+covered.height>=region.y+region.height;
     if(refinement.refinementComplete&&refinement.refinementBound&&Array.isArray(fresh.texts)&&fresh.texts.every(r=>typeof r?.text==='string'&&validBox(r)&&r.confidence>=0&&r.confidence<=1&&contains(covered,center(r)))){

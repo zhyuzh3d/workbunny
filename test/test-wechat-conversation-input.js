@@ -20,7 +20,7 @@ test('missing or conflicting coarse labels are refined once over the whole list,
  const identity={mode:'visual',sessionId:'synthetic-session'},control=box(.13,.22,.16,.05),action={action:'click',x:.2,y:.25};
  for(const coarse of [[],[ocr(task.recipient,.03,.09)]]){
   const shot={...snapshot(1,...coarse),visualFrameId:'frame',identity};let reads=0;
-  const approval=await approveInput({action,task,shot,review:review('contact',control),refineText:async region=>{reads++;assert.deepEqual(region,box(0,0,.33,1));return {frameId:'frame',identity,region,complete:true,texts:[ocr(task.recipient,.15,.24)]};}});
+  const approval=await approveInput({action,task,shot,review:review('contact',control),refineText:async(region,focusRegion)=>{reads++;assert.deepEqual(region,box(0,0,.33,1));assert.deepEqual(focusRegion,control);return {frameId:'frame',identity,region,complete:true,texts:[ocr(task.recipient,.15,.24)]};}});
   assert.equal(reads,1);assert.equal(approval.action.x,.19);assert.equal(shot.ocr.filter(r=>r.text===task.recipient&&r.x<.33).length,1);
  }
  const shot={...snapshot(1),visualFrameId:'frame',identity};let reads=0;
@@ -121,7 +121,7 @@ test('the production desktop guard invokes same-frame text refinement only when 
   const h=fixture();h.native.close=()=>{};h.native.cancel=()=>{};h.location={...h.location,software:'WeChat',region:box(0,0,1,1),mainRegion:box(0,0,1,1),texts:[heading,...(known?[ocr(task.recipient,.15,.24)]:[])]};
   let refined=0,clicked=false;const visualRequest=h.visual.request,nativeRequest=h.native.request;
   h.visual.request=async options=>{let input;try{input=JSON.parse(options.messages.find(m=>m.role==='user').content[0].text);}catch{}
-   if(input?.purpose==='visual-text-region'){refined++;return {response:{text:JSON.stringify({complete:true,texts:[ocr(task.recipient,.15/.33,.24,.08/.33)]})}};}return visualRequest(options);};
+   if(input?.purpose==='visual-text-region'){refined++;assert(input.focusInScope);assert.equal(options.maxTokens,1024);assert.equal(options.messages.find(m=>m.role==='user').content.filter(c=>c.type==='image_url').length,2);return {response:{text:JSON.stringify({complete:true,label:task.recipient,texts:[ocr(task.recipient,.15/.33,.24,.08/.33)]})}};}return visualRequest(options);};
   h.native.request=async(op,args)=>{const result=await nativeRequest(op,args);if(op==='displayInput'){assert.equal(args.action,'click');clicked=true;}return result;};
   const service=new DesktopService({native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap,planner:async()=>clicked?{action:'done',completed:true,evidence:'synthetic target opened'}:{action:'click',x:.2,y:.25},modelRequest:async()=>({text:JSON.stringify({kind:'contact',box:box(.13,.22,.16,.05)})})});t.after(()=>service.close());
   service.visualSessions=new Map([['wechat',h.visual]]);service.task={id:'synthetic-open-'+known,target:'wechat',operation:'open',recipient:task.recipient,goal:'open synthetic contact',scene:'life',domain:'life',visibilityFloor:1,steps:[],channelConversation:true,channelAuthorization:{account:require('../src/main/visual-session').visualAccount(h.visual.identity()),scene:'life'},workModel:'hy3',startedAt:Date.now()};service.running=true;service.generation=1;service.controller=new AbortController();

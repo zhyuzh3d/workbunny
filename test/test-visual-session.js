@@ -83,6 +83,20 @@ test('generic text refinement reads only retained region pixels and binds comple
   assert.equal(body[1].image_url.url,'data:image/png;base64,'+h.visual.crop(frame,region).toString('base64'));return {response:{text:JSON.stringify({complete:true,texts:[{text:'Label',x:.1,y:.2,width:.2,height:.1,confidence:.9},{text:'Label',x:.1,y:.6,width:.2,height:.1,confidence:.9}]})}};};
  const result=await h.visual.readTextRegion(frame.visualFrameId,{region});assert.equal(result.frameId,frame.visualFrameId);assert.deepEqual(result.identity,frame.identity);assert.equal(result.texts.length,2);assert.equal(result.complete,true);assert(Math.abs(result.texts[0].x-(result.region.x+.1*result.region.width))<1e-12);assert.equal(reads,1);assert.deepEqual(h.calls.map(c=>c.op),['displayCapture']);
 });
+test('focused text refinement independently reads its label and returns every same-label scope position with a compact recovery budget',async()=>{
+ const h=fixture(),frame=await h.visual.observe(),region={x:0,y:0,width:.33,height:1},focusRegion={x:.13,y:.22,width:.16,height:.05},budgets=[];
+ h.visual.request=async options=>{budgets.push(options.maxTokens);const body=options.messages.find(m=>m.role==='user').content,meta=JSON.parse(body[0].text),images=body.filter(c=>c.type==='image_url');assert(meta.focusInScope);assert.equal(images.length,2);assert.equal(images[0].image_url.url,'data:image/png;base64,'+h.visual.crop(frame,region).toString('base64'));assert.equal(images[1].image_url.url,'data:image/png;base64,'+h.visual.crop(frame,focusRegion).toString('base64'));assert(!JSON.stringify(options.messages).includes('IndependentLabel'));
+  if(budgets.length===1)throw Object.assign(Error('synthetic inline cap'),{code:'E_PAYLOAD_TOO_LARGE'});const f=meta.focusInScope;return {response:{text:JSON.stringify({complete:true,label:'IndependentLabel',texts:[{text:'IndependentLabel',x:f.x+f.width*.1,y:f.y+f.height*.2,width:f.width*.8,height:f.height*.4,confidence:.95},{text:'IndependentLabel',x:f.x,y:.6,width:f.width,height:.03,confidence:.95}]})}};};
+ const result=await h.visual.readTextRegion(frame.visualFrameId,{region,focusRegion});assert.deepEqual(budgets,[1024,512]);assert.equal(result.label,'IndependentLabel');assert.equal(result.texts.length,2);assert.equal(result.frameId,frame.visualFrameId);assert.deepEqual(h.calls.map(c=>c.op),['displayCapture']);
+ let calls=0;await assert.rejects(require('../src/main/wechat-conversation-input').approveInput({action:{action:'click',x:.2,y:.25},task:{operation:'open',recipient:'IndependentLabel'},shot:{...frame,ocr:[],mainRegion:{x:0,y:0,width:1,height:1}},review:async()=>({kind:'contact',box:focusRegion}),refineText:async()=>{calls++;return result;}}),e=>e.code==='E_WECHAT_CONVERSATION_INPUT'&&e.diagnostic.candidateCount===2);assert.equal(calls,1);
+});
+test('focused refinement rejects a misplaced or inconsistent label and never reads outside its scope',async()=>{
+ for(const mismatch of ['outside-focus','different-label']){
+  const h=fixture(),frame=await h.visual.observe();h.visual.request=async()=>({response:{text:JSON.stringify({complete:true,label:'Label',texts:[{text:mismatch==='different-label'?'Other':'Label',x:.7,y:.8,width:.1,height:.03,confidence:.9}]})}});
+  await assert.rejects(h.visual.readTextRegion(frame.visualFrameId,{region:{x:0,y:0,width:.33,height:1},focusRegion:{x:.13,y:.22,width:.16,height:.05}}),e=>e.diagnostic?.schemaAudit?.field==='label'&&e.dispatched===false);assert(h.calls.every(c=>c.op==='displayCapture'));
+ }
+ const h=fixture(),frame=await h.visual.observe(),before=h.requests.length;await assert.rejects(h.visual.readTextRegion(frame.visualFrameId,{region:{x:0,y:0,width:.33,height:1},focusRegion:{x:.5,y:.2,width:.2,height:.1}}),e=>e.dispatched===false);assert.equal(h.requests.length,before);
+});
 test('text refinement cannot return late data after its frame is reset or its caller cancels',async()=>{
  for(const change of ['reset','cancel']){
   const h=fixture(),frame=await h.visual.observe(),controller=new AbortController(),gate=Promise.withResolvers();h.visual.request=()=>gate.promise;
