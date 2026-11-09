@@ -15,7 +15,7 @@ function observationOCR(rows,recipient){
 async function requestObservation(options){
   const model=await require('./workbuddy-free').freeModel({vision:true,signal:options.signal});
   if(model!=='hy3')throw new Error('尚未确认可用的免费视觉模型，保留画面等待核对');
-  return {response:await require('./workbuddy').chat({...options,model,thinking:'low',maxTokens:Math.max(2048,Math.min(8192,Number(options.maxTokens)||2048)),timeoutMs:25000,
+  return {response:await require('./workbuddy').chat({...options,model,thinking:'low',maxTokens:Math.max(1,Math.min(8192,Number(options.maxTokens)||2048)),timeoutMs:25000,
     extraBody:{reasoning_effort:'low',response_format:{type:'json_object'}}}),model};
 }
 const {bubbleDirection}=require('./vision-local');

@@ -30,6 +30,19 @@ test('schema recovery repairs the rejected answer and preserves its audit if the
 test('explicit output budgets survive verification transport without being floored',async()=>{
  for(const vision of [false,true])for(const maxTokens of [1024,2048]){let sent;await requestVerification({messages,vision,maxTokens},{chat:async options=>{sent=options;return {model:options.model,text:'{}'};}});assert.equal(sent.maxTokens,maxTokens);assert.equal(sent.messages,messages);}
 });
+test('Observer request preserves its default and ceiling while forwarding a smaller controlled-recovery budget to chat',async()=>{
+ const free=require('../src/main/workbuddy-free'),wb=require('../src/main/workbuddy'),original={freeModel:free.freeModel,chat:wb.chat},calls=[];
+ free.freeModel=async options=>{assert.equal(options.vision,true);return 'hy3';};
+ wb.chat=async options=>{calls.push(options);return {model:options.model,text:'{"ok":true}'};};
+ try{
+  const observer=new(require('../src/main/wechat-observer').WeChatObserver)({native:{}});
+  for(const maxTokens of [undefined,1024,12000])await observer.request({messages,...(maxTokens===undefined?{}:{maxTokens})});
+  assert.deepEqual(calls.map(c=>c.maxTokens),[2048,1024,8192]);assert(calls.every(c=>c.model==='hy3'&&c.timeoutMs===25000));
+  calls.length=0;wb.chat=async options=>{calls.push(options);if(calls.length===1)throw failure('E_PAYLOAD_TOO_LARGE');return {model:options.model,text:'{"ok":true}'};};
+  const result=await checkedJSON({vision:true,maxTokens:2048,messages},value=>value,{request:observer.request});
+  assert.equal(result.value.ok,true);assert.deepEqual(calls.map(c=>c.maxTokens),[2048,1024]);assert(calls.every(c=>c.model==='hy3'&&c.timeoutMs===25000));
+ }finally{free.freeModel=original.freeModel;wb.chat=original.chat;}
+});
 test('the caller owns two total inference attempts, including the free-model alternative',async()=>{
  const calls=[],original=structuredClone(messages);
  const request=options=>requestVerification(options,{selectFree:async()=> 'hy3',chat:async options=>{calls.push(options);if(calls.length===1)throw failure('E_PAYLOAD_TOO_LARGE');return {model:options.model,text:'{"ok":true}'};}});
