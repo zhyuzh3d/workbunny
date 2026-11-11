@@ -1,7 +1,7 @@
 {
   "schema": "bunny.software-skill/v1",
   "id": "wechat",
-  "version": 9,
+  "version": 11,
   "skills": [
     "conversation.manage",
     "conversation.send",
@@ -15,7 +15,7 @@
   "resources": [
     {
       "path": "guide.md",
-      "sha256": "51dc29e4552240e5b5abc2d0516713fb6d01b8b721f3ded0280e3e21ed49e86c"
+      "sha256": "b4b7965befa49e127568bb5aa8f83018eff7d4cfdc59555e57e5906f2688f648"
     }
   ],
   "toolProtocol": "bunny.screen/v2",
@@ -37,7 +37,7 @@
       "window-metadata",
       "process-metadata",
       "accessibility",
-      "clipboard",
+      "clipboard-target-read",
       "private-protocol",
       "database",
       "script-control"
@@ -45,6 +45,12 @@
     "requiresScopedRecipient": true,
     "urlSchemes": [
       "weixin"
-    ]
+    ],
+    "requiredInputBackend": "virtual-hid",
+    "clipboard": {
+      "writeAuthorizedText": true,
+      "readPriorContent": false,
+      "paste": "boper-shortcut"
+    }
   }
 }

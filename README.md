@@ -17,6 +17,7 @@ WorkBunny 是依托 WorkBuddy 的 macOS 桌面小秘书。打开并登录 WorkBu
 | WorkBuddy 工作协作 | 在任务面板查看委派进度与交付结果，按需暂停、继续或停止任务。 |
 | 微信自动回复 | 在授权范围内值守 Mac 微信，按你指定的联系人和规则判断是否回复，处理后向你汇报。 |
 | 通用桌面控制 | Bunny 可以看屏幕、判断界面变化，并按目标自主组合点击、输入等操作，适用于不同桌面应用。 |
+| BOPER 统一键鼠 | 全部键鼠输入由 BOPER 调度，支持系统输入与 VirtualHID；文字优先通过键盘快捷键粘贴。可在独立「键鼠」设置页安装、授权和验证。 |
 | 长期记忆 | 按工作、生活和私聊场景检索过往对话、偏好与重要事实。你可以查看记忆来源、修订或删除。 |
 | 自主行动与进化 | 在授权范围内尝试方法、核查结果、遇到偏差时调整做法，从任务的成功与失败中积累经验，供下次参考。可开启空闲时的自主工作，也能导入经验及工具资源包。[经验资源包示例](examples/experience-pack/) |
 | 桌面角色与对话 | 3D 桌面浮窗，支持文字与语音交流，按渠道保存历史。可切换内置角色、调整配色与音色、导入兼容的角色与动作，也可接入自己的模型 API 或语音服务。 |
@@ -42,7 +43,7 @@ WorkBunny 自带七位角色。你可以在桌面切换今天想见的那一位�
 
 ## 技术架构
 
-WorkBunny 使用 Electron 和 JavaScript。隔离的 Renderer 通过 Preload 暴露的 IPC 接口与主进程交互。主进程负责模型请求、任务调度和权限校验。截屏、键鼠、语音识别、SQLite 访问和钥匙串由 macOS 上的 Swift 辅助程序提供。
+WorkBunny 使用 Electron 和 JavaScript。隔离的 Renderer 通过 Preload 暴露的 IPC 接口与主进程交互。主进程负责模型请求、任务调度和权限校验。屏幕像素、语音识别、SQLite 访问和钥匙串由 macOS 原生辅助程序提供；键鼠统一经 BOPER 的独立输入进程与认证 HID 组件执行。
 
 ```mermaid
 flowchart TB
@@ -70,7 +71,8 @@ flowchart TB
     Task -->|"持久化状态和回执"| Vault
     Task <--> Tools
     Tools <-->|"委派与跟进"| WorkBuddy["WorkBuddy"]
-    Tools <-->|"操作与观测"| Desktop["Swift 桌面桥<br/>截图与键鼠"]
+    Tools <-->|"屏幕像素与输入意图"| Desktop["Swift 桌面桥"]
+    Desktop --> BOPER["BOPER 统一键鼠<br/>CGEvent / VirtualHID"]
 ```
 
 - **执行与核查**。Task 表示目标及生命周期，Action 是可以独立推进和恢复的执行单元，Operation 是一次具体操作，例如截图或点击。运行时记录操作意图与回执，Bunny 根据可观察到的结果确认 Action 和 Task 是否完成。发送结果不确定时会保留待核查状态。
@@ -81,12 +83,20 @@ flowchart TB
 
 ## 下载与上手
 
-当前提供 **Apple Silicon Mac** 的 **v0.26.31 早期 Beta**。macOS 13 是最低构建目标，持续端侧语音识别需要 macOS 26，系统兼容性仍在验证。安装包使用本机开发签名，苹果公证待完成。复杂任务、界面识别和长期学习仍处于早期试用阶段。[发行说明与校验文件](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.26.31)
+当前提供 **Apple Silicon Mac** 的 **v0.26.44 早期 Beta**。本版主要加入 BOPER 统一键鼠模块，并优化芭尼模型细节。macOS 13 是最低构建目标，持续端侧语音识别需要 macOS 26，系统兼容性仍在验证。安装包使用本机开发签名，苹果公证待完成。复杂任务、界面识别和长期学习仍处于早期试用阶段。[发行说明与校验文件](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.26.44)
 
-1. **安装应用**。下载 [DMG 安装镜像](https://github.com/zhyuzh3d/workbunny/releases/download/v0.26.31/workbunny-0.26.31-macos-arm64.dmg)，打开后将 `workbunny.app` 拖入 Applications（应用程序）。也可使用发行页的应用 ZIP。升级前先退出旧版并备份资料。若 macOS 拦截首次启动，可在核对发行页的 SHA-256 后按系统提示允许打开。
+1. **安装应用**。下载 [DMG 安装镜像](https://github.com/zhyuzh3d/workbunny/releases/download/v0.26.44/workbunny-0.26.44-macos-arm64.dmg)，打开后将 `workbunny.app` 拖入 Applications（应用程序）。也可使用发行页的应用 ZIP。升级前先退出旧版并备份资料。若 macOS 拦截首次启动，可在核对发行页的 SHA-256 后按系统提示允许打开。
 2. **先用文字聊一句**。保持 WorkBuddy 已登录，在 Bunny 设置里确认使用 WorkBuddy 模式。想用其他模型聊天时，也可以配置自己的模型 API。
 3. **随口交办一件小事**。例如「我想问问同事午休都喜欢做什么。五道题就好，请交给 WorkBuddy 做个能在本机打开的网页草稿，做好了告诉我。」
-4. **按需要开启更多能力**。语音输入需要麦克风与语音识别权限。可选择系统音色、本地 Qwen3-TTS（至少 16 GiB 内存）、局域网 CHP 或自有 HTTP 朗读服务。微信值守需要屏幕录制和辅助功能权限，Mac 保持唤醒且微信已登录、界面可操作。[HTTP 语音配置示例](examples/tts-profiles/)
+4. **按需要开启更多能力**。语音输入需要麦克风与语音识别权限。可选择系统音色、本地 Qwen3-TTS（至少 16 GiB 内存）、局域网 CHP 或自有 HTTP 朗读服务。[HTTP 语音配置示例](examples/tts-profiles/)
+
+### 开启 BOPER 键鼠
+
+1. 打开设置 → **键鼠**，点击「启用虚拟键鼠」，按提示输入本机管理员密码并允许官方 Karabiner VirtualHIDDevice 驱动。安装者不需要 Apple 开发者账号或证书。
+2. 返回键鼠页重新检测，再单独允许「屏幕识别」。页面会给出当前系统的授权位置；本页操作即时生效。
+3. 状态就绪后可在生活场景运行可选输入验证。验证会移动鼠标并输入合成文字，约需 15 秒，请先暂停使用键鼠。
+
+VirtualHID 就绪后全部键鼠使用它，故障时停发，不自动降级。微信操作必须先启用 VirtualHID，并允许屏幕识别；Mac 需保持唤醒，微信已登录且界面可操作。此模式不需要微信辅助功能接口。尚未启用 VirtualHID 时，普通应用可使用系统 CGEvent 输入及相应权限。虚拟设备仍属于软件生成的输入，不承诺不可识别；目前应在明确交接、有人监督的条件下使用。[模块设计与验收边界](docs/boper-development-plan.md)
 
 官方安装包免费。WorkBuddy、模型 API 和可选语音服务的额度与费用由各服务提供方决定。[全部发行记录](https://github.com/zhyuzh3d/workbunny/releases)
 
@@ -119,6 +129,7 @@ flowchart TB
 | 工作委派与进度跟进 | [委派入口](src/main/work-delegation-skill.js) · [WorkBuddy 进度观察](src/main/workbuddy-observation.js) |
 | 模型接入和语音 | [模型请求](src/main/llm.js) · [语音识别](src/main/asr.js) · [朗读](src/main/tts.js) |
 | 桌面操作和原生存储 | [桌面桥](src/main/desktop-native.js) · [`native/`](native/) |
+| BOPER 与本机 MCP 控制 | [BOPER](native/boper/README.md) · [本机 MCP 架构](docs/architecture.md#本机-mcp-控制开发接口) · [`tools/bunnyctl.cjs`](tools/bunnyctl.cjs) |
 
 ### 本地开发
 

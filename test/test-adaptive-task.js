@@ -2,7 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {AgentService}=require('../src/main/agent-service'),{AuthorizationService}=require('../src/main/authorization-service');
 function fixture(decide){const records=new Map(),reports=[];let requests=0;const journal={put:async t=>records.set(t.id,structuredClone(t)),list:async()=>[...records.values()],authorized:async()=>true};
- const agent=new AgentService({journal,ready:()=>true,epoch:()=>1,autoSchedule:false,scene:{metrics:{},native:{request:async()=>({})},close:async()=>{}},authorization:new AuthorizationService({settings:()=>({terminal:true,systemConfiguration:true}),permissions:async()=>({screenCaptureAllowed:true,accessibilityTrusted:true,postEventAllowed:true})}),report:async r=>reports.push(r),request:async options=>({response:{text:JSON.stringify(await decide(requests++,options))}})});
+ const agent=new AgentService({journal,ready:()=>true,epoch:()=>1,autoSchedule:false,scene:{metrics:{},native:{request:async()=>({})},close:async()=>{}},authorization:new AuthorizationService({inputStatus:()=>({enabled:true,backend:'virtual-hid',state:'ready'}),settings:()=>({terminal:true,systemConfiguration:true}),permissions:async()=>({screenCaptureAllowed:true,accessibilityTrusted:true,postEventAllowed:true})}),report:async r=>reports.push(r),request:async options=>({response:{text:JSON.stringify(await decide(requests++,options))}})});
  agent.runtime.diagnoseRepair=async()=>({action:'change_method',source:'local'});
  return {agent,records,reports,requests:()=>requests,owner:{role:'owner',verified:true,channel:'dialogue',sources:['owner'],scene:'life'}};
 }

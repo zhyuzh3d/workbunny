@@ -13,6 +13,7 @@
 <script type="module" src="./brand-window.mjs"></script>
 <link rel="stylesheet" href="./task-card.css">
 <link rel="stylesheet" href="./panel-theme.css">
+<link rel="stylesheet" href="./boper-settings.css" />
 <script type="module" src="./panel-theme.mjs"></script>
 </head>
 <body data-p="settings">
@@ -21,11 +22,12 @@
 <div id="settings" class="pane">
   <div class="tabs" id="tabs">
     <button data-t="look">外观</button>
-    <button data-t="persona">设定</button>
+    <button data-t="persona">身份</button>
     <button data-t="scene">场景</button>
     <button data-t="ear">听力</button>
     <button data-t="brain">智力</button>
     <button data-t="mouth">语音</button>
+    <button data-t="keymouse">键鼠</button>
     <button data-t="data">系统</button>
   </div>
 
@@ -160,6 +162,10 @@
     <div class="note" id="brainHint"></div>
     <div class="permBtns"><button id="brainTestBtn" class="mini">测试当前选择</button></div>
     <div id="brainStatus" class="permTip" role="status">选择后可先测试，点保存后用于对话。</div>
+  </div>
+
+  <div class="pb" data-page="keymouse">
+    <section id="boperSettings" aria-label="键盘与鼠标"></section>
   </div>
 
   <div class="pb" data-page="data">

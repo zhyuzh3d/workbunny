@@ -5,6 +5,8 @@ WorkBunny's own source code is MIT-licensed. This does not relicense models, mot
 - Electron 44.10.0: MIT; the bundle includes Electron LICENSE and LICENSES.chromium.html for Chromium/dependencies.
 - three 0.170.0: MIT, https://github.com/mrdoob/three.js/blob/r170/LICENSE
 - @pixiv/three-vrm and three-vrm-animation 3.5.5: MIT, https://github.com/pixiv/three-vrm/blob/v3.5.5/LICENSE
+- BOPER bundles the unchanged Karabiner DriverKit VirtualHIDDevice 8.8.0 installer (Unlicense, original vendor signature) and compiles its C++ client with the pinned upstream dependencies. The full source, modification notices and component licenses are in `native/boper/THIRD_PARTY_NOTICES.md` and `native/boper/vendor/licenses/`; the installed app also includes those notices under `Contents/Resources/boper/`.
+- @modelcontextprotocol/sdk 1.32.2: MIT; used by the optional local development MCP/CLI entry points, not bundled into the application input process.
 - speech.cpp v0.8.11 (`c4bdcd0e751bd29460cb1353e6d54499828a1d90`): MIT, https://github.com/nyosegawa/speech.cpp/tree/v0.8.11 . Runtime source/build identity and bundled dependency notices accompany the binary.
 - Qwen weights are optional user downloads under upstream model terms. Weights and generated speech are not shipped.
 - **可可、阿雅、琪琪、美莉**: AvatarSample D/E/F/G, VRoid Project / pixiv. The embedded VRM metadata permits redistribution under its conditions; official AvatarSample terms additionally apply: https://vroid.pixiv.help/hc/ja/articles/4402394424089-AvatarSample-A-Z . These models are **not CC0 or MIT**. No paid redistribution, character-creation service or author endorsement is provided by this project.

@@ -205,6 +205,7 @@ class MainReview {
       const current = r.tasks.get(task.id), currentOwner = current && (entry.actionId ? current.actionRuns[entry.actionId] : current.state), currentRecord = stateFor(currentOwner || {})?.mainReview;
       if (!currentRecord || currentRecord.reviewId !== record.reviewId || currentRecord.status !== 'running' || controller.signal.aborted || !this.visible(current)) return;
       currentRecord.status = 'requested'; currentRecord.lastError = /^E_[A-Z0-9_]{1,64}$/.test(error.code || '') ? error.code : 'E_MAIN_REVIEW_UNAVAILABLE';
+      try{r.onRecoveryDiagnostic('main-review',current,error);}catch{}
       if(error.code==='E_MODEL_BUSY'){
         currentRecord.attempts=Math.max(0,currentRecord.attempts-1);stateFor(currentOwner).reviewCalls=Math.max(0,(stateFor(currentOwner).reviewCalls||0)-1);
         currentRecord.nextCheckAt=r.clock()+this.retryMs;void r.save(current).catch(()=>{});return;

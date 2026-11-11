@@ -9,7 +9,7 @@ test('raw submit verification stays inside native dispatch and precedes mouse or
   const perform = source.slice(source.indexOf('func perform('), source.indexOf('func runNativeSelfTest('));
   const click = perform.slice(perform.indexOf('if op == "click" || op == "move"'), perform.indexOf('if op == "scroll"'));
   const key = perform.slice(perform.indexOf('if op == "key"'), perform.indexOf('guard let value = request["text"]'));
-  for (const [body, dispatch] of [[click, 'try postMouse(.rightMouseDown'], [key, 'event.post(tap: .cghidEventTap)']]) {
+  for (const [body, dispatch] of [[click, 'try postClick(p, .right)'], [key, 'try boperInput("key"']]) {
     assert(body.indexOf('try validateWorkBuddySubmission(request, submissionExpectation)') >= 0);
     assert(body.indexOf('try validateWorkBuddySubmission(request, submissionExpectation)') < body.indexOf(dispatch));
   }

@@ -6,6 +6,7 @@ const { ActionLifecycle } = require('./action-lifecycle');
 const { ActionProgress } = require('./action-progress');
 const { hasNewInput } = require('./conversation-cursor');
 const diagnostics = require('./operation-diagnostics');
+const inputOutcomes=require('./boper-outcome');
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const beforeDispatch = (message, code) => Object.assign(new Error(message), { dispatched: false, code });
@@ -115,16 +116,17 @@ class OperationLedger {
             if (typeof permission === 'function') permission();
             mayHaveDispatched = true;
             diagnostics.record('operation-dispatch',{status:'requested',attempt});
-            return tool.execute(input, { task, signal: action.signal, action, operationId: id, attempt,resources:this.resources?.forTask(task,{signal:action.signal,isCurrent}) });
+            return inputOutcomes.collect(operation,()=>tool.execute(input, { task, signal: action.signal, action, operationId: id, attempt,resources:this.resources?.forTask(task,{signal:action.signal,isCurrent}) }));
           };
           result = progress ? await progress.stage('tool').measure('tool', execute) : await execute();
           if (tool.effect === 'write' && (result?.ok !== true || result?.verified !== true)) {
-            throw Object.assign(new Error(result?.error || '写入结果尚未核实'), { code: result?.code, dispatched: result?.dispatched,...(result?.diagnostic?{diagnostic:result.diagnostic}:{}) });
+            throw Object.assign(new Error(result?.error || '写入结果尚未核实'), { code: result?.code, dispatched: result?.dispatched,...(result?.inputOutcome?{inputOutcome:result.inputOutcome}:{}),...(result?.diagnostic?{diagnostic:result.diagnostic}:{}) });
           }
           break;
         } catch (error) {
+          const outcome=inputOutcomes.sanitize(error.inputOutcome||error.diagnostic?.inputOutcome);if(outcome&&!operation.inputOutcome)operation.inputOutcome=outcome;
           if (error.dispatched === false) mayHaveDispatched = false;
-          if (attempt >= maxAttempts || mayHaveDispatched || !['preparing', 'protected'].includes(action.phase) ||
+          if (attempt >= maxAttempts || mayHaveDispatched || inputOutcomes.hasEffects(operation.inputOutcome) || !['preparing', 'protected'].includes(action.phase) ||
               action.signal.aborted || !policy.shouldRetry?.(error)) throw error;
           operation.status = 'not_dispatched';
           diagnostics.record('operation-retry',{status:'not-dispatched',attempt,code:error.code});
@@ -141,6 +143,7 @@ class OperationLedger {
         }
       }
       operation.result = tool.effect === 'write' ? clone(result) : { ok: true };
+      if(!operation.inputOutcome&&result?.inputOutcome)operation.inputOutcome=inputOutcomes.sanitize(result.inputOutcome);
       operation.status = 'confirmed';
       operation.lifecycle.phase = 'completed';
       operation.finishedAt = this.clock();
@@ -157,11 +160,12 @@ class OperationLedger {
       // back into an unsent operation.
       if (operation.status !== 'confirmed') {
         if (tool.effect === 'read' || !mayHaveDispatched) error.dispatched = false;
-        if (error.dispatched === false) operation.status = 'not_dispatched';
+        if (error.dispatched === false&&!inputOutcomes.hasEffects(operation.inputOutcome)) operation.status = 'not_dispatched';
         if (action.superseded && action.phase === 'preparing' && error.dispatched === false) error.code = 'E_ACTION_SUPERSEDED';
         operation.lifecycle.phase = operation.status === 'not_dispatched' ? 'cancelled' : 'uncertain';
         if (action.superseded) operation.lifecycle.reason = 'newer-event';
-        operation.error = error.message;const diagnostic=require('./self-repair').diagnostic(error.diagnostic);if(diagnostic)operation.errorDiagnostic=diagnostic;
+        if(operation.inputOutcome)error.inputOutcome={...operation.inputOutcome};
+        operation.error = error.message;const diagnostic=require('./self-repair').diagnostic({...error.diagnostic,...(operation.inputOutcome?{inputOutcome:operation.inputOutcome}:{})});if(diagnostic)operation.errorDiagnostic=diagnostic;
         progress?.observe(tool.name, { tool: tool.name, args: input, error: error.code || error.name },
           { waiting: error.code === 'E_GUI_BUSY' ? 'gui' : error.code === 'E_CAPTURE_BUSY' ? 'capture' : undefined });
         await this.save(task);

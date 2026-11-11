@@ -6,14 +6,15 @@ const fs=require('node:fs'),fsp=require('node:fs/promises'),path=require('node:p
 const crypto=require('node:crypto');
 const {AsyncLocalStorage}=require('node:async_hooks');
 const context=new AsyncLocalStorage();
-const STAGES=new Set(['host-state','operation-intent','operation-dispatch','operation-receipt','operation-error','operation-retry',
+const STAGES=new Set(['host-state','gui-admission','operation-intent','operation-dispatch','operation-receipt','operation-error','operation-retry',
  'native-dispatch','native-receipt','native-error','native-recovery','native-exit',
  'capture-start','capture-end','capture-error','pixel-frame','visual-recognition','visual-text-filter','visual-aux-filter','visual-location','visual-change','visual-observation','visual-error','visual-lifecycle',
  'input-intent','input-preflight','input-dispatch','input-receipt','input-error','input-cancel','incident','evidence-pending','evidence-retained','evidence-unavailable','evidence-read','diagnostic-gap']);
 const IDS=new Set(['taskId','actionId','operationId','controllerId','visualSessionId','frameId','captureId','spanId','nativeClientId','nativeRequestId','incidentId','targetRef']);
-const NUMBERS=new Set(['generation','attempt','timeoutMs','elapsedMs','capturedAt','width','height','sourceWidth','sourceHeight','chars','x','y','deltaX','deltaY','bytes','count','dropped','pendingBytes','capturedAgeMs','discardedChars','observedTextRows','retainedTextRows','discardedTextRows','observedItems','retainedItems','discardedItems']);
-const FLAGS=new Set(['ok','verified','available','unique','active','sameIdentity','geometryChanged','identityChanged','pixelsChanged','reused','nativeAcknowledged','cancelledAfterDispatch','dispatched','mayHaveDispatched','matched','normalized']);
+const NUMBERS=new Set(['generation','attempt','timeoutMs','elapsedMs','capturedAt','width','height','sourceWidth','sourceHeight','chars','x','y','deltaX','deltaY','bytes','count','dropped','pendingBytes','capturedAgeMs','discardedChars','observedTextRows','retainedTextRows','discardedTextRows','observedItems','retainedItems','discardedItems','hidIdleMs']);
+const FLAGS=new Set(['ok','verified','available','unique','active','sameIdentity','geometryChanged','identityChanged','pixelsChanged','reused','nativeAcknowledged','cancelledAfterDispatch','dispatched','mayHaveDispatched','matched','normalized','ready','leaseFree']);
 const CHOICES={mode:['service','terminal','structured-ui','visual'],operation:['click','scroll','key','type'],
+ admissionReason:['not-ready','gui-owned','invalid-hid-idle','recent-hid-input','admitted'],
  backend:['CGDisplayStream'],imageKind:['display','visual-region','preflight-region'],status:['intent','requested','acknowledged','confirmed','not-dispatched','uncertain','cancelled','failed','completed','started','validated','validation-failed','unavailable','reused','reset','closed'],
  kind:['capture-failed','visual-unavailable','input-failed','operation-failed','native-failed','host-change'],
  state:['startup','shutdown','screen-lock','screen-unlock','sleep','wake','suspend','resume','stop'],

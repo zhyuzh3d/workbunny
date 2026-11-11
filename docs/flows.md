@@ -171,6 +171,49 @@ flowchart TD
 
 纯视觉链：普通显示像素 → 截图与 VLM 确认身份/区域/焦点/监测区 → 有界帧与局部像素时效 → displayInput 全局键鼠 → 按需要观察与结果核验。没有窗口列表、PID、应用接口或 AX 回落。视觉小区域变化由通用 sample/commit 稳定性机制处理，未知目标或焦点停止；暂停/取消立即使迟到派发失效，已发生输入仍如实保留回执。
 
+### BOPER 键鼠执行目标流程
+
+以下流程已接入 0.26.43 并在当前 Apple Silicon Mac 重装；安装者本机管理员授权、VirtualHID、MCP 控制及合成接收窗口全链路已验收。其他 macOS、自动物理接管和指定联系人微信任务仍待实测。详细边界及进度见 [BOPER 开发计划](boper-development-plan.md)。
+
+```mermaid
+flowchart TD
+    Intent["原 Task / Action：授权、GuiLease、目标证据和控制状态"] --> Service["单一 BoperService：会话、后端状态与能力要求"]
+    Pixels["纯视觉目标仅来自 CGDisplayStream 像素"] -.-> Service
+    Service --> Gate{"所需后端与能力就绪？"}
+    Gate -->|"否"| Blocked["停发并说明；故障不自动降级"]
+    Gate -->|"是"| Engine["独立普通权限输入进程；控制响应与输入执行隔离"]
+    Engine --> Text{"多字符文字？"}
+    Text -->|"是"| Clip["写入本次授权正文；核对 changeCount"]
+    Clip --> Chord["BOPER 编排 Cmd+V 键序列"]
+    Text -->|"否"| State["统一键鼠状态机和有限报告窗口"]
+    Chord --> State
+    State --> Backend{"当前会话固定后端"}
+    Backend -->|"CGEvent，仅获准范围"| CG["BOPER CGEvent 输出"]
+    Backend -->|"VirtualHID"| Helper["认证 HID helper；本地有序提交与复位"]
+    Install["安装者本机管理员授权；固定 root LaunchDaemon"] -.-> Helper
+    Control["宿主薄原生控制绑定；安装核验与 XPC 委托"] -.-> Helper
+    Service -.-> Control
+    Helper --> Driver["Karabiner daemon → BOPER 自身虚拟设备"]
+    Clip -.-> Receipt["原 Operation 账本：剪贴板改变、输入提交、部分或未知"]
+    CG --> Receipt
+    Helper --> Receipt
+    Receipt --> Judge["Bunny 按场景观察、核验和继续"]
+    Stop["主人停止、撤权、锁屏或会话失效"] --> Cancel["撤销 inputSession；拒绝旧报告并按序释放自身键鼠"]
+    Cancel --> Engine
+    Cancel --> Helper
+    Watchdog["宿主断线或续期超时"] --> Cancel
+```
+
+沿用现有任务调度与 GuiLease，不另建业务队列；清理失败有界退出占用，但 BOPER 保持故障，禁止新的输入。截图与软件检查不进入输入进程，长轨迹不阻塞控制和语音。
+
+设置 → 键鼠：启用组件 → 完成本机管理员安装及官方驱动批准 → 返回重新检测 → 单独允许屏幕识别 → 生活场景可选验证输入。页面按真实状态给出下一步，操作即时生效；查看其他设置页不触发屏幕权限查询。
+
+粘贴动作只由 BOPER 键盘快捷键产生，VirtualHID 模式使用虚拟键盘；系统剪贴板写入是前置数据准备。只有明确无法粘贴或确认未插入才选逐键策略，部分插入或结果不明先核对，不再粘贴或整段重打。默认不读取、备份或自动恢复旧剪贴板。
+
+原按 PID 的后台 CGEvent 输入不能直接换成全局 HID；VirtualHID 提前返回不支持，由宿主取得新的前台授权和焦点，或选择其他已获准通道。它不在后台悄悄换回 CGEvent。
+
+停止和报告提交在最后出口复核会话，复位按序处理；已进入系统的事件不保证可撤回。重连只恢复接纳资格，不重放旧输入。输入能力不扩大联系人、正文或渠道授权。
+
 ## 6. 写入账本与不确定效果
 
 ```mermaid

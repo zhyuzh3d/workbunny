@@ -13,7 +13,7 @@ test('send reports safe first-guard facts before dispatch and its wrapper preser
   assert.match(send, /code: preflight\.conflictingDraft \? "E_WORKBUDDY_DRAFT_CONFLICT" : "E_GUI_BEFORE_DISPATCH", dispatched: false/);
   assert.match(send, /diagnostic: workBuddySendGuardDiagnostic\(preflight, background: background, sendButtonCount: controls\.sendButtons\.count\)/);
   assert(send.indexOf('guard available, preflight.ready') < send.indexOf('AXUIElementPerformAction'));
-  assert(send.indexOf('guard available, preflight.ready') < send.indexOf('mouseDown.post'));
+  assert(send.indexOf('guard available, preflight.ready') < send.indexOf('try postClick(clickPoint)'));
   assert.match(source, /code: error\.code \?\? "E_GUI_BEFORE_DISPATCH", dispatched: error\.dispatched \?\? false, diagnostic: error\.diagnostic/);
 });
 

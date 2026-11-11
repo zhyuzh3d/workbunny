@@ -31,6 +31,24 @@ test('read-only identity checks accept a visible inactive target without grantin
  await assert.rejects(f.h.visual.input(frame.visualFrameId,{action:'click',x:100,y:60}),e=>e.code==='E_VISUAL_TARGET');
  assert(f.h.calls.every(c=>c.op==='displayCapture'));
 });
+test('a fresh scene health judgment can retire the planning frame and conservatively refuse its input',async()=>{
+ const f=setup(),{DesktopService}=require('../src/main/desktop-service'),service=Object.create(DesktopService.prototype);
+ f.scene.clock=()=>100000;
+ const frame=await f.h.visual.observe(),scope={...f.h.visual.identity(),target:'wechat'};
+ const shot={visualFrameId:frame.visualFrameId,identity:frame.identity,rect:frame.desktopRect,ocr:frame.texts,at:Date.now()};
+ Object.assign(service,{task:{id:'synthetic-frame-task',target:'wechat',recipient:'Alice',scene:'life',domain:'life',visibilityFloor:1},generation:1,running:true,
+  controller:new AbortController(),getScene:()=> 'life',visualSessions:new Map([['wechat',f.h.visual]]),screenshot:shot,
+  beforeWeChat:options=>f.scene.assertHealthy(options),pointerBlocked:()=>false,log:()=>{}});
+ // A second location judgment can move the model's main-region box while
+ // the actual pixels remain unchanged, invalidating the action's first frame.
+ f.h.location={...f.h.location,mainRegion:{x:.14,y:.1,width:.76,height:.8}};f.h.visual.anchor.needsRelocate=true;
+ await assert.rejects(service.actVisualInput({action:'scroll',x:.6,y:.5,deltaY:-100},scope,shot,1),e=>e.code==='E_VISUAL_TARGET'&&e.message==='视觉帧已过期，请重新观察'&&e.dispatched===false);
+ assert.equal(f.h.requests.length,2,'the fresh scene judgment is preserved');
+ assert(f.h.calls.every(call=>call.op==='displayCapture'),'the revoked planning frame cannot authorize input');
+ await f.scene.trip('synthetic security boundary','security');
+ await assert.rejects(service.actVisualInput({action:'scroll',x:.6,y:.5,deltaY:-100},scope,shot,1),e=>e.code==='E_APP_CIRCUIT');
+ assert.equal(f.h.calls.filter(call=>call.op==='displayInput').length,0,'a bound frame cannot waive a known security boundary');
+});
 test('a restored legacy window identity is not adopted into the new visual session',async()=>{
  const f=setup(),task={state:{sceneIdentity:{wechat:{pid:76,windowId:8}}}};await assert.rejects(f.scene.assertTaskIdentity(task),e=>e.code==='E_APP_CIRCUIT');assert.equal(f.faults.length,1);assert(!f.h.calls.some(c=>c.op==='displayInput'));
 });

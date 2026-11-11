@@ -47,6 +47,18 @@ test('the shared activation mechanism uses only a confirmed safe pixel region an
   await assert.rejects(f.visual.activate(),e=>e.code==='E_VISUAL_TARGET');assert(f.calls.every(c=>c.op==='displayCapture'));
  }
 });
+test('a missing safe activation region is reconsidered on the next bounded attempt even when pixels stay unchanged',async()=>{
+ let h;h=fixture({onInput:()=>{h.location.active=true;}});h.location.active=false;
+ await assert.rejects(h.visual.activate(),e=>e.code==='E_VISUAL_TARGET'&&e.dispatched===false);
+ assert.equal(h.requests.length,1);assert(h.calls.every(c=>c.op==='displayCapture'));
+ const identity=h.visual.identity();
+ h.location={...h.location,activationRegion:{x:.6,y:.12,width:.1,height:.05},activationEvidence:'visible empty title area'};
+ const result=await h.visual.activate();
+ assert.equal(result.activated,true);assert.equal(result.receipt.inputPerformed,true);
+ assert.deepEqual(h.visual.identity(),identity,'reconsideration preserves the existing visual identity');
+ assert.equal(h.requests.length,3,'fresh location is followed by actual post-input location');
+ assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+});
 test('failed activation observation preserves the security finding and input receipt without another automatic click',async()=>{
  let h;h=fixture({onInput:()=>{h.location={available:false,unavailableKind:'security',evidence:'synthetic visible security notice',reason:'synthetic security notice'};}});const original={...h.location,active:false,activationRegion:{x:.6,y:.12,width:.1,height:.05},activationEvidence:'synthetic safe title area'};h.location=original;
  const result=await h.visual.activate();assert.equal(result.activated,false);assert.equal(result.observationError.diagnostic.visualState.requiresOwner,true);assert.equal(result.observationError.diagnostic.inputReceipt.state,'acknowledged');assert.equal(result.receipt.inputPerformed,true);

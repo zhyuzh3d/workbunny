@@ -8,6 +8,7 @@ function relative(root,name){
   const file=path.join(root,name),stat=fs.lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink())throw Error('安装包资源不是普通文件：'+name);return file;
 }
 function verifyBundle(directory,{sourceRoot=ROOT}={}){
+  if(fs.existsSync(path.join(directory,'Contents/MacOS/workbunny')))require('./boper-bundle.cjs').verifyBundle(directory);
   const root=fs.existsSync(path.join(directory,'Contents/Resources/app'))?path.join(directory,'Contents/Resources/app'):directory;
   const expected=JSON.parse(fs.readFileSync(path.join(sourceRoot,'resources-manifest.json'))),actual=JSON.parse(fs.readFileSync(path.join(root,'resources-manifest.json')));
   const version=JSON.parse(fs.readFileSync(path.join(root,'package.json'))).version,sourceVersion=JSON.parse(fs.readFileSync(path.join(sourceRoot,'package.json'))).version;

@@ -31,6 +31,7 @@ const { conversationText, presentConversation: rawPresentation } = require('./co
 const { Secretary, verifyDelivery } = require('./secretary');
 const { ContactDirectory } = require('./contact-directory');
 const { GuiLease } = require('./gui-lease');
+const {getBoperService,configureBoper}=require('./boper-service');
 const scopePolicy = require('./memory-scope');
 const inputAdmission = require('./conversation-input');
 const { MemoryMaintenance } = require('./memory-maintenance');
@@ -59,7 +60,7 @@ const avatars = require('./avatars');
 const { MemoryService } = require('./memory-service');
 const { DesktopService } = require('./desktop-service');
 const { Interactions, InteractionAudio } = require('./interaction');
-const { SessionGate } = require('./session-gate');
+const { SessionGate, readSessionLocked } = require('./session-gate');
 
 /* ── 数据目录（开发时可被 BUDDY_PET_HOME 指到工作区） ── */
 app.setName(app.isPackaged ? 'workbunny' : 'workbunny-dev');
@@ -73,6 +74,8 @@ if (process.env.BUDDY_PET_HOME) {
   try { app.setPath('userData', process.env.BUDDY_PET_HOME); } catch (e) { console.error(e); }
 }
 const USER_DIR = app.getPath('userData');
+let boperGuiLease=null;
+let localControl=null;
 const SELF_TEST = fs.existsSync(path.join(USER_DIR, 'selftest.json')) || !!process.env.BUDDY_PET_SHOT_DIR;
 fs.mkdirSync(USER_DIR, { recursive: true, mode: 0o700 });
 fs.chmodSync(USER_DIR, 0o700);
@@ -2848,6 +2851,27 @@ ipcMain.handle('pet:software-permission', async(e,kind)=>{
   const permissions=await desktop.native.request('requestPermission',{kind},8000);
   await agent?.refreshPermissions();return permissions;
 });
+async function controlBoper(action){
+  const boper=getBoperService();
+  if(!['status','enable','disable','refresh','settings','test','permissions','authorize_screen'].includes(action))throw Error('BOPER 操作不合法');
+  if(action==='permissions'||action==='authorize_screen'){
+    const flags=await desktop.native.request(action==='permissions'?'permissions':'requestPermission',action==='permissions'?{requestedFields:['screenCaptureAllowed'],inputBackend:'virtual-hid'}:{kind:'screen'},8000);
+    return {...boper.status(),permissions:{screenCaptureAllowed:flags.screenCaptureAllowed===true}};
+  }
+  if(action==='test'){
+    await boper.refreshStatus();
+    let evidence;
+    try{evidence=await require('./boper-diagnostic').runLocalTest({BrowserWindow,boper,lease:boperGuiLease,screen,parent:panels.get('settings'),getScene:currentScene});}
+    catch(error){evidence=error.boperEvidence;throw error;}
+    finally{if(evidence){const dir=path.join(USER_DIR,'diagnostics');await fs.promises.mkdir(dir,{recursive:true,mode:0o700});await fs.promises.writeFile(path.join(dir,'boper-local-test.json'),JSON.stringify(evidence,null,2),{mode:0o600});}}
+    return {...boper.status(),note:'本地测试完成：中文与 Cmd+V 已确认；停止结果 '+evidence.cancelOutcome};
+  }
+  if(action==='status'||action==='refresh')return boper.refreshStatus();
+  if(action==='settings'){await boper.openSettings();return boper.refreshStatus();}
+  return require('./boper-settings-control').changeInputMode({action,boper,controllers:[desktop,watchDesktop,alertDesktop],ensureDriver:async()=>{const installer=require('./boper-installer');const driver=await installer.ensureDriver();await installer.ensureHelper({control:boper.control()});return driver;}});
+}
+ipcMain.handle('pet:boper-status',event=>{trustedCompanion(event,'settings');return controlBoper('status');});
+ipcMain.handle('pet:boper-control',(event,action)=>{trustedCompanion(event,'settings');return controlBoper(action);});
 ipcMain.handle('pet:panel-init', async () => {
   const c = config.load();
   const list = avatarList();
@@ -3306,6 +3330,12 @@ if (!lock) {
     });
     memory.selfRevisionChanged = () => { autonomy?.pause(); contextEpoch++; if (!selfMutationOwner) { activeThought?.abort(); voiceTurns.reset(); stopSpeaking(); } };
     const guiLease = new GuiLease();
+    boperGuiLease=guiLease;
+    const boper=getBoperService();
+    const boperGuide=require('./boper-setup-guide');const guide=boperGuide.setupGuide(process.getSystemVersion());
+    configureBoper({stateFile:path.join(USER_DIR,'boper.json'),setupGuide:boperGuide.publicGuide(guide),openSettings:()=>shell.openExternal(guide.settingsURL),validateInputContext:()=>!quitting&&!storageBusy&&!screenLocked&&memory?.ready===true});
+    boper.on('status',status=>{send('boper',status);for(const panel of panels.values())if(!panel.isDestroyed())panel.webContents.send('pet:ev',{type:'boper',...status});});
+    void boper.refreshStatus().catch(error=>log('[boper] '+error.message));
     ownerSecurity=await new(require('./owner-security').OwnerSecurity)({file:path.join(USER_DIR,'owner-security.json'),encrypt:value=>safeStorage.encryptString(value),decrypt:value=>safeStorage.decryptString(value),onChange:async()=>{contextEpoch++;activeThought?.abort();stopSpeaking();if(dialogueChannels)await dialogueChannels.revokeAll();send('owner-security',{configured:false});}}).init();
     dialogueChannels=memory.dialogueChannels=new(require('./dialogue-channels').DialogueChannels)({memory,security:ownerSecurity,getScene:currentScene,onRevoke:ids=>agent?.revokeChannelOutputs(ids)});
     await dialogueChannels.ensure({application:'bunny'});
@@ -3361,11 +3391,15 @@ if (!lock) {
     watchDesktop = new DesktopService({log,pointerBlocked:point=>petWindowInput?.blocksPoint(point)===true, sensitivePolicy,beforeWeChat:()=>agent?.scene.assertHealthy(),onWeChatUnavailable:reason=>agent?.scene.trip(reason),getWeChatOwnership:()=>config.load().software.wechatAccountOwnership,lease: guiLease, owner: 'agent-conversation', getScene: currentScene, contactDirectory: contacts, imageResize, imageCrop, bitmap:imageBitmap,
       persist: task => createTaskJournal(memory)({ ...task, taskType: 'agent-operation' }) });
     const agentNative = new (require('./desktop-native').DesktopNative)();
+    agentNative.setInputContext(()=>{
+      const ownerId=guiLease.owner,revision=guiLease.revision;
+      return {ownerId,validate:()=>!!ownerId&&guiLease.owner===ownerId&&guiLease.revision===revision&&readyForOwner()};
+    });
     // Local thinking and speech do not own the mouse or keyboard. Only GUI
     // ownership/readiness and five seconds of quiet gate a new GUI action.
     const canOperate = require('./gui-admission').createGuiAdmission({native:agentNative,lease:guiLease,ready:readyForOwner});
     const authorization=new (require('./authorization-service').AuthorizationService)({settings:()=>config.load().software,
-      permissions:()=>agentNative.request('permissions',{},8000),onResolved:async id=>{if(pendingTaskPermission?.taskId===id){pendingTaskPermission=null;send('task-permission',{resolved:true});}},onMissing:async request=>{
+      permissions:requestedFields=>agentNative.request('permissions',{requestedFields},8000),inputStatus:()=>getBoperService().status(),onResolved:async id=>{if(pendingTaskPermission?.taskId===id){pendingTaskPermission=null;send('task-permission',{resolved:true});}},onMissing:async request=>{
         pendingTaskPermission=request;send('task-permission',request);
         const panel=openPanel('settings');const show=()=>{if(!panel.isDestroyed())panel.webContents.send('pet:ev',{type:'task-permission',...request});};
         if(panel.webContents.isLoading())panel.webContents.once('did-finish-load',show);else show();
@@ -3490,12 +3524,13 @@ if (!lock) {
       return vaultOpening;
     };
     sessionGate = new SessionGate({
-      readLocked: async () => (await desktop.status()).permissions.sessionLocked,
+      readLocked: () => readSessionLocked(desktop.native),
       onLocked: () => {
         operationTrace.record('host-state',{state:'screen-lock'});operationDiagnostics.clearPixels();
         publishRecall();
         tts.clearSpeechCache?.();
         screenLocked = true; void speechDiagnostic?.finish('screen-lock'); send('dialogue-reset', {}); speakerFilter.cancel(); publishWebSources(); vaultKeyAbort?.abort(); stopListen(); stopSpeaking(); memory.cancelExtraction(); desktop.suspend({cause:'screen-lock',reason:'电脑锁屏'}).catch(() => {});
+        void getBoperService().stop('screen-lock').catch(error=>log('[boper] '+error.message));
         void agent.invalidate('电脑锁屏，任务已暂停'); watchDesktop.suspend({cause:'screen-lock',reason:'电脑锁屏'}).catch(() => {});
         taskNotifications?.invalidate(); alertDesktop?.suspend({cause:'screen-lock',reason:'电脑锁屏'}).catch(() => {});
         asrStatus = { ...asrStatus, captureReady: false, note: 'locked' }; send('asrStatus', asrStatus);
@@ -3511,11 +3546,11 @@ if (!lock) {
     });
     powerMonitor.on('lock-screen', () => sessionGate.lock());
     powerMonitor.on('unlock-screen', () => sessionGate.refresh().catch(() => {}));
-    powerMonitor.on('suspend',()=>{operationTrace.record('host-state',{state:'sleep'});operationDiagnostics.clearPixels();});
+    powerMonitor.on('suspend',()=>{operationTrace.record('host-state',{state:'sleep'});operationDiagnostics.clearPixels();void getBoperService().stop('sleep').catch(error=>log('[boper] '+error.message));});
     powerMonitor.on('resume',()=>operationTrace.record('host-state',{state:'wake'}));
     await sessionGate.start();
     if (quitting) return;
-    globalShortcut.register('CommandOrControl+Shift+Escape', () => { desktop.stop(); stopSpeaking(); });
+    globalShortcut.register('CommandOrControl+Shift+Escape', () => { void getBoperService().stop('owner-stop').catch(error=>log('[boper] '+error.message));desktop.stop(); stopSpeaking(); });
     createWindow();
     syncQwenRuntime();
 
@@ -3726,12 +3761,19 @@ if (!lock) {
       console.error('[hotkey]', e.message);
     }
 
+    const {LocalControl,ownerMethods}=require('./local-control');
+    const settingsPanel=require('./settings-panel');
+    localControl=new LocalControl({userData:USER_DIR,methods:ownerMethods({getScene:currentScene,
+      setScene:scene=>applySettings({memory:{scene}}),boperControl:controlBoper,
+      settingsTabs:settingsPanel.SETTINGS_TAB_NAMES,openSettings:tab=>settingsPanel.openSettingsPanel({openPanel,tab})})});
+    await localControl.start().catch(error=>{console.error('[local-control]',error.code||'E_LOCAL_START',error.message);});
     app.on('activate', () => showWindow());
   });
 }
 
 let shutdownStarted = false, shutdownFlushed = false;
 app.on('before-quit', event => {
+  void localControl?.close().catch(()=>{});
   operationTrace.record('host-state',{state:'shutdown'});
   const diagnosticShutdown=speechDiagnostic?.finish('process-exit');
   connection.close(); speakerFilter.cancel(); embodiment.close();
@@ -3754,7 +3796,7 @@ app.on('before-quit', event => {
       shutdownStarted = true;
       Promise.allSettled([diagnosticShutdown,...[desktop,watchDesktop,alertDesktop].filter(Boolean).map(controller=>controller.suspend({cause:'process-exit'}))]).then(async results => {
         for(const result of results)if(result.status==='rejected')agent?.recoveryDiagnostic('shutdown-controller-suspend',null,{error:result.reason});
-        await autonomy?.close(); await agent?.close(); await watchDesktop?.close(); await alertDesktop?.close(); await taskNotifications?.close(); await desktop?.close(); const diagnosticFlush=await operationDiagnostics.close(500);if(!diagnosticFlush.drained)send('operation-diagnostic',{kind:'shutdown-gap',...diagnosticFlush});return memory.close();
+        await autonomy?.close(); await agent?.close(); await watchDesktop?.close(); await alertDesktop?.close(); await taskNotifications?.close(); await desktop?.close(); await getBoperService().shutdown(); const diagnosticFlush=await operationDiagnostics.close(500);if(!diagnosticFlush.drained)send('operation-diagnostic',{kind:'shutdown-gap',...diagnosticFlush});return memory.close();
       }).catch(() => log('[memory] 退出时写入未完成，保留已提交数据')).finally(() => { shutdownFlushed = true; app.quit(); });
     }
   } else desktop?.close();

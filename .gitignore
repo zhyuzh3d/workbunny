@@ -2,6 +2,7 @@
 node_modules/
 dist/
 bin/
+build/
 
 # 运行时数据（配置里有 API Key，绝不能进仓库）
 .data/

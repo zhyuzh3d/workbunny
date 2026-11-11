@@ -8,8 +8,10 @@ const built=JSON.parse(fs.readFileSync(path.join(bundle,'resources-manifest.json
 const stage=path.join(root,'dist',`workbunny-${version}-source`),archive=stage+'.zip';
 fs.rmSync(stage,{recursive:true,force:true});fs.mkdirSync(stage,{recursive:true});const files=new Set(built.files.map(f=>f.path));
 // Use the reviewed Git inventory; ignored/local experiments are never swept in.
-const maintained=cp.execFileSync('git',['ls-files','-z','--','tools','test','native','docs','licenses','.github','examples'],{cwd:root,encoding:'utf8'}).split('\0').filter(Boolean);
-for(const p of maintained)if(/\.(js|cjs|mjs|py|sh|command|swift|c|cpp|h|modulemap|json|md|txt|html|css)$/.test(p)||/^native\/vendor\/.*\/(AUTHORS|LICENSE|PATENTS)$/.test(p))files.add(p);
+const maintained=cp.execFileSync('git',['ls-files','-z','--','tools','test','native','resources','docs','licenses','.github','examples'],{cwd:root,encoding:'utf8'}).split('\0').filter(Boolean);
+// BOPER requires Objective-C++, C++ headers, extensionless vendor headers,
+// build pins, launchd plists and the unchanged signed driver installer.
+for(const p of maintained)if(p.startsWith('native/boper/')||p.startsWith('resources/boper/')||/\.(js|cjs|mjs|py|sh|command|swift|c|cpp|h|modulemap|json|md|txt|html|css)$/.test(p)||/^native\/vendor\/.*\/(AUTHORS|LICENSE|PATENTS)$/.test(p))files.add(p);
 for(const p of ['README.md','docs/images/readme-hero.webp','res/README.md','package-lock.json','resources-manifest.json','.gitignore'])files.add(p);
 const inventory=[];
 for(const p of [...files].sort()){

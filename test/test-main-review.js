@@ -62,6 +62,18 @@ test('review timeout is bounded, late output ignored and disabled rollback keeps
  const {id}=await h.start();await h.runtime.tick(id);await h.runtime.tick();await new Promise(resolve=>setTimeout(resolve,30));let task=h.runtime.tasks.get(id),run=Object.values(task.actionRuns)[0];assert.equal(h.runtime.mainReviews.active,null);assert.equal(run.recoveryState.mainReview.status,'requested');assert.equal(run.recoveryState.mainReview.lastError,'E_MAIN_REVIEW_TIMEOUT');
  enabled=false;gate.resolve(plan());await flush();await h.runtime.tick(id);assert.equal(task.status,'paused');assert(run.recoveryState.selfSuspension);assert.equal(h.effects.length,0);
 });
+test('unavailable review retains its concrete failure code and reaches the existing safe diagnostic hook',async t=>{
+ const diagnostics=[],h=harness(async()=>({status:'paused',selfSuspension:suspension}),{
+  reviewTask:async()=>{throw Object.assign(Error('synthetic review context failure'),{code:'E_SELF_CONTEXT_BUDGET'});},
+  onRecoveryDiagnostic:(stage,task,error)=>diagnostics.push({stage,id:task.id,code:error.code})
+ });t.after(()=>h.runtime.close());
+ const {id}=await h.start();await h.runtime.tick(id);
+ for(const at of [1000,21000,61000]){h.time(at);await h.runtime.tick();await flush();}
+ const task=h.runtime.tasks.get(id),record=Object.values(task.actionRuns)[0].recoveryState.mainReview;
+ assert.equal(record.unavailable,true);assert.equal(record.lastError,'E_SELF_CONTEXT_BUDGET');assert.equal(record.attempts,3);
+ assert.deepEqual(diagnostics,Array.from({length:3},()=>({stage:'main-review',id,code:'E_SELF_CONTEXT_BUDGET'})));
+ assert.equal(task.status,'paused');assert.equal(h.effects.length,0);
+});
 test('review decision cannot apply after authorization loss, a goal update, or an in-flight persistence stop',async t=>{
  const gate=deferred();const h=harness(async()=>({status:'paused',selfSuspension:suspension}),{reviewTask:()=>gate.promise});t.after(()=>h.runtime.close());
  const {id}=await h.start();await h.runtime.tick(id);await h.runtime.tick();await flush();h.revoke();gate.resolve(plan());await flush();assert.equal(h.runtime.tasks.get(id).status,'paused');assert.equal(h.effects.length,0);

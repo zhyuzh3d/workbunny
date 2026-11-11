@@ -7,6 +7,7 @@ const OPTIONS={context:['compact_context','retry','defer'],schema:['repair_schem
 function diagnostic(value){
  if(!value||typeof value!=='object'||Array.isArray(value))return undefined;
  const result={};for(const key of ['operation','method','model'])if(typeof value[key]==='string'&&/^[a-zA-Z0-9_.:-]{1,80}$/u.test(value[key]))result[key]=value[key];
+ const inputOutcome=require('./boper-outcome').sanitize(value.inputOutcome);if(inputOutcome)result.inputOutcome=inputOutcome;
  if(value.visualState&&['login','security','occluded','ambiguous','absent','unclear','inactive','identity'].includes(value.visualState.kind)&&typeof value.visualState.requiresOwner==='boolean')result.visualState={kind:value.visualState.kind,requiresOwner:value.visualState.requiresOwner};
  if(value.inputReceipt&&typeof value.inputReceipt==='object'&&!Array.isArray(value.inputReceipt)){
   const source=value.inputReceipt,receipt={};
@@ -59,6 +60,7 @@ function diagnostic(value){
  return Object.keys(result).length?result:undefined;
 }
 function category(error){
+ if(require('./boper-outcome').hasEffects(error?.inputOutcome||error?.diagnostic?.inputOutcome))return null;
  const code=String(error?.code||'');if(BLOCKED.has(code))return null;
  if(code==='E_VISUAL_TARGET')return 'stall';
  if(['E_CONTEXT_WINDOW','E_CONTEXT_BUDGET'].includes(code))return 'context';

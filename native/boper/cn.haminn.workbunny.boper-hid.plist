@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>cn.haminn.workbunny.boper-hid</string>
+  <key>BundleProgram</key><string>Contents/Library/LaunchServices/boper-hid-helper</string>
+  <key>MachServices</key><dict>
+    <key>cn.haminn.workbunny.boper-hid.control</key><true/>
+    <key>cn.haminn.workbunny.boper-hid.input</key><true/>
+  </dict>
+  <key>ProcessType</key><string>Interactive</string>
+  <!-- On-demand Mach service. The helper exits after its last authenticated
+       host leaves and its own bounded release completes; no KeepAlive loop. -->
+  <key>AssociatedBundleIdentifiers</key><array><string>cn.haminn.workbunny</string></array>
+</dict></plist>

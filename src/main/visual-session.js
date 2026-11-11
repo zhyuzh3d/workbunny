@@ -107,7 +107,13 @@ class VisualSession{
   // cannot loop, and owner-required findings are never cleared by this choice.
   if(prior&&retry===true&&typeof retryKey==='string'&&retryKey&&retryKey!==prior.retryKey&&frame.capturedAt>=prior.after&&!prior.error?.diagnostic?.visualState?.requiresOwner&&validBox(r)&&this.anchor.activationEvidence)this.activationAttempt=null;
   if(this.activationAttempt)return {activated:false,receipt:{...this.activationAttempt.receipt},observationError:this.activationAttempt.error||{code:'E_VISUAL_TARGET',message:'原激活输入结果仍待核对，未再次点击',diagnostic:inputDiagnostic(blocked('',{kind:'inactive'}),this.activationAttempt.receipt)}};
-  if(!validBox(r)||!this.anchor.activationEvidence)throw blocked('画面没有唯一安全激活区域',{kind:'inactive'});
+  if(!validBox(r)||!this.anchor.activationEvidence){
+   // This failed interpretation must not become a permanent obstacle merely
+   // because the pixels stay still. The scheduler owns bounded retries; its
+   // next attempt must obtain fresh visual judgment before any input.
+   this.anchor.needsRelocate=true;
+   throw blocked('画面没有唯一安全激活区域',{kind:'inactive'});
+  }
   const attempt={receipt:{state:'unconfirmed',method:'display-pixels'},retryKey};this.activationAttempt=attempt;
   let input;try{input=await this.input(frame.visualFrameId,{action:'click',x:d.x+(r.x+r.width/2)*d.width,y:d.y+(r.y+r.height/2)*d.height},{signal});}
   catch(error){attempt.after=this.clock();if(error.dispatched===false){this.activationAttempt=null;attempt.receipt={...attempt.receipt,state:'not-dispatched',inputPerformed:false};}error.diagnostic=inputDiagnostic(error,attempt.receipt);throw error;}
@@ -247,7 +253,7 @@ class VisualSession{
   // before native dispatch. Failure proves no input was sent.
   try{const approved=beforeDispatch?.();if(approved&&typeof approved.then==='function'){Promise.resolve(approved).catch(()=>{});throw Error('派发前授权复核必须同步完成');}this.current(signal);}catch(error){error.dispatched=false;throw error;}
   state.requested=true;trace.record('input-dispatch',{status:'requested',timeoutMs:1500});
-  const result={...await this.native.request('displayInput',payload,1500)};
+  const result={...await this.native.request('displayInput',payload,1500,{application:this.application,visual:true,displayBounds:[proof.displayRect],signal})};
   if(result.performed===true&&this.anchor)this.anchor.needsRelocate=true;
   // Cancellation after dispatch cannot erase a real input receipt. The caller
   // stops its next operation, while this operation retains its actual outcome.

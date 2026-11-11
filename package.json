@@ -1,7 +1,7 @@
 {
   "name": "workbunny",
   "productName": "WorkBunny",
-  "version": "0.26.31",
+  "version": "0.26.44",
   "description": "WorkBunny · 有长期记忆的桌面情感伙伴与工作小秘书",
   "main": "src/main/entry.js",
   "private": true,
@@ -11,6 +11,7 @@
     "test": "node tools/test.cjs"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "electron": "44.10.0"
   },
   "dependencies": {

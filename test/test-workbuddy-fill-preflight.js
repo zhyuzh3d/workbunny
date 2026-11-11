@@ -10,7 +10,7 @@ test('fill checks the live draft after both focus paths and before text dispatch
   const foregroundFocus = fill.indexOf('try focusWorkBuddyEditor(');
   const backgroundFocus = fill.indexOf('guard workBuddyEditorFocused(controls) else');
   const focusedCheck = fill.indexOf('sendEnabled: focusedSendEnabled)');
-  const firstInput = fill.indexOf('try postUnicodeText(');
+  const firstInput = fill.indexOf('try boperInput("typeText", inputParams)');
   const idempotent = fill.indexOf('return ["filled": true, "idempotent": true');
   assert(foregroundFocus >= 0 && backgroundFocus >= 0);
   assert(focusedCheck > foregroundFocus && focusedCheck > backgroundFocus);

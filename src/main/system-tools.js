@@ -7,6 +7,7 @@ function terminalArgs(v){
  if(v.application!=='system'||!['read','reversible','configuration'].includes(v.impact)||!Array.isArray(v.args)||v.args.length>100||v.args.some(a=>typeof a!=='string'||a.length>16000||a.includes('\0')))throw Error('终端操作参数不合法');
  const command=text(v.command,'程序',1000),args=v.args;
  require('./interaction-policy').assertTerminalTargets(command,args);
+ require('./boper-terminal-policy').assertSource(command,args);
  const code=[command,...args].join(' ');
  if(/(?:^|[\s/])sudo(?:\s|$)|\b(?:mkfs|diskutil\s+erase|rm\s+-[^\s]*r[^\s]*f)\b|(?:killall|pkill)\s+.*(?:WeChat|微信)|(?:\/Applications\/WeChat\.app|Library\/Containers\/com\.tencent\.xinWeChat)|osascript[\s\S]*(?:WeChat|微信)/iu.test(code))throw Error('该命令超出非破坏性终端或微信视觉操作范围');
  const seconds=v.timeoutSeconds??30;if(!Number.isInteger(seconds)||seconds<1||seconds>300)throw Error('命令时限应为1到300秒');
@@ -14,6 +15,8 @@ function terminalArgs(v){
 }
 async function executeTerminal(args,{task,signal,directory,resources,operationId}){
  require('./interaction-policy').assertTerminalTargets(args.command,args.args);
+ const requestedCwd=args.cwd||path.join(directory,task.id);
+ await require('./boper-terminal-policy').inspectFiles(args.command,args.args,requestedCwd);
  const assertLive=()=>{if(signal?.aborted)throw Object.assign(Error('任务已停止，未执行命令'),{dispatched:false});};assertLive();
  const cwd=args.cwd||path.join(directory,task.id);if(!args.cwd)await fs.mkdir(cwd,{recursive:true,mode:0o700});
  const actual=await fs.realpath(cwd),env=Object.fromEntries(['PATH','HOME','LANG','LC_ALL','TMPDIR'].filter(k=>process.env[k]).map(k=>[k,process.env[k]]));

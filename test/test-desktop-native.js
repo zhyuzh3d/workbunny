@@ -21,7 +21,7 @@ test('display ownership excludes another process and is released automatically a
 function fixture(options = {}) {
   const children = [];
   const client = new DesktopNative('/fixture/desktop', { ...options, spawn: (bin, args, opts) => {
-    assert.equal(bin, '/fixture/desktop'); assert.deepEqual(args, []); assert.deepEqual(opts.stdio, ['pipe', 'pipe', 'pipe']);
+    assert.equal(bin, '/fixture/desktop'); assert.deepEqual(args, []); assert.deepEqual(opts.stdio, ['pipe', 'pipe', 'pipe', 'pipe', 'pipe']);
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
     child.stdin = new Writable({ write(chunk, _encoding, callback) { child.lines.push(String(chunk)); callback(); } });
     child.lines = []; child.kill = () => {}; children.push(child); return child;
@@ -124,6 +124,28 @@ test('client resolves a stable packaged or development executable path', () => {
   assert.equal(defaultBinary().endsWith('/bin/desktop'), true);
 });
 
+test('private desktop intents use trusted host context and retain BOPER effects before native completion',async()=>{
+ const calls=[],messages=[],replies=[];let child;
+ const boper={assertAvailable:()=>({backend:'virtual-hid'}),execute:async(operation,context,scope)=>{calls.push({operation,context,scope});context.validate();return {dispatched:true,reportsSubmitted:4,clipboardChanged:true,clipboardChangeCount:9,completion:'local-submitted'};},endScope:async(owner,scope)=>{calls.push({cleanup:true,owner,scope});return {releaseConfirmed:true};},cancelOwner:async()=>({releaseConfirmed:true})};
+ const client=new DesktopNative('/fixture/desktop',{boper,inputContext:()=>({ownerId:'trusted-owner',application:'wechat',validate:()=>true}),spawn:()=>{
+  child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.stdin=new Writable({write(chunk,_enc,done){messages.push(JSON.parse(chunk));done();}});child.stdio=[child.stdin,child.stdout,child.stderr,new PassThrough(),new Writable({write(chunk,_enc,done){replies.push(JSON.parse(chunk));done();}})];child.kill=()=>queueMicrotask(()=>child.emit('close',0));return child;
+ }});
+ const proof={frameId:'fixture-frame',capturedAt:Date.now(),displayRect:{x:0,y:0,width:100,height:100},region:{x:0,y:0,width:100,height:100}};
+ const pending=client.request('displayInput',{action:'type',text:'fixture',visualEvidence:proof},1000,{application:'wechat',visual:true});const request=messages[0];
+ assert(!('application' in request));assert(!('ownerId' in request));
+ child.stdio[3].write(JSON.stringify({id:1,requestId:request.id,operation:{action:'typeText',params:{text:'fixture'}}})+'\n');await new Promise(r=>setImmediate(r));
+ assert.equal(calls[0].context.application,'wechat');assert.equal(calls[0].context.ownerId,'trusted-owner');assert.deepEqual(calls[0].operation.params.visualEvidence,proof);assert.equal(replies[0].ok,true);
+ child.stdout.write(JSON.stringify({id:request.id,ok:true,result:{performed:true}})+'\n');const result=await pending;assert.equal(result.inputOutcome.clipboardChanged,true);assert.equal(result.inputOutcome.reportsSubmitted,4);assert.equal(result.inputOutcome.releaseConfirmed,true);assert.equal(calls[1].cleanup,true);await client.close();
+});
+
+test('a later native failure cannot erase earlier BOPER input or clipboard effects',async()=>{
+ const boper={assertAvailable:()=>({backend:'cg-event'}),execute:async()=>({dispatched:true,reportsSubmitted:2,clipboardChanged:true,completion:'local-submitted'}),endScope:async()=>({releaseConfirmed:true}),cancelOwner:async()=>({releaseConfirmed:true})};
+ let child;const client=new DesktopNative('/fixture/desktop',{boper,inputContext:()=>({ownerId:'owner',validate:()=>true}),spawn:()=>{
+  child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.lines=[];child.stdin=new Writable({write(c,_e,done){child.lines.push(JSON.parse(c));done();}});child.stdio=[child.stdin,child.stdout,child.stderr,new PassThrough(),new Writable({write(_c,_e,done){done();}})];child.kill=()=>queueMicrotask(()=>child.emit('close',0));return child;
+ }});
+ const pending=client.request('workbuddyFill',{text:'fixture'},1000);const request=child.lines[0];child.stdio[3].write(JSON.stringify({id:1,requestId:request.id,operation:{action:'typeText',params:{text:'fixture'}},displayBounds:[{x:0,y:0,width:100,height:100}]})+'\n');await new Promise(r=>setImmediate(r));child.stdout.write(JSON.stringify({id:request.id,ok:false,error:'draft changed after input',dispatched:false})+'\n');await assert.rejects(pending,error=>error.dispatched===true&&error.inputOutcome.clipboardChanged===true);await client.close();
+});
+
 test('native key map explicitly covers ANSI letters, digits, editing keys, and F1-F12', () => {
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   const keyMap = source.slice(source.indexOf('func keyCode('), source.indexOf('func modifiers('));
@@ -133,11 +155,11 @@ test('native key map explicitly covers ANSI letters, digits, editing keys, and F
   assert.match(modifierMap, /case "command", "cmd": flags\.insert\(\.maskCommand\)/);
 });
 
-test('Unicode chunks iterate scalar values and revalidate focus before each type chunk', () => {
+test('text validation preserves scalar values and delegates whole text after a fresh target check', () => {
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   assert.match(source, /for scalar in value\.unicodeScalars/);
   assert.match(source, /current\.count \+ units\.count > limit/);
-  assert.match(source, /for item in plan \{\s*let \(currentId, _\) = try validateActionContext\(request\)/);
+  assert.match(source, /let \(currentId, _\) = try validateActionContext\(request\)[\s\S]{0,240}boperInput\("typeText"/);
 });
 
 test('environment screenshots exclusively use CG display pixels and retain private screenshot files', () => {
@@ -154,7 +176,7 @@ test('environment screenshots exclusively use CG display pixels and retain priva
 test('locked-session guard covers capture, activate, and all input actions; permissions reports lock state', () => {
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   assert.match(source, /session\["CGSSessionScreenIsLocked"\]/);
-  assert.match(source, /"sessionLocked": sessionLocked\(\)/);
+  assert.match(source, /result\["sessionLocked"\] = checks\.contains\("sessionLocked"\) \? try checkedSessionLockState/);
   assert.match(source.slice(source.indexOf('func capture(_ request:'), source.indexOf('struct VisualROI:')), /guard !sessionLocked\(\)/);
   assert.match(source, /DispatchQueue\.global\(qos: \.userInitiated\)\.async/);
   assert.match(source, /RunLoop\.main\.run\(mode: \.default, before: Date\(timeIntervalSinceNow: 0\.1\)\)/);
@@ -165,7 +187,7 @@ test('type plans reject implicit newlines and controls, emit explicit soft break
   assert.match(source, /func makeInputPlan\(_ value: String, lineBreak: Any\? = nil\)/);
   assert.match(source, /value\.replacingOccurrences\(of: "\\r\\n", with: "\\n"\)/);
   assert.match(source, /scalar\.value <= 0x1f && scalar\.value != 0x0a/);
-  assert.match(source, /event\.flags = \.maskShift[\s\S]{0,180}event\.post\(tap: \.cghidEventTap\)/);
+  assert.match(source, /func postShiftReturn[\s\S]{0,240}"modifiers": \["shift"\][\s\S]{0,180}boperInput\("key"/);
   assert.match(source, /guard !sessionLocked\(\) else \{ throw DesktopError\(message: "电脑已锁屏，请解锁后重试"\) \}/);
   const run = spawnSync(nativeTestBinary(), ['--self-test-native'], { encoding: 'utf8', timeout: 5000 });
   assert.equal(run.status, 0, run.stderr || run.stdout);
@@ -263,7 +285,8 @@ test('WorkBuddy semantic path retains exact identity and draft guards with bound
   assert.match(source, /makeInputPlan\(text, lineBreak: "shiftEnter"\)/);
   assert.match(source, /func postUnicodeText\(_ units: \[UInt16\], targetPID: pid_t\? = nil\)/);
   assert.match(source, /func postShiftReturn\(targetPID: pid_t\? = nil\)/);
-  assert.match(source, /if let targetPID \{ event.postToPid\(targetPID\) \} else \{ event.post\(tap: \.cghidEventTap\) \}/);
+  assert.doesNotMatch(source, /\.post\(|postToPid\(|CGEvent\(/);
+  assert.match(source, /boperInput\("typeText", inputParams\)/);
   assert.match(source, /AXUIElementSetAttributeValue\(editor, kAXFocusedAttribute/);
   assert.match(source, /kAXFocusedUIElementAttribute/);
   assert.match(source, /waitDeadline = DispatchTime\.now\(\)\.uptimeNanoseconds \+ 800_000_000/);
@@ -275,10 +298,10 @@ test('WorkBuddy semantic path retains exact identity and draft guards with bound
   assert.match(send, /approvedWorkBuddySendPoint\(request, buttonRect: currentButtonRect, windowRect: context\.rect\)/);
   assert.match(send, /kAXFocusedWindowAttribute/);
   assert.match(send, /rectsMatch\(focusedRect, context\.rect\)/);
-  assert.match(send, /CGPreflightPostEventAccess\(\)/);
+  assert.doesNotMatch(send, /CGPreflightPostEventAccess\(\)/);
   assert.match(send, /workBuddyTextMatches\(axAttribute\(editor/);
-  assert.match(send, /mouseDown\.post\(tap: \.cghidEventTap\)\s*mouseUp\.post\(tap: \.cghidEventTap\)/);
-  assert.equal((send.match(/mouseDown\.post/g) || []).length, 1);
+  assert.match(send, /try postClick\(clickPoint\)/);
+  assert.equal((send.match(/try postClick/g) || []).length, 1);
   assert.match(source, /case "workbuddyInspect"/);
   assert.match(source, /case "workbuddyFill"/);
   assert.match(source, /case "workbuddySend"/);

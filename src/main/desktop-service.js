@@ -25,7 +25,8 @@ function operationApproval(read,fail){
   return ()=>{if(JSON.stringify(read())!==approved)throw fail();};
 }
 function controllerTerminal(task){return !!task?.stopRequest||task?.controllerLifecycle?.terminal===true||['user-stop','business-stop'].includes(task?.controllerLifecycle?.intent)||['cancelled','skipped'].includes(task?.status)||task?.monitorStatus==='stopped';}
-const HOST_SUSPEND_CAUSES=new Set(['process-exit','task-pause','action-cancel','action-timeout','source-change','scene-change','screen-lock','storage-migration','connection-change']);
+const INPUT_BACKEND_CHANGE_CAUSE='input-backend-change';
+const HOST_SUSPEND_CAUSES=new Set(['process-exit','task-pause','action-cancel','action-timeout','source-change','scene-change','screen-lock','storage-migration','connection-change',INPUT_BACKEND_CHANGE_CAUSE]);
 const ACTIVE_DESKTOP_STATES=new Set(['running','starting','monitoring','verifying','awaiting','review']);
 function suspensionIdentity(task,cause){
   if(!task)return cause+':empty';
@@ -465,6 +466,12 @@ class DesktopService {
     this.task = null; this.running = false; this.starting = false; this.startRequestToken = 0; this.generation = 0; this.screenshot = null; this.displayRegionAnchor = null;
     this.freeChoice = false; this.freeChoicePending = false;
     this.controller = null; this.permission = {}; this.revision = 0; this.monitorPromise = null; this.monitorPromiseGeneration = null; this.followUpInProgress = false;
+    this.native.setInputContext?.((op,payload)=>{
+      const generation=this.generation,task=this.task,revision=this.lease.revision,background=payload.background===true;
+      return {ownerId:this.guiOwner,application:task?.target,background,signal:this.operationSignal,
+        validate:()=>{if(generation!==this.generation||task!==this.task||(!this.running&&!this.followUpInProgress)||this.operationSignal?.aborted)throw Object.assign(Error('任务输入控制已失效'),{code:'E_BOPER_CONTEXT',dispatched:false});
+          if(!background&&(!this.guiLeaseHeld||this.lease.owner!==this.guiOwner||this.lease.revision!==revision))throw Object.assign(Error('GUI 使用权已失效，未派发输入'),{code:'E_BOPER_CONTEXT',dispatched:false});return true;}};
+    });
   }
   get operationSignal(){return this.followUpInProgress?this.followUpController?.signal:this.controller?.signal;}
   get visualSession(){return this.visualFor(this.task?.target||'current');}
@@ -481,6 +488,7 @@ class DesktopService {
   }
   async status() { this.permission = await this.native.request('permissions', {}, 8000); return this.publicStatus(); }
   async requestPermission() { this.permission = await this.native.request('requestPermission', {}, 8000); return this.publicStatus(); }
+  assertInputAvailable(permissions,target=this.task?.target){const boper=this.native.boper;if(boper){const status=boper.assertAvailable({application:target});if(status.backend==='virtual-hid')return true;}if(!permissions.postEventAllowed)throw Error('请先允许模拟键鼠权限');return true;}
   update(patch) { if (this.task) Object.assign(this.task, patch); this.emit(this.publicStatus()); }
   async journal() {
     if (!this.task) return;
@@ -918,7 +926,7 @@ class DesktopService {
     try {
       const permissions = await this.native.request('permissions', {}, 8000); this.assertLive(gen); this.permission = permissions;
       if (permissions.sessionLocked) throw new Error('电脑已锁屏，请解锁后重试');
-      if (!permissions.screenCaptureAllowed || !permissions.postEventAllowed) throw new Error('请先允许屏幕录制和模拟键鼠权限');
+      if (!permissions.screenCaptureAllowed) throw new Error('请先允许屏幕录制权限'); this.assertInputAvailable(permissions);
       if (!this.planner && !this.modelRequest) { const checked=await preflightWorkModel(workModel, this.controller.signal,{includeCapacity:true}); this.assertLive(gen);
         this.recordPlanningCapacity(checked,this.task.id,gen); }
       if(requestSignal?.aborted)throw new Error('交办已取消，未开始桌面操作');
@@ -984,7 +992,7 @@ class DesktopService {
         await this.journal(); this.assertLive(gen);
         const permissions = await this.native.request('permissions', {}, 8000); this.assertLive(gen); this.permission = permissions;
         if (permissions.sessionLocked) throw new Error('电脑已锁屏，请解锁后重试');
-        if (!permissions.screenCaptureAllowed || !permissions.postEventAllowed) throw new Error('请先允许屏幕录制和模拟键鼠权限');
+        if (!permissions.screenCaptureAllowed) throw new Error('请先允许屏幕录制权限'); this.assertInputAvailable(permissions);
         this.starting = false;
         const taskScope = Object.freeze({ id: task.id, goal: task.goal, taskText: task.goal, target: 'wechat', scene: task.scene, domain: task.domain, visibilityFloor: task.visibilityFloor, operation: task.operation,channelConversation:task.channelConversation,readRequest:task.readRequest,
           message: task.message, attachment:task.attachment, recipient: task.recipient, recipientAliases: task.recipientAliases || [task.recipient], contactConfirmed: task.contactConfirmed === true,
@@ -1053,7 +1061,7 @@ class DesktopService {
       await this.journal(); this.assertLive(gen);
       const permissions = await this.native.request('permissions', {}, 8000); this.assertLive(gen); this.permission = permissions;
       if (permissions.sessionLocked) throw new Error('电脑已锁屏，请解锁后重试');
-      if (!permissions.screenCaptureAllowed || !permissions.postEventAllowed) throw new Error('请先允许屏幕录制和模拟键鼠权限');
+      if (!permissions.screenCaptureAllowed) throw new Error('请先允许屏幕录制权限'); this.assertInputAvailable(permissions);
       if (!this.planner) { const checked=await preflightWorkModel(task.workModel, this.controller.signal,{includeCapacity:true}); this.assertLive(gen);
         this.recordPlanningCapacity(checked,task.id,gen); }
       this.starting = false;
@@ -1238,7 +1246,7 @@ class DesktopService {
   }
   async tryBackgroundWorkBuddy(gen,taskScope){
     require('./interaction-policy').assertChannel('workbuddy','structured-ui');
-    if(this.permission.accessibilityTrusted===false||this.task.workContext?.buddyApp)return false;
+    if(this.native.boper?.status().enabled||this.permission.accessibilityTrusted===false||this.task.workContext?.buddyApp)return false;
     let capability;
     try{capability=await this.native.request('workbuddyCapabilities',{},3000);}catch{this.assertLive(gen);return false;}
     this.assertLive(gen);if(!capability?.backgroundAX)return false;
@@ -2205,8 +2213,8 @@ class DesktopService {
     } catch (e) { if (gen === this.generation) { this.running = false; this.update({ status: 'paused', note: e.message }); } return { ok: false, error: e.message }; }
     finally { if (lease&&gen===this.generation) this.releaseGuiLease(); }
   }
-  async close() { this.generation++; this.startRequestToken++; this.running = false; this.starting = false; this.freeChoice = false; this.freeChoicePending = false; this.controller?.abort(); this.followUpController?.abort(); this.releaseGuiLease(true); await this.native.close(); }
+  async close() { this.generation++; this.startRequestToken++; this.running = false; this.starting = false; this.freeChoice = false; this.freeChoicePending = false; this.controller?.abort(); this.followUpController?.abort(); try{await this.native.close();}finally{this.releaseGuiLease(true);} }
 }
-module.exports = { DesktopService, validateAction, WECHAT_RULE, sameRect, visualProgressKey, dispatchGuard, analyzeWorkBuddyOCR, selectedFlash, prepareOCR, promptOCR, preflightWorkModel,
+module.exports = { DesktopService, INPUT_BACKEND_CHANGE_CAUSE, validateAction, WECHAT_RULE, sameRect, visualProgressKey, dispatchGuard, analyzeWorkBuddyOCR, selectedFlash, prepareOCR, promptOCR, preflightWorkModel,
   WORKBUDDY_TEXT_UTF16_LIMIT, workBuddyTextWithinLimit, validateWorkBuddyOutbound, makeWorkBuddyOutbound,
   validateWechatAction, wechatHeaderConfirmed, wechatMessageVisible, visualDraftSubmit, WECHAT_OPERATIONS };

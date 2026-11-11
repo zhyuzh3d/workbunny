@@ -167,6 +167,12 @@ func taskResourceStop(_ request: [String: Any], application: Bool) throws -> [St
     }
     return ["verified": false, "reason": "已请求停止命令，但进程组结束尚未确认"]
 }
+func checkedSessionLockState(_ value: [String: Any]?) throws -> Bool {
+    guard let session = value else {
+        throw DesktopError(message: "系统会话状态暂不可用", code: "E_SESSION_STATE_UNAVAILABLE", dispatched: false)
+    }
+    return (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue ?? false
+}
 func sessionLocked() -> Bool {
     guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
     return (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue ?? false
@@ -194,27 +200,66 @@ func point(_ request: [String: Any], in rect: CGRect) throws -> CGPoint {
     }
     return CGPoint(x: x, y: y)
 }
-func postMouse(_ type: CGEventType, _ point: CGPoint, _ button: CGMouseButton = .left) throws {
-    guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
-        throw DesktopError(message: "无法创建鼠标事件")
+// The desktop bridge can inspect structured targets, but cannot emit input.
+// These inherited anonymous pipes carry bounded intents to the sole host
+// BOPER owner. A standalone desktop process has no input authority.
+var boperCurrentRequest: [String: Any] = [:]
+var boperProxySequence = 0
+var boperClipboardPrepared = false
+func boperInput(_ action: String, _ params: [String: Any]) throws -> [String: Any] {
+    guard fcntl(3, F_GETFD) >= 0, fcntl(4, F_GETFD) >= 0,
+          let requestID = boperCurrentRequest["id"] as? Int else {
+        throw DesktopError(message: "键鼠只能由 Bunny 宿主通过 BOPER 授权", code: "E_BOPER_CONTEXT", dispatched: false)
     }
-    event.post(tap: .cghidEventTap)
+    boperProxySequence += 1
+    let id = boperProxySequence
+    let payload: [String: Any] = ["id": id, "requestId": requestID,
+        "operation": ["action": action, "params": params], "timeoutMs": 12000,
+        "displayBounds": [rectObject(CGDisplayBounds(CGMainDisplayID()))]]
+    let bytes = try JSONSerialization.data(withJSONObject: payload) + Data([10])
+    guard bytes.count <= 256 * 1024 else { throw DesktopError(message: "BOPER 输入意图过大", code: "E_BOPER_PROTOCOL", dispatched: false) }
+    try FileHandle(fileDescriptor: 3, closeOnDealloc: false).write(contentsOf: bytes)
+    let deadline = DispatchTime.now().uptimeNanoseconds + 30_000_000_000
+    var line = Data()
+    while DispatchTime.now().uptimeNanoseconds < deadline && line.count <= 256 * 1024 {
+        var descriptor = pollfd(fd: 4, events: Int16(POLLIN), revents: 0)
+        let ready = poll(&descriptor, 1, 100)
+        if ready < 0 { if errno == EINTR { continue }; break }
+        if ready == 0 { continue }
+        var byte: UInt8 = 0
+        guard Darwin.read(4, &byte, 1) == 1 else { break }
+        if byte != 10 { line.append(byte); continue }
+        guard let response = try JSONSerialization.jsonObject(with: line) as? [String: Any],
+              response["id"] as? Int == id else { break }
+        if response["ok"] as? Bool == true { return response["result"] as? [String: Any] ?? [:] }
+        throw DesktopError(message: response["error"] as? String ?? "BOPER 输入中断，结果需要核对",
+            code: response["code"] as? String ?? "E_BOPER_INPUT", dispatched: response["dispatched"] as? Bool)
+    }
+    throw DesktopError(message: "BOPER 输入回执不明；未自动重放", code: "E_BOPER_PROXY_UNKNOWN", dispatched: true)
+}
+func postMouse(_ type: CGEventType, _ point: CGPoint, _ button: CGMouseButton = .left) throws {
+    let action: String
+    switch type {
+    case .mouseMoved: action = "move"
+    case .leftMouseDown, .rightMouseDown: action = "mouseDown"
+    case .leftMouseUp, .rightMouseUp: action = "mouseUp"
+    default: throw DesktopError(message: "BOPER 鼠标动作不支持", dispatched: false)
+    }
+    _ = try boperInput(action, ["x": point.x, "y": point.y, "button": button == .right ? "right" : "left"])
+}
+func postClick(_ point: CGPoint, _ button: CGMouseButton = .left) throws {
+    _ = try boperInput("click", ["x": point.x, "y": point.y, "button": button == .right ? "right" : "left"])
 }
 func postUnicodeText(_ units: [UInt16], targetPID: pid_t? = nil) throws {
     guard !units.isEmpty else { return }
-    for down in [true, false] {
-        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else { throw DesktopError(message: "无法创建文本事件") }
-        event.flags = []
-        event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-        if let targetPID { event.postToPid(targetPID) } else { event.post(tap: .cghidEventTap) }
-    }
+    var params: [String: Any] = ["text": String(decoding: units, as: UTF16.self)]
+    if let targetPID { params["targetPid"] = Int(targetPID) }
+    _ = try boperInput("typeText", params)
 }
 func postShiftReturn(targetPID: pid_t? = nil) throws {
-    for down in [true, false] {
-        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: down) else { throw DesktopError(message: "无法创建软换行事件") }
-        event.flags = .maskShift
-        if let targetPID { event.postToPid(targetPID) } else { event.post(tap: .cghidEventTap) }
-    }
+    var params: [String: Any] = ["key": "return", "modifiers": ["shift"]]
+    if let targetPID { params["targetPid"] = Int(targetPID) }
+    _ = try boperInput("key", params)
 }
 func keyCode(_ name: String) -> CGKeyCode? {
     let table: [String: UInt16] = [
@@ -669,7 +714,7 @@ func workBuddyNavigation(_ request: [String: Any]) throws -> [String: Any] {
         }
         guard let frame = axWindowRect(chosen.element), context.rect.contains(CGPoint(x: frame.midX, y: frame.midY)) else { throw DesktopError(message: "WorkBuddy 导航需要视觉定位") }
         let point = CGPoint(x: frame.midX, y: frame.midY)
-        try postMouse(.leftMouseDown, point); try postMouse(.leftMouseUp, point)
+        try postClick(point)
     }
     return ["performed": true, "operation": operation, "label": chosen.label]
 }
@@ -844,7 +889,7 @@ func workBuddyStop(_ request: [String: Any]) throws -> [String: Any] {
     if AXUIElementPerformAction(button,kAXPressAction as CFString) != .success {
         try revalidateWorkBuddyContext(request,context)
         guard let rect=axWindowRect(button), context.rect.contains(CGPoint(x:rect.midX,y:rect.midY)) else { throw DesktopError(message:"停止按钮需要重新视觉定位") }
-        try postMouse(.leftMouseDown,CGPoint(x:rect.midX,y:rect.midY));try postMouse(.leftMouseUp,CGPoint(x:rect.midX,y:rect.midY))
+        try postClick(CGPoint(x:rect.midX,y:rect.midY))
     }
     return ["performed":true]
 }
@@ -868,7 +913,6 @@ func workBuddyEditorFocused(_ controls: WorkBuddyControls) -> Bool {
     return controls.editorFocusElements.contains { CFEqual($0, focused) }
 }
 func focusWorkBuddyEditor(_ request: [String: Any], context: WorkBuddyContext, controls: WorkBuddyControls, editor: AXUIElement) throws {
-    guard CGPreflightPostEventAccess() else { throw DesktopError(message: "缺少输入控制权限，未向编辑器写入文本") }
     AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     let focusDeadline = DispatchTime.now().uptimeNanoseconds + 250_000_000
     while DispatchTime.now().uptimeNanoseconds < focusDeadline {
@@ -882,7 +926,7 @@ func focusWorkBuddyEditor(_ request: [String: Any], context: WorkBuddyContext, c
     }
     let center = CGPoint(x: editorRect.midX, y: editorRect.midY)
     try revalidateWorkBuddyContext(request, context)
-    try postMouse(.leftMouseDown, center); try postMouse(.leftMouseUp, center)
+    try postClick(center)
     try revalidateWorkBuddyContext(request, context)
     let clickDeadline = DispatchTime.now().uptimeNanoseconds + 250_000_000
     while DispatchTime.now().uptimeNanoseconds < clickDeadline {
@@ -924,7 +968,6 @@ func workBuddyFill(_ request: [String: Any]) throws -> [String: Any] {
     }
     if background {
         try revalidateWorkBuddyContext(request, context, requireFrontmost: false)
-        guard CGPreflightPostEventAccess() else { throw DesktopError(message: "缺少定向输入权限", code: "E_BACKGROUND_UNSUPPORTED", dispatched: false) }
         AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         let focusDeadline = DispatchTime.now().uptimeNanoseconds + 250_000_000
         while !workBuddyEditorFocused(controls) && DispatchTime.now().uptimeNanoseconds < focusDeadline { usleep(25_000) }
@@ -951,19 +994,13 @@ func workBuddyFill(_ request: [String: Any]) throws -> [String: Any] {
         throw DesktopError(message: "WorkBuddy 取得焦点后的草稿与请求不一致或不可读，已保留原内容", code: "E_WORKBUDDY_DRAFT_CONFLICT", dispatched: false)
     case .write: break
     }
-    let targetPID: pid_t? = background ? context.pid : nil
-    do {
-        for item in plan {
-            try revalidateWorkBuddyContext(request, context, requireFrontmost: !background)
-            guard workBuddyModelLabelAllowed(axAttribute(combo, kAXValueAttribute as String) as? String), workBuddyEditorFocused(controls) else { throw DesktopError(message: "定向编辑器已变化") }
-            switch item {
-            case .text(let units): try postUnicodeText(units, targetPID: targetPID)
-            case .softLineBreak: try postShiftReturn(targetPID: targetPID)
-            }
-        }
-    } catch {
-        throw DesktopError(message: "WorkBuddy 输入中断，草稿可能部分更新；未自动重试或发送")
+    var inputParams: [String: Any] = ["text": expectedText, "lineBreak": "shiftEnter"]
+    if background { inputParams["targetPid"] = Int(context.pid) }
+    try revalidateWorkBuddyContext(request, context, requireFrontmost: !background)
+    guard workBuddyModelLabelAllowed(axAttribute(combo, kAXValueAttribute as String) as? String), workBuddyEditorFocused(controls) else {
+        throw DesktopError(message: "定向编辑器已变化", dispatched: false)
     }
+    _ = try boperInput("typeText", inputParams)
     let waitDeadline = DispatchTime.now().uptimeNanoseconds + 800_000_000
     var finalReadback: String?
     repeat {
@@ -1041,14 +1078,10 @@ func workBuddySend(_ request: [String: Any]) throws -> [String: Any] {
         }
         throw DesktopError(message: "后台发送回执待核对，不重复发送", code: "E_GUI_SEND_UNKNOWN", dispatched: true)
     }
-    guard CGPreflightPostEventAccess(), let buttonRect = axWindowRect(button) else {
+    guard let buttonRect = axWindowRect(button) else {
         throw DesktopError(message: "发送按钮几何不完整或缺少输入控制权限；未发送", code: "E_GUI_BEFORE_DISPATCH", dispatched: false)
     }
     let clickPoint = try approvedWorkBuddySendPoint(request, buttonRect: buttonRect, windowRect: context.rect)
-    guard let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: clickPoint, mouseButton: .left),
-          let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: clickPoint, mouseButton: .left) else {
-        throw DesktopError(message: "无法创建发送鼠标事件；未发送", code: "E_GUI_BEFORE_DISPATCH", dispatched: false)
-    }
     try revalidateWorkBuddyContext(request, context)
     guard let app = controls.application,
           let focusedWindow = axElementAttribute(app, kAXFocusedWindowAttribute as String),
@@ -1061,8 +1094,7 @@ func workBuddySend(_ request: [String: Any]) throws -> [String: Any] {
     }
     _ = try approvedWorkBuddySendPoint(request, buttonRect: currentButtonRect, windowRect: context.rect)
     try revalidateWorkBuddyContext(request, context)
-    mouseDown.post(tap: .cghidEventTap)
-    mouseUp.post(tap: .cghidEventTap)
+    try postClick(clickPoint)
     let postContextIsValid = (try? revalidateWorkBuddyContext(request, context)) != nil
     return ["pressed": true, "method": "foreground-pointer", "point": ["x": clickPoint.x, "y": clickPoint.y], "postContextValid": postContextIsValid]
 }
@@ -1654,6 +1686,15 @@ func recognizePNG(_ request: [String: Any]) throws -> [String: Any] {
 // Pixel-only input intentionally has no application/window identity. The host
 // supplies freshly rechecked display evidence and a region located in pixels.
 // This entry must never call windowEntries, targetWindow, AX or app activation.
+func permissionRequestFields(_ kind: String) -> Set<String> {
+    switch kind {
+    case "screen": return ["screenCaptureAllowed"]
+    case "accessibility": return ["accessibilityTrusted"]
+    case "input": return ["postEventAllowed"]
+    case "all": return ["accessibilityTrusted", "screenCaptureAllowed", "postEventAllowed"]
+    default: return []
+    }
+}
 func displayInput(_ request: [String: Any]) throws -> [String: Any] {
     let allowed: Set<String> = ["id", "op", "sentAtMs", "timeoutMs", "action", "visualEvidence", "x", "y", "text", "key", "modifiers", "deltaX", "deltaY", "button", "lineBreak"]
     guard Set(request.keys).isSubset(of: allowed) else { throw DesktopError(message: "视觉输入不接受应用、窗口或界面参数", dispatched: false) }
@@ -1671,7 +1712,6 @@ func displayInput(_ request: [String: Any]) throws -> [String: Any] {
           let action = request["action"] as? String, ["click", "scroll", "key", "type"].contains(action) else {
         throw DesktopError(message: "视觉输入证据无效或过期，未读取窗口信息且未派发", dispatched: false)
     }
-    guard CGPreflightPostEventAccess() else { throw DesktopError(message: "缺少键鼠输入权限", dispatched: false) }
     if action == "click" || action == "scroll" {
         guard let x = number(request["x"]), let y = number(request["y"]), region.contains(CGPoint(x: x, y: y)) else {
             throw DesktopError(message: "键鼠位置不在视觉确认区域内", dispatched: false)
@@ -1680,28 +1720,23 @@ func displayInput(_ request: [String: Any]) throws -> [String: Any] {
         if action == "click" {
             let button = request["button"] as? String ?? "left"
             guard ["left", "right"].contains(button) else { throw DesktopError(message: "鼠标按钮无效", dispatched: false) }
-            if button == "right" { try postMouse(.rightMouseDown, point, .right); try postMouse(.rightMouseUp, point, .right) }
-            else { try postMouse(.leftMouseDown, point); try postMouse(.leftMouseUp, point) }
+            if button == "right" { try postClick(point, .right) }
+            else { try postClick(point) }
         } else {
             let dx = number(request["deltaX"]) ?? 0, dy = number(request["deltaY"]) ?? 0
-            guard abs(dx) <= 2000, abs(dy) <= 2000,
-                  let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0) else { throw DesktopError(message: "滚动参数无效", dispatched: false) }
-            event.location = point; event.post(tap: .cghidEventTap)
+            guard abs(dx) <= 2000, abs(dy) <= 2000 else { throw DesktopError(message: "滚动参数无效", dispatched: false) }
+            _ = try boperInput("scroll", ["x": point.x, "y": point.y, "deltaX": dx, "deltaY": dy])
         }
         return ["performed": true, "frameId": frameId, "point": ["x": x, "y": y], "mode": "display-pixels"]
     }
     if action == "key" {
-        guard let name = request["key"] as? String, let code = keyCode(name) else { throw DesktopError(message: "按键无效", dispatched: false) }
-        let flags = try modifiers(request["modifiers"])
-        for down in [true, false] {
-            guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { throw DesktopError(message: "无法创建键盘事件") }
-            event.flags = flags; event.post(tap: .cghidEventTap)
-        }
+        guard let name = request["key"] as? String, keyCode(name) != nil else { throw DesktopError(message: "按键无效", dispatched: false) }
+        _ = try modifiers(request["modifiers"])
+        _ = try boperInput("key", ["key": name, "modifiers": request["modifiers"] as? [String] ?? []])
     } else {
         guard let value = request["text"] as? String, !value.isEmpty, value.utf16.count <= 4096 else { throw DesktopError(message: "输入文本无效", dispatched: false) }
-        for item in try makeInputPlan(value, lineBreak: request["lineBreak"]) {
-            switch item { case .text(let units): try postUnicodeText(units); case .softLineBreak: try postShiftReturn() }
-        }
+        _ = try makeInputPlan(value, lineBreak: request["lineBreak"])
+        _ = try boperInput("typeText", ["text": value, "lineBreak": request["lineBreak"] ?? "shiftEnter"])
     }
     return ["performed": true, "frameId": frameId, "mode": "display-pixels"]
 }
@@ -1720,18 +1755,32 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
     case "taskApplicationForceStop": return try taskApplicationForceStop(request)
     case "softwareInterface": return try softwareInterface(request)
     case "softwareControl": return try softwareControl(request)
+    case "sessionState": return ["sessionLocked": try checkedSessionLockState(CGSessionCopyCurrentDictionary() as? [String: Any])]
     case "permissions":
-        return ["accessibilityTrusted": AXIsProcessTrusted(), "screenCaptureAllowed": CGPreflightScreenCaptureAccess(),
-                "postEventAllowed": CGPreflightPostEventAccess(), "sessionLocked": sessionLocked()]
+        let fields = Set(["accessibilityTrusted", "screenCaptureAllowed", "postEventAllowed", "sessionLocked"])
+        let virtualInput = request["inputBackend"] as? String == "virtual-hid"
+        let requested = request["requestedFields"] as? [String]
+        guard requested == nil || Set(requested!).isSubset(of: fields) else { throw DesktopError(message: "权限检查字段无效", dispatched: false) }
+        let checks = requested.map { Set($0) } ?? (virtualInput ? Set(["screenCaptureAllowed", "sessionLocked"]) : fields)
+        var result: [String: Any] = ["checkedFields": Array(checks).sorted()]
+        result["accessibilityTrusted"] = checks.contains("accessibilityTrusted") ? AXIsProcessTrusted() as Any : NSNull()
+        result["screenCaptureAllowed"] = checks.contains("screenCaptureAllowed") ? CGPreflightScreenCaptureAccess() as Any : NSNull()
+        result["postEventAllowed"] = checks.contains("postEventAllowed") ? CGPreflightPostEventAccess() as Any : NSNull()
+        result["sessionLocked"] = checks.contains("sessionLocked") ? try checkedSessionLockState(CGSessionCopyCurrentDictionary() as? [String: Any]) as Any : NSNull()
+        return result
     case "requestPermission":
         let kind = request["kind"] as? String ?? "all"
         guard ["all", "screen", "accessibility", "input"].contains(kind) else { throw DesktopError(message: "权限请求类型无效") }
-        let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
-        let ax = (kind == "all" || kind == "accessibility") ? AXIsProcessTrustedWithOptions(options) : AXIsProcessTrusted()
-        let capture = (kind == "all" || kind == "screen") ? CGRequestScreenCaptureAccess() : CGPreflightScreenCaptureAccess()
-        let events = (kind == "all" || kind == "input") ? CGRequestPostEventAccess() : CGPreflightPostEventAccess()
-        return ["accessibilityTrusted": ax, "screenCaptureAllowed": capture, "postEventAllowed": events,
-                "note": "若系統設定要求，請手動允許並重新啟動 workbunny"]
+        let checks = permissionRequestFields(kind)
+        var result: [String: Any] = ["checkedFields": Array(checks).sorted(), "accessibilityTrusted": NSNull(), "screenCaptureAllowed": NSNull(), "postEventAllowed": NSNull(),
+                                    "note": "请按系统提示允许所选权限；若要求重新打开应用，请重新打开 Bunny。"]
+        if checks.contains("accessibilityTrusted") {
+            let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
+            result["accessibilityTrusted"] = AXIsProcessTrustedWithOptions(options)
+        }
+        if checks.contains("screenCaptureAllowed") { result["screenCaptureAllowed"] = CGRequestScreenCaptureAccess() }
+        if checks.contains("postEventAllowed") { result["postEventAllowed"] = CGRequestPostEventAccess() }
+        return result
     case "frontmost": return ["application": appIdentity(currentFrontmost()), "windows": windowEntries()]
     case "inputIdle": return inputIdle()
     case "recognize": return try recognizePNG(request)
@@ -1768,7 +1817,7 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
     case "click", "move", "scroll", "key", "type", "pasteFile":
         guard !sessionLocked() else { throw DesktopError(message: "电脑已锁屏，请解锁后重试") }
         _ = try validateActionContext(request)
-        guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else { throw DesktopError(message: "缺少辅助功能/输入监控权限；请显式调用 requestPermission 后在系统设置中允许") }
+        guard AXIsProcessTrusted() else { throw DesktopError(message: "缺少辅助功能/输入监控权限；请显式调用 requestPermission 后在系统设置中允许") }
         let (windowId, rect) = try targetWindow(request)
         if op == "pasteFile" {
             guard let file = request["filePath"] as? String, let expectedHash = request["sha256"] as? String,
@@ -1779,11 +1828,10 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
             guard actualHash == expectedHash else { throw DesktopError(message: "附件内容已改变，停止粘贴") }
             _ = try validateActionContext(request)
             NSPasteboard.general.clearContents()
+            boperClipboardPrepared = true
             guard NSPasteboard.general.writeObjects([url as NSURL]) else { throw DesktopError(message: "文件剪贴板准备失败") }
-            for down in [true, false] {
-                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: down) else { throw DesktopError(message: "无法模拟文件粘贴") }
-                event.flags = .maskCommand; event.post(tap: .cghidEventTap)
-            }
+            let changeCount = NSPasteboard.general.changeCount
+            _ = try boperInput("key", ["key": "v", "modifiers": ["command"], "clipboardChangeCount": changeCount, "clipboardChanged": true])
             return ["performed": true, "windowId": windowId, "sha256": actualHash]
         }
         if op == "click" || op == "move" {
@@ -1793,38 +1841,30 @@ func perform(_ request: [String: Any]) throws -> [String: Any] {
                 let button = request["button"] as? String ?? "left"
                 guard ["left", "right"].contains(button) else { throw DesktopError(message: "鼠标按钮无效") }
                 try validateWorkBuddySubmission(request, submissionExpectation)
-                if button == "right" { try postMouse(.rightMouseDown, p, .right); try postMouse(.rightMouseUp, p, .right) }
-                else { try postMouse(.leftMouseDown, p); try postMouse(.leftMouseUp, p) }
+                if button == "right" { try postClick(p, .right) }
+                else { try postClick(p) }
             }
             return ["performed": true, "windowId": windowId, "point": ["x": p.x, "y": p.y]]
         }
         if op == "scroll" {
             let p = try point(request, in: rect)
             let dx = number(request["deltaX"]) ?? 0, dy = number(request["deltaY"]) ?? 0
-            guard abs(dx) <= 2000, abs(dy) <= 2000, let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0) else { throw DesktopError(message: "滚动参数无效") }
-            event.location = p
-            event.post(tap: .cghidEventTap); return ["performed": true, "windowId": windowId]
+            guard abs(dx) <= 2000, abs(dy) <= 2000 else { throw DesktopError(message: "滚动参数无效", dispatched: false) }
+            _ = try boperInput("scroll", ["x": p.x, "y": p.y, "deltaX": dx, "deltaY": dy])
+            return ["performed": true, "windowId": windowId]
         }
         if op == "key" {
-            guard let name = request["key"] as? String, let code = keyCode(name) else { throw DesktopError(message: "不支持的按键") }
-            let flags = try modifiers(request["modifiers"])
+            guard let name = request["key"] as? String, keyCode(name) != nil else { throw DesktopError(message: "不支持的按键", dispatched: false) }
+            _ = try modifiers(request["modifiers"])
             try validateWorkBuddySubmission(request, submissionExpectation)
-            for down in [true, false] {
-                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { throw DesktopError(message: "无法创建键盘事件") }
-                event.flags = flags; event.post(tap: .cghidEventTap)
-            }
+            _ = try boperInput("key", ["key": name, "modifiers": request["modifiers"] as? [String] ?? []])
             return ["performed": true, "windowId": windowId]
         }
         guard let value = request["text"] as? String, !value.isEmpty, value.utf16.count <= 4096 else { throw DesktopError(message: "文本长度须为 1 至 4096 个 UTF-16 单元") }
         let plan = try makeInputPlan(value, lineBreak: request["lineBreak"])
-        for item in plan {
-            let (currentId, _) = try validateActionContext(request)
-            guard currentId == windowId else { throw DesktopError(message: "目标窗口已变化，停止继续输入") }
-            switch item {
-            case .text(let units): try postUnicodeText(units)
-            case .softLineBreak: try postShiftReturn()
-            }
-        }
+        let (currentId, _) = try validateActionContext(request)
+        guard currentId == windowId else { throw DesktopError(message: "目标窗口已变化，停止继续输入", dispatched: false) }
+        _ = try boperInput("typeText", ["text": value, "lineBreak": request["lineBreak"] ?? "shiftEnter"])
         return ["performed": true, "windowId": windowId, "utf16Units": value.utf16.count,
                 "textChunks": plan.filter { if case .text = $0 { return true }; return false }.count,
                 "softLineBreaks": plan.filter { $0 == .softLineBreak }.count]
@@ -2133,6 +2173,13 @@ func runNativeSelfTest() -> Never {
             throw DesktopError(message: "截图独立任务或多显示器裁切回归失败")
         }
 
+        guard permissionRequestFields("screen") == ["screenCaptureAllowed"],
+              permissionRequestFields("accessibility") == ["accessibilityTrusted"],
+              permissionRequestFields("input") == ["postEventAllowed"],
+              permissionRequestFields("all").count == 3,
+              permissionRequestFields("invalid").isEmpty else {
+            throw DesktopError(message: "单项授权请求不得查询其他权限")
+        }
         let multiline = try makeInputPlan("A\r\nB\nC", lineBreak: "shiftEnter")
         let expected: [DesktopInputEvent] = [.text([65]), .softLineBreak, .text([66]), .softLineBreak, .text([67])]
         guard multiline == expected else { throw DesktopError(message: "CRLF/LF 软换行计划不匹配") }
@@ -2194,6 +2241,9 @@ func handleLineInPool(_ line: String) {
         writeJSON(["id": NSNull(), "ok": false, "error": "无效 JSON 请求"]); return
     }
     let id = request["id"] ?? NSNull()
+    boperCurrentRequest = request
+    boperClipboardPrepared = false
+    defer { boperCurrentRequest = [:]; boperClipboardPrepared = false }
     do { writeJSON(["id": id, "ok": true, "result": try perform(request)]) }
     catch is CaptureBusyError { writeJSON(["id": id, "ok": false, "code": "E_CAPTURE_BUSY", "error": "另一个截图进程正在使用显示连接，稍后继续"]) }
     catch let e as CaptureUnavailableError { writeJSON(["id": id, "ok": false, "code": "captureUnavailable", "error": e.message]) }
@@ -2202,9 +2252,14 @@ func handleLineInPool(_ line: String) {
         if let code = e.code { response["code"] = code }
         if let dispatched = e.dispatched { response["dispatched"] = dispatched }
         if let diagnostic = e.diagnostic { response["diagnostic"] = diagnostic }
+        if boperClipboardPrepared { response["inputOutcome"] = ["clipboardChanged": true] }
         writeJSON(response)
     }
-    catch { writeJSON(["id": id, "ok": false, "error": error.localizedDescription]) }
+    catch {
+        var response: [String: Any] = ["id": id, "ok": false, "error": error.localizedDescription]
+        if boperClipboardPrepared { response["inputOutcome"] = ["clipboardChanged": true] }
+        writeJSON(response)
+    }
 }
 
 // Release temporary display/PNG/Vision objects after each request during long watches.

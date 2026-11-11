@@ -38,6 +38,7 @@ for helper in vault desktop asr-legacy; do
   fi
 done
 zsh "$ROOT/tools/build-keychain.sh"
+zsh "$ROOT/tools/build-boper.sh"
 
 echo "▸ 清理"
 rm -rf "$APP"
@@ -70,6 +71,17 @@ cp "$ROOT/bin/desktop" "$APP/Contents/Resources/bin/desktop"
 cp -R "$ROOT/bin/workbunny-keychain.app" "$APP/Contents/Resources/bin/"
 chmod +x "$APP/Contents/Resources/bin/asr"
 cp -R "$ROOT/bin/speech" "$APP/Contents/Resources/bin/speech"
+mkdir -p "$APP/Contents/Library/LaunchServices" "$APP/Contents/Library/LaunchDaemons" "$APP/Contents/Resources/boper"
+cp "$ROOT/build/native/boper-runtime" "$APP/Contents/Resources/bin/boper-runtime"
+cp "$ROOT/build/native/boper-control.node" "$APP/Contents/Resources/bin/boper-control.node"
+cp "$ROOT/build/native/boper-hid-helper" "$APP/Contents/Library/LaunchServices/boper-hid-helper"
+cp "$ROOT/native/boper/cn.haminn.workbunny.boper-hid.plist" "$APP/Contents/Library/LaunchDaemons/"
+cp "$ROOT/native/boper/cn.haminn.workbunny.boper-hid.root.plist" "$APP/Contents/Resources/boper/"
+cp "$ROOT/resources/boper/install-helper.sh" "$APP/Contents/Resources/boper/"
+cp "$ROOT/resources/boper/manifest.json" "$ROOT/resources/boper/Karabiner-DriverKit-VirtualHIDDevice-8.8.0.pkg" "$APP/Contents/Resources/boper/"
+cp "$ROOT/resources/boper/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon.plist" "$APP/Contents/Resources/boper/"
+cp "$ROOT/native/boper/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/boper/"
+cp -R "$ROOT/native/boper/vendor/licenses" "$APP/Contents/Resources/boper/"
 
 echo "▸ 写入 Info.plist"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -112,6 +124,7 @@ fi
 # ad-hoc 的指定要求是 cdhash，重打包一次就变，TCC 把它当全新应用 ⇒ 每次启动重弹授权。
 # 用固定证书签，指定要求变成 identifier + 证书指纹，重打包多少次都认。
 echo "▸ 签名"
+node "$ROOT/tools/boper-fuses.cjs" "$APP" --write
 # Sign nested Mach-O components first. Any failure stops the build.
 find "$APP/Contents/Frameworks" -type f -perm +111 -print0 | while IFS= read -r -d '' file; do
   if /usr/bin/file -b "$file" | grep -q 'Mach-O'; then codesign --force --sign "$IDENTITY" "$file"; fi
@@ -123,6 +136,10 @@ for helper in speech/speech vault desktop asr asr-legacy; do
   codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.${helper:t}" "$APP/Contents/Resources/bin/$helper"
 done
 codesign --force --sign "$IDENTITY" "$APP/Contents/Resources/bin/workbunny-keychain.app"
+codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.boper-runtime" "$APP/Contents/Resources/bin/boper-runtime"
+codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.boper-hid" "$APP/Contents/Library/LaunchServices/boper-hid-helper"
+codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.boper-control" "$APP/Contents/Resources/bin/boper-control.node"
+node "$ROOT/tools/boper-bundle.cjs" "$APP" --write
 codesign --force --sign "$IDENTITY" "$APP"
 
 # 本地构建不该带隔离标记，否则 Gatekeeper 会拦自签名应用

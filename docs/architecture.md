@@ -2,6 +2,8 @@
 
 本文记录当前源码的早期 Beta 架构与实现边界，核对日期为 2026-11-09。另见[产品需求](product-requirements.md)与[执行流程](flows.md)。
 
+BOPER 统一键鼠模块已接入，0.26.43 已在当前 Apple Silicon Mac 重装；安装者本机管理员授权的固定 root LaunchDaemon、认证 XPC、MCP 控制、真实接收窗口及最终设置面板均已验收，不依赖开发者账号或 Apple 开发者证书。它复用原 Task 与 GuiLease，独立普通权限进程执行输入，helper 提交 HID；VirtualHID 启用后全局使用且不自动降级，微信要求此后端。多字符经系统剪贴板准备、BOPER Cmd+V 粘贴。已完成 arm64/macOS 13 最低目标编译，其他系统实机兼容及自动物理接管仍未验收，当前只允许受监督交接。结构、源码入口和验证进度见 [BOPER 开发计划](boper-development-plan.md)及 [native 边界](../native/boper/README.md)。
+
 双脑协作已接入当前源码并完成离线闭环验证，分阶段计划与实机边界见[双脑升级记录](dual-brain-upgrade-plan.md)。主进程、任务系统是程序组织；主脑、任务脑是按认知职责与上下文范围划分的 LLM 调度。任务顶层持有主脑督导的生命周期，统一自我系统给出高层决定；这不表示已经安装或通过真实软件验收。
 
 ## 1. 分层与依赖
@@ -181,7 +183,9 @@ Action 在异步来源核对后建立时，会重新安排同一个调度器的�
 
 `AgentRuntime` 用一个定时器选择最近的检查、到期或保活时刻，空队列和结束态无需周期唤醒。达到指定时长会取消正在运行的 worker 并保留写入证据。`TaskKeepalive` 在工作空闲一分钟且没有 worker、模型请求或有效等待时，按原 Task/Action 上下文提醒继续思考，每个作用对象只保留一条在途提醒。提醒的计时与业务进展计时分开。
 
-GUI 准入在未持有资源时检查连续空闲五秒及 lease；动作已持有 GUI 后不再用 HID 空闲时间判断“人正在干扰”，因为自己的输入也会更新时间。桌面输入串行，语义工作及无冲突动作独立推进；屏幕采集连接复用并有界缓存。
+GUI 准入在未持有资源时检查连续空闲五秒及 lease；动作已持有 GUI 后不再用 HID 空闲时间判断“人正在干扰”，因为自己的输入也会更新时间。准入诊断仅记录当前就绪、lease 空闲、HID 空闲毫秒和固定原因，不记录持有者身份，也不凭 HID 数值归因实际操作者；主脑督导失败复用脱敏恢复诊断记录固定错误码，便于区分模型、本地资料与超时。桌面输入串行，语义工作及无冲突动作独立推进；屏幕采集连接复用并有界缓存。
+
+锁屏轮询经独立 `sessionState` 原生入口只读取 `CGSession` 锁屏状态，不再为此调用整包权限查询或 AX／屏录／键鼠授权检查。轮询周期和有界请求时限不变；该入口在系统会话字典不可得时抛固定错误，读取失败或返回非布尔状态均按锁定处理，锁屏事件与关闭会使旧读取结果失效。原输入／采集共用的锁屏函数未改。已有锁屏隐私清理、任务暂停及解锁后的恢复流程保持原入口。此变更已通过离线生命周期测试和 Swift 类型检查，未据此宣称微信退出原因或实机验收结果。
 
 全局自主生活、主线程健康检测、外部进程看门狗和任务保活各自独立。任务调用和恢复判断的异步等待有界；阻塞 JavaScript 主线程的同步代码或基础存储/进程故障仍依赖原来的进程健康与底层超时机制，不能据此宣称绝对无故障。
 
@@ -370,6 +374,8 @@ Task 验收依据实际执行报告重新检索适用经验，保留场景、软
 
 健康与身份核对可以只读观察可见但未激活的目标，不因此放行输入。拥有 GUI 的执行入口与 `screen.activate` 共用 `VisualSession.activate`：只点击当前视觉明确标出的安全激活区域，并用新画面重新确认；普通截图不触发激活。激活后观察失败保留原诊断与实际输入回执，安全提示可上送共享场景；已确认或结果未知的激活默认只读补证，不自动重复点击。任务可用 `screen.activate retry=true` 显式重选；固定桌面入口消费任务脑或主脑现有的新策略指导。两者均须输入回执后的新鲜同身份画面确认未激活和安全区域，同一Operation或指导只重选一次，不能越过需要主人处理的提示。控件拒绝沿现有 `candidateCount/guardChecks` 记录无正文的命中数与几何、帧归属检查，供下轮区分漏识别、区域不一致和歧义。
 
+未取得安全激活区域时本次不发输入，并将该视觉判断标为需重新定位；下一次由既有有界恢复调度发起的尝试须取得新判断。不能因像素未变而永久复用导致失败的负面判断；重新定位保留会话身份、既有输入回执和登录／安全边界。此路径已离线验证，真实桌面效果需随实操单独核验。
+
 定位模型的全部几何字段（包括 `texts`）统一使用第一张完整显示图的归一化坐标，文字框与身份、主区域、监测区域一样严格位于目标 `region` 内。宿主裁图时统一换算为目标图坐标；模型不同时承担整图与局部两套参照。几何校验失败按具体字段、预期关系与实际类型记录，并在同帧有界修正中指出坐标合同，不误记为 JSON 语法错误。
 
 目标、主区域与身份锚点严格校验；辅助观察统一逐项筛选，记录脱敏字段原因及保留、丢弃数量，不裁剪或替换坏框。监测区域至少保留一个原始合法项，否则拒绝定位；可选粗文字坏行不进入guard，失效的焦点或激活框连同对应依据清空，只读观察可继续，真正需要对应输入前提时仍明确拒绝或补证。字面补证直接使用 `checkedJSON` 的抄录协议与原有30秒有界等待，不套用语义复核的摘要提示。
@@ -405,6 +411,35 @@ Task 验收依据实际执行报告重新检索适用经验，保留场景、软
 [`CompanionAutonomy`](../src/main/companion-autonomy.js) 仍负责自主生活的授权、安静时段、预算与活动选择，部分本地创作经 Secretary 执行。这与任务保活、Doze/Dream 和模型请求超时不同，也尚未全部迁为普通 AgentRuntime Task；后续统一需保留授权、资料范围与结果回执，不能仅凭总体框图宣布迁移完成。
 
 正式资料默认在 `~/Library/Application Support/workbunny`，开发资料在 `.data/dev`。数据库迁移核对密文和完整性后原子切换指针；外置资料盘失联进入恢复，不自动创建空库。跨机器使用加密备份恢复，本机封装文件不能代替密码备份。
+
+### 本机 MCP 控制（开发接口）
+
+公开控制入口采用官方 `@modelcontextprotocol/sdk` 1.32.2 的 stdio Server，使用带 `initialize` 协商的 MCP `2025-11-25` profile；当前不实现 `2026-07-28` stateless profile。`tools/bunny-mcp.cjs` 处理协议与能力协商，`tools/bunnyctl.cjs` 使用同一官方 SDK Client 调用它。协议依据：[生命周期](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)、[工具与结构化结果](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)。
+
+真实主进程的 `local-control.js` 统一注册工具名、JSON Schema、参数检查和操作处理函数，桥接 `tools/list`、`tools/call`，结果使用 `structuredContent`、兼容文字块和 `isError`。当前开放 `scene_get`、`scene_set`、`boper_status`、`boper_enable`、`boper_disable`、`boper_refresh`、`boper_settings`、`boper_permissions`、`boper_authorize_screen`、`boper_test` 与 `settings_open`，不提供对话、历史、数据库、任意设置或任意代码读取/执行工具。新增能力必须显式注册，不能通过客户端自报方法扩权。`settings_open` 仅打开本应用面板并选择已有标签，返回自身窗口范围供受限像素核查，不执行任意脚本。
+
+stdio 桥和 CLI 只使用项目 Node 22 与开发依赖，不加载输入 addon、不改变调试 fuse；实际操作仍由已运行的 Bunny 主进程执行。桥到主进程的内部 IPC 使用 `<userData>/control/bunny.sock`，目录 `0700`、socket `0600`；同一用户的本机调用按主人授权处理。请求、回执大小、连接数、并发和等待均有上限；超时返回结果不明，不自动重试或重放。仅内部传输使用私有 envelope，不将它称为 MCP。
+
+设置的「键鼠」是独立标签，原「设定」更名「身份」，保留内部 persona 标识。键鼠页按未启用、安装/更新、等待驱动授权、故障、就绪提供下一步，操作即时生效；系统版本决定驱动批准位置，显示原厂驱动与发布者名称。屏幕识别权限单独列示，只在进入该页或手动重新检测时查询；`authorize_screen` 仅请求屏幕权限，不附带 AX 或注入权限查询。就绪、屏幕已允许且生活场景才开放合成接收窗口验收，诊断第一步先确认 CGDisplayStream 可用，之后才发送输入。
+
+`scene_get` 仅读取 `config.memory.scene`，`scene_set` 与 UI 共用 `applySettings`，沿原有取消、场景失效和通知链路切换；BOPER 与 UI 共用 `controlBoper`。本地输入验收继续要求生活场景，只使用合成材料和自己的接收窗口。没有读取私聊内容的调试入口。
+
+```sh
+# 在项目目录使用 Node 22；也可显式指定 --user-data DIR 或 --socket PATH。
+node tools/bunnyctl.cjs tools list
+node tools/bunnyctl.cjs scene get
+node tools/bunnyctl.cjs scene set life
+node tools/bunnyctl.cjs boper status
+node tools/bunnyctl.cjs boper enable
+node tools/bunnyctl.cjs boper refresh
+node tools/bunnyctl.cjs boper test
+node tools/bunnyctl.cjs settings open --params '{"tab":"keymouse"}'
+
+# 供 MCP 客户端配置的 stdio 服务入口。
+node tools/bunny-mcp.cjs
+```
+
+SDK 真实 stdio 握手、工具发现/调用、JSON Schema、结构化成功/错误和 CLI 已用合成 socket 宿主离线回归。0.26.42 已从相同 CLI/MCP 入口验证实际签名主进程的生活场景状态、管理员安装、VirtualHID、中文及换行粘贴、快捷键、滚轮、拖动与停止；取消后的新一轮验收和升级恢复通过，最后以 `settings_open` 打开系统页并用 CGDisplayStream 仅核查该面板。0.26.43 进一步验证独立键鼠页、关闭后重新启用、屏幕权限状态和无组件重装升级；63 项专项回归通过，实机接收窗口约 14 秒，精确正文、一次粘贴、滚轮 5 次、拖动 12 次、落点误差约 0.95 逻辑点及移动取消释放均通过，安装包 574 项核验通过。当前本地验收不涉及微信任务或私聊内容。
 
 生产窗口的入口样式统一引入 `src/renderer/theme.css`，集中定义色板、文字层级、间距、圆角、控件尺寸及阴影。`form-controls.css` 与 `panel-theme.css` 负责共用表单和面板组件，各页样式保留布局；角色窗口、设置/动作、记忆/任务、自我理解及关于窗口使用同一配置，状态语义色独立于玫红强调色。
 

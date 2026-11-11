@@ -1,6 +1,7 @@
 import { mountOwnerSecurity } from './owner-security.mjs';
 import '../shared/motion-core.js';
 import { mountSoftwarePermissions } from './software-permissions.mjs';
+import { mountBoperSettings } from './boper-settings.mjs';
 import { mountProductInfo } from './product-info-ui.mjs';
 import { mountPortability } from './portability-ui.js';
 import { autoGrow } from './auto-grow.js';
@@ -24,6 +25,7 @@ document.body.dataset.p = which;
 document.title = which === 'motions' ? 'WorkBunny-动作库' : 'WorkBunny-设置';
 
 let cfg = null;
+let boperSettings = null;
 let AVATAR_LIST = [];
 let MOTIONS = [];
 let MOTION_GROUPS = [];
@@ -94,6 +96,7 @@ function paintSceneProfile(source = cfg) {
   const configured = source?.memory?.scene;
   let scene = pendingValue('memory.scene', configured || 'life');
   if (!Object.hasOwn(SCENE_SCOPE_TEXT, scene)) scene = 'life';
+  boperSettings?.refreshView();
   $('panelScene').value = scene;
   $('panelSceneScope').textContent = SCENE_SCOPE_TEXT[scene];
   const path = 'memory.scene';
@@ -124,17 +127,23 @@ function changePanelScene(scene) {
 }
 
 /* ═══════════ tab 切换 ═══════════ */
+const settingsTabIds=[...document.querySelectorAll('#tabs button[data-t]')].map(button=>button.dataset.t);
+let requestedSettingsTab=null;
 function showTab(t) {
+  if(!settingsTabIds.includes(t))return;
   document.body.dataset.tab = t;
   for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('on', b.dataset.t === t);
   for (const p of document.querySelectorAll('.pb[data-page]')) p.classList.toggle('on', p.dataset.page === t);
   if (t === 'persona') selfSettings.resize();
+  if (t === 'keymouse') boperSettings?.activate();
+  else boperSettings?.deactivate();
   if (t === 'look') autoGrow($('avatarDescription'), 2);
 }
 document.getElementById('tabs').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-t]');
   if (b) showTab(b.dataset.t);
 });
+window.pet.on(ev=>{if(which==='settings'&&ev.type==='settings-tab'&&settingsTabIds.includes(ev.tab)){requestedSettingsTab=ev.tab;showTab(ev.tab);}});
 
 /* ═══════════ 权限 ═══════════ */
 let asrStat = { speech: null, mic: null, note: '' };
@@ -815,6 +824,10 @@ function buildMotionList() {
   if (which === 'settings') {
     const software=mountSoftwarePermissions($('softwarePermissions'),window.pet,{config:cfg,save:patch=>persist(patch),onOpen:()=>showTab('data')});
     software?.paint(init.taskPermission);
+    boperSettings = mountBoperSettings($('boperSettings'), window.pet, {
+      getScene: () => edits.has('memory.scene') ? null : cfg?.memory?.scene,
+      onChooseScene: () => showTab('scene'),
+    });
     await mountPortability(window.pet);
     void mountProductInfo($('productInfo'), window.pet);
     $('avatarSelect').onchange = () => pickAvatar($('avatarSelect').value).catch(error => { $('avatarImportStatus').textContent = error.message; });
@@ -869,7 +882,7 @@ function buildMotionList() {
       }
     });
     paintPerm(init.asr || null);
-    showTab(init.taskPermission || init.storage?.ok === false ? 'data' : init.connection?.ready === false && cfg.brain.source !== 'apikey' ? 'brain' : 'look');
+    showTab(requestedSettingsTab||(init.taskPermission || init.storage?.ok === false ? 'data' : init.connection?.ready === false && cfg.brain.source !== 'apikey' ? 'brain' : 'look'));
 
     $('sizeRow').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-k]');

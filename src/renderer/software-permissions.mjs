@@ -17,6 +17,7 @@ export function mountSoftwarePermissions(root,api,{config,save,onOpen}={}){
  const buttons=document.createElement('div');buttons.className='permBtns';root.append(buttons);
  const paint=request=>{
   buttons.replaceChildren();if(request?.resolved){status.textContent='授权已核对，原任务已继续。';return;}if(!request)return;status.textContent=request.message;onOpen?.();
+  if(request.missing?.includes('boperReady')){const button=document.createElement('button');button.className='mini';button.textContent='安装并启用虚拟键鼠';button.onclick=async()=>{button.disabled=true;try{await api.boperControl('enable');status.textContent='请完成系统批准，并在 BOPER 设置中重新检测。';}catch(error){status.textContent=error.message;}finally{button.disabled=false;}};buttons.append(button);return;}
   const names={screenCaptureAllowed:['screen','屏幕录制'],accessibilityTrusted:['accessibility','输入与辅助功能'],postEventAllowed:['input','模拟键鼠']};
   for(const missing of request.missing||[]){const known=names[missing];if(!known)continue;const button=document.createElement('button');button.className='mini';button.textContent='允许'+known[1];
    button.onclick=async()=>{button.disabled=true;try{await api.softwarePermission(known[0]);status.textContent='请完成系统提示。授权后会重新核对并继续原任务。';}catch(error){status.textContent=error.message;}finally{button.disabled=false;}};buttons.append(button);break;

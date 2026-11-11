@@ -112,6 +112,8 @@ contextBridge.exposeInMainWorld('pet', {
   agentResultLink:(id,index)=>ipcRenderer.invoke('pet:agent-result-link',{id,index}),
   agentStatus: () => ipcRenderer.invoke('pet:agent-status'),
   softwarePermission: kind => ipcRenderer.invoke('pet:software-permission',kind),
+  boperStatus: () => ipcRenderer.invoke('pet:boper-status'),
+  boperControl: action => ipcRenderer.invoke('pet:boper-control',action),
   agentCommand: (text) => ipcRenderer.invoke('pet:agent-command', text),
   agentControl: (operation, id) => ipcRenderer.invoke('pet:agent-control', { operation, id }),
   activityStop: ref => ipcRenderer.invoke('pet:activity-control', {operation:'stop',ref}),

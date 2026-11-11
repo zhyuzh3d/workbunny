@@ -2,6 +2,11 @@
 // Never enter a synchronous Keychain read while the login screen owns the session.
 // Native session status is authoritative; Electron 33's idle state reports "idle"
 // on this locked macOS 26 machine, so idle time is not a lock detector.
+async function readSessionLocked(native) {
+  const state = await native.request('sessionState', {}, 8000);
+  if (typeof state?.sessionLocked !== 'boolean') throw Object.assign(Error('原生会话状态无效'), { code: 'E_SESSION_STATE' });
+  return state.sessionLocked;
+}
 class SessionGate {
   constructor({ readLocked, onLocked, onUnlocked, pollMs = 10000 }) {
     Object.assign(this, { readLocked, onLocked, onUnlocked, pollMs });
@@ -33,4 +38,4 @@ class SessionGate {
   }
   close() { this.closed = true; this.revision++; clearInterval(this.timer); this.timer = null; }
 }
-module.exports = { SessionGate };
+module.exports = { SessionGate, readSessionLocked };

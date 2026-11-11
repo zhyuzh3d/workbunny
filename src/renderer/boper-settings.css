@@ -1,0 +1,30 @@
+.pb[data-page="keymouse"] { padding: 20px; }
+.boper-settings { max-width: 520px; font-size: var(--text-body); line-height: 1.5; }
+.panel-theme .boper-heading h2 { margin: 0; color: var(--ink); font-size: var(--text-heading); font-weight: 600; }
+.boper-test h3 { margin: 0; color: var(--ink); font-size: var(--text-body); font-weight: 600; }
+.boper-heading p, .boper-status p, .boper-test p, .boper-details p { margin: 6px 0 0; color: var(--muted); line-height: 1.6; }
+.boper-status { margin-top: 20px; padding: 15px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper); }
+.boper-status-title { font-size: var(--text-body); font-weight: 600; color: var(--ink); }
+.boper-ready .boper-status-title, .boper-tested { color: var(--ok) !important; }
+.boper-fault .boper-status-title, .boper-error { color: var(--danger) !important; }
+.boper-hint { font-size: var(--text-body); }
+.boper-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.panel-theme .boper-settings button.mini { font-size: var(--text-body); }
+.panel-theme .boper-settings button.mini.boper-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.panel-theme .boper-settings button.mini.boper-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.boper-details, .boper-test { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.boper-details summary { cursor: pointer; color: var(--ink-soft); }
+.boper-steps { margin: 10px 0 0; padding-left: 22px; color: var(--muted); line-height: 1.7; }
+.boper-test button, .boper-details button { margin: 10px 8px 0 0; }
+.boper-status .boper-details { margin-top: 12px; padding-top: 10px; }
+.boper-details pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; color: var(--muted); }
+body[data-tab="keymouse"] #settings > .sf { display: none; }
+.boper-instant { font-size: var(--text-xs); }
+.boper-screen { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.boper-screen-heading { display: flex; align-items: center; gap: 12px; }
+.boper-screen-heading h3 { margin: 0; color: var(--ink); font-size: var(--text-body); font-weight: 600; }
+.boper-screen-heading span { font-size: var(--text-body); }
+.boper-screen-ok { color: var(--ok); }
+.boper-screen-pending { color: var(--muted); }
+.boper-screen p { margin: 6px 0 0; color: var(--muted); line-height: 1.6; }
+.boper-screen button { margin: 10px 8px 0 0; }
