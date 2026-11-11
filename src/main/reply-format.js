@@ -4,6 +4,7 @@ const object = (properties, required) => ({ type: 'object', properties, required
 const string = maxLength => ({ type: 'string', minLength: 1, maxLength });
 const control = action => object({ action: { const: action } }, ['action']);
 const intent = { anyOf: [
+  require('./hearing-hotword-tools').ACTION_SCHEMA,
   ...['stop', 'status', 'resume'].map(control),
   object({ action: { const: 'self_update' }, ops: { type: 'array', minItems: 1, maxItems: 8, items: object({ op: { enum: ['add', 'replace', 'remove', 'lock', 'unlock', 'lock_all', 'unlock_all'] }, entryId: string(100), text: string(400), facet: { enum: ['identity', 'trait', 'value', 'behavior', 'interest'] }, condition: string(160), lock: { type: 'boolean' } }, ['op']) } }, ['action', 'ops']),
   ...['remember', 'learn_experience'].map(action => object({ action: { const: action }, content: string(1200), quotes: { type: 'array', minItems: 1, maxItems: 4, items: string(500) } }, ['action', 'content', 'quotes'])),
@@ -25,18 +26,32 @@ const schema = { anyOf: [
 // Transport capabilities choose the wire format. This never replaces the shared
 // local validator: JSON mode alone can return any JSON value, including scalars.
 const CAPABILITIES = Object.freeze({ workbuddy: 'json_object', deepseek: 'json_object', grok: 'json_schema' });
-function responseFormat(provider, capability = CAPABILITIES[provider] || 'json_object', { cognitive = false } = {}) {
+function responseFormat(provider, capability = CAPABILITIES[provider] || 'json_object', { cognitive = false,allowTurnDisposition=false } = {}) {
   const c = require('./dialogue-cognition');
+  const replySchema=allowTurnDisposition?{anyOf:[object({...schema.anyOf[0].properties,turnDisposition:{enum:['keep','replace']}},['kind','text','turnDisposition']),...schema.anyOf.slice(1)]}:schema;
   const cognitionSchema = object({ protocol: { const: 'dialogue-v2' }, stages: { type: 'array', minItems: 3, maxItems: 3, items: { anyOf: [
     object({ stage: { const: 'review' }, grade: { enum: c.GRADES }, note: { type: 'string', maxLength: 300 }, grasp: { enum: c.GRASP }, pace: { enum: c.PACE } }, ['stage', 'grade', 'note', 'grasp', 'pace']),
-    object({ stage: { const: 'reply' }, reply: schema }, ['stage', 'reply']),
+    object({ stage: { const: 'reply' }, reply: replySchema }, ['stage', 'reply']),
     object({ stage: { const: 'prediction' }, expect: { anyOf: [{ type: 'string', maxLength: 400 }, { type: 'null' }] },
       basis: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: 256 } } }, ['stage', 'expect', 'basis']),
   ] } } }, ['protocol', 'stages']);
-  return capability === 'json_schema' ? { type: 'json_schema', json_schema: { name: 'workbunny_reply', strict: true, schema: cognitive ? cognitionSchema : schema } } : { type: 'json_object' };
+  return capability === 'json_schema' ? { type: 'json_schema', json_schema: { name: 'workbunny_reply', strict: true, schema: cognitive ? cognitionSchema : replySchema } } : { type: 'json_object' };
 }
-function validateReply(raw, { allowActions = true, cognitive = false } = {}) {
-  if (cognitive) return require('./dialogue-cognition').decode(raw, inner => validateReply(inner, { allowActions }));
+function validateReply(raw, { allowActions = true, cognitive = false, allowEmptyVoiceDecision = false,allowTurnDisposition=false } = {}) {
+  if (cognitive) return require('./dialogue-cognition').decode(raw, inner => validateReply(inner, { allowActions,allowEmptyVoiceDecision,allowTurnDisposition }));
+  let disposition;
+  if(allowTurnDisposition){
+    let value;try{value=require('./dialogue-actions').parseStrictJson(raw);}catch{}
+    if(value?.kind==='chat'){
+      disposition=Object.hasOwn(value,'turnDisposition')?value.turnDisposition:'keep';
+      if(!['keep','replace'].includes(disposition))throw Object.assign(new Error('语音轮次处理方式无效'),{code:'E_REPLY_PROTOCOL'});
+      if(Object.hasOwn(value,'turnDisposition')){const {turnDisposition,...inner}=value;raw=JSON.stringify(inner);}
+    }
+  }
+  if(allowEmptyVoiceDecision&&allowActions){
+    let value;try{value=require('./dialogue-actions').parseStrictJson(raw);}catch{}
+    if(value&&value.kind==='chat'&&typeof value.text==='string'&&!value.text.trim()&&Object.keys(value).length===2)return {text:'',skipped:true};
+  }
   const { makeActionGate } = require('./dialogue-actions');
   let text = '';
   const gate = makeActionGate(delta => { text += delta; }, { requireEnvelope: true });
@@ -45,13 +60,14 @@ function validateReply(raw, { allowActions = true, cognitive = false } = {}) {
     const error = new Error('模型回复未通过对话协议校验'); error.code = 'E_REPLY_PROTOCOL'; throw error;
   }
   const parsed = require('./dialogue-actions').parseStrictJson(raw);
-  return { text, ...(parsed.kind === 'chat' && parsed.text !== text ? { taggedText: parsed.text } : {}), intent: gate.intent, skipped: gate.skipped };
+  return { text, ...(parsed.kind === 'chat' && parsed.text !== text ? { taggedText: parsed.text } : {}), intent: gate.intent, skipped: gate.skipped,
+    ...(disposition?{turnDisposition:disposition}:{}) };
 }
 
 // Cognition is optional metadata. If only that metadata is invalid, a strictly
 // validated, unambiguous chat can still be delivered. Never recover actions or
 // skip decisions from an invalid envelope.
-function recoverCognitiveChat(raw) {
+function recoverCognitiveChat(raw,{allowTurnDisposition=false}={}) {
   let value;
   try { value = require('./dialogue-actions').parseStrictJson(raw); } catch { return null; }
   let inner = value;
@@ -64,8 +80,8 @@ function recoverCognitiveChat(raw) {
   if (!inner || inner.kind !== 'chat') return null;
   const innerRaw = JSON.stringify(inner);
   try {
-    const validated = validateReply(innerRaw, { allowActions: false });
-    return validated.text && !validated.intent && !validated.skipped ? { ...validated, innerRaw } : null;
+    const validated = validateReply(innerRaw, { allowActions: false,allowTurnDisposition });
+    return validated.text && !validated.intent && !validated.skipped ? { ...validated, innerRaw,...(allowTurnDisposition?{turnDisposition:'keep'}:{}) } : null;
   } catch { return null; }
 }
 function dialogueHistory(messages) {

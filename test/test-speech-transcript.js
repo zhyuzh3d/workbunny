@@ -13,17 +13,48 @@ test('native publication explicitly retracts withdrawn provisional words without
  const rows=run.stdout.trim().split('\n').map(JSON.parse);assert.deepEqual(rows.map(row=>row.t),['partial','retract','selfTest']);
  assert.equal(rows[0].gen,7);assert.equal(rows[1].gen,7);assert.equal(rows[1].v,undefined);assert.equal(rows[1].coveredSeq,undefined);assert.equal(rows[2].transcriptRetraction,true);assert.equal(rows[2].recognizerStarted,false);
 });
-test('recognized ranges require independent multi-frame speech support and preserve capture ownership',t=>{
+test('input evidence checks finite generation ranges and preserves capture clocks without classifying words',t=>{
  if(!fs.existsSync(binary))return t.skip('native ASR is not built');
- const run=spawnSync(binary,['--self-test-acoustic-evidence'],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);
- const result=JSON.parse(run.stdout.trim());
- for(const key of ['acousticEvidence','quietRejected','unknownRejected','transientRejected','rangeOwnership','captureClock','realSpeechPreserved','partialFrameOwnership'])assert.equal(result[key],true,key);
- assert.equal(result.recognizerStarted,false);
+ const run=spawnSync(binary,['--self-test-acoustic-evidence'],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);const result=JSON.parse(run.stdout.trim());for(const key of ['inputClockEvidence','rangeOwnership','captureClock'])assert.equal(result[key],true,key);assert.equal(result.recognizerStarted,false);
+});
+test('system candidates and short words survive quiet/missing auxiliary timing evidence unchanged',t=>{
+ if(!fs.existsSync(binary))return t.skip('native ASR is not built');
+ const run=spawnSync(binary,['--self-test-timed-acoustic-support'],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);const rows=run.stdout.trim().split('\n').map(JSON.parse),summary=rows.at(-1);for(const key of ['systemCandidatesPreserved','shortWordsPreserved','timingIsEvidenceOnly'])assert.equal(summary[key],true,key);assert.deepEqual(rows.map(row=>row.t),['partial','utterance','selfTest']);assert.equal(rows[0].v,'fixture you');assert.equal(rows[1].v,'fixture you');
 });
 test('native speech keeps final phrases, replaces volatile ranges and preserves audio across rollover without microphone access',t=>{
  if(!fs.existsSync(binary))return t.skip('native ASR is not built');
  const run=spawnSync(binary,['--self-test-transcript'],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);
  const result=JSON.parse(run.stdout.trim());assert.equal(result.transcriptRanges,true);assert.equal(result.rolloverAudio,true);
+});
+test('finalized prefixes survive range rounding and withdrawal, conflicting revisions fail closed, and quiet input stays healthy',t=>{
+ if(!fs.existsSync(binary))return t.skip('native ASR is not built');
+ const run=spawnSync(binary,['--self-test-transcript-protection'],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);
+ const rows=run.stdout.trim().split('\n').map(JSON.parse);assert.equal(rows.length,1);
+ for(const key of ['transcriptProtection','finalizedPrefixPreserved','conflictRejected','duplicateFinalSafe','zeroLengthWatermarkSafe','missingTimingCompatible','zeroDurationCompatible','punctuationSafe','longQuietHealthy'])assert.equal(rows[0][key],true,key);
+ assert.equal(rows[0].recognizerStarted,false);
+});
+test('completed-input finalization confirms the latest unchanged result only after both receipts in either order',t=>{
+ if(!fs.existsSync(binary))return t.skip('native ASR is not built');
+ for(const order of [[],['--finalizer-first']])for(const fixture of ['revised','withdrawn','quiet','unbacked']){
+  const run=spawnSync(binary,['--self-test-completed-finalization','--fixture',fixture,...order],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);
+  const rows=run.stdout.trim().split('\n').map(JSON.parse),summary=rows.find(row=>row.t==='selfTest');
+  for(const key of ['completedFinalization','bothReceiptsRequired','latestRevision','onceOnly'])assert.equal(summary[key],true,key);
+  assert.equal(summary.recognizerStarted,false);
+  const utterances=rows.filter(row=>row.t==='utterance');assert.equal(utterances.length,fixture==='withdrawn'?0:1);
+  if(utterances.length)assert.equal(utterances[0].v,'fixture latest');
+  const receipts=rows.filter(row=>row.t==='finalization');assert.equal(receipts.length,1);assert.equal(receipts[0].stage,'committed');assert.equal(receipts[0].ok,true);
+  assert.equal(receipts[0].resultsConfirmed,fixture==='withdrawn');
+  for(const row of receipts){assert.deepEqual(Object.keys(row).sort(),['at','current','gen','inputSeconds','ok','resultsConfirmed','stage','t','textChars']);assert.equal(row.gen,7);assert.equal(row.inputSeconds,1);}
+  assert(!rows.some(row=>['auth','ready','tap','capture'].includes(row.t)));
+ }
+});
+test('a finalizer receipt cannot authorize future ranges or conflicting final revisions',t=>{
+ if(!fs.existsSync(binary))return t.skip('native ASR is not built');
+ for(const fixture of ['future','conflicted']){
+  const run=spawnSync(binary,['--self-test-completed-finalization','--fixture',fixture],{encoding:'utf8',timeout:5000});assert.equal(run.status,24,run.stderr||run.stdout);
+  const rows=run.stdout.trim().split('\n').map(JSON.parse);assert(!rows.some(row=>['utterance','final','audioFinal'].includes(row.t)));
+  const failure=rows.find(row=>row.t==='finalization');assert.equal(failure.stage,'failed');assert.equal(failure.reason,'unconfirmed');assert.equal(failure.ok,false);
+ }
 });
 test('optional native speech trace contains only fixed stages and finite numeric metadata without starting recognition',t=>{
  if(!fs.existsSync(binary))return t.skip('native ASR is not built');
@@ -37,6 +68,6 @@ test('optional native speech trace contains only fixed stages and finite numeric
   if(['t','stage'].includes(key))continue;assert(fields.has(key),key);
   assert(typeof value==='boolean'||typeof value==='number'&&Number.isFinite(value)||Array.isArray(value)&&value.every(n=>typeof n==='number'&&Number.isFinite(n)),key);
  }assert.equal(row.gen,7);assert.equal(row.currentGen,0);assert.equal(row.queuedBuffers,2);assert.equal(row.queuedFrames,320);assert.equal(row.pendingFrames,320);assert.deepEqual(row.rms,[.25]);assert.deepEqual(row.peak,[.25]);}
- const result=trace.find(row=>row.stage==='result');assert.equal(result.removedSegments,1);assert.equal(result.touchesFinalized,true);
+ const result=trace.find(row=>row.stage==='result');assert.equal(result.removedSegments,0);assert.equal(result.touchesFinalized,false);
  assert.equal(rows.some(row=>['ready','auth','partial','utterance','tap','capture'].includes(row.t)),false);
 });

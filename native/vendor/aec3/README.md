@@ -3,8 +3,8 @@
 WorkBunny uses the maintained freedesktop extraction of Google's WebRTC
 AudioProcessing, release **2.1**, based on **WebRTC M131**. Its non-mobile echo
 controller is AEC3. The bridge uses upstream automatic delay estimation,
-multichannel render analysis, double-talk handling, a high-pass filter and low
-noise suppression. Analog/digital automatic gain control, preamplification and
+multichannel render analysis, double-talk handling, a high-pass filter and standard
+noise suppression with upstream defaults, shared by all devices. Analog/digital automatic gain control, preamplification and
 capture level adjustment are disabled. The DSP never changes device volumes.
 
 `sources.json` locks the two unmodified source archives and their SHA-256 hashes.

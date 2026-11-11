@@ -470,6 +470,19 @@ class AgentRuntime {
         const snapshot = clone(task), now = this.clock();
         apply(snapshot, now);
         await this.commitSnapshot(task, snapshot, now, apply);
+        if (!overflow && stored.type === 'conversation.messages' && require('./conversation-cursor').hasNewInput(stored)) {
+          const scope = this.eventScope(stored);
+          for (const worker of this.actionGroups.get(id)?.workers.values() || []) {
+            if (!scope || worker.scope !== scope || worker.eventKey === stored.key) continue;
+            // Cancel planning immediately. Once a write Operation exists, its
+            // lifecycle already cancels preparation at the safe boundary. Let
+            // that Operation settle its actual non-dispatch/receipt before
+            // releasing this worker, so a successor cannot inherit a transient
+            // unknown write while the old draft is still being stopped.
+            const settlingWrite = Object.values(task.operations).some(op => op.actionId === worker.actionId && op.effect === 'write' && op.status === 'intent');
+            if (!settlingWrite) worker.controller.abort(Object.assign(new Error('同一会话有新消息，保留原输入并合并回应'), { code: 'E_ACTION_SUPERSEDED', dispatched: false }));
+          }
+        }
         this.schedule();
         return { ok: true, ...(overflow ? { overflow: true } : {}) };
       });

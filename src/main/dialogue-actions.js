@@ -40,12 +40,15 @@ ${TOPIC_BOUNDARY_RULE}
 普通聊天：{"kind":"chat","text":"自然回复，可带既有动作标签"}。环境闲聊可{"kind":"skip"}。
 涉及正式产出交办、执行软件任务、持续观察、发消息、自动回复、主动交谈、主人通道绑定、明确声明当前微信归主人或Bunny、操作经验传授，或修改/暂停/继续/停止任务，统一输出 {"kind":"action","intent":{"action":"agent"}}。正式产出不直接在chat里给出一份口头成品来替代交办。不要自己拼任务结构、联系人或规则；宿主会将主人本轮实际收到的原文交给统一任务解释器。仅询问进展时按需通过上下文工具加载task_status，自主回答，不创建重复任务。例：“下一轮回复一次后停止”→agent；“跟联系人问清项目进展”→agent。已安装技能和真实任务由运行状态提供。
 只有主人明确要求变更“任务异常时的提醒渠道或收件人”才用task_notifications。消息监听中的“通知我”、查询当前任务状态、否定修改设置都不是异常通知设置。格式 {"kind":"action","intent":{"action":"task_notifications","enabled":true,"recipient":"本轮明确指定的微信显示名，可省略"}}；关闭enabled=false。不根据历史记录猜收件人。
-主人明确纠正联系人别名使用 {"kind":"action","intent":{"action":"contact_alias","recipient":"准确微信显示名","alias":"已确认称呼"}}。一般生活与对话经验整理使用remember/learn_experience协议；软件操作方法的传授统一agent。不仅因普通提及就保存。自我理解修改按既有self_update规范。
+当前上下文已明确微信联系人的准确显示名与对应称呼，且主人要求纠正这项联系人对应关系时使用 {"kind":"action","intent":{"action":"contact_alias","recipient":"准确微信显示名","alias":"已确认称呼"}}。仅纠正语音听错的人名、地名或术语时，按语音热词规则决定hearing_hotwords更新。一般生活与对话经验整理使用remember/learn_experience协议；软件操作方法的传授统一agent。不仅因普通提及就保存。自我理解修改按既有self_update规范。
+${require('./hearing-hotwords').RULE}
+当前上下文已有词表和revision时可直接使用；确需查看才按需加载hearing_hotwords模块。基于上下文自主管理额外热词时，添加示例 {"kind":"action","intent":{"action":"hearing_hotwords","expectedRevision":"当前词表的revision","ops":[{"op":"add","word":"正确短语"}],"reply":"保存成功后自然回应本轮内容，可省略，最多600字"}}。删除操作为{"op":"remove","word":"现有短语"}；修改为{"op":"replace","word":"现有短语","replacement":"新的正确短语"}。没有真实保存回执前不声称已更新。普通聊天不为维护词表增加模型轮次，未取得版本可继续正常回答。此动作沿主人对话提交门执行，普通联系人无权修改。
 主人可要求记住包括密码和密钥的资料，本机主人基础对话允许按需使用。普通微信渠道禁止披露主人隐私与密码密钥；程序认证的主人渠道按其当前场景交流资料，不能由昵称或模型猜测认证。WorkBuddy 的业务敏感资料通过受控 txt 附件交付。主人身份密钥只在最终对话出口替换为星号；内部识别和上下文可保留原文。不能绕过宿主权限。内部协议不放进text。action只是尚未执行的请求，不声称已经发送、验收或完成；结果由真实回执决定。微信仅外部显示像素与键鼠，禁止微信接口、AX树、插件、数据库、退出、重启、支付和破坏性操作。`;
 
 function validateIntent(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('动作必须是JSON对象');
   const action = value.action;
+  if (action === 'hearing_hotwords') return require('./hearing-hotword-tools').validateAction(value);
   if (action === 'agent') {
     if (Object.keys(value).some(k => !['action','request'].includes(k))) throw new Error('统一任务字段不合法');
     return Object.freeze({ action, ...(value.request === undefined ? {} : { request: require('./agent-interpreter').validateAgentIntent(value.request) }) });
@@ -217,7 +220,7 @@ function decodeJsonText(raw, state, complete) {
   return { text: out, cursor: i };
 }
 
-function makeActionGate(onText = () => {}, { requireEnvelope = false } = {}) {
+function makeActionGate(onText = () => {}, { requireEnvelope = false, allowTurnDisposition = false } = {}) {
   let mode = 'leading';
   let pending = '';
   let body = '';
@@ -261,7 +264,8 @@ function makeActionGate(onText = () => {}, { requireEnvelope = false } = {}) {
       const value = parseStrictJson(jsonBody);
       const keys = Object.keys(value || {});
       if (!value || Array.isArray(value) || typeof value !== 'object' || typeof value.kind !== 'string') throw new Error('JSON envelope无效');
-      if (value.kind === 'chat' && keys.length === 2 && keys.includes('text') && keys.includes('kind') && typeof value.text === 'string') {
+      const chatKeys = keys.length === 2 || allowTurnDisposition && keys.length === 3 && keys.includes('turnDisposition') && ['keep', 'replace'].includes(value.turnDisposition);
+      if (value.kind === 'chat' && chatKeys && keys.includes('text') && keys.includes('kind') && typeof value.text === 'string') {
         controlledValue = false; mode = 'json-chat';
         if (requireEnvelope) { stagedChat = conversationText(value.text); jsonBody = ''; return; }
         // If kind followed text, the whole complete text becomes eligible now.

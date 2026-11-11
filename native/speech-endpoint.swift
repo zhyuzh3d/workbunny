@@ -1,5 +1,49 @@
 import Foundation
 
+// macOS 26 may terminate the result stream with this exact rejection after
+// the system VAD drains an empty segment. Code 1 alone is a generic internal
+// error; this narrow compatibility case still requires finalizer success.
+func isEmptySpeechRejection(_ error: Error, detectorEnabled: Bool, current: Bool, endingQuiet: Bool,
+                            requested: Bool, inputSeconds: Double, everHadText: Bool,
+                            textEmpty: Bool, validRevisions: Bool) -> Bool {
+    let error = error as NSError
+    return detectorEnabled && current && endingQuiet && requested && inputSeconds.isFinite && inputSeconds > 0 &&
+        !everHadText && textEmpty && validRevisions && error.domain == "SFSpeechErrorDomain" && error.code == 1 &&
+        error.userInfo[NSLocalizedDescriptionKey] as? String == "RecogRejected"
+}
+
+// Transport arrival and VAD sample time have different clocks/latencies.
+// Reuse existing health/freshness bounds instead of allowing stale sample
+// evidence to misclassify a missing physical stream as a speech failure.
+enum SpeechCaptureFault: String {
+    case configurationChanged = "configuration-changed"
+    case transportTimeout = "transport-timeout"
+    case vadTimeout = "vad-timeout"
+
+    var exitCode: Int32 { self == .vadTimeout ? 25 : 22 }
+    func message(pendingText: Bool) -> String {
+        let base: String
+        switch self {
+        case .configurationChanged: base = "音频连接已变化，正在重新连接"
+        case .transportTimeout: base = "麦克风音频输入中断，正在重新连接"
+        case .vadTimeout: base = "语音活动检测暂时不可用，正在重新连接"
+        }
+        return pendingText ? base + "；本段语音尚未确认，请重新说出完整要求" : base
+    }
+}
+struct SpeechCaptureHealthPolicy {
+    static func fault(now: Double, captureAt: Double, activityAt: Double,
+                      captureTimeout: Double = 4, activityTimeout: Double = 4,
+                      freshness: Double = 0.5) -> SpeechCaptureFault? {
+        guard now.isFinite, captureAt.isFinite, activityAt.isFinite,
+              now >= captureAt, now >= activityAt else { return .transportTimeout }
+        let captureAge = now - captureAt
+        if captureAge > captureTimeout { return .transportTimeout }
+        guard now - activityAt >= activityTimeout else { return nil }
+        return captureAge > freshness ? .transportTimeout : .vadTimeout
+    }
+}
+
 // Pure policies. The caller protects mutation and claim with its state lock.
 // All times use one monotonic clock; absence of evidence is never quiet.
 struct SpeechEndpointPolicy {
@@ -100,6 +144,11 @@ struct SpeechEndpointPolicy {
         return activity
     }
 
+    func allowsEmptyCheckpoint(deliveredSeconds: Double, at now: Double, generation: Int) -> Bool {
+        validConfiguration && generation == self.generation && deliveredSeconds.isFinite && deliveredSeconds > 0 &&
+        hasObservedActive && evidence(at: now, generation: generation) == .quiet
+    }
+
     func decision(at now: Double, generation: Int) -> Decision {
         guard generation == self.generation else { return .wait }
         guard validConfiguration, now.isFinite, now >= healthAt else { return .unconfirmed }
@@ -107,9 +156,9 @@ struct SpeechEndpointPolicy {
         // A successor may observe a brief sound without recognizing words.
         // It still needs a real finalizer/results barrier to cover that audio;
         // otherwise the host can never confirm the preceding spoken turn.
-        if hasObservedActive, evidence(at: now, generation: generation) == .quiet,
+        if (hasObservedActive || hasText), evidence(at: now, generation: generation) == .quiet,
            quietSeconds + 1e-9 >= silenceSeconds,
-           lastTextChangeAt.map({ now - $0 + 1e-9 >= silenceSeconds }) ?? true { return .quiet }
+           (hasObservedActive || (lastTextChangeAt.map({ now - $0 + 1e-9 >= silenceSeconds }) ?? true)) { return .quiet }
         if let first = firstTextAt, now - first >= maxSeconds { return .unconfirmed }
         return .wait
     }
@@ -121,6 +170,7 @@ struct SpeechFinalizationBarrier {
     private(set) var requestedAt: Double?
     private(set) var failure: Failure?
     private(set) var claimed = false
+    private(set) var resultsConfirmed: Bool?
     private var finalizerOK = false
     private var streamEnded = false
     private var text: String?
@@ -145,8 +195,12 @@ struct SpeechFinalizationBarrier {
     mutating func resultsEnded(confirmed: Bool, text: String, generation: Int) -> Bool {
         guard generation == self.generation, !claimed, failure == nil else { return false }
         guard requestedAt != nil else { failure = .unexpectedResultsEnd; return false }
-        guard confirmed else { failure = .unconfirmed; return false }
         if streamEnded { return false }
+        // This is the watermark in the last published result, not a receipt
+        // from finalizeAndFinishThroughEndOfInput. An unchanged volatile
+        // result need not be republished when it is finalized. Retain this
+        // observation for diagnostics and wait for the successful finalizer.
+        resultsConfirmed = confirmed
         streamEnded = true; self.text = text; return true
     }
 
@@ -155,7 +209,14 @@ struct SpeechFinalizationBarrier {
         failure = reason
     }
 
-    mutating func timeout(generation: Int) { fail(.timeout, generation: generation) }
+    @discardableResult
+    mutating func timeout(generation: Int) -> Bool {
+        // Receipts and publication are separate scheduled jobs. Once both
+        // receipts arrived, a timer running before claim must not revoke them.
+        guard generation == self.generation, requestedAt != nil, !claimed,
+              failure == nil, !(finalizerOK && streamEnded) else { return false }
+        failure = .timeout; return true
+    }
 
     // This is an atomic once-claim only when the caller holds its state lock.
     mutating func claim(generation: Int) -> String? {
@@ -191,10 +252,14 @@ extension SpeechEndpointPolicy {
         try check(value.decision(at: 1.6, generation: 7) == .wait)
         observe(.quiet, 0.9, 2.4, &value)
         try check(value.decision(at: 2.4, generation: 7) == .quiet)
+        // A delayed ASR revision must not restart an already elapsed acoustic
+        // pause; the finalizer still drains and confirms the system result.
+        value.recordText("fixture revised", at: 2.4, generation: 7)
+        try check(value.decision(at: 2.4, generation: 7) == .quiet)
         try check(value.evidence(at: 2.91, generation: 7) == .unknown)
         try check(value.decision(at: 2.91, generation: 7) == .wait)
-        try check(!value.recordText("fixture text", at: 2.92, generation: 7))
-        try check(value.lastTextChangeAt == 0)
+        try check(!value.recordText("fixture revised", at: 2.92, generation: 7))
+        try check(value.lastTextChangeAt == 2.4)
         try check(!value.observe(.active, quietSeconds: 0, at: 3, generation: 6, now: 3))
         try check(value.evidence(at: 3, generation: 6) == .unknown)
         try check(value.decision(at: 3, generation: 6) == .wait)
@@ -213,7 +278,9 @@ extension SpeechEndpointPolicy {
         observe(.quiet, 1, 2, &empty)
         try check(!empty.hasText && empty.decision(at: 2, generation: 7) == .quiet)
         idle.recordText("fixture hallucination", at: 59, generation: 7)
-        try check(idle.decision(at: 60, generation: 7) == .wait)
+        try check(idle.decision(at: 60, generation: 7) == .quiet)
+        observe(.unknown, 0, 60.1, &idle)
+        try check(idle.decision(at: 60.1, generation: 7) == .wait)
         var blind = policy()
         try check(blind.decision(at: 4, generation: 7) == .unconfirmed)
         observe(.unknown, 0, 3.9, &blind)
@@ -243,7 +310,7 @@ extension SpeechEndpointPolicy {
         try check(resumed.evidence(at: 2.1, generation: 7) == .unknown)
         try check(resumed.decision(at: 2.1, generation: 7) == .wait)
         observe(.quiet, 10, 3, &resumed)
-        try check(resumed.decision(at: 3, generation: 7) == .wait)
+        try check(resumed.decision(at: 3, generation: 7) == .quiet)
         try check(!resumed.recordText("fixture retained", at: 3.1, generation: 7))
         try check(resumed.lastTextChangeAt == 2.1)
         try check(!resumed.resetActivity(at: 3.2, generation: 6))
@@ -262,6 +329,7 @@ extension SpeechEndpointPolicy {
             try check(barrier.claim(generation: 7) == nil)
             if finalizerFirst { barrier.resultsEnded(confirmed: true, text: "fixture final", generation: 7) }
             else { barrier.finalizerSucceeded(generation: 7) }
+            try check(!barrier.timeout(generation: 7))
             try check(barrier.claim(generation: 6) == nil)
             try check(barrier.claim(generation: 7) == "fixture final")
             try check(barrier.claim(generation: 7) == nil)
@@ -285,14 +353,40 @@ extension SpeechEndpointPolicy {
         expired.request(at: 1, generation: 7)
         expired.finalizerSucceeded(generation: 7)
         expired.resultsEnded(confirmed: true, text: "fixture final", generation: 7)
-        expired.timeout(generation: 7)
-        try check(expired.claim(generation: 7) == nil)
-        var unconfirmed = SpeechFinalizationBarrier(generation: 7)
-        unconfirmed.request(at: 1, generation: 7)
-        unconfirmed.resultsEnded(confirmed: false, text: "fixture volatile", generation: 7)
-        unconfirmed.finalizerSucceeded(generation: 7)
-        try check(unconfirmed.failure == .unconfirmed)
-        try check(unconfirmed.claim(generation: 7) == nil)
+        try check(!expired.timeout(generation: 7))
+        try check(expired.claim(generation: 7) == "fixture final")
+        for finalizerFirst in [false, true] {
+            var pending = SpeechFinalizationBarrier(generation: 7)
+            pending.request(at: 1, generation: 7)
+            if finalizerFirst { pending.finalizerSucceeded(generation: 7) }
+            else { pending.resultsEnded(confirmed: true, text: "fixture pending", generation: 7) }
+            try check(pending.timeout(generation: 7))
+            if finalizerFirst { pending.resultsEnded(confirmed: true, text: "fixture pending", generation: 7) }
+            else { pending.finalizerSucceeded(generation: 7) }
+            try check(pending.claim(generation: 7) == nil)
+        }
+        // Unchanged volatile results need not be republished as final. Both
+        // callback orders still require the complete-input finalizer receipt.
+        for finalizerFirst in [false, true] {
+            var unchanged = SpeechFinalizationBarrier(generation: 7)
+            unchanged.request(at: 1, generation: 7)
+            if finalizerFirst { unchanged.finalizerSucceeded(generation: 7) }
+            else { unchanged.resultsEnded(confirmed: false, text: "fixture unchanged", generation: 7) }
+            try check(unchanged.claim(generation: 7) == nil)
+            if finalizerFirst { unchanged.resultsEnded(confirmed: false, text: "fixture unchanged", generation: 7) }
+            else { unchanged.finalizerSucceeded(generation: 7) }
+            try check(unchanged.resultsConfirmed == false && unchanged.failure == nil)
+            try check(unchanged.claim(generation: 7) == "fixture unchanged")
+            try check(unchanged.claim(generation: 7) == nil)
+        }
+        for reason in [SpeechFinalizationBarrier.Failure.finalizer, .results, .timeout] {
+            var unconfirmed = SpeechFinalizationBarrier(generation: 7)
+            unconfirmed.request(at: 1, generation: 7)
+            unconfirmed.resultsEnded(confirmed: false, text: "fixture volatile", generation: 7)
+            unconfirmed.fail(reason, generation: 7)
+            unconfirmed.finalizerSucceeded(generation: 7)
+            try check(unconfirmed.failure == reason && unconfirmed.claim(generation: 7) == nil)
+        }
         var unexpected = SpeechFinalizationBarrier(generation: 7)
         unexpected.resultsEnded(confirmed: true, text: "fixture unexpected", generation: 7)
         try check(!unexpected.request(at: 1, generation: 7))
@@ -303,6 +397,8 @@ extension SpeechEndpointPolicy {
         old.resultsEnded(confirmed: true, text: "fixture old", generation: 6)
         old.timeout(generation: 6)
         try check(old.failure == nil && old.claim(generation: 7) == nil)
-        return ["t": "selfTest", "speechEndpoint": true, "speechFinalizationBarrier": true, "checks": checks]
+        return ["t": "selfTest", "speechEndpoint": true, "speechFinalizationBarrier": true,
+                "unchangedVolatileFinalization": true, "finalizerFailureRejected": true,
+                "readyReceiptsSurviveTimeout": true, "checks": checks]
     }
 }

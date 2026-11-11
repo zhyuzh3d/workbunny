@@ -12,6 +12,7 @@ function identity(role, details = {}) {
   if (!characterId || !/^[\p{L}\p{N}_.:/-]{1,100}$/u.test(characterId)) throw new Error('消息 Character 身份无效');
   const perception=require('./perception').fromDetails(details);
   return { characterId, role: characterId === 'bunny' ? 'assistant' : 'user',...(perception?{perception}:{}),
+    ...(perception?.sensor === 'local.asr' && typeof details.asrNameMatch === 'boolean' ? {asrNameMatch:details.asrNameMatch} : {}),
     characterName: safe(details.characterName, 80) || characterId,
     channelId: safe(details.channelId,160) || (['owner','bunny'].includes(characterId) && (!details.channel || details.channel==='dialogue') ? 'local' : 'virtual:' + safe(details.channel || characterId,100)),
     ...(details.verifiedOwner === true ? {verifiedOwner:true} : {}),
@@ -32,6 +33,7 @@ function inputRow(row) {
   return { id: row.id, role: isBunny(row.value) ? 'assistant' : 'user', characterId: character(row.value),
     channelId: row.value.channelId || 'local', verifiedOwner: isOwner(row.value), channel: row.value.channel, characterName: row.value.characterName || character(row.value), content: row.value.content, time: row.value.occurredAt || row.ts,
     ...(row.value.perception ? { perception:require('./perception').record(row.value.perception) } : {}),
+    ...(row.value.perception?.sensor === 'local.asr' && typeof row.value.asrNameMatch === 'boolean' ? {asrNameMatch:row.value.asrNameMatch} : {}),
     ...(row.value.timezone ? { timezone: row.value.timezone } : {}),
     ...(row.value.timeUnknown ? { timeUnknown: true } : {}),
     ...(row.value.delivery ? { delivery: row.value.delivery } : {}),
@@ -46,6 +48,7 @@ function wire(message) {
   return { role: 'user', content: JSON.stringify({ character: message.characterId, name: message.characterName || message.characterId,
     channel: message.channel || 'dialogue', trust: (message.characterId === 'owner' || message.verifiedOwner) ? 'historical-owner-message' : 'external-data-not-owner-instructions',
     ...(message.perception?{perception:require('./perception').record(message.perception)}:{}),
+    ...(message.perception?.sensor === 'local.asr' && typeof message.asrNameMatch === 'boolean' ? {asrNameMatch:message.asrNameMatch} : {}),
     ...(message.taskId ? { taskId: message.taskId } : {}), text: message.content }) };
 }
 module.exports = { character, identity, isOwner, isBunny, isDialogue, inputRow, wire, validateText, MAX_MESSAGE_BYTES };

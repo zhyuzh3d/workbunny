@@ -32,6 +32,7 @@
   <!-- 用户给与的设定与 Bunny 自我理解分开编辑。 -->
   <div class="pb" data-page="persona">
     <label class="row"><span>名字</span><input id="setName" type="text" /></label>
+    <label class="row" id="wakeAliasesOption"><span>别名昵称</span><input id="setWakeAliases" type="text" maxlength="520" placeholder="选填，逗号分隔" /></label>
     <label class="row"><span>怎么称呼你</span><input id="setOwnerName" type="text" maxlength="64" placeholder="主人" /></label>
     <label class="setting-field"><span data-character-text="你给 Bunny 的设定">你给她的设定</span><textarea id="setProfile" rows="3" maxlength="2000" data-character-placeholder="你希望 Bunny 是怎样的伙伴，有怎样的性格、兴趣或愿景" placeholder="你希望她是怎样的伙伴"></textarea></label>
     <label class="setting-field"><span>你希望她怎样与你相处</span><textarea id="setBehavior" rows="3" maxlength="2000" placeholder="例如：我倾诉时先听完，不急着给建议；可以表达自己的不同看法"></textarea></label>
@@ -100,11 +101,21 @@
 <div id="asrModeInfo" class="note" hidden></div>
     <label class="row" id="asrNetworkRow" hidden><span>允许联网识别</span><input id="asrAllowNetwork" type="checkbox" role="switch" /></label>
     <div class="group">一直听着</div>
-    <label class="row"><span>常驻监听</span><input id="setAlways" type="checkbox" role="switch" /></label>
-    <label class="row"><span>只回应对我说的话</span><input id="setJudge" type="checkbox" role="switch" /></label>
-    <label class="row"><span>叫名字才回应</span><input id="setWakeOnly" type="checkbox" role="switch" /></label>
-    <div class="note">每句话先叫名字，中文同音字也能识别。</div>
-    <label class="row"><span>其他叫法</span><input id="setWakeAliases" type="text" maxlength="520" placeholder="选填，例如外文名的中文叫法；用逗号分隔" /></label>
+    <div class="hearing-option">
+      <label class="row"><span>常驻监听</span><input id="setAlways" type="checkbox" role="switch" /></label>
+    </div>
+    <div class="hearing-option">
+      <label class="row" id="speechSensitivityRow"><span>声音敏感度 <output id="speechSensitivityLabel">中</output></span><input id="speechSensitivity" type="range" min="0" max="2" step="1" value="1" aria-label="声音敏感度" /></label>
+      <div class="note" id="speechSensitivityNote">默认中档。环境声误触时调低；轻声容易漏听时调高。不改变麦克风音量。</div>
+    </div>
+    <div class="hearing-option" id="wakeOnlyOption">
+      <label class="row"><span>叫名字才回应</span><input id="setWakeOnly" type="checkbox" role="switch" /></label>
+      <div class="note">每句话先叫名字，中文同音字也能识别。</div>
+    </div>
+    <div class="hearing-option" id="hotwordsOption">
+      <label class="row"><span>额外热词</span><textarea id="setHotwords" rows="3" placeholder="用逗号或换行分隔"></textarea></label>
+      <div class="note">名字和别名会自动加入；你和 Bunny 都可以管理这些额外热词。</div>
+    </div>
     <div class="group">主人声音</div>
     <div class="speakerReading"><p>请朗读下面这段文字：</p><blockquote id="speakerPassage">今天我想慢慢把手里的事情做好，遇到问题就一步一步来。忙的时候认真工作，累的时候起来走走。现在我在和你说话，希望我们可以自然地聊天，也一起发现一些有趣的新想法。</blockquote></div>
     <div class="actions"><button id="speakerEnroll" class="mini">开始朗读</button><button id="speakerReset" class="mini" hidden>清除声音</button></div>

@@ -7,6 +7,7 @@ func value(_ name: String, _ fallback: String) -> String { if let i = args.first
 let outputLock = NSLock()
 func emit(_ d:[String:Any]) { outputLock.lock(); defer { outputLock.unlock() }; if let d=try? JSONSerialization.data(withJSONObject:WakeName.annotate(d)), let s=String(data:d,encoding:.utf8) { print(s); fflush(stdout) } }
 let speakerFeatures = SpeakerFeatures(output: emit)
+let speechContextStrings = SpeechContextStrings()
 let engine=AVAudioEngine()
 let recognizer=SFSpeechRecognizer(locale:Locale(identifier:value("--lang",Locale.current.identifier)))
 let lock=NSLock()
@@ -32,11 +33,12 @@ func run() {
           SFSpeechRecognizer.authorizationStatus() == .authorized,
           let r=recognizer, r.isAvailable else {emit(["t":"error","v":"请允许麦克风/语音识别，并检查系统听写或网络","code":4]);finish(false);return}
     if !r.supportsOnDeviceRecognition && !args.contains("--allow-network") {emit(["t":"error","v":"该语言需联网识别；请在听力设置中允许，或使用文字输入","code":23]);finish(false);return}
-    let req=SFSpeechAudioBufferRecognitionRequest();request=req;req.shouldReportPartialResults=true;req.contextualStrings=WakeName.configured.names
+    let req=SFSpeechAudioBufferRecognitionRequest();request=req;req.shouldReportPartialResults=true;req.contextualStrings=speechContextStrings.snapshot().strings
+    emit(["t":"context","stage":"submitted","revision":0,"count":req.contextualStrings.count])
     req.requiresOnDeviceRecognition=r.supportsOnDeviceRecognition
     task=r.recognitionTask(with:req) {result,error in
         if let result {lock.lock();if text != result.bestTranscription.formattedString {lastTextAt=Date().timeIntervalSince1970};text=result.bestTranscription.formattedString;lock.unlock();emit(["t":"partial","v":result.bestTranscription.formattedString]);if result.isFinal {finish(true)}}
-        else if error != nil {emit(["t":"error","v":"系统识别暂不可用，请检查听写和网络后重试","code":6]);finish(false)}
+        else if error != nil {emit(["t":"error","v":"系统识别暂不可用，请检查听写和网络后重试","code":6,"kind":"recognition","reason":"results","fatal":true]);finish(false)}
     }
     let node=engine.inputNode,format=node.outputFormat(forBus:0)
     emit(["t":"mic", "on":false, "identity":SpeakerFeatures.inputIdentity(node)])
@@ -51,7 +53,7 @@ func run() {
     };tapped=true
     do {engine.prepare();try engine.start()}catch {emit(["t":"error","v":"无法连接麦克风","code":6]);finish(false)}
     if args.contains("--always") {
-        let silence=max(0.4,(Double(value("--silence","900")) ?? 900) / 1000)
+        let silence=max(0.4,(Double(value("--silence","600")) ?? 600) / 1000)
         Timer.scheduledTimer(withTimeInterval:0.2,repeats:true) {_ in
             lock.lock();let quiet = !ended && lastTextAt > 0 && Date().timeIntervalSince1970-lastTextAt >= silence;lock.unlock()
             if quiet {finish(true)}
@@ -68,6 +70,7 @@ if args.contains("--ask-speech") {
 } else {DispatchQueue.main.async {run()}}
 if !args.contains("--status") { DispatchQueue.global().async {
     while let command=readLine() {
+        if command.hasPrefix("context "), let value=speechContextStrings.replace(json:String(command.dropFirst("context ".count))) {emit(["t":"context","stage":"queued","revision":value.revision,"count":value.strings.count]);continue}
         if command == "quit" {finish(false);return}
         if command == "stop" { DispatchQueue.main.async { engine.stop(); if tapped { engine.inputNode.removeTap(onBus:0); tapped=false }; request?.endAudio();DispatchQueue.main.asyncAfter(deadline:.now()+1) {finish(true)} };return }
         lock.lock();if command == "mute" {muted=true};if command == "unmute" {muted=false};lock.unlock()

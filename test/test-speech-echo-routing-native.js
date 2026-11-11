@@ -7,6 +7,6 @@ test('native echo routing keeps stereo time order, bounded history and honest ra
  const run=spawnSync(binary,['--self-test-echo-routing'],{encoding:'utf8',timeout:5000});
  assert.equal(run.status,0,run.stderr||run.stdout);
  const result=JSON.parse(run.stdout.trim());
- for(const key of ['echoRouting','timestampOrder','stereoReference','boundedRing','silentReferenceIsLive','staleReferenceBypasses','rawInputPreserved','conversionFrames','boundedCaptureHeadroom','headroomFlush','referenceFailureReleasesRaw'])assert.equal(result[key],true,key);
+ for(const key of ['echoRouting','timestampOrder','stereoReference','boundedRing','silentReferenceIsLive','staleReferenceBypasses','rawInputPreserved','conversionFrames','boundedCaptureHeadroom','headroomFlush','referenceFailureReleasesRaw','bufferingDelayClock','bufferingDelayScheduling','firstReferenceDeadline','headroomSampleClocks'])assert.equal(result[key],true,key);
  assert.equal(result.recognizerStarted,false);assert.equal(result.devicesStarted,false);
 });

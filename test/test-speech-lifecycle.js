@@ -1,4 +1,5 @@
 'use strict';
+const actualReplyPolicy=()=>require('../src/main/reply-policy');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -27,13 +28,15 @@ function fixture({ streaming = false, prefetch = false } = {}) {
     ttsSession:{synthesize},voiceFor:(_emo,instructions)=>instructions,
     llm:{makeSentenceSplitter:require('../src/main/llm').makeSentenceSplitter},require:()=>({redact:text=>text}),
     inputAdmission:{containsSecret:()=>false},publishWebSources(){},embodiment:{perform(){}},
+    dialogueScope:()=> 'fixture',dialogueScheduler:()=>({interrupt(){}}),
     presentConversation: text => text, prefetchNext() {}, noteSpoken() {}, muteAsr() {}, unmuteAsr() {}, log() {},
     voiceMetadata() {}, send: (type, value) => events.push({ type, value }), console: { error() {} },
     ipcMain: { handle: (name, fn) => handlers.set(name, fn), on: (name, fn) => handlers.set(name, fn) },
     setTimeout: (fn, ms) => { const id = ++next; timers.set(id, { fn, ms }); allTimers.set(id, fn); return id; },
     clearTimeout: id => timers.delete(id), setImmediate: fn => fn(),
   };
-  vm.createContext(context);
+  Object.assign(context,{voiceThoughts:new Map(),lastAcceptedOwnerAt:0,contextEpoch:0,replyPolicy:actualReplyPolicy(),speechEcho:context.speechEcho||{rows:[]}});
+ vm.createContext(context);
   vm.runInContext([
     section('function waitForSpeech(', 'const speechEcho'),
     section('function stopSpeaking(', '/* ── 闭麦'),
@@ -137,4 +140,14 @@ test('voice preview timeout returns even when synthesis ignores cancellation', a
   f.calls[0].resolve(result()); await flush();
   assert.equal(c.activeAudioId, id); assert.equal(c.speaking, true);
   assert.deepEqual(f.audio().map(e => e.value.text), ['new']);
+});
+test('appending a keep response preserves the active synthesis and all original story blocks with their message ids',async()=>{
+ const f=fixture(),c=f.context;c.speak('故事开头。故事余下的完整正文。',{messageId:'original-story'});const signal=f.calls[0].options.signal;
+ c.speak('礼貌回应。',{messageId:'courtesy'});assert.equal(signal.aborted,false);assert.deepEqual(Array.from(c.speechQueue,item=>[item.text,item.messageId]),[['故事余下的完整正文。','original-story'],['礼貌回应。','courtesy']]);
+ f.calls[0].resolve(result());await flush();f.handlers.get('pet:audio-done')({sender:c.win.webContents},{id:c.activeAudioId,success:true});f.nextSentence();f.calls[1].resolve(result());await flush();
+ assert.deepEqual(f.audio().map(event=>event.value.text),['故事开头。','故事余下的完整正文。']);assert.equal(c.activeSpeechReplyId,'original-story');assert.equal(c.speechQueue[0].messageId,'courtesy');
+ c.stopSpeaking('user');assert.equal(c.speechQueue.length,0);
+});
+test('explicit stop cancels both isolated keep/older inferences as well as pending audio without reviving late work',()=>{
+ const f=fixture(),c=f.context,a=new AbortController(),b=new AbortController();c.voiceThoughts.set('older',a);c.voiceThoughts.set('keep',b);c.speak('pending story',{messageId:'old'});c.stopSpeaking('user');assert(a.signal.aborted);assert(b.signal.aborted);assert.equal(c.speechQueue.length,0);assert.equal(c.speaking,false);
 });

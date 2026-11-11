@@ -138,10 +138,21 @@ document.getElementById('tabs').addEventListener('click', (e) => {
 
 /* ═══════════ 权限 ═══════════ */
 let asrStat = { speech: null, mic: null, note: '' };
+function paintSpeechSensitivity(value = cfg?.asr?.sensitivity ?? 1) {
+  const input = $('speechSensitivity'), label = $('speechSensitivityLabel');
+  if (!input || !label) return;
+  input.value = String(value); label.textContent = ['低', '中', '高'][value] || '中';
+  input.setAttribute('aria-valuetext', label.textContent);
+  input.disabled = asrStat.mode === 'single';
+  $('speechSensitivityNote').textContent = asrStat.mode === 'single'
+    ? '当前系统使用兼容识别，此人声检测设置需要 macOS 26。'
+    : '默认中档。环境声误触时调低；轻声容易漏听时调高。不改变麦克风音量。';
+}
 const SPEECH_ZH = { 0: '待授权', 1: '被限制', 2: '已拒绝', 3: '已授权' };
 const MIC_ZH = { granted: '已授权', denied: '已拒绝', restricted: '被限制', 'not-determined': '待授权', unknown: '未知' };
 function paintPerm(st) {
   if (st) asrStat = { ...asrStat, ...st };
+  paintSpeechSensitivity(pendingValue('asr.sensitivity', 1));
   const sEl = $('permSpeech'), mEl = $('permMic');
   const speech = asrStat.speech;
   const micOk = asrStat.mic === true || asrStat.micSystem === 'granted';
@@ -616,9 +627,10 @@ function syncTts(c, acknowledged = []) {
   paintSceneProfile(c);
   if (!edits.has('tts.apiKey')) paintCredential($('rmKey'), c.tts.hasApiKey ? KEY_MASK : '', {preview:c.tts.apiKeyPreview});
   $('setAlways').checked = pendingValue('voice.alwaysListen', false);
-  $('setJudge').checked = pendingValue('asr.judge', true);
+  paintSpeechSensitivity(pendingValue('asr.sensitivity', 1));
   $('setWakeOnly').checked = pendingValue('asr.wakeOnly', false);
   if (!edits.has('asr.wakeAliases')) $('setWakeAliases').value = (c.asr.wakeAliases || []).join('，');
+  if (!edits.has('asr.hotwords')) $('setHotwords').value = (c.asr.hotwords || []).join('\n');
   $('setTtsOn').checked = pendingValue('tts.enabled', true);
   if (!edits.has('avatar') && (previous?.avatar !== c.avatar || acknowledged.includes('avatar'))) {
     avatarKey = AVATAR_LIST.find(a => a.key === c.avatar || a.file === c.avatar || a.label === c.avatar)?.key || avatarKey;
@@ -641,9 +653,10 @@ function fillForm() {
   $('setOwnerName').value = c.buddy.ownerName || '主人';
   selfSettings.paint();
   $('setAlways').checked = !!(c.voice && c.voice.alwaysListen);
-  $('setJudge').checked = !(c.asr && c.asr.judge === false);
+  paintSpeechSensitivity(c.asr?.sensitivity ?? 1);
   $('setWakeOnly').checked = !!c.asr?.wakeOnly;
   $('setWakeAliases').value = (c.asr?.wakeAliases || []).join('，');
+  $('setHotwords').value = (c.asr?.hotwords || []).join('\n');
   $('setTtsOn').checked = !!c.tts.enabled;
   const t = c.tts || {};
   ttsDraft = {
@@ -882,8 +895,9 @@ function buildMotionList() {
     for (const [id, path] of [['setName', 'buddy.name'], ['setOwnerName', 'buddy.ownerName']])
       $(id).addEventListener('input', () => edit(path, $(id).value));
     $('setAlways').addEventListener('change', () => edit('voice.alwaysListen', $('setAlways').checked));
+    $('speechSensitivity').addEventListener('input', () => { const value = Number($('speechSensitivity').value); edit('asr.sensitivity', value); paintSpeechSensitivity(value); });
     $('setWakeAliases').addEventListener('input', () => edit('asr.wakeAliases', $('setWakeAliases').value.split(/[,，、]/).map(s=>s.trim()).filter(Boolean)));
-    $('setJudge').addEventListener('change', () => edit('asr.judge', $('setJudge').checked));
+    $('setHotwords').addEventListener('input', () => edit('asr.hotwords', $('setHotwords').value.split(/[,，、\r\n]+/).map(s=>s.trim()).filter(Boolean)));
     $('setWakeOnly').addEventListener('change', async () => {
       try { await persist({asr:{wakeOnly:$('setWakeOnly').checked}}); } catch(error) { $('setWakeOnly').checked = !!cfg.asr.wakeOnly; $('permTip').textContent = error.message; }
     });

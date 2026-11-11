@@ -6,7 +6,7 @@ const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function fixture(t,overrides={}){
  const directory=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bunny-private-speech-'))),root=path.join(directory,'diagnostics'),processes=[],calls=[],logs=[];
  const controller=new SpeechDiagnostic({root,bin:'/offline/asr',options:()=>({always:true,lang:'zh-CN',silenceMs:950,maxSeconds:45,device:'unchanged',noMicAsk:true}),speakerFilter:new SpeakerFilter(),suspendNormal:()=>calls.push('normal-killed-and-discarded'),
-  createTurns:opts=>createVoiceTurns({...opts,pauseMs:1,turnMs:5,finalWaitMs:300}),createAsr:(_bin,log)=>{const p=new EventEmitter();p.running=false;p.traceRecognizer=1;let seq=0;p.activity=(state='quiet')=>p.emit('activity',{state,quietSeconds:state==='quiet'?1:0,at:Date.now(),seq:++seq,recognizer:1,sourceGen:1});p.start=opts=>{calls.push('private-spawn');p.opts=opts;p.running=true;log('private-canary');p.emit('ready');p.activity('active');};p.kill=opts=>{p.killed=opts;p.running=false;};processes.push(p);return p;},...overrides});
+  createTurns:opts=>createVoiceTurns({...opts,pauseMs:1,turnMs:5,finalWaitMs:300}),createAsr:(_bin,log)=>{const p=new EventEmitter();const emit=p.emit.bind(p);p.emit=(event,...args)=>{if(['partial','utterance'].includes(event))args[1]={speechSupported:true,...args[1]};return emit(event,...args);};p.running=false;p.traceRecognizer=1;let seq=0;p.activity=(state='quiet')=>p.emit('activity',{state,quietSeconds:state==='quiet'?1:0,at:Date.now(),seq:++seq,recognizer:1,sourceGen:1});p.start=opts=>{calls.push('private-spawn');p.opts=opts;p.running=true;log('private-canary');p.emit('ready');p.activity('active');};p.kill=opts=>{p.killed=opts;p.running=false;};processes.push(p);return p;},...overrides});
  t.after(async()=>{await controller.finish('fixture-cleanup');await fsp.rm(directory,{recursive:true,force:true});});return {controller,root,processes,calls,logs,directory};
 }
 test('diagnostic defaults produce no directory, process or ordinary log, and invalid bounds cannot start',async t=>{
@@ -29,6 +29,15 @@ test('isolated destructive transcript can only reach private filters/turn sinks,
 test('deadline kills only the private recognizer and late output cannot revive private turns',async t=>{
  const f=fixture(t,{createTurns:opts=>createVoiceTurns({...opts,pauseMs:1,turnMs:5,finalWaitMs:100})});await f.controller.start({durationMs:35});const p=f.processes[0];p.emit('partial','first private words');await delay(70);assert.equal(f.controller.active,false);assert.equal(f.controller.status().reason,'deadline');assert.equal(f.controller.blocked,true);assert.equal(p.running,false);
  const directory=await f.controller.directory(),before=await fsp.readFile(path.join(directory,'host-events.ndjson'),'utf8');p.emit('partial','late-canary');p.emit('utterance','late-canary');p.emit('ready');await delay(10);assert.equal(await fsp.readFile(path.join(directory,'host-events.ndjson'),'utf8'),before);
+});
+test('an isolated playback-text match remains a candidate, never a semantic acceptance or echo veto',async t=>{
+ t.mock.timers.enable({apis:['Date','setTimeout','setInterval'],now:0});
+ const f=fixture(t,{recentEcho:()=>true});await f.controller.start({durationMs:500});const p=f.processes[0];
+ p.emit('partial','晚安');p.emit('utterance','晚安');p.activity();t.mock.timers.tick(5);await f.controller.finish();
+ const file=path.join(await f.controller.directory(),'host-events.ndjson'),rows=fs.readFileSync(file,'utf8').trim().split('\n').map(JSON.parse);
+ const requests=rows.filter(row=>row.event==='host-request-sink');assert.equal(requests.length,1);
+ assert.equal(requests[0].reason,'candidate');assert.equal(requests[0].playbackTextMatch,true);assert.equal(requests[0].semanticAccepted,false);assert.equal(requests[0].businessDispatch,false);
+ assert(!rows.some(row=>row.event==='host-filter'&&row.stage.endsWith('drop-echo')));
 });
 test('unconfirmed private speech closes its recognizer within the turn bound and rejects all late results',async t=>{
  const f=fixture(t,{createTurns:opts=>createVoiceTurns({...opts,pauseMs:1,turnMs:5,finalWaitMs:30})});await f.controller.start({durationMs:500});const p=f.processes[0];p.emit('partial','synthetic unconfirmed prefix');p.emit('utterance','synthetic unconfirmed prefix.');p.activity('active');

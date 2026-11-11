@@ -17,6 +17,10 @@ test('partial is display-only; a native final and the configured seal precede re
  assert.equal(f.requests.length,1);assert.equal(await f.requests[0].waitForCommit(),true);
  f.requests[0].remember();f.requests[0].remember();assert.deepEqual(f.remembered,['fixture question.']);
 });
+test('all system ASR linguistic candidates including short words await the ordinary seal',()=>{
+ for(const word of ['X','A','好','不','you','To']){const f=fixture({requireActivity:true});f.c.final(word);f.quietFor(3000);assert.equal(f.requests.length,1,word);assert.equal(f.requests[0].text,word);assert.equal(f.errors.length,0);}
+ const f=fixture({requireActivity:true});f.c.partial('A');f.quietFor(1000);assert.equal(f.requests.length,0);f.c.partial('A useful request');f.c.final('A useful request');f.quietFor(3000);assert.equal(f.requests.length,1);
+});
 test('multiple native segments before the seal retain their text in one request',async()=>{
  const f=fixture();f.c.partial('first segment');f.c.final('first segment.');f.advance(500);f.c.partial('second segment');f.c.final('second segment.');
  f.advance(2999);assert.equal(f.requests.length,0);f.advance(1);assert.equal(f.requests.length,1);
@@ -47,6 +51,37 @@ test('checkpoint finalization still waits for real quiet, and a real continuatio
  f.activity('active',0,{sourceGen:5});f.c.partial('and its actual continuation',{recognizer:1,sourceGen:5});assert.equal(f.requests.length,0);
  f.c.final('and its actual continuation',{recognizer:1,sourceGen:5});f.quietFor(3000,{sourceGen:7});assert.equal(f.requests.length,1);
  assert.equal(f.requests[0].text,'complete owner request\nand its actual continuation');assert.equal(checkpoints.length,1);
+});
+test('a finalized turn requests exact successor coverage in its existing short quiet window and still requires the actual receipt',()=>{
+ const checkpoints=[],f=fixture({requireActivity:true,pauseMs:350,turnMs:350,onCheckpoint:meta=>checkpoints.push(meta)});
+ f.activity('active');f.c.final('confirmed complete request');f.activity('active',0,{sourceGen:3});f.quietFor(400,{sourceGen:3});
+ assert.equal(checkpoints.length,1);assert.equal(checkpoints[0].sourceGen,3);assert.equal(checkpoints[0].recognizer,1);assert.equal(f.requests.length,0);
+ f.quietFor(400,{sourceGen:3});assert.equal(checkpoints.length,1,'one request per continuous quiet window');
+ assert.equal(f.audioFinal({sourceGen:3}),true);f.advance(0);assert.equal(f.requests.length,1);assert.equal(f.requests[0].canCommit(),true);
+});
+test('a missed coverage window can be requested again after new activity without refreshing the original timeout',()=>{
+ const checkpoints=[],f=fixture({requireActivity:true,pauseMs:350,turnMs:350,onCheckpoint:meta=>checkpoints.push(meta)});
+ f.c.final('confirmed request');f.activity('active',0,{sourceGen:3});f.quietFor(400,{sourceGen:3});assert.equal(checkpoints.length,1);
+ f.activity('unknown',0,{sourceGen:3});f.quietFor(400,{sourceGen:3});assert.equal(checkpoints.length,2);
+ f.quietFor(7100,{sourceGen:3});assert.equal(checkpoints.length,2);assert(f.c.snapshot());f.advance(100);
+ assert.equal(f.c.snapshot(),null);assert.equal(f.requests.length,0);assert.equal(f.errorDetails[0].reason,'acoustic-timeout');
+});
+test('coverage checkpoints cannot jump over earlier unconfirmed sources, active audio, stale evidence or a provisional continuation',()=>{
+ for(const kind of ['active','unknown','new-source','partial','stale']){
+  const checkpoints=[],f=fixture({requireActivity:true,pauseMs:350,turnMs:350,onCheckpoint:meta=>checkpoints.push(meta)});
+  f.c.final('confirmed request');f.activity('active',0,{sourceGen:3});
+  if(kind==='partial')f.c.partial('still speaking',{recognizer:1,sourceGen:3});
+  if(kind==='active'||kind==='unknown'){f.advance(400);f.activity(kind,0,{sourceGen:3});}
+  else if(kind==='stale'){f.advance(600);f.activity('quiet',1,{sourceGen:3,at:0});}
+  else f.quietFor(400,{sourceGen:kind==='new-source'?5:3});
+  assert.equal(checkpoints.length,0,kind);assert.equal(f.requests.length,0);
+ }
+});
+test('an admitted effect waiter can obtain successor coverage while keeping its existing commit gate',async()=>{
+ const checkpoints=[],f=fixture({requireActivity:true,pauseMs:350,turnMs:350,onCheckpoint:meta=>checkpoints.push(meta)});
+ f.c.final('confirmed request');f.quietFor(400);f.advance(0);const token=f.requests[0];assert(token.canCommit());
+ f.activity('active',0,{sourceGen:3});const pending=token.waitForCommit();f.quietFor(400,{sourceGen:3});assert.equal(checkpoints.length,1);assert.equal(token.canCommit(),false);
+ f.audioFinal({sourceGen:3});assert.equal(await pending,true);assert.equal(token.canCommit(),true);assert.equal(f.requests.length,1);
 });
 test('cancelled or finalized turns cannot dispatch a delayed checkpoint into a replacement',()=>{
  for(const finish of [f=>f.c.reset(),f=>f.c.final('already finalized')]){
@@ -253,16 +288,25 @@ test('a restarted recognizer cannot carry an unconfirmed partial into a new epoc
  const f=fixture({requireActivity:true});f.activity('active');f.c.partial('unconfirmed old phrase');f.advance(100);f.activity('quiet',1,{recognizer:2});
  assert.equal(f.c.snapshot(),null);assert.equal(f.errors.length,1);f.quietFor(3000,{recognizer:2});assert.equal(f.requests.length,0);
 });
-test('noise never requests or reports an error; configured short answers still need a final',()=>{
+test('empty punctuation never requests or reports an error; single-word inputs need the same final as other speech',()=>{
  const noise=fixture();noise.c.partial('...');noise.c.final('...');noise.advance(8000);assert.equal(noise.requests.length,0);assert.equal(noise.errors.length,0);
- const short=fixture({allowShort:()=>true});short.c.partial('嗯');short.advance(1000);assert.equal(short.requests.length,0);short.c.final('嗯');short.advance(2000);assert.equal(short.requests.length,1);
+ for (const text of ['嗯', '好', '1', 'hello']) {
+  const short = fixture();
+  short.c.partial(text);
+  short.advance(1000);
+  assert.equal(short.requests.length, 0);
+  short.c.final(text);
+  short.advance(2000);
+  assert.equal(short.requests.length, 1);
+  assert.equal(short.requests[0].text, text);
+ }
 });
 test('confirmation timeout reports only fixed metadata after cancelling the turn and offers speech or text recovery',()=>{
  const events=[],privateText='synthetic-private-transcript-canary';
  const f=fixture({sessionId:'fixture-session',onError:(message,metadata)=>{assert.equal(f.c.snapshot(),null);events.push({message,metadata});}});
  f.activity('active',0,{recognizer:4,sourceGen:7});f.c.partial(privateText);f.advance(8000);
  assert.equal(events.length,1);assert.match(events[0].message,/未提交/);assert.match(events[0].message,/完整重说/);assert.match(events[0].message,/输入文字/);
- assert.deepEqual(events[0].metadata,{reason:'confirmation-timeout',turn:1,turnId:'fixture-session:1',admitted:false,awaitingAudioFinal:false,finalized:false,
+ assert.deepEqual(events[0].metadata,{reason:'confirmation-timeout',turn:1,turnId:'fixture-session:1',admitted:false,effectWaiting:false,awaitingAudioFinal:false,finalized:false,
   partialChars:privateText.length,segments:0,chars:privateText.length,lastTextAt:0,recognizer:4,sourceGen:7});
  assert(!JSON.stringify(events).includes(privateText));assert.equal(f.requests.length,0);assert.deepEqual(f.remembered,[]);
  f.advance(10000);assert.equal(events.length,1,'one timeout must not create a recurring recovery request');
@@ -342,6 +386,15 @@ test('default final seal admits confirmed quiet speech within 350ms instead of a
  f.advance(1000);f.c.final('synthetic complete question');f.activity('quiet',.3);f.advance(49);assert.equal(f.requests.length,0);
  f.activity('quiet',.35);f.advance(0);assert.equal(f.requests.length,1);assert.equal(f.now(),1049);
 });
+test('production seal starts on 600ms acoustic quiet without another delay after a late final',()=>{
+ const f=fixture({requireActivity:true,pauseMs:600,turnMs:0});
+ f.activity('active');f.c.partial('天气怎么样');f.advance(590);f.activity('quiet',.59);
+ f.c.final('天气怎么样');f.advance(0);assert.equal(f.requests.length,0);
+ f.advance(10);f.activity('quiet',.6);f.advance(0);assert.equal(f.requests.length,1);
+ const late=fixture({requireActivity:true,pauseMs:600,turnMs:0});
+ late.activity('active');late.c.partial('再说一次');late.advance(600);late.activity('quiet',.6);
+ late.advance(100);late.c.final('再说一次');late.advance(0);assert.equal(late.requests.length,1);
+});
 test('raw acoustic uncertainty cannot time out an ordinary accepted answer without a pending operation',()=>{
  for(const state of ['active','unknown']){
   const f=fixture({requireActivity:true});f.c.final('synthetic normal question');f.quietFor(3000);const token=f.requests[0];
@@ -377,4 +430,31 @@ test('intentional skip may complete, while invalidated and reset tokens cannot m
  const f=fixture();f.c.final('synthetic intentionally skipped request');f.advance(3000);const skipped=f.requests[0];skipped.skip();assert.equal(skipped.complete(),true);assert.deepEqual(f.remembered,[]);
  f.c.final('synthetic interrupted request');f.advance(3000);const interrupted=f.requests[1];f.c.reset();assert.equal(interrupted.complete(),false);assert.equal(interrupted.completed,false);
  f.c.final('synthetic later request');f.advance(3000);assert.equal(interrupted.complete(),false);assert.equal(f.requests[2].isCurrent(),true);
+});
+test('an undecided candidate retains the prior inference and blocks effects until a late ignore restores exact coverage',async()=>{
+ const f=fixture({deferRecognition:true,requireActivity:true});f.c.final('real owner question',{recognizer:1,sourceGen:1});f.quietFor(3000);const old=f.requests[0];old.hold();old.recognize();
+ f.activity('active',0,{sourceGen:3});f.c.partial('To',{recognizer:1,sourceGen:3});assert.equal(old.isCurrent(),true);assert.equal(old.canCommit(),false);
+ f.c.final('To',{recognizer:1,sourceGen:3});f.quietFor(3000,{sourceGen:3});const noise=f.requests[1];noise.hold();let allowed=false;const waiter=old.waitForCommit().then(value=>allowed=value);
+ f.quietFor(10000,{sourceGen:3});assert.equal(old.isCurrent(),true);assert.equal(noise.isCurrent(),true);assert.equal(allowed,false);assert.equal(f.errors.length,0);
+ noise.skip();noise.complete();await waiter;assert.equal(allowed,true);assert.equal(old.canCommit(),true);old.remember();assert.deepEqual(f.remembered,['real owner question']);
+});
+test('only semantic recognition of a successor invalidates the retained turn; pending replacement cancels only that candidate',()=>{
+ const f=fixture({deferRecognition:true});f.c.final('first request',{recognizer:1,sourceGen:1});f.advance(3000);const old=f.requests[0];old.hold();old.recognize();
+ f.c.final('you',{recognizer:1,sourceGen:3});f.advance(3000);const noise=f.requests[1];noise.hold();assert.equal(old.isCurrent(),true);
+ f.c.partial('new real question',{recognizer:1,sourceGen:5});assert.equal(noise.isCurrent(),false);assert.equal(old.isCurrent(),true);
+ f.c.final('new real question',{recognizer:1,sourceGen:5});f.advance(3000);const fresh=f.requests[2];fresh.hold();assert.equal(old.isCurrent(),true);fresh.recognize();assert.equal(old.isCurrent(),false);assert.equal(fresh.isCurrent(),true);
+});
+test('ignoring text without the exact source final cannot fabricate audio coverage for a retained operation',async()=>{
+ const f=fixture({deferRecognition:true,requireActivity:true});f.c.final('real operation',{recognizer:1,sourceGen:1});f.quietFor(3000);const old=f.requests[0];old.hold();old.recognize();f.activity('active',0,{sourceGen:3});
+ f.c.final('you',{recognizer:1,sourceGen:5});f.quietFor(3000,{sourceGen:5});const noise=f.requests[1];noise.hold();noise.skip();noise.complete();assert.equal(old.canCommit(),false);
+ const pending=old.waitForCommit();f.quietFor(8000,{sourceGen:5});assert.equal(await pending,false);assert.equal(f.remembered.length,0);
+});
+test('a recognized keep response preserves the retained operation and a third partial only retires the keep input',async()=>{
+ const f=fixture({deferRecognition:true,requireActivity:true});f.c.final('original request',{recognizer:1,sourceGen:1});f.quietFor(3000);const a=f.requests[0];a.hold();a.recognize();
+ f.activity('active',0,{sourceGen:3});f.c.final('courtesy response',{recognizer:1,sourceGen:3});f.quietFor(3000,{sourceGen:3});const b=f.requests[1];b.hold();b.recognize({replace:false});assert.equal(a.isCurrent(),true);assert.equal(a.canCommit(),true);assert.equal(b.turnDisposition,'keep');
+ f.activity('active',0,{sourceGen:5});f.c.partial('another candidate',{recognizer:1,sourceGen:5});assert.equal(b.isCurrent(),false);assert.equal(a.isCurrent(),true);assert.equal(a.canCommit(),false);
+ f.c.final('another candidate',{recognizer:1,sourceGen:5});f.quietFor(3000,{sourceGen:5});const c=f.requests[2];c.skip();c.complete();assert.equal(a.isCurrent(),true);assert.equal(await a.waitForCommit(),true);
+});
+test('the semantic owner receipt carries actual capture end time for monotonic conversation timing',()=>{
+ let metadata;const f=fixture({deferRecognition:true,onRemember:(_text,value)=>{metadata=value;}});f.c.final('real input',{recognizer:1,sourceGen:1,audioStartAtMs:100,audioEndAtMs:700});f.advance(3000);const token=f.requests[0];token.recognize({replace:false});token.remember();assert.equal(metadata.audioEndAtMs,700);assert.notEqual(metadata.audioEndAtMs,metadata.heardAt);
 });

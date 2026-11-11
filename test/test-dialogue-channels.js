@@ -312,3 +312,14 @@ test('ordinary dialogue invites authentication only when the host supports it, w
  await brain.decide(args);assert.match(system,/主动简短请对方.*输入主人身份识别密钥/);assert.equal(payload.authentication.enabled,true);assert.equal(payload.channel.owner,false);
  args.channelContext.authentication.enabled=false;await brain.decide(args);assert.match(system,/不要求对方输入不会生效的密钥/);assert.equal(payload.authentication.enabled,false);
 });
+
+test('merged owner messages reuse each original channel ingestion receipt and retain its authorization revision',async()=>{
+ const {AgentService}=require('../src/main/agent-service'),seen=[],channel={},snapshot={owner:true,channelId:'fixture-channel',revision:7,scene:'life'};
+ const agent={memory:null,scene:{knownIdentity:{}},context:()=>({text:''}),contextModules:()=>[],
+  channels:{ensure:async()=>channel,ingest:async(_channel,key,messages)=>{seen.push(key);return {snapshot,ownerRevision:key.includes(':1:')?6:7,messages:messages.map(message=>({...message,ownerInput:true})),sourceIds:[key]};},
+   context:async()=>({sourceIds:[]}),assert(){},current:()=>true,holdReply:(_channel,_snapshot,_key,decision,sources)=>({...decision,sources})},
+  brain:{decide:async args=>{assert.deepEqual(args.incoming.map(message=>message.text),['new authorized detail']);return {decision:'reply',reply:'fixture acknowledgment',ownerAction:{type:'task'}};}}};
+ const task={id:'fixture-task',state:{}},incoming=[{...message('old grant input'),sequence:1},{...message('new authorized detail'),sequence:2}];
+ const decision=await AgentService.prototype.dialogueDecision.call(agent,{task,subject:{application:'wechat',recipient:'Fixture'},conversation:{},incoming,incomingBatches:[{sequences:[1]},{sequences:[2]}]});
+ assert.deepEqual(seen,['fixture-task:incoming:1:0','fixture-task:incoming:2:0']);assert.deepEqual(decision.ownerCommand.sequences,[2]);assert.equal(decision.sources.length,2);
+});

@@ -247,28 +247,43 @@ flowchart TB
     Reference["私有 unmuted CoreAudio 全局输出 tap"] --> Echo
     Echo --> Audio["格式转换 → 同一份最终 PCM"]
     Echo -.->|"参考拒绝、超时或断流：有界降级并受控恢复"| Audio
-    Audio --> Analyzer["仅含 Transcriber 的 Analyzer"]
+    Audio --> Analyzer["SpeechDetector人声门控 + Transcriber增量识别"]
+    Names["设定：正确名字 + 用户别名昵称"] --> Vocabulary["统一去重总库最多512项；系统识别选取最多100项"]
+    ExtraWords["听力：共享额外热词；默认 WorkBunny / Workbuddy"] --> Vocabulary
+    WordManagement["用户编辑 / Bunny已有对话或任务中的增改删"] --> WordSave["版本检查 + 既有提交门 / OperationLedger → 保存真实回执"]
+    WordSave --> ExtraWords
+    Vocabulary --> WordSnapshot["启动或下一自然识别段取快照；不重启采集"]
+    WordSnapshot --> Analyzer
+    Analyzer -.-> WordReceipt["系统上下文 submitted / failed；不等于准确率增益"]
     Audio --> VAD["独立VAD：随物理音频连续；不随Analyzer冷启，不裁音频"]
     Audio --> Speaker["声纹特征"]
     Analyzer --> EndGate
-    VAD --> EndGate["交付事件异步复核：同代新鲜静音 + 文字稳定；timer兜底"]
-    EndGate --> FinalBarrier["finalizer成功 + 结果流确认结束 → 仅上报一次"]
-    FinalBarrier --> TurnGate["整句确认 + 默认350ms收口 + 新鲜quiet → 语义请求"]
+    VAD --> EndGate["交付事件异步复核：同代新鲜静音 600ms；timer兜底"]
+    EndGate --> FinalBarrier["完整输入finalizer成功 + 结果流排空 + 实际输入范围校验 → 仅上报一次"]
+    FinalBarrier --> TurnGate["整句确认 + 新鲜quiet → 立即语义请求"]
+    TurnGate -.->|"精确后继来源在短quiet窗口请求真实排空"| FinalBarrier
     VAD --> TurnGate
-    TurnGate --> EntryGate["接纳一次语义轮次；修订/取消/代次使旧结果失效"]
-    Partial["partial仅显示；新认可文字修订旧轮次"] --> TurnGate
-    Partial --> Unconfirmed["八秒输入未确认或提交门超时：提示重说或文字"]
+    TurnGate --> EntryGate["microphone-observation候选；合并未完成输入"]
+    Partial["同范围声学支持的partial增量显示；非已知回声同步打断"] --> TurnGate
+    Partial --> Unconfirmed["八秒输入未确认或提交门超时：丢弃未确认输入"]
     VAD --> EffectGate["当前提交门：fresh quiet；新有声须新定稿"]
     EffectGate --> WaitGate["实际副作用等待时关门：保留同轮结果；独立八秒有界等待"]
     WaitGate -.-> EffectGate
     WaitGate --> Unconfirmed
-    Unconfirmed --> Rearm["丢弃旧识别器；有限重试；旧回调隔离；继续接收新消息"]
-    EntryGate --> Observation
+    Unconfirmed --> Rearm["普通识别失败静默；1.2–8秒退避恢复；旧回调隔离"]
+    WaitGate -.->|"已接纳操作实际等待提交失败"| EffectNotice["如实提示未执行；不以失败冒充成功"]
+    FinalBarrier -.->|"识别/定稿失败；无成功回执"| Rearm
+    EntryGate --> AsrContext["ASR纠错经验 + 名字/昵称/热词 + 语义与交流间隔 + 实际播放线索；同次调度解释并回答"]
+    Vocabulary --> AsrContext
+    AsrContext --> Observation
     VAD --> VoiceFault["四秒无证据 / 最长界：取消未确认片段并有界恢复"]
     Sensor --> Observation["原内容 + perception + 可用证据引用"]
     Observation --> Think["Bunny 综合上下文判断；关键歧义才补证"]
-    Think --> Reply["普通非敏感答复：有效轮次直接展示/朗读；新认可文字取消旧结果"]
-    Think --> EffectGate
+    Think --> Decision{"同次推理：是否为需处理的对话？"}
+    Decision -->|"忽略 / 成功空决定"| Silent["退休候选；无气泡/声音/主人历史"]
+    Decision -->|"接纳"| Accepted["记录已接纳发言；原效果门保持有效"]
+    Accepted --> Reply["普通非敏感答复：有效轮次展示/朗读"]
+    Accepted --> EffectGate
     EffectGate --> Act["授权内行动及自主核查；真实提交处重核"]
     Act --> Outcome["真实成功、失败、恢复与适用条件"]
     Dialogue["渠道历史与重要事实"] --> Doze["分渠道、分场景 Doze Summary"]

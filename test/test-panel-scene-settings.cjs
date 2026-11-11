@@ -31,7 +31,7 @@ let settings = {
   window: { scale: 1 },
   buddy: { name: 'Fixture', ownerName: '主人', profile: '共通角色设定必须保持五行。', sceneProfiles: { private: '私聊原设定', life: '生活原设定', work: '工作原设定' } },
   memory: { enabled: true, extract: false, scene: 'life' },
-  voice: { alwaysListen: true }, asr: { judge: true },
+  voice: { alwaysListen: true }, asr: { judge: true, wakeAliases: ['小兔'], hotwords: ['WorkBunny', 'Workbuddy'] },
   brain: { source: 'workbuddy', provider: 'deepseek', model: 'hy3', thinking: 'low', apiKey: 'brain-secret', profiles: { deepseek: { apiKey: 'deepseek-secret', modelId: 'deepseek-v4.1-flash', thinking: 'high' } } },
   tts: { enabled: true, engine: 'system', voice: 'Tingting', rate: 200, hasApiKey: true, apiKey: 'tts-secret', baseURL: 'http://fixture', qwen: { voice: 'serena' }, chp: { voice: 'fixture' } },
   motions: { disabled: [] },
@@ -149,6 +149,40 @@ async function main() {
   win.webContents.on('console-message', (_e, level, message, line) => console.error(`panel fixture console[${level}] ${line}: ${message}`));
   await win.loadFile(panelHtml, { query: { p: 'settings' } });
   await waitFor(() => evalIn(win, "document.getElementById('setProfile').value" ).then(value => value.includes('共通角色设定')), 'settings profile rendered');
+  if(process.argv.includes('--hearing-only')) {
+    await evalIn(win, 'document.querySelector("[data-t=persona]").click()');
+    assert.equal(await evalIn(win, 'document.getElementById("setName").parentElement.nextElementSibling.id'), 'wakeAliasesOption');
+    assert.equal(await evalIn(win, 'document.getElementById("setWakeAliases").value'), '小兔');
+    assert.equal(await evalIn(win, 'document.getElementById("setWakeAliases").placeholder'), '选填，逗号分隔');
+    assert.equal(await evalIn(win, 'document.querySelector("#wakeAliasesOption span").textContent'), '别名昵称');
+    await evalIn(win, 'document.querySelector("[data-t=ear]").click()');
+    assert.equal(await evalIn(win, 'document.getElementById("setJudge")'), null);
+    assert.equal(await evalIn(win, 'document.getElementById("setHotwords").value'), 'WorkBunny\nWorkbuddy');
+    const spacing=await evalIn(win, `(()=>{const wake=document.getElementById('wakeOnlyOption'),hotwords=document.getElementById('hotwordsOption'),sensitivity=document.getElementById('speechSensitivityNote');const r=el=>el.getBoundingClientRect();return {beforeWake:r(wake).top-r(sensitivity).bottom,beforeHotwords:r(hotwords).top-r(wake).bottom,insideWake:r(wake.querySelector('.note')).top-r(wake.querySelector('.row')).bottom,insideHotwords:r(hotwords.querySelector('.note')).top-r(hotwords.querySelector('.row')).bottom};})()`);
+    assert(spacing.beforeWake>spacing.insideWake && spacing.beforeHotwords>spacing.insideWake && spacing.beforeHotwords>spacing.insideHotwords, 'component spacing exceeds internal spacing: '+JSON.stringify(spacing));
+    await evalIn(win, 'window.pet.__fixture.emitConfig({asr:{hotwords:["远程更新"],wakeAliases:["新昵称"]}})');
+    await waitFor(()=>evalIn(win,'document.getElementById("setHotwords").value').then(value=>value==='远程更新'),'clean hotwords update');
+    assert.equal(await evalIn(win, 'document.getElementById("setWakeAliases").value'), '新昵称');
+    await evalIn(win, `(()=>{const hotwords=document.getElementById('setHotwords');hotwords.value=${JSON.stringify(' Alpha，Beta\nGamma, Delta ')};hotwords.dispatchEvent(new Event('input',{bubbles:true}));const aliases=document.getElementById('setWakeAliases');aliases.value='兔兔，宝贝';aliases.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await evalIn(win, 'window.pet.__fixture.emitConfig({asr:{hotwords:["并发更新"],wakeAliases:["并发昵称"]}})');
+    assert.equal(await evalIn(win, 'document.getElementById("setHotwords").value'), ' Alpha，Beta\nGamma, Delta ');
+    assert.equal(await evalIn(win, 'document.getElementById("setWakeAliases").value'), '兔兔，宝贝');
+    await click(win, 'saveBtn');
+    await waitFor(()=>Promise.resolve(JSON.stringify(settings.asr.hotwords)===JSON.stringify(['Alpha','Beta','Gamma','Delta'])),'hotwords draft persisted');
+    assert.deepEqual(settings.asr.wakeAliases, ['兔兔','宝贝']);
+    assert.equal(await evalIn(win, 'document.getElementById("setHotwords").value'), 'Alpha\nBeta\nGamma\nDelta');
+    await evalIn(win, `(()=>{const el=document.getElementById('setHotwords');el.value='';el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await click(win, 'saveBtn');await waitFor(()=>Promise.resolve(settings.asr.hotwords.length===0),'empty hotwords persisted');
+    assert.equal(await evalIn(win, 'document.getElementById("speechSensitivityLabel").textContent'), '中');
+    for(const [value,label] of [[0,'低'],[2,'高'],[1,'中']]) {
+      await evalIn(win, `(()=>{const el=document.getElementById('speechSensitivity');el.value='${value}';el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+      assert.equal(await evalIn(win, 'document.getElementById("speechSensitivityLabel").textContent'), label);
+      await click(win, 'saveBtn');await waitFor(()=>Promise.resolve(settings.asr.sensitivity===value),'hearing sensitivity persisted');
+    }
+    console.log('hearing settings passed: alias placement, hotwords edit/save/sync, spacing, and sensitivity');
+    await win.close();server.close();fs.rmSync(tmp,{recursive:true,force:true});app.exit(0);
+    return;
+  }
 
   assert.equal(await evalIn(win,"[...document.querySelectorAll('input[type=checkbox]')].every(e=>e.getAttribute('role')==='switch'&&getComputedStyle(e).width==='36px')"),true);
   assert.equal(await evalIn(win,"getComputedStyle(document.querySelector('.permBox')).borderTopWidth"),'0px');
@@ -198,7 +232,7 @@ async function main() {
   await chooseAvatar('custom-two.vrm');
   await waitFor(()=>Promise.resolve(settings.avatar==='custom-two.vrm'),'preview custom selection');
   await evalIn(win,'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-  fs.writeFileSync(path.join(tmp,'picker.png'),(await win.webContents.capturePage()).toPNG());
+
   await chooseAvatar('fixture-avatar');
   await waitFor(()=>Promise.resolve(settings.avatar==='fixture-avatar'),'restore initial fixture selection');
 
@@ -211,7 +245,7 @@ async function main() {
   await waitFor(() => Promise.resolve(calls.some(c=>c.openRepository)), 'repository external action');
   assert.equal(await evalIn(win, 'document.getElementById("dialogueBehind")'), null, 'the duplicate dialogue switch is removed');
   await evalIn(win, 'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-  fs.writeFileSync(path.join(tmp,'system.png'), (await win.webContents.capturePage()).toPNG());
+
   await evalIn(win, 'document.querySelector("[data-t=scene]").click()');
   const scene = () => evalIn(win, "document.getElementById('panelScene').value");
   const select = name => evalIn(win, `document.getElementById('panelScene').value='${name}';document.getElementById('panelScene').dispatchEvent(new Event('change'))`);
@@ -259,7 +293,7 @@ async function main() {
     assert.match(await evalIn(win, 'document.getElementById("brainHint").textContent'), /填写密钥/, 'no capability hint from a model that has not been fetched');
     await evalIn(win, `document.getElementById('brainKeyInput').value='fixture-'+${JSON.stringify(provider)};document.getElementById('brainKeyInput').dispatchEvent(new Event('input'))`);
     assert.match(await evalIn(win,'document.getElementById("brainKeyInput").parentElement.querySelector(".credential-preview").textContent'), /^fixt•+/, 'pasted key immediately shows a partial preview');
-    if (provider === 'grok') { await evalIn(win, 'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); fs.writeFileSync(path.join(tmp,'credential-preview.png'), (await win.webContents.capturePage()).toPNG()); }
+    if (provider === 'grok') { await evalIn(win, 'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');  }
     await click(win,'brainModelsBtn');
     await waitFor(() => evalIn(win, '!document.getElementById("brainModelsBtn").disabled'), 'model fetch '+provider);
     assert.deepEqual(await modelIds(), [provider==='grok'?'grok-4.20-0309-non-reasoning':provider+'-actual-first',provider+'-actual-second']);

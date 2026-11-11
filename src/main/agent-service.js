@@ -38,8 +38,8 @@ async function scanRecoveryTasks(service,stage,action){
 }
 class AgentService{
  constructor({desktop,conversationDesktop,memory,contacts,journal,native,imageResize,bitmap,getScene=()=> 'life',ready=()=>true,
-   epoch=()=>memory?.generation??1,canOperate=async()=>true,report=async()=>{},emit=()=>{},log=()=>{},request,reasoningRequest,reviewTask,mainReviewOptions,scene,autoSchedule=true,verify=verifyDelivery,authorization,taskDirectory,deliveryDirectory,getWeChatOwnership=()=> 'owner',setWeChatOwnership,stopWork,channels,softwareServices=[],readSubmissionEvidence=async()=>''}={}){
-  Object.assign(this,{desktop,conversationDesktop,memory,contacts,getScene,ready,epoch,canOperate,report,emit,log,verify,authorization,deliveryDirectory,getWeChatOwnership,setWeChatOwnership,taskDirectory,stopWork,readSubmissionEvidence});
+   epoch=()=>memory?.generation??1,canOperate=async()=>true,report=async()=>{},emit=()=>{},log=()=>{},request,reasoningRequest,reviewTask,mainReviewOptions,scene,autoSchedule=true,verify=verifyDelivery,authorization,taskDirectory,deliveryDirectory,getWeChatOwnership=()=> 'owner',setWeChatOwnership,stopWork,channels,softwareServices=[],hearingHotwords,readSubmissionEvidence=async()=>''}={}){
+  Object.assign(this,{desktop,conversationDesktop,memory,contacts,getScene,ready,epoch,canOperate,report,emit,log,verify,authorization,deliveryDirectory,getWeChatOwnership,setWeChatOwnership,taskDirectory,stopWork,hearingHotwords,readSubmissionEvidence});
   // Recovery ownership is for this process only. Restoring an attention task
   // may read receipts, but cannot replay GUI work from a previous process.
   this.workRecoveryRequests=new Set();this.priorResultReviewAuthorizations=new Map();
@@ -69,6 +69,7 @@ class AgentService{
   require('./context-assembler').registerExperienceTool(this.tools,{memory});
   require('./judgment').registerJudgment(this.tools,{request});
   require('./task-memory-tools').registerTaskMemoryTools(this.tools,{memory,isCurrent:t=>this.runtime?.tasks.get(t.id)===t&&!['paused','stopping','stopped','expired','completed'].includes(t.status)});
+  require('./hearing-hotword-tools').registerHearingHotwordTools(this.tools,{hearingHotwords,isCurrent:t=>this.runtime?.tasks.get(t.id)===t&&!['paused','stopping','stopped','expired','completed'].includes(t.status)});
   this.skills.register(conversationSkill({brain:{decide:a=>this.dialogueDecision(a)},channelDialogue:!!channels,decisionCurrent:d=>!d.channelReply||!!this.channels?.validReply(d.channelReply),selfChannel:s=>s.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',canOperate:t=>this.canOperateForTask(t),observationBlocked:t=>this.interactiveConflict(t),ownerBindings:(s,a)=>!!this.channels||this.isOwner(s,a),sentMessages:(s,t)=>this.ownMessages(s,t)}));
   this.skills.register(sendOnceSkill).register(readOnceSkill).register(workDelegationSkill);
   this.skills.register(screenWatchSkill({request}));
@@ -132,8 +133,9 @@ class AgentService{
  }
  currentTask(){const active=this.runtime.list().filter(t=>!TERMINAL.has(t.status));return active.length===1?this.runtime.tasks.get(active[0].id):null;}
  context({scene=this.getScene(),excludeTaskId}={}){const tasks=this.runtime.list({scene}).filter(t=>t.id!==excludeTaskId&&!TERMINAL.has(t.status)),attention=tasks.filter(t=>['needs_attention','waiting_permission','paused'].includes(t.status)).length;return {text:`任务概况：${tasks.length}项未结束，其中${attention}项暂停或需要处理；详情可按需加载task_status上下文模块。`,sourceIds:[]};}
- contextModules({scene=this.getScene(),excludeTaskId}={}){
-  return [{id:'task_status',description:'Current task monitoring facts, progress, elapsed time and available results. Read only; requesting progress never starts a task.',maxLimit:20,parameters:{limit:6,detail:'summary',maxTokens:2200},load:async p=>this.runtime.list({scene}).filter(t=>t.id!==excludeTaskId).sort((a,b)=>Number(TERMINAL.has(a.status))-Number(TERMINAL.has(b.status))||b.updatedAt-a.updatedAt).slice(0,p.limit).map(t=>({id:t.id,goal:t.goal.slice(0,p.detail==='full'?1500:300),status:t.status,note:t.note.slice(0,p.detail==='full'?1200:300),elapsedMs:Date.now()-t.createdAt,updatedAt:t.updatedAt,...(p.detail==='full'?{counters:t.counters,lastCheckedAt:t.lastCheckedAt,schedule:t.schedule,queuedEvents:t.queuedEvents}:{}),result:t.result?{summary:String(t.result.summary||'').slice(0,p.detail==='full'?1500:300),links:t.result.links}:null}))}];
+ contextModules({scene=this.getScene(),excludeTaskId,owner=true,isCurrent}={}){
+  return [{id:'task_status',description:'Current task monitoring facts, progress, elapsed time and available results. Read only; requesting progress never starts a task.',maxLimit:20,parameters:{limit:6,detail:'summary',maxTokens:2200},load:async p=>this.runtime.list({scene}).filter(t=>t.id!==excludeTaskId).sort((a,b)=>Number(TERMINAL.has(a.status))-Number(TERMINAL.has(b.status))||b.updatedAt-a.updatedAt).slice(0,p.limit).map(t=>({id:t.id,goal:t.goal.slice(0,p.detail==='full'?1500:300),status:t.status,note:t.note.slice(0,p.detail==='full'?1200:300),elapsedMs:Date.now()-t.createdAt,updatedAt:t.updatedAt,...(p.detail==='full'?{counters:t.counters,lastCheckedAt:t.lastCheckedAt,schedule:t.schedule,queuedEvents:t.queuedEvents}:{}),result:t.result?{summary:String(t.result.summary||'').slice(0,p.detail==='full'?1500:300),links:t.result.links}:null}))},
+   require('./hearing-hotword-tools').contextFragment({hearingHotwords:this.hearingHotwords,owner,isCurrent})].filter(Boolean);
  }
  async observeSupervision(event){
   const snapshot=event?.snapshot,physical=snapshot?.task;if(!physical)return false;
@@ -741,11 +743,23 @@ class AgentService{
  }
  async dialogueDecision(args){
   if(!this.channels)return this.brain.decide(args);
-  const {task,subject,incoming=[],phase='incoming',signal}=args;
+  const {task,subject,incoming=[],incomingBatches,phase='incoming',signal}=args;
   const identity=task.state.sceneIdentity?.wechat||this.scene.knownIdentity;
   const channel=await this.channels.ensure(subject,identity);
   const eventKey=task.id+':'+phase+':'+incoming.map(m=>m.sequence).join(',')+':'+(task.state.goalRevision||0);
-  const received=phase==='incoming'?await this.channels.ingest(channel,eventKey,incoming,{signal}):{snapshot:this.channels.snapshot(channel),messages:incoming,sourceIds:[]};
+  let received;
+  if(phase==='incoming'&&incomingBatches?.length>1){
+   const receipts=[];
+   for(const batch of incomingBatches){
+    const messages=incoming.filter(message=>batch.sequences.includes(message.sequence));
+    const key=task.id+':'+phase+':'+messages.map(m=>m.sequence).join(',')+':'+(task.state.goalRevision||0);
+    receipts.push(await this.channels.ingest(channel,key,messages,{signal}));
+   }
+   const latest=receipts.at(-1),snapshot=latest.snapshot,valid=receipts.filter(receipt=>!receipt.expired);
+   received={...latest,messages:valid.flatMap(receipt=>receipt.messages.map(message=>({...message,ownerInput:receipt.ownerRevision===snapshot.revision&&message.ownerInput===true}))),
+    sourceIds:[...new Set(valid.flatMap(receipt=>receipt.sourceIds||[]))],ownerRevision:snapshot.revision,
+    authenticated:valid.some(receipt=>receipt.authenticated&&receipt.ownerRevision===snapshot.revision),duplicate:receipts.every(receipt=>receipt.duplicate)};
+  }else received=phase==='incoming'?await this.channels.ingest(channel,eventKey,incoming,{signal}):{snapshot:this.channels.snapshot(channel),messages:incoming,sourceIds:[]};
   let snapshot=received.snapshot;
   if(received.expired)return this.channels.holdReply(channel,snapshot,eventKey,{decision:'reply',reply:'Owner verification expired. Please verify again to continue this request.',summary:'Owner authorization expired',completed:false,progress:{},unknown:[]},[]);
   const currentText=snapshot.owner&&phase==='incoming'
@@ -758,7 +772,7 @@ class AgentService{
   context.authentication={enabled:this.channels.security?.enabled===true,configured:!!this.channels.security?.key};
   if(received.authenticated&&snapshot.owner&&received.ownerRevision===snapshot.revision)context.authenticationEvent={type:'owner-authenticated',credentialOnly:!ownerInput.length,replayed:received.duplicate===true,expiresAt:snapshot.expiresAt};
   if(snapshot.owner){
-   const scope={scene:snapshot.scene,excludeTaskId:task.id};context.taskOverview=this.context(scope).text;
+   const scope={scene:snapshot.scene,excludeTaskId:task.id,owner:snapshot.owner,isCurrent:()=>this.channels.current(snapshot)&&!signal?.aborted};context.taskOverview=this.context(scope).text;
    const recall=this.memory?.ready?require('./conversation-recall').createRecallSession(this.memory,{scene:snapshot.scene,allowSensitive:true,isCurrent:()=>this.channels.current(snapshot)&&!signal?.aborted,scopeEpoch:()=>channel.revision}):null;
    context.recallSession=recall;context.contextSession=require('./context-assembler').createContextSession({fragments:[...this.contextModules(scope),...(recall?[require('./conversation-recall').recallFragment(recall)]:[])],signal,isCurrent:()=>this.channels.current(snapshot)});
   }

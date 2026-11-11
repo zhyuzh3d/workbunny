@@ -41,11 +41,14 @@ async function chatWithSearch(options, { chat = wb.chat, search = searchPublicWe
     check();
     const enabledTools = [...(webAllowed && searches < 3 && !localCalls&&!contextCalls ? [TOOL] : []), ...(recall && localCalls < 4 ? recall.tools : []),...(context?context.tools:[])];
     const allowTools = round < maxRounds-1 && totalCalls < maxCalls && enabledTools.length > 0;
-    const { onDelta, onSentence, onSearch, webSearch, recallSession,contextSession, ...request } = options;
+    const { onDelta, onSentence, onStreamReset, onSearch, webSearch, recallSession,contextSession, ...request } = options;
     const extraBody = { ...request.extraBody };
     if (allowTools) { extraBody.tools = enabledTools; extraBody.tool_choice = 'auto'; }
     else { delete extraBody.tools; delete extraBody.tool_choice; }
-    const response = await chat({ ...request,...(inputBudgetTokens===undefined?{}:{inputBudgetTokens}), messages, extraBody, timeoutMs: Math.max(1, deadline - Date.now()), onDelta: undefined, onSentence: undefined });
+    let streamed = false;
+    if(options.streamText === true) onStreamReset?.();
+    const response = await chat({ ...request,...(inputBudgetTokens===undefined?{}:{inputBudgetTokens}), messages, extraBody, timeoutMs: Math.max(1, deadline - Date.now()),
+      onDelta: options.streamText === true && onDelta ? (delta, delivery) => { check(); streamed = true; onDelta(delta, delivery); } : undefined, onSentence: undefined });
     modelCalls++;
     for (const key of ['prompt_tokens', 'completion_tokens', 'total_tokens', 'input_tokens', 'output_tokens', 'credit']) {
       const value = response.usage?.[key];
@@ -53,7 +56,7 @@ async function chatWithSearch(options, { chat = wb.chat, search = searchPublicWe
     }
     check();
     const calls = response.toolCalls || [];
-    if (!calls.length) { final = response; break; }
+    if (!calls.length) { if(!streamed && (response.raw || response.text)) onDelta?.(response.raw || response.text, { complete: true }); final = response; break; }
     if (!allowTools || calls.length > 3) throw Object.assign(new Error('搜索请求超出本轮上限'), { code: 'E_TOOL_PROTOCOL' });
     messages.push({ role: 'assistant', content: null, tool_calls: calls });
     for (const call of calls) {
@@ -123,7 +126,6 @@ async function chatWithSearch(options, { chat = wb.chat, search = searchPublicWe
   check();
   if (!final) throw Object.assign(new Error('本轮没有产生可用回复'), { code: 'E_TOOL_PROTOCOL' });
   // Nothing from tool deltas or search JSON is delivered to speech or bubbles.
-  if (final.raw || final.text) options.onDelta?.(final.raw || final.text);
   if (options.onSentence && final.text) {
     const splitter = require('./llm').makeSentenceSplitter(options.onSentence); splitter.push(final.text); splitter.flush();
   }

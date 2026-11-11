@@ -66,7 +66,7 @@ test('uncertain message order reobserves the visible exact conversation without 
  assert.equal(Object.values(task.operations).filter(op=>op.tool==='conversation.open').length,opens,'later uncertain reads do not repeat navigation');
  h.setVisible([message('old'),message('fresh verified')]);await h.runtime.tick(id);assert.equal(task.inbox.length,1);assert.equal(task.inbox[0].messages[0].text,'fresh verified');
 });
-function harness({behavior='reply',brain,completion='manual',subjects=[{application:'wechat',recipient:'Alice'}],observe,transcribe,onOpen}={}){
+function harness({behavior='reply',brain,completion='manual',subjects=[{application:'wechat',recipient:'Alice'}],observe,transcribe,onOpen,channelDialogue=false}={}){
  let visible=[message('old')],busy=false;const sent=[],reports=[],records=new Map(),tools=new ToolRegistry();let now=1000;
  tools.register({name:'conversation.observe',description:'pixels',effect:'read',capabilities:['conversation.read'],scope:a=>a,execute:async a=>observe?observe(a,visible):({headerMatched:true,changed:true,messages:visible,draft:''})});
  tools.register({name:'conversation.open',description:'open',effect:'read',capabilities:['screen.input'],scope:a=>a,execute:async(_args,context)=>{await onOpen?.(context);return {ok:true};}});
@@ -74,7 +74,8 @@ function harness({behavior='reply',brain,completion='manual',subjects=[{applicat
  tools.register({name:'conversation.send',description:'send',effect:'write',capabilities:['conversation.send'],scope:a=>a,execute:async a=>{sent.push(a.message);visible=[...visible,message(a.message,'outgoing')];return {ok:true,verified:true,receipt:{at:now}};}});
  tools.register({name:'memory.related',description:'related shared memories',effect:'read',capabilities:['memory.read'],scope:a=>a,execute:async()=>({items:[]})});
  tools.register({name:'owner.dispatch',description:'owner',effect:'write',capabilities:['owner.command'],scope:a=>a,execute:async()=>({ok:true,verified:true})});
- const decisions=[],skills=new SkillRegistry(tools).register(conversationSkill({brain:{decide:async args=>{decisions.push(args);return brain?brain(args):{decision:'reply',reply:'reply '+args.incoming.map(m=>m.text).join('+'),summary:'noted',completed:false,progress:{},unknown:[]};}},canOperate:async()=>!busy}));
+ tools.register({name:'conversation.save',description:'save',effect:'write',capabilities:['conversation.read'],scope:a=>a,execute:async()=>({ok:true,verified:true})});
+ const decisions=[],skills=new SkillRegistry(tools).register(conversationSkill({brain:{decide:async args=>{decisions.push(args);return brain?brain(args):{decision:'reply',reply:'reply '+args.incoming.map(m=>m.text).join('+'),summary:'noted',completed:false,progress:{},unknown:[]};}},canOperate:async()=>!busy,channelDialogue,ownerBindings:()=>true}));
  const journal={put:async t=>{records.set(t.id,structuredClone(t));},list:async()=>[],authorized:async t=>records.has(t.id)};
  const runtime=new AgentRuntime({journal,tools,skills,report:async r=>reports.push(r),epoch:()=>1,clock:()=>now,autoSchedule:false});
  const start=()=>runtime.start({skill:'conversation.manage',goal:'照看会话',subjects,completion,parameters:{behavior}}, {role:'owner',verified:true,sources:['owner'],scene:'life'});
@@ -154,6 +155,7 @@ test('a busy reply continues observing and merges later messages before its firs
  const h=harness(),{id}=await h.start();await h.runtime.tick(id);h.incoming('first');await h.runtime.tick(id);
  h.setBusy(true);await h.runtime.tick(id);assert.equal(h.decisions.length,1);
  h.incoming('later update');await h.runtime.tick(id);
+ await h.runtime.tick(id); // The new observation first cancels the old response worker.
  assert.equal(h.runtime.tasks.get(id).inbox.length,1);assert.equal(h.runtime.tasks.get(id).inbox[0].messages.length,2);
  assert.equal(h.records.get(id).inbox[0].messages.length,2);assert.equal(h.sent.length,0);
  h.setBusy(false);await h.runtime.tick(id);assert.deepEqual(h.sent,['reply first+later update']);
@@ -263,4 +265,23 @@ test('authenticated task dispatch follows the confirmed acknowledgment and recov
  await assert.rejects(skill.run(context),/not delivered/);assert.deepEqual(order,['ack']);
  failAck=false;await skill.run(context);assert.deepEqual(order,['ack','ack','dispatch']);
  order.length=0;await skill.run({...context,completedCall:(_key,tool)=>tool==='conversation.send'?{verified:true,receipt}:null});assert.deepEqual(order,['dispatch'],'a recovered acknowledgment proceeds through the existing dispatch ledger without sending it again');
+});
+
+test('an observed same-channel successor cancels planning and merges pending text and voice without accepting a late decision',async()=>{
+ for(const behavior of ['reply','owner']){
+  let release,entered;const at=new Promise(resolve=>entered=resolve);let count=0;
+  const h=harness({behavior,channelDialogue:behavior==='owner',brain:args=>{
+   if(++count===1){entered(args.signal);return new Promise(resolve=>release=resolve);}
+   return {decision:'reply',reply:'combined '+args.incoming.map(m=>m.text).join('+'),summary:'combined',completed:false,progress:{},unknown:[]};
+  }}),{id}=await h.start();await h.runtime.tick(id);h.incoming('first');await h.runtime.tick(id);
+  const prior=h.runtime.tick(id),signal=await at,task=h.runtime.tasks.get(id),key=Object.keys(task.state.conversations)[0];
+  h.incoming('second');const cursor=new ConversationCursor(task.state.conversations[key].cursor),delta=cursor.observe([message('old'),message('first'),message('second')]);
+  assert((await h.runtime.enqueue(id,{key:'new-observed-event',type:'conversation.messages',subjectKey:key,ownerChannel:behavior==='owner',messages:delta.messages},
+    {advance:target=>{target.state.conversations[key].cursor=cursor.snapshot();}})).ok);
+  assert(signal.aborted);await prior;assert.equal(task.inbox.length,2);assert.equal(h.sent.length,0);
+  await h.runtime.tick(id);assert.deepEqual(h.sent,['combined first+second']);assert.equal(task.inbox.length,0);
+  assert.equal(h.decisions[1].incomingBatches.length,2);
+  release({decision:'reply',reply:'obsolete',summary:'obsolete',completed:false,progress:{},unknown:[]});await Promise.resolve();await Promise.resolve();assert.deepEqual(h.sent,['combined first+second']);
+  await h.runtime.close();
+ }
 });

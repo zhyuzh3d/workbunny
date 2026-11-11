@@ -6,6 +6,7 @@ export function clampBubbleTop(anchorY, bubbleHeight, viewportHeight, margin = 8
 }
 
 export function createBubbleController(bubble, textElement, { setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {}) {
+  const tail = bubble.nextElementSibling?.id === 'bubbleTail' ? bubble.nextElementSibling : null;
   let timer = null;
   let streamText = '';
   let streaming = false;
@@ -127,6 +128,7 @@ export function createBubbleController(bubble, textElement, { setTimeoutFn = set
     place(anchorY, viewportHeight) {
       measuredHeight ??= bubble.offsetHeight;
       const top = Math.round(clampBubbleTop(anchorY, measuredHeight, viewportHeight));
+      if (tail) tail.style.top = `${top + measuredHeight - 5}px`;
       if (top !== placedTop) {
         if (placedTop === undefined) bubble.style.bottom = 'auto';
         placedTop = top;

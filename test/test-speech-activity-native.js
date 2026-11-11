@@ -10,5 +10,5 @@ test('native activity observer has bounded frames, channel consensus and generat
  const binary=process.env.WORKBUNNY_ASR_TEST_BIN;if(!binary)return t.skip('set WORKBUNNY_ASR_TEST_BIN after the coordinated build');
  const run=spawnSync(binary,['--self-test-speech-activity'],{encoding:'utf8',timeout:5000});assert.equal(run.status,0,run.stderr||run.stdout);
  const result=JSON.parse(run.stdout.trim());assert.equal(result.speechActivity,true);assert.equal(result.mode,0);assert.equal(result.frameMs,10);assert.equal(result.recognizerStarted,false);
- for(const key of ['partialFrames','allChannels','generationIsolation','physicalStreamContinuity','gapReset','inputUnchanged','resourceBounds','withinBufferActivity','directSpeechConfirmation','hangoverIsNotSpeech','transientRejected'])assert.equal(result[key],true,key);
+ for(const key of ['partialFrames','allChannels','generationIsolation','physicalStreamContinuity','gapReset','inputUnchanged','resourceBounds','withinBufferActivity','upstreamActivity','directFrameLedger','hangoverExcluded','partialFrameClock'])assert.equal(result[key],true,key);
 });

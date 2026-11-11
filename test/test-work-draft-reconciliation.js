@@ -25,14 +25,16 @@ test('a recorded input intent remains uncertain even if a legacy boolean is miss
  const task={skill:'work.delegate',status:'needs_attention',state:{workCheckpoint:{phase:'draft-ready'}},operations:{submit:{id:'submit',effect:'write',tool:'work.submit',status:'intent'}}};assert.equal(taskGuidance(task).title,'原草稿待继续');task.state.workCheckpoint.phase='input-unknown';assert.equal(taskGuidance(task).title,'草稿写入待核对');
 });
 test('own interactive regions reject pointer operations before dispatch while keyboard and human UI remain available',async()=>{
- const calls=[],logs=[],scope={bundleId:'com.tencent.workbuddy.mac',pid:123,windowId:7};
- const native={request:async op=>{calls.push(op);if(op==='frontmost')return {application:scope,windows:[{...scope,rect:{x:-100,y:20,width:1000,height:800}}]};if(op==='workbuddyInspect')return {scanComplete:true,childrenFetchErrors:0,editorCount:1,homeReady:true,draftEmpty:false,draftMatchesRequest:true};return {performed:true};},close:async()=>{}};
- const service=new DesktopService({native,pointerBlocked:p=>p.x===400&&p.y===420,log:x=>logs.push(x)});
+ const {fixture}=require('./support/visual-fixture.cjs'),h=fixture(),logs=[];
+ h.location={...h.location,software:'WorkBuddy',region:{x:0,y:0,width:1,height:1},mainRegion:{x:0,y:0,width:1,height:1}};
+ const nativeRequest=h.native.request;h.native.request=async(...args)=>{const result=await nativeRequest(...args);return args[0]==='displayCapture'?{...result,desktopRect:{x:-100,y:20,width:1000,height:800}}:result;};h.native.close=async()=>{};
+ const visualRequest=h.visual.request;h.visual.request=async options=>options.messages[0].content.includes('定位指定软件')?visualRequest(options):{response:{text:'{"matched":true,"evidence":"Synthetic complete task draft and submit conditions are visible"}'}};
+ const service=new DesktopService({native:h.native,imageCrop:h.crop,bitmap:h.bitmap,pointerBlocked:p=>p.x===400&&p.y===420,log:x=>logs.push(x)});service.visualSessions=new Map([['workbuddy',h.visual]]);
  service.task={id:'fixture',scene:'life',domain:'life',visibilityFloor:1,target:'workbuddy',outboundText:'fixture'};service.running=true;service.generation=1;service.controller=new AbortController();
- const shot=service.screenshot={at:Date.now(),rect:{x:-100,y:20,width:1000,height:800},preview:'fixture'};
+ const scope={...h.visual.identity(),target:'workbuddy'},shot=await service.capture(scope,1);
  try{
-  await assert.rejects(service.act({action:'click',purpose:'submit',x:.5,y:.5},scope,shot,1),e=>e.code==='E_GUI_POINTER_BLOCKED'&&e.dispatched===false);assert(!calls.includes('click'));
-  await assert.rejects(service.act({action:'type',purpose:'task',text:'fixture',focus:{x:.5,y:.5}},scope,shot,1),e=>e.dispatched===false);assert(!calls.includes('type'));
-  await service.act({action:'key',purpose:'submit',key:'enter',modifiers:[]},scope,shot,1);assert.equal(calls.filter(x=>x==='key').length,1);assert(logs.some(x=>x.stage==='pointer-blocked'));
+  await assert.rejects(service.act({action:'click',purpose:'submit',x:.5,y:.5},scope,shot,1),e=>e.code==='E_GUI_POINTER_BLOCKED'&&e.dispatched===false);assert(!h.calls.some(c=>c.op==='displayInput'));
+  await assert.rejects(service.act({action:'type',purpose:'task',text:'fixture',focus:{x:.5,y:.5}},scope,shot,1),e=>e.code==='E_GUI_POINTER_BLOCKED'&&e.dispatched===false);assert(!h.calls.some(c=>c.op==='displayInput'));
+  await service.act({action:'key',purpose:'submit',key:'enter',modifiers:[]},scope,shot,1);assert.equal(h.calls.filter(c=>c.op==='displayInput'&&c.args.action==='key').length,1);assert(logs.some(x=>x.stage==='pointer-blocked'));assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
  }finally{await service.close();}
 });

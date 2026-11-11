@@ -149,18 +149,19 @@ html, body {
 }
 .web-source-link:hover { background: var(--accent-soft); color: var(--ink); }
 #bubbleTail {
-  position: absolute;
+  position: fixed;
   left: 50%;
-  bottom: -6px;
-  width: 12px;
-  height: 12px;
-  margin-left: -6px;
+  width: 10px;
+  height: 10px;
   background: var(--floating-ground);
   border-right: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
-  transform: rotate(45deg);
-  border-bottom-right-radius: 3px;
+  transform: translateX(-50%) rotate(45deg);
+  border-bottom-right-radius: 2px;
+  pointer-events: none;
+  z-index: 20;
 }
+#bubble.hidden + #bubbleTail { display: none; }
 
 /* ── 换角色：转圈 + 一句话，落在角色身上而不是整屏 ── */
 #loading {
@@ -376,9 +377,11 @@ html, body {
 
 /* ══ 脚下那条：耳朵状态 + 电平 + 听到的话 ══
  * 左端固定在地面左下角；宽度是「内容要多少给多少，最多整窗」。
- * 关闭 = 灰；在听 = 绿（静态，不呼吸）；有声音 = 电平条跟着跳；
+ * 关闭 = 灰；打开 = 绿；圆点大小和竖线高度同步跟随真实音量；
  * 有话说 = 撑满整窗宽，文字长了横向滚动。 */
 #ear {
+  --ear-indicator: var(--listen-off);
+  --ear-level: 0;
   flex: 1 1 0;
   min-width: 0;
   height: var(--status-h);
@@ -410,51 +413,45 @@ html, body {
 #fab button:hover { box-shadow: var(--shadow-floating); }
 /* 字幕只使用按钮左侧的剩余空间；长文字在 earWin 内滚动。 */
 #ear.expand { min-width: 0; }
-/* 在听：整条转成中性墨色，点灯是绿的 */
-#ear.on { color: var(--ink-soft); border-color: var(--ok-ring); background: var(--ok-soft); }
+/* 开启时圆点和竖线为绿色；关闭后电平归零，文字保留原有颜色。 */
+#ear.on {
+  --ear-indicator: var(--listen-on);
+  --ear-level: var(--lvl, 0);
+  color: var(--ink-soft); border-color: var(--ok-ring); background: var(--ok-soft);
+}
 #ear.off { color: var(--muted); }
 #ear.warn { color: var(--accent-text); border-color: var(--accent-ring); }
 
 #ear .earDot {
-  width: 20px; height: 22px; border-radius: var(--radius-small);
-  margin-left: -6px; margin-right: -7px;
-  padding: 0; border: 0; background: transparent;
-  display: grid; place-items: center; cursor: pointer;
+  width: 38px; height: 22px; border-radius: var(--radius-small);
+  margin-left: -6px; margin-right: -3px;
+  padding: 0 4px; border: 0; background: transparent;
+  display: flex; align-items: center; justify-content: center; gap: 5px; cursor: pointer;
   flex: 0 0 auto;
 }
 #ear .earDot::before {
   content: ''; width: 7px; height: 7px; border-radius: 50%;
-  background: var(--switch-off);
-  transition: background .22s;
+  flex: 0 0 auto;
+  background: var(--ear-indicator);
+  transform: scale(calc(1 + var(--ear-level) * .85));
+  transition: transform .06s linear;
 }
 #ear .earDot:hover { background: rgba(90, 98, 90, .1); }
-#ear.on .earDot::before { background: var(--ok); }
-#ear.warn .earDot::before { background: var(--accent); }
 
-/* 电平条：不自己动，只跟真实音量 —— 安静时几乎是一条线，说话时明显起伏 */
+/* 与圆点共用电平和响应时间，不使用自行循环的音波动画。 */
 #ear .bars {
-  display: none;
-  align-items: center;
-  gap: 1.5px;
-  height: 12px;
-  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 1.5px;
+  height: 16px; flex: 0 0 auto;
 }
-#ear.on .bars { display: flex; }
 #ear .bars i {
-  display: block;
-  width: 2px;
-  height: 3px;
-  border-radius: 1px;
-  background: var(--ok);
-  opacity: .85;
-  transition: height .08s linear;
+  display: block; width: 2px; border-radius: 1px;
+  background: var(--ear-indicator);
+  transition: height .06s linear;
 }
-#ear .bars i:nth-child(1) { height: calc(3px + var(--lvl, 0) * 8px); }
-#ear .bars i:nth-child(2) { height: calc(3px + var(--lvl, 0) * 12px); }
-#ear .bars i:nth-child(3) { height: calc(3px + var(--lvl, 0) * 9px); }
-#ear .bars i:nth-child(4) { height: calc(3px + var(--lvl, 0) * 6px); }
-/* 声音够大：条子转暖色，主人一眼看出"它听见我了" */
-#ear.loud .bars i { background: var(--warn); }
+#ear .bars i:nth-child(1) { height: calc(3px + var(--ear-level) * 8px); }
+#ear .bars i:nth-child(2) { height: calc(3px + var(--ear-level) * 12px); }
+#ear .bars i:nth-child(3) { height: calc(3px + var(--ear-level) * 9px); }
+#ear .bars i:nth-child(4) { height: calc(3px + var(--ear-level) * 6px); }
 
 /* 文字窗口：撑满剩余宽度，超出就在里面横向滚动 */
 #ear .earWin {

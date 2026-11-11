@@ -22,8 +22,8 @@ test('channel history, memory derivation and model input preserve ASR provenance
  const {MemoryService}=require('../src/main/memory-service');const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bunny-perception-'));
  const memory=new MemoryService({dir,bin:path.resolve('bin/vault'),openKey:async()=>Buffer.alloc(32,101),getSettings:()=>({enabled:true,extract:false,scene:'life'})});await memory.init();assert(memory.ready,memory.error);
  t.after(async()=>{await memory.close();fs.rmSync(dir,{recursive:true,force:true});});
- const message=await memory.addMessage('user','会议改到明天下午三点。',{scene:'life',perception:p.speech('turn:test')});
- const wire=JSON.parse(actors.wire(actors.inputRow(message)).content);assert.equal(wire.text,message.value.content);assert.equal(wire.perception.level,'converted');assert.deepEqual(wire.perception.transforms,['asr']);
+ const message=await memory.addMessage('user','会议改到明天下午三点。',{scene:'life',perception:p.speech('turn:test'),asrNameMatch:true});
+ const wire=JSON.parse(actors.wire(actors.inputRow(message)).content);assert.equal(wire.text,message.value.content);assert.equal(wire.perception.level,'converted');assert.deepEqual(wire.perception.transforms,['asr']);assert.equal(wire.asrNameMatch,true);
  await memory.write([{id:'derived-summary',kind:'summary',ts:Date.now(),domain:'life',visibilityFloor:1,value:{origin:'doze',content:'会议时间变更的摘要。',sources:[message.id]}}]);
  const summary=(await require('../src/main/memory-evidence').readRecords(memory,['derived-summary']))[0];assert.equal(summary.value.perception.level,'inferred');assert.deepEqual(summary.value.perception.sourceChannels,['microphone']);assert.deepEqual(summary.value.sources,[message.id]);
  let payload;const {ConversationBrain}=require('../src/main/conversation-brain');const brain=new ConversationBrain({request:async options=>{payload=JSON.parse(options.messages.at(-1).content);return {response:{text:JSON.stringify({decision:'reply',reply:'收到。',summary:'已回应',progress:{},unknown:[],completed:false})}};}});

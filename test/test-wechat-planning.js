@@ -42,8 +42,10 @@ test('WeChat before/after screenshots are in one multimodal turn and do not surv
  assert.equal(calls[1].messages[1].content.filter(p=>p.type==='image_url').length,1);
 });
 test('an inconclusive post-send view retries full-screen location twice without any further input',async()=>{
- let frames=0,decisions=0,inputs=0;const now=Date.now(),s=new DesktopService({native:{request:async op=>op==='frontmost'?{application:{bundleId:'com.tencent.xinWeChat',pid:10},windows:[{pid:10,layer:0,windowId:20,rect:{width:821,height:909}}]}:{}},planner:async()=>{decisions++;return {action:'done',completed:false,evidence:'画面尚未核对'};}});
- s.task={...scope,domain:'life',scene:'life',visibilityFloor:1,startedAt:now,attemptStartedAt:now,submitAttemptedAt:now-1000,draftInserted:true,status:'running',steps:[]};s.running=true;s.generation=1;s.controller=new AbortController();s.displayRegionAnchor={windowId:20};
- s.capture=async()=>{frames++;return {at:Date.now(),ocr:[],preview:shot.preview};};s.act=async()=>{inputs++;};s.assertScreenshotCurrent=async()=>{};
- await s.runOwned(1,{...scope,startedAt:now,attemptStartedAt:now});assert.equal(frames,3);assert.equal(decisions,3);assert.equal(inputs,0);assert.equal(s.displayRegionAnchor,null);assert.equal(s.task.status,'paused');assert(s.task.proofCorrection.includes('全屏重新定位'));
+ const {fixture}=require('./support/visual-fixture.cjs'),h=fixture();h.location.software='微信';h.native.close=async()=>{};
+ let frames=0,decisions=0,inputs=0;const now=Date.now(),s=new DesktopService({native:h.native,imageCrop:h.crop,bitmap:h.bitmap,planner:async()=>{decisions++;return {action:'done',completed:false,evidence:'画面尚未核对'};}});
+ s.visualSessions=new Map([['wechat',h.visual]]);
+ s.task={...scope,domain:'life',scene:'life',visibilityFloor:1,startedAt:now,attemptStartedAt:now,submitAttemptedAt:now-1000,draftInserted:true,status:'running',steps:[]};s.running=true;s.generation=1;s.controller=new AbortController();s.displayRegionAnchor={mode:'visual'};
+ const capture=s.capture.bind(s);s.capture=async(...args)=>{frames++;return capture(...args);};s.act=async()=>{inputs++;};
+ try{await s.runOwned(1,{...scope,startedAt:now,attemptStartedAt:now});assert.equal(frames,3);assert.equal(decisions,3);assert.equal(inputs,0);assert.equal(s.displayRegionAnchor,null);assert.equal(s.task.status,'paused');assert(s.task.proofCorrection.includes('全屏重新定位'));assert.equal(h.calls.filter(c=>c.op==='displayCapture').length,5,'activation, three observations and final read-only verification');assert(h.calls.every(c=>c.op==='displayCapture'));}finally{await s.close();}
 });

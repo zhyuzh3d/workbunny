@@ -6,10 +6,11 @@ const {SpeakerFilter}=require('../src/main/speaker-filter');
 const {Asr,createActivityClock}=require('../src/main/asr');const {createVoiceTurns}=require('../src/main/voice-turns');
 function fixture(){let at=0,next=0,seq=0;const timers=new Map(),requests=[],events=[];
  const turns=createVoiceTurns({requireActivity:true,now:()=>at,setTimer:(fn,ms)=>{const id=++next;timers.set(id,{at:at+ms,fn});return id;},clearTimer:id=>timers.delete(id),onRequest:t=>requests.push({at,turn:t}),onInvalidate:()=>{},onRemember:()=>{}});
- const asr=new Asr('/unused');const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');
+ const asr=new Asr('/unused');const onMessage=asr.onMessage.bind(asr);asr.onMessage=m=>onMessage({...(['partial','utterance'].includes(m.t)?{speechSupported:true}:{}),...m});const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');
  const handlers=source.slice(source.indexOf('    const asrInput='),source.indexOf("    asr.on('recycle'"));
  const ctx={asr,asrMode:'continuous',asrFailStreak:0,require:name=>name==='./asr-input-pipeline'?{createAsrInputPipeline:options=>require('../src/main/asr-input-pipeline').createAsrInputPipeline({...options,now:()=>at,setTimer:(fn,ms)=>{const id=++next;timers.set(id,{at:at+ms,fn});return id;},clearTimer:id=>timers.delete(id)})}:require(name),voiceTurns:turns,speakerFilter:new SpeakerFilter(),suppressEnrollmentFinal:false,screenLocked:false,stopSpeaking:()=>{},publishSpeakerStatus:()=>{},lastSpeakerStatusAt:0,Date:{now:()=>at},send:(type,data)=>events.push({type,...data}),log:()=>{},alwaysOn:true,speaking:false,speechGen:0,lastPartialLogAt:0,lastLiveText:'',lastSpokeAt:0,recentSpeech:'',config:{load:()=>({asr:{wakeOnly:false}})},nameHit:()=>true,micPeak:0,micPeakAt:0,micQuietLoggedAt:0};
  ctx.speechEcho=new SpeechEcho({now:()=>at});ctx.traceSpeech=()=>{};ctx.nameHit=()=>ctx.nameMatches!==false;
+ ctx.interruptDialogue=()=>{if(ctx.speaking)ctx.stopSpeaking();};
  vm.runInNewContext(source.slice(source.indexOf('function echoLike('),source.indexOf('let activeAudioId =')),ctx);
  vm.runInNewContext(handlers,ctx);
  function advance(ms){const end=at+ms;while(true){const due=[...timers].filter(([,v])=>v.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!due)break;at=due[1].at;timers.delete(due[0]);due[1].fn();}at=end;}
@@ -56,7 +57,7 @@ test('non-owner evidence rejects new words without cancelling an already confirm
  const owner=f.requests[0].turn;f.asr.onMessage(feature(1));assert(owner.isCurrent(),'a completed owner turn is not cancelled by another speaker');
  f.asr.onMessage({t:'partial',v:'旁人后来说话'});assert.equal(f.requests.length,1);
 });
-test('self echo is filtered throughout a long playback and its ending tail',()=>{
+test('actual long playback and its ending tail supply text-match evidence',()=>{
  const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');let at=30000;
  const ctx={speaking:true,lastSpokeAt:0,speechEcho:new SpeechEcho({now:()=>at}),Date:{now:()=>at}};
  ctx.speechEcho.prepare('one','这是已经播放了三十秒的长句，仍然不能把自己的声音当作用户插话。');ctx.speechEcho.start('one');
@@ -66,21 +67,23 @@ test('self echo is filtered throughout a long playback and its ending tail',()=>
  ctx.speaking=false;ctx.lastSpokeAt=at;ctx.speechEcho.end('one');at+=2000;assert(ctx.recentEcho('仍然不能把自己的声音当作用户插话'));
  at+=1100;assert(!ctx.recentEcho('已经播放了三十秒的长句'),'a later owner repetition is admitted');
 });
-test('AEC voice activity and short or misrecognized self echo do not interrupt playback, but new owner words do',()=>{
+test('playback matches remain candidates while new recognized words interrupt immediately',()=>{
  const f=fixture();let interruptions=0;f.ctx.stopSpeaking=()=>{interruptions++;f.ctx.speaking=false;};
  f.ctx.speaking=true;f.ctx.speechEcho.prepare('one','我已经为你整理好报告，接下来我们可以检查结果。');f.ctx.speechEcho.start('one');f.asr.aec=true;
  f.asr.onMessage({t:'voiceFeatures',vector:Array.from({length:28},(_,i)=>Number(i===0)),frames:40,quality:.9,durationMs:400,speech:true});
  assert.equal(interruptions,0,'AEC and unfiltered voice activity are not speaker identity');
- f.asr.onMessage({t:'partial',v:'我'});f.asr.onMessage({t:'partial',v:'整理好报告'});
+ f.asr.onMessage({t:'partial',v:'整理好报告'});
  f.asr.onMessage({t:'partial',v:'接下来我们可以检察结果'});
  assert.equal(interruptions,0);assert.equal(f.requests.length,0);assert.equal(f.events.filter(e=>e.type==='asrPartial').length,0);
- f.asr.onMessage({t:'partial',v:'等一下我有新问题'});assert.equal(interruptions,0);f.advance(300);assert.equal(interruptions,1);
+ f.asr.onMessage({t:'partial',v:'等一下我有新问题'});assert.equal(interruptions,1);f.advance(300);assert.equal(interruptions,1);
  f.advance(1000);assert.equal(f.requests.length,0);
+ f.asr.onMessage({t:'utterance',v:'等一下我有新问题'});f.levels(600);
+ assert.equal(f.requests.length,1);assert.equal(f.requests[0].turn.text,'等一下我有新问题');assert.equal(interruptions,1);
 });
-test('wake-only mode does not interrupt speech when the name was not called',()=>{
+test('wake-only mode still interrupts for recognized words, before the wake-name decision',()=>{
  const f=fixture();let interruptions=0;f.ctx.stopSpeaking=()=>interruptions++;
  f.ctx.speaking=true;f.ctx.config.load=()=>({asr:{wakeOnly:true}});f.ctx.nameMatches=false;
- f.asr.onMessage({t:'partial',v:'旁边的人在聊天'});assert.equal(interruptions,0);assert.equal(f.turns.snapshot(),null);
+ f.asr.onMessage({t:'partial',v:'旁边的人在聊天'});assert.equal(interruptions,1);assert.equal(f.turns.snapshot().text,'旁边的人在聊天');assert.equal(f.requests.length,0);
 });
 test('switching from one-shot recording to continuous listening replaces the recognizer generation',()=>{
  const source=fs.readFileSync(path.join(__dirname,'../src/main/index.js'),'utf8');let killed=0,started=0;

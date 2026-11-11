@@ -93,9 +93,8 @@ final class SystemAudioReference {
                 if now - startingAt > 5 { failure = -8 }
                 return false
             }
-            guard !restartQueued, now - lastAttemptAt >= 5,
-                  failure != kAudioDevicePermissionsError,
-                  failure != 0 || (receivedAt > 0 && now - receivedAt > 2) else { return false }
+            guard !restartQueued, Self.recoveryDue(now: now, lastAttemptAt: lastAttemptAt,
+                lastReceivedAt: receivedAt, failure: failure) else { return false }
             restartQueued = true; return true
         }
         if retry {
@@ -104,6 +103,13 @@ final class SystemAudioReference {
                 closeDevices(); openDevices()
             }
         }
+    }
+    fileprivate static func recoveryDue(now: Double, lastAttemptAt: Double,
+                                        lastReceivedAt: Double, failure: Int32) -> Bool {
+        // AudioDeviceStart can succeed without ever delivering an IOProc. That
+        // first-callback deadline belongs to this stream, just like later stalls.
+        now - lastAttemptAt >= 5 && failure != kAudioDevicePermissionsError &&
+            (failure != 0 || lastReceivedAt == 0 || now - lastReceivedAt > 2)
     }
     private static var defaultOutputAddress: AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -245,6 +251,8 @@ final class SpeechEchoCancellation {
     private var lastState = ""
     private var lastCode = Int32.min
     private var newestRenderAt = 0.0
+    private var newestRenderAnalyzedAt = 0.0
+    private var lastBufferingDelayMs: Int32 = 0
     private var latestCaptureAt = 0.0, referenceRms = 0.0
     private let output: ([String: Any]) -> Void
     private let recordReference: ((AudioPCMChunk) -> Void)?
@@ -268,11 +276,12 @@ final class SpeechEchoCancellation {
     }
     private func reset() {
         if let context { wb_aec_reset(context) }
-        newestRenderAt = 0; ready = false
+        newestRenderAt = 0; newestRenderAnalyzedAt = 0; lastBufferingDelayMs = 0; ready = false
     }
     func diagnostics() -> [String: Any] {
         var result: [String: Any] = ["referenceRms": referenceRms, "referenceAt": newestRenderAt,
             "referenceLagMs": (latestCaptureAt - newestRenderAt) * 1000,
+            "aecBufferingDelayMs": Int(lastBufferingDelayMs),
             "captureHeadroomMs": captureHeadroomSeconds * 1000, "capturePendingFrames": partial.count]
         if let context {
             var stats = WBAECStats()
@@ -283,6 +292,15 @@ final class SpeechEchoCancellation {
             }
         }
         return result
+    }
+    fileprivate static func bufferingDelayMs(renderAt: Double, analyzedAt: Double,
+                                             captureAt: Double, processedAt: Double) -> Int32 {
+        // WebRTC's buffering delay is (t_render - t_analyze) +
+        // (t_process - t_capture), not the acoustic path estimate. Both PCM
+        // timestamps label their first sample on the host clock. Render and
+        // capture run serially here, but keep their actual call-time difference.
+        let seconds = (renderAt - analyzedAt) + (processedAt - captureAt)
+        return Int32(min(500, max(0, (seconds * 1000).rounded())))
     }
     func process(_ input: AVAudioPCMBuffer, at audioTime: AVAudioTime) -> AVAudioPCMBuffer? {
         processChunk(input, at: audioTime)?.buffer
@@ -333,6 +351,7 @@ final class SpeechEchoCancellation {
                         frame.right.withUnsafeBufferPointer { pcm.floatChannelData![1].update(from: $0.baseAddress!, count: 480) }
                         recordReference(AudioPCMChunk(buffer: pcm, at: frame.at))
                     }
+                    let analyzedAt = ProcessInfo.processInfo.systemUptime
                     let result = frame.left.withUnsafeBufferPointer { left in
                         frame.right.withUnsafeBufferPointer { right in
                             var channels: [UnsafePointer<Float>?] = [left.baseAddress, right.baseAddress]
@@ -341,11 +360,13 @@ final class SpeechEchoCancellation {
                     }
                     if result != 0 { valid = false; failure = result; break }
                     referenceRms = sqrt(zip(frame.left, frame.right).reduce(0.0) { $0 + (Double($1.0) * Double($1.0) + Double($1.1) * Double($1.1)) / 960 })
-                    newestRenderAt = frame.at; ready = true
+                    newestRenderAt = frame.at; newestRenderAnalyzedAt = analyzedAt; ready = true
                 }
                 valid = valid && ready && newestRenderAt <= captureAt + captureHeadroomSeconds + 0.05 && captureAt - newestRenderAt <= 0.25
                 if valid {
-                    let delay = Int32(min(500, max(0, (captureAt - newestRenderAt) * 1000)))
+                    let delay = Self.bufferingDelayMs(renderAt: newestRenderAt, analyzedAt: newestRenderAnalyzedAt,
+                        captureAt: captureAt, processedAt: ProcessInfo.processInfo.systemUptime)
+                    lastBufferingDelayMs = delay
                     let delayStatus = wb_aec_set_stream_delay_ms(context, delay)
                     let result = partial.withUnsafeBufferPointer { wb_aec_process_capture(context, $0.baseAddress!.advanced(by: offset), destination.advanced(by: offset), 480) }
                     valid = result == 0 && delayStatus == 0
@@ -382,6 +403,16 @@ final class SpeechEchoCancellation {
             checks += 1
             if !condition { throw NSError(domain: "bunny.echo-routing.self-test", code: checks) }
         }
+        try check(bufferingDelayMs(renderAt: 10.05, analyzedAt: 10.2, captureAt: 10, processedAt: 10.2) == 50)
+        try check(bufferingDelayMs(renderAt: 9.95, analyzedAt: 10.2, captureAt: 10, processedAt: 10.2) == 0)
+        try check(bufferingDelayMs(renderAt: 10, analyzedAt: 10.2, captureAt: 10, processedAt: 10.2) == 0)
+        try check(bufferingDelayMs(renderAt: 10.05, analyzedAt: 10.2, captureAt: 10, processedAt: 10.212) == 62)
+        try check(bufferingDelayMs(renderAt: 11, analyzedAt: 11.1, captureAt: 10, processedAt: 11.1) == 500)
+        try check(!SystemAudioReference.recoveryDue(now: 14.9, lastAttemptAt: 10, lastReceivedAt: 0, failure: 0))
+        try check(SystemAudioReference.recoveryDue(now: 15, lastAttemptAt: 10, lastReceivedAt: 0, failure: 0))
+        try check(!SystemAudioReference.recoveryDue(now: 15, lastAttemptAt: 10, lastReceivedAt: 14.9, failure: 0))
+        try check(SystemAudioReference.recoveryDue(now: 15, lastAttemptAt: 10, lastReceivedAt: 12, failure: 0))
+        try check(!SystemAudioReference.recoveryDue(now: 15, lastAttemptAt: 10, lastReceivedAt: 0, failure: kAudioDevicePermissionsError))
         let mono = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
         let stereo = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
         func pcm(_ format: AVAudioFormat, frames: Int, sample: Float = 0) -> AVAudioPCMBuffer {
@@ -441,6 +472,38 @@ final class SpeechEchoCancellation {
         try check(withExtendedLifetime(released) { released!.buffer.floatChannelData![0][0] == 0.125 && released!.buffer.floatChannelData![0][2399] == 0.125 })
         try check(fallback.diagnostics()["capturePendingFrames"] as? Int == 0)
 
+        // Replay both physical sample clocks through the real adapters. The
+        // 60ms capture queue must retain its original timestamps, and its
+        // reference lead must be reported as positive buffering delay at either
+        // native or converted sample rates. No device or recognizer is opened.
+        for rate in [48000.0, 44100.0] {
+            let sourceMic = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
+            let sourceRender = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
+            let clockedReference = SystemAudioReference(fixtureFormat: sourceRender)
+            let clocked = SpeechEchoCancellation(sourceFormat: sourceMic, reference: clockedReference,
+                startReference: false, captureHeadroomMs: 60) { _ in }
+            var nextOutputAt = now, delivered = 0
+            for index in 0..<8 {
+                let at = now + Double(index) * 0.1
+                let count = Int(rate / 10)
+                clockedReference.supplyFixture(pcm(sourceRender, frames: count), at: at)
+                if let signal = clocked.processChunk(pcm(sourceMic, frames: count, sample: 0.01),
+                    at: AVAudioTime(hostTime: AVAudioTime.hostTime(forSeconds: at))) {
+                    try check(abs(signal.at - nextOutputAt) < 1e-7)
+                    nextOutputAt = signal.endAt; delivered += Int(signal.buffer.frameLength)
+                    let diagnostics = clocked.diagnostics()
+                    let leadMs = -(diagnostics["referenceLagMs"] as! Double)
+                    let delayMs = diagnostics["aecBufferingDelayMs"] as! Int
+                    try check(leadMs > 0 && Double(delayMs) >= leadMs - 1 && Double(delayMs) < leadMs + 50)
+                }
+            }
+            for signal in try clocked.flush() {
+                try check(abs(signal.at - nextOutputAt) < 1e-7)
+                nextOutputAt = signal.endAt; delivered += Int(signal.buffer.frameLength)
+            }
+            try check(abs(delivered - 38400) <= 1)
+        }
+
         let resampled = SpeechEchoCancellation(sourceFormat: AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!,
             reference: SystemAudioReference(), startReference: false) { _ in }
         var delivered = 0
@@ -455,6 +518,8 @@ final class SpeechEchoCancellation {
         return ["echoRouting": true, "timestampOrder": true, "stereoReference": true, "boundedRing": true,
                 "silentReferenceIsLive": true, "staleReferenceBypasses": true, "rawInputPreserved": true,
                 "conversionFrames": true, "boundedCaptureHeadroom": true, "headroomFlush": true,
+                "bufferingDelayClock": true, "bufferingDelayScheduling": true, "firstReferenceDeadline": true,
+                "headroomSampleClocks": true,
                 "referenceFailureReleasesRaw": true, "recognizerStarted": false, "devicesStarted": false, "checks": checks]
     }
 }

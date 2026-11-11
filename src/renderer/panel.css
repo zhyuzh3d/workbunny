@@ -66,6 +66,10 @@ body[data-p="motions"]  #motions  { display: flex; }
   line-height: 1.6;
   color: var(--muted);
 }
+.hearing-option { margin-top: var(--space-4); }
+.group + .hearing-option { margin-top: 0; }
+.hearing-option > .row { margin-bottom: 0; }
+.hearing-option > .note { margin-top: var(--space-1); }
 /* 一页里按选择显/隐的那一段：隐藏时彻底不占位，页面不会突然矮一截 */
 .sub { display: none; margin-top: 10px; }
 .sub.on { display: block; }

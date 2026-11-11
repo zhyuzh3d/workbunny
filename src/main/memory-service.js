@@ -261,12 +261,14 @@ class MemoryService {
       await this.onChange({ type: 'memory-changed' });
     } catch { /* Refresh notifications must not affect committed writes. */ }
   }
-  async write(records, epoch = this.epoch, { notify = true, restoreSequence = false, strictSources = false } = {}) {
+  async write(records, epoch = this.epoch, { notify = true, restoreSequence = false, strictSources = false, assertCurrent = () => {} } = {}) {
+    assertCurrent();
     const needed = [...new Set(records.flatMap(r => r.value.sources || []))], parents = new Map();
     // Each row can carry up to 2 MiB of ciphertext. Keep native responses
     // below the framing limit even when one task depends on large records.
     for (let i = 0; i < needed.length; i += VAULT_PAGE_SIZE) {
       const found = await this.db.request('get', { ids: needed.slice(i, i + VAULT_PAGE_SIZE) });
+      assertCurrent();
       for (const r of found.rows) parents.set(r.id, this.decode(r));
     }
     for (const r of records) {
@@ -283,6 +285,7 @@ class MemoryService {
       if (strictSources && scope.visibilityFloor !== r.visibilityFloor) throw new Error('任务来源的可见范围高于当前授权');
       Object.assign(r, scope);
     }
+    assertCurrent();
     const result = await this.db.request('write', { epoch, ...(restoreSequence ? { restoreSequence: true } : {}), records: records.map(r => this.encode(r, restoreSequence)) });
     this.epoch = result.epoch;
     if (notify && records.some(r => ['memory', 'message', 'summary', 'persona', 'task'].includes(r.kind) || knowledge.typeOf(r) || r.value.schema === 'growth-entry/v1' || r.value.schema === 'bunny.memory-import/v1'&&r.value.type==='batch')) await this.notifyChange();
@@ -497,7 +500,12 @@ class MemoryService {
       return Promise.reject(new Error('消息隐私版本不合法'));
     }
     const generation = Object.hasOwn(safeDetails, 'privacyEpoch') ? safeDetails.privacyEpoch : this.generation;
+    const assertCurrent = () => {
+      if (safeDetails.signal?.aborted || typeof safeDetails.isCurrent === 'function' && !safeDetails.isCurrent())
+        throw Object.assign(new Error('对话已被新输入替换，未保存旧回答'), { code: 'ABORT_ERR' });
+    };
     return this.serial(async () => {
+      assertCurrent();
       if (generation !== this.generation) throw new Error('消息来源的隐私版本已变更');
       if (safeDetails.evidenceSnapshots && !(await verifySnapshots(this, safeDetails.evidenceSnapshots, { scene: safeDetails.scene ?? this.scene() })).ok)
         throw new Error('回复的回忆依据已变化，未保存旧回答');
@@ -522,6 +530,7 @@ class MemoryService {
         ...(actors.isOwner(meta) ? { userOrdinal: this.userMessagesSeen + 1 } : {}),
         sources: actors.isOwner(meta) ? [] : sources };
       const existing = (await this.db.request('get', { ids: [recordId] })).rows[0];
+      assertCurrent();
       if (existing) {
         if (existing.kind !== 'message') throw new Error('幂等消息 ID 已被其他记录占用');
         const prior = this.decode(existing).value;
@@ -534,7 +543,8 @@ class MemoryService {
       }
       const record = { id: recordId, kind: 'message', ts: this.clock(), domain: safeDetails.domain ?? safeDetails.scene ?? this.scene(),
         ...(safeDetails.visibilityFloor !== undefined ? { visibilityFloor: safeDetails.visibilityFloor } : {}), value };
-      await this.write([record]);
+      assertCurrent();
+      await this.write([record], this.epoch, { assertCurrent });
       if (scopes.canRead(this.scene(), record)) this.recent.push(record); this.recent = this.recent.slice(-80);
       if (actors.isOwner(meta)) {
         this.userMessagesSeen = value.userOrdinal;

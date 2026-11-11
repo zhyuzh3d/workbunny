@@ -82,21 +82,22 @@ test('owner-labelled credentials are encrypted, recallable and included only in 
 });
 
 test('WorkBuddy attachment must be visibly present before the safe prompt is submitted',async t=>{
- const {DesktopService}=require('../src/main/desktop-service');const calls=[];
+ const {DesktopService}=require('../src/main/desktop-service');const calls=[];let pasted=false,attachmentObservations=0;
  const policy=createSensitivePolicy({getValues:async()=>[fixtureSecret]}),prepared=await policy.prepareWorkBuddy('处理测试账号 '+fixtureSecret);
  t.after(()=>require('../src/main/sensitive-policy').removeSensitiveAttachment(prepared.attachment).catch(()=>{}));
  const service=new DesktopService({sensitivePolicy:policy,native:{request:async(op,payload)=>{
   calls.push({op,payload});
+  if(op==='frontmost')return {application:{bundleId:'com.tencent.workbuddy.mac',pid:1},windows:[{pid:1,windowId:2}]};
   if(op==='workbuddyInspect')return {available:true,homeReady:true,editorCount:1,selectedModel:'deepseek-v4.1-flash',draftEmpty:true,sendButtonRect:{x:900,y:620,width:40,height:40}};
-  if(op==='workbuddyFill')return {filled:true};if(op==='pasteFile')return {performed:true};if(op==='workbuddySend')return {pressed:true,postContextValid:true};
+  if(op==='workbuddyFill')return {filled:true};if(op==='pasteFile'){pasted=true;return {performed:true};}if(op==='workbuddySend'){assert(pasted);assert(attachmentObservations>0);assert.equal(service.task.sensitiveAttachmentState,'verified');return {pressed:true,postContextValid:true};}
   throw Error('unexpected native call');
  }}});
  service.task={id:'fixture',target:'workbuddy',scene:'life',domain:'life',visibilityFloor:1,outboundText:prepared.text,steps:[],sensitiveAttachment:prepared.attachment};
  service.running=true;service.generation=1;
  service.assertScreenshotCurrent=async()=>{};
- service.capture=async()=>({ocr:[{text:path.basename(prepared.attachment.path),confidence:.99}]});
+ service.capture=async()=>{if(pasted)attachmentObservations++;return {ocr:pasted?[{text:path.basename(prepared.attachment.path),confidence:.99}]:[]};};
  assert(await service.tryWorkBuddyHandoff({outboundText:prepared.text},{bundleId:'com.tencent.workbuddy.mac',pid:1,windowId:2},{},1));
- assert.deepEqual(calls.map(call=>call.op),['workbuddyInspect','workbuddyFill','pasteFile','workbuddyInspect','workbuddySend']);
+ assert.deepEqual(calls.map(call=>call.op),['workbuddyInspect','frontmost','workbuddyFill','pasteFile','frontmost','workbuddyInspect','workbuddySend']);
  assert(!JSON.stringify(calls).includes(fixtureSecret));assert.equal(service.task.sensitiveAttachmentState,'delivered');assert(!fs.existsSync(prepared.attachment.path));
 });
 
@@ -109,8 +110,9 @@ test('sensitive filehelper delivery prepares a text file but refuses input witho
  const result=await service.start({target:'wechat',recipient:'文件传输助手',operation:'send',goal:'给主人发送示例凭据',message:fixtureSecret});assert(result.ok,result.error);
  const file=service.task.attachment;t.after(()=>require('../src/main/sensitive-policy').removeSensitiveAttachment(file).catch(()=>{}));
  assert(file);assert.equal(service.task.requiresFileHelperVerification,true);assert(!service.task.message.includes(fixtureSecret));
- const scope={bundleId:'com.tencent.xinWeChat',pid:2,windowId:3};
+ const scope=service.visualSession.identity();service.task.scope=scope;
  const shot={ocr:[{text:'文件传输助手',confidence:.99,x:.4,y:.02,width:.2,height:.03}]};
- await assert.rejects(service.act({action:'type',purpose:'task',text:service.task.message},scope,shot,service.generation),/文件传输助手/);
+ await assert.rejects(service.sensitivePolicy.check({target:'wechat',recipient:'文件传输助手',ownership:'owner',attachment:file,taskAuthorized:true,fileHelperVerified:false}),/文件传输助手/);
+ await assert.rejects(service.act({action:'type',purpose:'task',text:service.task.message},scope,shot,service.generation),error=>error.dispatched===false&&/微信附件.*原生文件选择/.test(error.message));
  assert.deepEqual(calls,['permissions']);
 });

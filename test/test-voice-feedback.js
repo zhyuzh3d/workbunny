@@ -7,6 +7,7 @@ test('final ASR for an uncalled name never publishes pending feedback',()=>{
  ctx.publishVoiceLive('旁边的说话',{final:true,pending:true,turn:1,turnId:'fixture:1',phase:'pending'});assert.deepEqual({...events[0]},{type:'heard',text:'旁边的说话',replied:false,reason:'not-addressed',turn:1,turnId:'fixture:1',phase:'pending'});
  ctx.publishVoiceLive('旁边的说话。',{final:true,pending:true});assert(events.every(e=>e.replied===false));
  ctx.publishVoiceLive('Bunny看看',{final:true,pending:true});assert.equal(events.at(-1).replied,undefined);
+ ctx.publishVoiceLive('Bunny新问题',{final:true,pending:false,phase:'candidate',turn:2});assert.equal(events.at(-1).type,'heard');assert.equal(events.at(-1).turn,2);
 });
 test('ignored speech has explicit feedback, expires, and does not replace a newer semantic reply',()=>{
  const source=fs.readFileSync('src/renderer/app.js','utf8');let clear;
@@ -15,10 +16,12 @@ test('ignored speech has explicit feedback, expires, and does not replace a newe
  vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function earLabel()'),source.indexOf('/* 文字超出可用宽度')),ctx);
  vm.runInContext(source.slice(source.indexOf('function clearHeard()'),source.indexOf('function asrHealthy()')),ctx);
  vm.runInContext(source.slice(source.indexOf('function paintHeard('),source.indexOf('/* ═══════════ 权限')),ctx);
- ctx.paintHeard('旁边的说话',false,'not-addressed');assert.equal(ctx.earLabel(),'你说 · 旁边的说话 · 没叫我，飘过～');assert.equal(ctx.pendingHeard,'');
+ ctx.paintHeard('旁边的说话',false,'not-addressed');assert.equal(ctx.earLabel(),'在听');assert.equal(ctx.pendingHeard,'');
  ctx.paintHeard('旁边的说话。',false,'not-addressed');assert(!ctx.earLabel().includes('正在回应'));
  clear();assert.equal(ctx.earLabel(),'在听');
  ctx.paintHeard('Bunny你好');ctx.paintHeard('旧的语义判断',false);assert.equal(ctx.shownState,'pending');
+ assert.equal(ctx.earLabel(),'Bunny你好 · 正在回应');
+ for(const [state,label] of [['ready','正在转语音'],['reply','正在说话'],['done','在听'],['skip','在听']]){ctx.shownState=state;assert.equal(ctx.earLabel(),label);assert(!ctx.earLabel().includes('Bunny你好'));}
 });
 test('authoritative turn reset, completion and new speech clear old words and reject stale results',()=>{
  const source=fs.readFileSync('src/renderer/app.js','utf8'),timers=[];
@@ -34,4 +37,11 @@ test('authoritative turn reset, completion and new speech clear old words and re
  ctx.paintHeard('new words',undefined,undefined,2);assert.equal(ctx.shownState,'done','a duplicate pending result cannot reopen a retired turn');
  const expire=timers.at(-1);ctx.paintLive('third words',{turn:3,phase:'partial'});expire();assert.equal(ctx.liveText,'third words');
  ctx.paintLive('',{turn:2,phase:'reset'});assert.equal(ctx.liveText,'third words');
+});
+test('actual playback start immediately replaces pending response status',()=>{
+ const source=fs.readFileSync('src/renderer/app.js','utf8');let paints=0;
+ const ctx={shownHeard:'你好',shownState:'pending',activeAudioId:'current',paintEar(){paints++;}};
+ vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function markReplyStarted('),source.indexOf('/* ═══════════ 加载')),ctx);
+ ctx.markReplyStarted('obsolete');assert.equal(ctx.shownState,'pending');assert.equal(paints,0);
+ ctx.markReplyStarted('current');assert.equal(ctx.shownState,'reply');assert.equal(paints,1);
 });

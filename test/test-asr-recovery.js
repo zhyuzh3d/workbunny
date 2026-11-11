@@ -13,7 +13,7 @@ test('other repeated faults back off within a fixed limit without inferring a pe
 test('the production host stops repeated unconfirmed recovery, rejects background restart and permits explicit owner resume',()=>{
  const fs=require('node:fs'),vm=require('node:vm'),source=fs.readFileSync(require.resolve('../src/main/index.js'),'utf8'),callbacks={},retries=[],events=[],starts=[];
  const context={asr:{on:(name,callback)=>{callbacks[name]=callback;},running:false,start:opts=>starts.push(opts)},applyStatus:()=>{},voiceTurns:{recognizerStopped:()=>{}},quitting:false,screenLocked:false,storageBusy:false,speechDiagnostic:null,memory:null,listenRestartTimer:null,asrStatus:{},config:{load:()=>({memory:{enabled:false},voice:{alwaysListen:true}})},alwaysOn:true,asrMode:'continuous',asrFailStreak:0,asrRecoveryBlocked:false,asrRecovery,send:(...args)=>events.push(args),scheduleListenRestart:delay=>retries.push(delay),log:()=>{}};
- vm.runInNewContext(source.slice(source.indexOf('function mayRecoverListening()'),source.indexOf('/** 本地小门槛')),context);
+ vm.runInNewContext(source.slice(source.indexOf('function mayRecoverListening()'),source.indexOf('/** Only empty/nonlinguistic')),context);
  const first=source.indexOf("    asr.on('exit', code => {"),last=source.indexOf('    if (connection.status().ready)',first);vm.runInNewContext(source.slice(first,last),context);
  for(let i=0;i<3;i++)callbacks.exit(25);
  assert.deepEqual(retries,[1200,1200]);assert.equal(context.alwaysOn,false);assert.equal(context.asrRecoveryBlocked,true);assert(events.some(([event,value])=>event==='asrError'&&value.message.includes('仍可打字')));

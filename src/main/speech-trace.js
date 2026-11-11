@@ -5,12 +5,12 @@ const stages=new Set(['tap-vpio','tap-capture','echo-output','analyzer-input','r
  'raw-partial','raw-utterance','raw-final','partial-accepted','partial-pending-barge','partial-retracted','partial-drop-enrollment','partial-drop-speaker','partial-drop-echo','partial-drop-barge','partial-drop-mode',
  'utterance-accepted','utterance-drop-enrollment','utterance-drop-speaker','utterance-drop-mode','utterance-drop-echo','utterance-drop-barge','final-accepted','final-drop-enrollment','final-drop-speaker','final-drop-mode','final-drop-echo','final-drop-barge',
  'turn-partial','turn-final','turn-retracted','turn-checkpoint','turn-audio-final','turn-request','turn-gate-closed','turn-gate-ready','turn-completed','turn-invalidated','turn-remember','turn-reset','turn-unconfirmed','turn-reset-speaker','history-written','history-unconfirmed','request-drop-noise','request-drop-echo','request-drop-wake','request-accepted',
- 'voice-playback-start','voice-playback-end','voice-admitted','voice-model-start','voice-model-end','voice-model-abort','voice-effects-waiting','voice-effects-allowed','voice-task-admitted']);
+ 'voice-playback-start','voice-playback-end','voice-admitted','voice-candidate','voice-semantic-accepted','voice-semantic-ignored','voice-model-start','voice-model-end','voice-model-abort','voice-effects-waiting','voice-effects-allowed','voice-task-admitted']);
 const fields=new Set(['at','gen','currentGen','seq','recognizer','pendingFrames','pendingSeconds','frames','rate','channels','measuredChannels','rms','peak','inputFrames','outputFrames','muted','aec','accepted','converted','conversionError','buffers','current','utteranceCount',
  'directBuffers','directFrames','queuedBuffers','queuedFrames','replayedBuffers','replayedFrames','start','end','finalizedThrough','isFinal','textChars','combinedChars','removedSegments','touchesFinalized','confirmed','ok',
  'chars','turn','segments','partialChars','finalized','requested','remembered','skipped',
- 'commitReady','waitingAudio','gateClosedMs','reasonCode','elapsedMs','taskAdmitted','activityAgeMs','activitySeq','sourceGen','quietSeconds',
- 'sampleStartAt','sampleEndAt','aecRenderFrames','aecCaptureFrames','aecResets','aecDelayMs','aecErleDb','referenceRms','referenceAt','referenceLagMs','captureHeadroomMs','capturePendingFrames']);
+ 'commitReady','replacesResponse','pendingResponses','pendingAudioParts','waitingAudio','gateClosedMs','reasonCode','elapsedMs','taskAdmitted','activityAgeMs','activitySeq','sourceGen','quietSeconds',
+ 'sampleStartAt','sampleEndAt','aecRenderFrames','aecCaptureFrames','aecResets','aecDelayMs','aecBufferingDelayMs','aecErleDb','referenceRms','referenceAt','referenceLagMs','captureHeadroomMs','capturePendingFrames']);
 function sanitizeSpeechTrace(value){
  if(!value||!stages.has(value.stage))return null;
  const result={stage:value.stage};

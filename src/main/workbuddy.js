@@ -193,7 +193,9 @@ async function chatWithTransport(opts, transport) {
   }
   const { raw, model: usedModel, usage, toolCalls, finishReason } = response;
   if (toolCalls?.length) return { text: '', raw: '', model: usedModel, usage, finishReason, provider: 'workbuddy', toolCalls,contextBudget:opts.contextBudget };
-  if (onDelta) onDelta(raw);
+  // The broker has already buffered the entire response. Consumers must
+  // validate this completion before presenting it as incremental content.
+  if (onDelta) onDelta(raw, { complete: true });
   const { extractTags, makeSentenceSplitter } = require('./llm');
   if (onSentence) { const split = makeSentenceSplitter(onSentence); split.push(raw); split.flush(); }
   const parsed = extractTags(raw);

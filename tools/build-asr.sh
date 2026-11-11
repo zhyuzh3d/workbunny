@@ -26,6 +26,6 @@ xcrun clang -O2 -std=c11 -target arm64-apple-macos26.0 -include "$vad_build/fvad
 vad_objects+=("$vad_build/speech-vad.o")
 xcrun ar rcs "$vad_build/libfvad.a" "${vad_objects[@]}"
 echo_library=$(zsh tools/build-echo-cancellation.sh "$vad_build/echo")
-xcrun swiftc -O -parse-as-library -target arm64-apple-macos26.0 -import-objc-header native/asr-bridge.h native/speaker-features.swift native/wake-name.swift native/speech-transcript.swift native/speech-diagnostic.swift native/speech-activity.swift native/speech-endpoint.swift native/audio-pcm-stream.swift native/speech-echo-cancellation.swift native/asr.swift "$vad_build/libfvad.a" "$echo_library" -lc++ -o bin/asr \
+xcrun swiftc -O -parse-as-library -target arm64-apple-macos26.0 -import-objc-header native/asr-bridge.h native/speaker-features.swift native/wake-name.swift native/speech-context.swift native/speech-transcript.swift native/speech-diagnostic.swift native/speech-activity.swift native/speech-endpoint.swift native/audio-pcm-stream.swift native/speech-echo-cancellation.swift native/asr.swift "$vad_build/libfvad.a" "$echo_library" -lc++ -o bin/asr \
   -framework Accelerate -framework Speech -framework AVFoundation -framework AudioToolbox -framework CoreAudio
 chmod +x bin/asr

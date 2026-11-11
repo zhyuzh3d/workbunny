@@ -16,16 +16,16 @@ test('separate semantic and effect state diagnostics retain fixed numeric reason
  assert.deepEqual(sanitizeSpeechTrace({stage:'turn-gate-ready',gateClosedMs:Infinity,reasonCode:NaN,waitingAudio:secret}),{stage:'turn-gate-ready'});
 });
 test('echo stream diagnostics expose only finite counters, levels and sample times',()=>{
- const row=sanitizeSpeechTrace({stage:'echo-output',sampleStartAt:1,sampleEndAt:1.1,aecRenderFrames:20,aecCaptureFrames:10,aecResets:1,aecDelayMs:16,aecErleDb:20,referenceRms:.1,referenceAt:1,referenceLagMs:0,captureHeadroomMs:60,capturePendingFrames:2880,
+ const row=sanitizeSpeechTrace({stage:'echo-output',sampleStartAt:1,sampleEndAt:1.1,aecRenderFrames:20,aecCaptureFrames:10,aecResets:1,aecDelayMs:16,aecBufferingDelayMs:50,aecErleDb:20,referenceRms:.1,referenceAt:1,referenceLagMs:0,captureHeadroomMs:60,capturePendingFrames:2880,
   referencePcm:[1,2],deviceUID:'private',aecConfig:{secret:true},transcript:'private'});
- assert.deepEqual(row,{stage:'echo-output',sampleStartAt:1,sampleEndAt:1.1,aecRenderFrames:20,aecCaptureFrames:10,aecResets:1,aecDelayMs:16,aecErleDb:20,referenceRms:.1,referenceAt:1,referenceLagMs:0,captureHeadroomMs:60,capturePendingFrames:2880});
+ assert.deepEqual(row,{stage:'echo-output',sampleStartAt:1,sampleEndAt:1.1,aecRenderFrames:20,aecCaptureFrames:10,aecResets:1,aecDelayMs:16,aecBufferingDelayMs:50,aecErleDb:20,referenceRms:.1,referenceAt:1,referenceLagMs:0,captureHeadroomMs:60,capturePendingFrames:2880});
  assert.deepEqual(sanitizeSpeechTrace({stage:'echo-output',aecErleDb:NaN,referenceLagMs:Infinity,referenceRms:'private'}),{stage:'echo-output'});
 });
 test('ordinary model and actual effect checkpoints permit only bounded metadata',()=>{
- for(const stage of ['voice-admitted','voice-model-start','voice-model-end','voice-model-abort','voice-effects-waiting','voice-effects-allowed','voice-task-admitted']){
-  const row=sanitizeSpeechTrace({stage,elapsedMs:1200,taskAdmitted:false,current:true,activityAgeMs:605,quietSeconds:3.26,activitySeq:19,sourceGen:3,
+ for(const stage of ['voice-admitted','voice-candidate','voice-semantic-accepted','voice-semantic-ignored','voice-model-start','voice-model-end','voice-model-abort','voice-effects-waiting','voice-effects-allowed','voice-task-admitted']){
+  const row=sanitizeSpeechTrace({stage,elapsedMs:1200,replacesResponse:true,pendingResponses:1,pendingAudioParts:3,taskAdmitted:false,current:true,activityAgeMs:605,quietSeconds:3.26,activitySeq:19,sourceGen:3,
    body:'private-content',request:{apiKey:'private-key'},task:{goal:'private-goal'}});
-  assert.deepEqual(row,{stage,elapsedMs:1200,taskAdmitted:false,current:true,activityAgeMs:605,quietSeconds:3.26,activitySeq:19,sourceGen:3});
+  assert.deepEqual(row,{stage,elapsedMs:1200,replacesResponse:true,pendingResponses:1,pendingAudioParts:3,taskAdmitted:false,current:true,activityAgeMs:605,quietSeconds:3.26,activitySeq:19,sourceGen:3});
  }
 });
 function asrFixture(t){

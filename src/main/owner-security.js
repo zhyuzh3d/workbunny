@@ -4,6 +4,13 @@ let active;
 const values=()=>active?[...active.protectedValues]:[];
 function variants(value){return [...new Set([value,encodeURIComponent(value),JSON.stringify(value).slice(1,-1),Buffer.from(value).toString('base64')])].filter(Boolean);}
 function redact(text){let out=String(text??'');for(const value of values())for(const part of variants(value))out=out.split(part).join('********');return out;}
+function redactPrefix(text,{final=false}={}){
+ let out=redact(text);if(final)return out;
+ // A protected key may span provider chunks. Hold only a matching suffix,
+ // then either redact the complete key or release an unrelated continuation.
+ let hold=0;for(const value of values())for(const part of variants(value))for(let size=1;size<part.length&&size<=out.length;size++)if(out.endsWith(part.slice(0,size)))hold=Math.max(hold,size);
+ return hold?out.slice(0,-hold):out;
+}
 function contains(text){return redact(text)!==String(text??'');}
 function sanitize(value){if(typeof value==='string')return redact(value);if(Array.isArray(value))return value.map(sanitize);if(value&&typeof value==='object'&&(Object.getPrototypeOf(value)===Object.prototype||Object.getPrototypeOf(value)===null))return Object.fromEntries(Object.entries(value).map(([k,v])=>[redact(k),sanitize(v)]));return value;}
 function withPrinciples(invoke,options){
@@ -64,4 +71,4 @@ class OwnerSecurity{
   });this.tail=job.catch(()=>{});return job;
  }
 }
-module.exports={OwnerSecurity,redact,sanitize,contains,withPrinciples,activate:service=>{active=service;}};
+module.exports={OwnerSecurity,redact,redactPrefix,sanitize,contains,withPrinciples,activate:service=>{active=service;}};

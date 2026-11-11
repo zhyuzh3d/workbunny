@@ -512,7 +512,7 @@ function ensureAudio() {
   voiceGain.connect(audioCtx.destination);
   analyserData = new Uint8Array(analyser.fftSize);
   pcmPlayer = createPCMPlayer({ context: audioCtx, destination: analyser,
-    onStart: id => { markReplyStarted(); pet.audioStarted(id); },
+    onStart: id => { markReplyStarted(id); pet.audioStarted(id); },
     onDone: id => { closeMouth(); pet.audioDone(true, id); },
     onUnderrun: () => pet.log('[tts] 流式播放缓冲不足'),
   });
@@ -548,7 +548,7 @@ async function playWav(u8, id) {
   };
   currentSource = src;
   src.start();
-  markReplyStarted(); pet.audioStarted(id);
+  markReplyStarted(id); pet.audioStarted(id);
 }
 
 function stopAudio(keepQuiet) {
@@ -575,7 +575,8 @@ function playPCM(event) {
   if (event.end) pcmPlayer?.end(event.id);
 }
 
-function markReplyStarted() {
+function markReplyStarted(id) {
+  if (id !== activeAudioId) return;
   if (shownHeard && !['skip', 'not-addressed'].includes(shownState)) { shownState = 'reply'; paintEar(); }
 }
 
@@ -1085,14 +1086,13 @@ const activity = document.getElementById('activity');
 
 /* 脚下那条（同时是"耳朵"的开关和"我说了什么"的显示器）：
  *   .off     耳朵关着 —— 灰，什么都不动
- *   .on      在听 —— 绿灯常亮（不做呼吸动画），电平条跟真实音量
- *   .loud    声音够大 —— 条子转暖色，主人一眼看出它听见了
+ *   .on      在听 —— 绿色圆点和竖线同步跟随真实音量
  *   .expand  刚听到话 —— 撑满整窗宽，长了就横向滚动，不省略
  * 一个元素承担全部状态，所以"在听"永远不会跟输入框打架。 */
 let dockMode = 'mini';        // mini | open
 pet.inputState?.(false);
 let listening = false;        // 耳朵开着（常驻聆听）
-let shownHeard = '';          // 「你说 · …」
+let shownHeard = '';          // 本轮已识别内容，仅在正在回应时显示
 let shownState = '';          // pending | ready | reply | done | skip | not-addressed
 let liveText = '';            // 正说到一半的字（实时字幕）
 let aecOn = false;            // 系统回声消除可用 → 她说话时也能听
@@ -1124,10 +1124,9 @@ function earLabel() {
   if (asrStat.note === 'memory-locked') return '记忆待解锁';
   if (listening && asrStat.captureReady === false) return asrStat.note === 'installing' ? '准备语音资源…' : asrStat.note === 'starting' ? '正在连接麦克风…' : '正在重连麦克风…';
   if (liveText) return liveText;
-  if (shownHeard) {
-    const status = { pending: '正在回应', ready: '正在准备声音', reply: '正在说话', skip: '略过', 'not-addressed': '没叫我，飘过～' }[shownState];
-    return `你说 · ${shownHeard}${status ? ' · ' + status : ''}`;
-  }
+  if (shownState === 'pending') return shownHeard ? `${shownHeard} · 正在回应` : '正在回应';
+  if (shownState === 'ready') return '正在转语音';
+  if (shownState === 'reply') return '正在说话';
   return listening ? '在听' : '耳朵关着';
 }
 
@@ -1158,11 +1157,12 @@ function paintEar() {
   const t = document.getElementById('earTxt');
   if (!ear) return;
   const warn = listening && !asrHealthy();
-  ear.classList.toggle('on', listening && !warn);
-  ear.classList.toggle('off', !listening || warn);
+  ear.classList.toggle('on', listening);
+  ear.classList.toggle('off', !listening);
+  if (!listening) ear.style.setProperty('--lvl', '0');
   ear.classList.toggle('warn', warn);
   ear.classList.toggle('skip', ['skip', 'not-addressed'].includes(shownState));
-  ear.classList.toggle('expand', !!(shownHeard || liveText));
+  ear.classList.toggle('expand', !!(liveText || shownState === 'pending' && shownHeard));
   const toggle = document.getElementById('listenToggle');
   if (toggle) {
     toggle.title = listening ? '关闭实时监听' : '开启实时监听';
@@ -1294,7 +1294,6 @@ async function sendText() {
   pendingHeard = '';
   shownHeard = '';
   paintEar();
-  showBubble(v, 3200);
   const result = await pet.say(v);
   if (result && !result.ok) { if (!input.value) input.value = v; showBubble(result.error || '这句话没有发送成功。', 7000, true); }
 }
@@ -1332,7 +1331,7 @@ document.addEventListener('pointerdown', event => {
   toIdle(0.26);
 }, { passive: true });
 
-/* 点击字幕打开输入框；聆听只通过独立开关控制。 */
+/* 圆点与音波共用一个聆听按钮；其余区域只切换文字输入窗。 */
 const earBar = document.getElementById('ear');
 const listenToggle = document.getElementById('listenToggle');
 listenToggle.addEventListener('pointerdown', event => event.stopPropagation());
@@ -1420,7 +1419,7 @@ function paintListen() {
   paintEar();
 }
 
-/** 听到一句话：脚下那条撑开显示「你说 · …」，主人一眼能确认有没有被听清 */
+/** 保存本轮识别内容，正在回应时显示；后续语音状态只显示状态名。 */
 function paintHeard(text, replied, reason, turn) {
   if (!text) return;
   if (!acceptHeardTurn(turn)) return;
@@ -1758,7 +1757,7 @@ function wire() {
         break;
       case 'chat':
         document.getElementById('bubble').classList.remove('notice');
-        if (ev.role === 'user') { clearWebSources(); noteMaster(); showBubble(ev.text, 3000); }
+        if (ev.role === 'user') { clearWebSources(); noteMaster(); if (ev.source !== 'keyboard') showBubble(ev.text, 3000); }
         else if (ev.role === 'assistant') {bubbleController.finish(ev.text, 9000);if(ev.taskId&&ev.links?.length)renderResultText(document.getElementById('bubbleText'),ev.text,ev.links,index=>pet.agentResultLink(ev.taskId,index));}
         break;
       case 'recall':
@@ -1808,6 +1807,9 @@ function wire() {
       case 'think':
         thinkingNow = !!ev.on;
         if (thinkingNow) {
+          // stopSpeaking retires the previous output before this request
+          // starts. Restore the current candidate's response caption here.
+          if (ev.text) paintHeard(ev.text, undefined, undefined, ev.turn);
           clearWebSources();
           ambientTimer = 30;
           if (!speakingNow) {
@@ -1818,7 +1820,7 @@ function wire() {
           }
         } else if (!speakingNow) {
           if (performance.now() >= expressiveUntil) toIdle(0.42);
-          if (shownState === 'pending') { shownState = 'done'; clearHeardLater(); }
+          if (shownState === 'pending' && (!Number.isSafeInteger(ev.turn) || ev.turn === heardTurn)) { shownState = 'done'; clearHeardLater(); }
         }
         paintEar();
         break;
@@ -1832,6 +1834,8 @@ function wire() {
           if (currentMotion !== IDLE && !ev.interaction && performance.now() >= expressiveUntil) toIdle(0.45);
         } else if (!thinkingNow && shownHeard && !['skip', 'not-addressed'].includes(shownState)) {
           shownState = 'done'; clearHeardLater();
+        } else if (thinkingNow && shownHeard && shownState === 'reply') {
+          shownState = 'pending';
         }
         paintEar();
         break;
@@ -1901,13 +1905,11 @@ function wire() {
         else toIdle(0.3);
         break;
       case 'asrLevel': {
-        const l = Math.max(0.08, Math.min(1, ev.v * 2.2));
-        // 脚下那条的电平条跟着真实音量走 ——
-        // 这是"它在听我说话"最直接的证据，比任何文案都管用。
+        // 圆点和竖线共用实际电平，按钮命中区域保持固定。
         const earEl = document.getElementById('ear');
         if (earEl) {
-          earEl.style.setProperty('--lvl', Math.min(1, ev.v * 1.9).toFixed(3));
-          earEl.classList.toggle('loud', ev.v > 0.22);
+          const level = Number.isFinite(ev.v) ? Math.max(0, Math.min(1, ev.v * 1.9)) : 0;
+          earEl.style.setProperty('--lvl', level.toFixed(3));
         }
         break;
       }
@@ -2302,6 +2304,5 @@ window.__listen = (on) => { listening = !!on; paintEar(); return listening; };
 window.__level = (v) => {
   const ear = document.getElementById('ear');
   ear.style.setProperty('--lvl', Math.min(1, Number(v) || 0).toFixed(3));
-  ear.classList.toggle('loud', Number(v) > 0.22);
   return true;
 };

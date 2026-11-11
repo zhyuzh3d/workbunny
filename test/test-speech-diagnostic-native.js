@@ -17,8 +17,8 @@ test('native diagnostic is opt in and is wired before permissions or language as
  assert(source.includes('|| speechDiagnostic != nil'));
  assert(source.includes('if speechDiagnostic != nil { fail("私有语音诊断所需语言资源未安装'));
  assert(source.includes('reportingOptions: [.volatileResults, .fastResults]'));
- assert(source.includes('SpeechAnalyzer(modules: [transcriber])'));
- assert(!/SpeechDetector\s*\(/.test(source));
+ assert(source.includes('SpeechAnalyzer(modules: [detector, transcriber])'));
+ assert(source.includes('SpeechDetector(detectionOptions: .init(sensitivityLevel: detectionLevel), reportResults: false)'));
  assert(source.includes('let freshActivity = endpointPolicy.observe('));
  assert(source.includes('if freshActivity && state == .active { speakerFeatures.speechDetected(true) }'));
 });

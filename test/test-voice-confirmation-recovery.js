@@ -1,32 +1,32 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),{EventEmitter}=require('node:events'),{PassThrough}=require('node:stream');
-const {Asr,asrRecovery,createActivityClock}=require('../src/main/asr'),{createVoiceTurns}=require('../src/main/voice-turns'),{createAsrInputPipeline}=require('../src/main/asr-input-pipeline'),{SpeakerFilter}=require('../src/main/speaker-filter');
+const {Asr,asrRecovery,createActivityClock,shouldNotifyAsrFailure}=require('../src/main/asr'),{createVoiceTurns}=require('../src/main/voice-turns'),{createAsrInputPipeline}=require('../src/main/asr-input-pipeline'),{SpeakerFilter}=require('../src/main/speaker-filter');
 const source=fs.readFileSync(require.resolve('../src/main/index.js'),'utf8');
 function fixture(t){
  let at=0,next=0,seq=0;const timers=new Map(),children=[],events=[],requests=[];
  const schedule=(fn,ms)=>{const id=++next;timers.set(id,{fn,at:at+ms});return id;},cancel=id=>timers.delete(id);
  const asr=new Asr('/offline/asr',()=>{},()=>{const p=new EventEmitter();Object.assign(p,{pid:children.length+1,stdout:new PassThrough(),stderr:new PassThrough(),stdin:new PassThrough(),kills:[],kill(signal){this.kills.push(signal);}});children.push(p);return p;});
- const ctx={asr,asrMode:'continuous',asrRecovery,alwaysOn:false,asrFailStreak:0,asrRecoveryBlocked:false,listenRestartTimer:null,voiceInputOwner:null,
-  contextEpoch:1,memory:{ready:true,generation:1},quitting:false,screenLocked:false,storageBusy:false,speechDiagnostic:null,asrStatus:{},
+ const ctx={asr,asrMode:'continuous',asrRecovery,shouldNotifyAsrFailure,alwaysOn:false,asrFailStreak:0,asrRecoveryBlocked:false,listenRestartTimer:null,voiceInputOwner:null,
+  voiceThoughts:new Map(),contextEpoch:1,memory:{ready:true,generation:1},quitting:false,screenLocked:false,storageBusy:false,speechDiagnostic:null,asrStatus:{},
   config:{load:()=>({memory:{enabled:false},voice:{alwaysListen:true},asr:{wakeOnly:false}})},systemPreferences:{getMediaAccessStatus:()=> 'granted'},fs:{existsSync:()=>true},ASR_BIN:'/offline/asr',asrOpts:()=>({always:true}),
   Date:{now:()=>at},setTimeout:schedule,clearTimeout:cancel,send:(type,value)=>events.push({type,...value}),log:()=>{},speakerFilter:new SpeakerFilter(),lastLiveText:'',lastDialogueAt:0,
-  speechTraceEnabled:false,traceSpeech:()=>{},voiceMetadata:()=>{},handleUtterance:(_text,token)=>requests.push(token),stopSpeaking:()=>{},pushHistory:()=>{},publishSpeakerStatus:()=>{},
+  speechTraceEnabled:false,traceSpeech:()=>{},voiceMetadata:()=>{},handleUtterance:(_text,token)=>requests.push(token),stopSpeaking:()=>{},interruptDialogue:()=>{},pushHistory:()=>{},publishSpeakerStatus:()=>{},
   suppressEnrollmentFinal:false,speaking:false,speechGen:0,lastPartialLogAt:0,lastSpeakerStatusAt:0,recentEcho:()=>false,bargeInReady:()=>true,nameHit:()=>true,micPeak:0,micPeakAt:0,micQuietLoggedAt:0,
   require:name=>name==='./voice-turns'?{createVoiceTurns:options=>createVoiceTurns({...options,now:()=>at,setTimer:schedule,clearTimer:cancel})}:name==='./asr-input-pipeline'?{createAsrInputPipeline}:require(name)};
  ctx.applyStatus=value=>{ctx.asrStatus={...ctx.asrStatus,...value};};vm.createContext(ctx);
- vm.runInContext(source.slice(source.indexOf('function startListen(reason)'),source.indexOf('/** 本地小门槛')),ctx);
+ vm.runInContext(source.slice(source.indexOf('function startListen(reason)'),source.indexOf('/** Only empty/nonlinguistic')),ctx);
  vm.runInContext(source.slice(source.indexOf('function publishVoiceLive('),source.indexOf('// Private diagnostics use')),ctx);
  const turns=vm.runInContext('voiceTurns',ctx);
  vm.runInContext(source.slice(source.indexOf('    const asrInput='),source.indexOf("    asr.on('recycle'")),ctx);
  const first=source.indexOf("    asr.on('exit', code => {");vm.runInContext(source.slice(first,source.indexOf('    if (connection.status().ready)',first)),ctx);
  const clock=()=>{asr.activityClock=createActivityClock({wallNow:()=>at,monoNow:()=>at});seq=0;};
  ctx.startListen('user');clock();
- function send(message,p=asr.proc){p.stdout.write(JSON.stringify(message)+'\n');}
+ function send(message,p=asr.proc){p.stdout.write(JSON.stringify({...(['partial','utterance'].includes(message.t)?{speechSupported:true}:{}),...message})+'\n');}
  function advance(ms){const end=at+ms;let loops=0;for(;;){const due=[...timers].filter(([,v])=>v.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!due)break;if(++loops>10000)throw Error('unbounded host timers');const[id,timer]=due;at=timer.at;timers.delete(id);const old=asr.traceRecognizer;timer.fn();if(old!==asr.traceRecognizer)clock();}at=end;}
  t.after(()=>{ctx.quitting=true;turns.reset();asr.kill({discard:true});timers.clear();});
  return {ctx,asr,turns,children,events,requests,timers,send,advance,
   activity:(state,extra={})=>send({t:'activity',state,quietSeconds:state==='quiet'?3:0,at:at/1000,emittedAt:at/1000,seq:++seq,gen:1,...extra}),
-  audioFinal:gen=>send({t:'audioFinal',gen,coveredSeq:seq})};
+  audioFinal:gen=>send({t:'audioFinal',gen,coveredSeq:seq}),restart:()=>{const timer=timers.get(ctx.listenRestartTimer);assert(timer,'a bounded rearm is scheduled');advance(timer.at-at);}};
 }
 test('actual host retains one confirmed request after empty audio coverage near its deadline without reconnecting',t=>{
  const f=fixture(t),child=f.asr.proc;f.activity('active');f.send({t:'partial',v:'synthetic complete owner request'});
@@ -54,7 +54,7 @@ test('a late final with continuous successor activity reaches acoustic timeout a
  f.advance(7200);f.activity('active');f.send({t:'utterance',v:'confirmed words waiting for quiet',gen:1});
  for(let i=0;i<79;i++){f.advance(100);f.activity('active',{gen:3});}
  assert.equal(f.asr.proc,child);f.advance(100);assert.deepEqual(child.kills,['SIGKILL']);assert.equal(f.ctx.asrFailStreak,1);assert.equal(f.requests.length,0);
- assert(f.events.some(event=>event.type==='toast'&&/文字已定稿/.test(event.text)));
+ assert(!f.events.some(event=>event.type==='toast'),'unconfirmed recognition is discarded without a bubble');
 });
 test('actual host confirmation timeout discards its child and late text/close cannot enter a replacement',t=>{
  const f=fixture(t),old=f.asr.proc;f.send({t:'partial',v:'unconfirmed synthetic instruction'});f.advance(8000);
@@ -62,30 +62,30 @@ test('actual host confirmation timeout discards its child and late text/close ca
  f.send({t:'partial',v:'late synthetic revision'},old);f.send({t:'utterance',v:'late synthetic final'},old);old.emit('close',0,null);
  assert.equal(f.ctx.asrFailStreak,1);assert.equal(f.children.length,1);f.advance(1200);assert.equal(f.children.length,2);const current=f.asr.proc;
  f.send({t:'final',v:'later old final'},old);old.emit('close',25,null);assert.equal(f.asr.proc,current);assert.equal(f.requests.length,0);assert.equal(f.ctx.asrFailStreak,1);
- assert(f.events.some(e=>e.type==='asrLive'&&e.text===''));assert(f.events.some(e=>e.type==='toast'&&/文字/.test(e.text)));
+ assert(f.events.some(e=>e.type==='asrLive'&&e.text===''));assert(!f.events.some(e=>e.type==='toast'));
 });
-test('three host deadlines stop automatic retry even when native finals and readiness arrive without usable acoustic confirmation',t=>{
+test('repeated host recognition deadlines stay silent and retain bounded listening recovery',t=>{
  const f=fixture(t);
  for(let attempt=1;attempt<=3;attempt++){
   f.send({t:'ready'});f.send({t:'partial',v:'synthetic pending phrase '+attempt});f.send({t:'utterance',v:'synthetic pending phrase '+attempt});f.advance(8000);
-  assert.equal(f.ctx.asrFailStreak,attempt);assert.equal(f.requests.length,0);if(attempt<3)f.advance(1200);
+  assert.equal(f.ctx.asrFailStreak,attempt);assert.equal(f.requests.length,0);if(attempt<3)f.restart();
  }
- assert.equal(f.ctx.alwaysOn,false);assert.equal(f.ctx.asrRecoveryBlocked,true);f.advance(60000);assert.equal(f.children.length,3);assert(f.events.some(e=>e.type==='asrError'&&/仍可打字/.test(e.message)));
- f.ctx.startListen('heal');assert.equal(f.children.length,3);f.ctx.startListen('user');assert.equal(f.children.length,4);assert.equal(f.ctx.asrFailStreak,0);
+ assert.equal(f.ctx.alwaysOn,true);assert.equal(f.ctx.asrRecoveryBlocked,false);assert(!f.events.some(e=>['asrError','toast'].includes(e.type)));
+ f.restart();assert.equal(f.children.length,4);
 });
 test('admission alone does not clear earlier faults and recognizer-stopped feedback never recursively rearms',t=>{
  const f=fixture(t);f.ctx.asrFailStreak=2;f.activity('quiet');f.send({t:'partial',v:'confirmed synthetic phrase'});f.send({t:'utterance',v:'confirmed synthetic phrase'});
  for(let i=0;i<30;i++){f.advance(100);f.activity('quiet');}f.advance(0);assert.equal(f.requests.length,1);assert.equal(f.ctx.asrFailStreak,2);
  f.turns.reset();f.send({t:'partial',v:'another unconfirmed phrase'});const current=f.asr.proc;f.turns.recognizerStopped();assert.equal(f.asr.proc,current);assert.deepEqual(current.kills,[]);f.advance(10000);assert.equal(f.children.length,1);
 });
-test('three admitted turns whose effect gates never recover still exhaust the shared retry budget',t=>{
+test('accepted operations fail closed on commit loss while recognition recovery stays available',t=>{
  const f=fixture(t);
  for(let attempt=1;attempt<=3;attempt++){
   f.activity('quiet');f.send({t:'partial',v:'synthetic admitted phrase '+attempt});f.send({t:'utterance',v:'synthetic admitted phrase '+attempt});
   for(let i=0;i<30;i++){f.advance(100);f.activity('quiet');}f.advance(0);assert.equal(f.requests.length,attempt);assert.equal(f.ctx.asrFailStreak,attempt-1);
-  f.activity('unknown');void f.requests.at(-1).waitForCommit();f.advance(8000);assert.equal(f.ctx.asrFailStreak,attempt);if(attempt<3)f.advance(1200);
+  f.requests.at(-1).recognize();f.activity('unknown');void f.requests.at(-1).waitForCommit();f.advance(8000);assert.equal(f.ctx.asrFailStreak,attempt);if(attempt<3)f.restart();
  }
- assert.equal(f.ctx.asrRecoveryBlocked,true);f.advance(60000);assert.equal(f.children.length,3);
+ assert.equal(f.ctx.asrRecoveryBlocked,false);assert.equal(f.ctx.alwaysOn,true);f.restart();assert.equal(f.children.length,4);
  assert(f.events.some(e=>e.type==='toast'&&!/未提交交办/.test(e.text)&&/文字/.test(e.text)));
 });
 test('shutdown, lock, manual-off, diagnostic isolation and changed context never kill or restart a timeout owner',t=>{
@@ -98,16 +98,16 @@ test('a scheduled rearm rechecks context and a stale turn cannot kill a newer re
  const f=fixture(t);f.send({t:'partial',v:'old synthetic phrase'});f.asr.kill({discard:true});f.asr.start({always:true});const current=f.asr.proc;f.advance(8000);assert.equal(f.asr.proc,current);assert.deepEqual(current.kills,[]);assert.equal(f.children.length,2);assert.equal(f.ctx.asrFailStreak,0);
 });
 test('real successor text after graceful recycle rebinds the retained turn to its current child without crossing context',t=>{
- const f=fixture(t);f.activity('quiet');f.send({t:'partial',v:'confirmed retained phrase'});f.send({t:'utterance',v:'confirmed retained phrase'});const turn=f.turns.snapshot().id;
+ const f=fixture(t);f.activity('quiet',{quietSeconds:.2});f.send({t:'partial',v:'confirmed retained phrase'});f.send({t:'utterance',v:'confirmed retained phrase'});const turn=f.turns.snapshot().id;
  f.advance(100);f.asr.proc.emit('close',0,null);f.advance(1200);const current=f.asr.proc;assert.equal(f.children.length,2);
  f.activity('active');f.send({t:'partial',v:'successor continuation words'});assert.equal(f.turns.snapshot().id,turn);assert.equal(f.ctx.voiceInputOwner.proc,current);
  f.advance(8000);assert.deepEqual(current.kills,['SIGKILL']);assert.equal(f.ctx.asrFailStreak,1);f.send({t:'utterance',v:'late successor final'},current);assert.equal(f.turns.snapshot(),null);assert.equal(f.requests.length,0);f.advance(1200);assert.equal(f.children.length,3);
- const changed=fixture(t);changed.activity('quiet');changed.send({t:'partial',v:'old context phrase'});changed.send({t:'utterance',v:'old context phrase'});changed.advance(100);changed.asr.proc.emit('close',0,null);changed.advance(1200);const next=changed.asr.proc;
+ const changed=fixture(t);changed.activity('quiet',{quietSeconds:.2});changed.send({t:'partial',v:'old context phrase'});changed.send({t:'utterance',v:'old context phrase'});changed.advance(100);changed.asr.proc.emit('close',0,null);changed.advance(1200);const next=changed.asr.proc;
  changed.ctx.contextEpoch++;changed.activity('active');changed.send({t:'partial',v:'text after context changed'});changed.advance(8000);assert.deepEqual(next.kills,[]);assert.equal(changed.ctx.asrFailStreak,0);
 });
 test('a replacement with text but no new activity cannot inherit an old activity epoch to evade its deadline',t=>{
  const f=fixture(t);f.activity('active');f.send({t:'partial',v:'first pending synthetic phrase'});f.advance(8000);assert.equal(f.ctx.asrFailStreak,1);f.advance(1200);
  const current=f.asr.proc;f.send({t:'ready'});f.send({t:'capture'});f.send({t:'partial',v:'replacement phrase without activity'});assert.equal(f.ctx.voiceInputOwner.recognizer,2);f.advance(8000);
  assert.deepEqual(current.kills,['SIGKILL']);assert.equal(f.ctx.asrFailStreak,2);f.send({t:'utterance',v:'late unconfirmed replacement final'},current);assert.equal(f.requests.length,0);assert.equal(f.turns.snapshot(),null);
- f.advance(1200);f.send({t:'partial',v:'third missing activity phrase'});f.advance(8000);assert.equal(f.ctx.asrFailStreak,3);assert.equal(f.ctx.asrRecoveryBlocked,true);f.advance(60000);assert.equal(f.children.length,3);
+ f.restart();f.send({t:'partial',v:'third missing activity phrase'});f.advance(8000);assert.equal(f.ctx.asrFailStreak,3);assert.equal(f.ctx.asrRecoveryBlocked,false);f.restart();assert.equal(f.children.length,4);assert(!f.events.some(e=>['asrError','toast'].includes(e.type)));
 });

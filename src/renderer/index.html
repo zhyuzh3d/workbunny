@@ -43,8 +43,8 @@
     <span class="web-sources-label">参考来源</span>
     <div id="webSourceLinks" class="web-source-links"></div>
   </div>
-  <div id="bubbleTail"></div>
 </div>
+<div id="bubbleTail" aria-hidden="true"></div>
 
 <!-- 换角色时的等待态：角色区域转圈，其他 UI 照常显示（绝不整片空白） -->
 <div id="loading" class="hidden">
@@ -68,9 +68,10 @@
 
 <!-- 下方在听状态：为右侧喇叭、设置按钮预留空间。 -->
 <div id="statusRow" role="group" aria-label="在听与声音设置">
-  <div id="ear" class="off" title="点击输入文字">
-    <button id="listenToggle" class="earDot" type="button" title="开启实时监听" aria-label="开启实时监听" aria-pressed="false"></button>
-    <span class="bars"><i></i><i></i><i></i><i></i></span>
+  <div id="ear" class="off" title="点击打开或关闭文字输入窗">
+    <button id="listenToggle" class="earDot" type="button" title="开启实时监听" aria-label="开启实时监听" aria-pressed="false">
+      <span class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    </button>
     <span class="earWin"><span id="earTxt">耳朵关着</span></span>
   </div>
 
@@ -118,7 +119,7 @@
 <div id="ver"></div>
 
 <!-- 首次提示 -->
-<div id="hint" class="hidden">点击字幕输入文字，也可以直接和她说话</div>
+<div id="hint" class="hidden">右击菜单打开更多功能</div>
 
 
 <script type="module" src="./app.js"></script>

@@ -76,8 +76,8 @@ extern "C" WBAEC *wb_aec_create(int sample_rate, int render_channels) {
         config.echo_canceller.mobile_mode = false;  // Select upstream AEC3.
         config.high_pass_filter.enabled = true;
         config.noise_suppression.enabled = true;
-        config.noise_suppression.level =
-            webrtc::AudioProcessing::Config::NoiseSuppression::kLow;
+        // Use upstream's common noise-suppression defaults, without local
+        // microphone-specific suppression levels or gain calibration.
         config.pre_amplifier.enabled = false;
         config.capture_level_adjustment.enabled = false;
         config.gain_controller1.enabled = false;

@@ -53,7 +53,7 @@ async function testViewportAndScaleBounds() {
     assert.ok(dock.bottom !== 'auto', 'bottom anchored input remains on its existing CSS anchor');
   }
   assert.match(appJs, /#ear, #dock, #bubble/u, 'bubble remains part of the interactive hit-test so scroll events reach it');
-  assert.match(appJs, /pet\.hit\(inside\)/u, 'leaving the bubble returns the window to click-through behavior');
+  assert.match(appJs, /pet\.hit\(inside,\s*taskUi,\s*overUi\)/u, 'leaving the bubble returns the window to click-through behavior');
   assert.match(appJs, /document\.addEventListener\('pointerdown'[\s\S]{0,180}#bubble[\s\S]{0,160}return/u, 'bubble presses do not initiate character dragging');
   assert.equal(await evaluate("document.getElementById('stage').contains(document.getElementById('bubble'))"), false,
     'bubble scroll input is outside the character click/drag surface');
@@ -65,8 +65,11 @@ async function testShortTextCompactAndNewTurnResetsScroll() {
   await evaluate(`window.fixture.controller.show('短句。',60000); window.fixture.controller.place(360,innerHeight)`);
   const shortHeight = await evaluate("document.getElementById('bubble').getBoundingClientRect().height");
   assert.ok(shortHeight < 90, `short text remains compact: ${shortHeight}`);
+  const tail = await evaluate(`(() => { const b=document.getElementById('bubble').getBoundingClientRect(), t=document.getElementById('bubbleTail').getBoundingClientRect(); return {center: t.left+t.width/2, bubbleCenter: b.left+b.width/2, bottom: t.bottom, bubbleBottom: b.bottom}; })()`);
+  assert.ok(Math.abs(tail.center - tail.bubbleCenter) < 1 && tail.bottom > tail.bubbleBottom, 'tail is visible below the centered bubble');
 
   await evaluate(`window.fixture.controller.hide(); window.fixture.controller.appendDelta(${JSON.stringify('滚动测试'.repeat(180))}); window.fixture.controller.place(360,innerHeight)`);
+  assert.equal(await evaluate("getComputedStyle(document.getElementById('bubbleTail')).display !== 'none'"), true, 'tail appears with the bubble');
   const max = await evaluate("document.getElementById('bubble').scrollHeight-document.getElementById('bubble').clientHeight");
   await evaluate(`document.getElementById('bubble').scrollTop=${Math.max(0, max - 12)}`);
   await evaluate(`window.fixture.controller.appendDelta(${JSON.stringify('追加的一段内容'.repeat(30))})`);
@@ -77,6 +80,8 @@ async function testShortTextCompactAndNewTurnResetsScroll() {
 
   await evaluate(`window.fixture.controller.show(${JSON.stringify('下一轮'.repeat(160))},60000)`);
   assert.equal(await evaluate("document.getElementById('bubble').scrollTop"), 0, 'new message resets to the beginning');
+  await evaluate('window.fixture.controller.hide()');
+  assert.equal(await evaluate("getComputedStyle(document.getElementById('bubbleTail')).display"), 'none', 'tail hides with the bubble');
 }
 
 async function testMouseAndKeyboardScrollInput() {

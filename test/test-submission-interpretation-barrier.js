@@ -1,18 +1,22 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {DesktopService}=require('../src/main/desktop-service');
+const {raster,bitmap,crop,encode}=require('./support/visual-fixture.cjs');
 function fixture({target='workbuddy',history=[],positive=false,cancelAfterSubmit=false,rejectSubmit=false}={}){
- let clicks=0,plans=0,reconcileAccess=0;const rect={x:0,y:0,width:1000,height:800},bundleId=target==='wechat'?'com.tencent.xinWeChat':'com.tencent.workbuddy.mac';
+ let clicks=0,plans=0,reconcileAccess=0;const rect={x:0,y:0,width:1000,height:800};
  const interpretation={action:'done',completed:false,receipt:{observed:'not_applied',basis:'unchanged screenshot and original draft still present',draft:'present'}};
  const actions=history.some(s=>['intent','input-sent'].includes(s.state))?[{action:'click',purpose:'submit',x:.9,y:.9},interpretation]:[{action:'type',purpose:'task',text:'fixture exact draft'}, {action:'click',purpose:'submit',x:.9,y:.9},interpretation,{action:'click',purpose:'submit',x:.9,y:.9},interpretation,{action:'click',purpose:'submit',x:.9,y:.9}];
- let service;service=new DesktopService({native:{close:async()=>{},cancel:async()=>{},request:async()=>({application:{pid:123,bundleId,name:'fixture'},windows:[{pid:123,windowId:7,layer:0,rect}]})},persist:async()=>{},planner:async()=>{const action=actions[plans++];if(cancelAfterSubmit&&clicks)await service.stop('fixture cancellation');return action;}});
+ const image=raster(),native={close:async()=>{},cancel:async()=>{},request:async op=>{assert.equal(op,'displayCapture','activation uses display pixels only');return {pngBase64:encode(image).toString('base64'),width:image.width,height:image.height,desktopRect:rect,backend:'CGDisplayStream',capturedAt:Date.now()};}};
+ const verificationRequest=async options=>({response:{text:JSON.stringify(options.messages[0].content.includes('定位指定软件')?{software:target==='wechat'?'微信':'WorkBuddy',available:true,unique:true,active:true,sameIdentity:true,region:{x:0,y:0,width:1,height:1},mainRegion:{x:0,y:0,width:1,height:1},identityRegion:{x:.1,y:.02,width:.3,height:.1},monitorRegions:[{x:0,y:.1,width:1,height:.8}],focusRegion:{x:.3,y:.7,width:.6,height:.2},focusEvidence:'Synthetic editor caret',evidence:'Synthetic unique task heading',texts:[{text:'DeepSeek-V4.1-Flash',confidence:1,x:.6,y:.8,width:.3,height:.03}]}:{matched:true,evidence:'Synthetic screenshot confirms the empty task editor and input prerequisites'})}});
+ let service;service=new DesktopService({native,bitmap,imageCrop:crop,verificationRequest,persist:async()=>{},planner:async(_goal,_shot,_signal,task)=>{const action=actions[plans++];if(cancelAfterSubmit&&clicks)await service.stop('fixture cancellation');return action?.action==='type'?{...action,inputEvidence:{observationId:task.inputPrerequisites.observationId,checks:task.inputPrerequisites.checks.map(check=>({id:check.id,observed:check.expected,basis:'Synthetic screenshot shows '+check.id+': '+check.expected}))}}:action;}});
  service.generation=1;service.running=true;service.controller=new AbortController();const now=Date.now();
  service.task={id:'fixture',target,scene:'life',domain:'work',visibilityFloor:1,workModel:'deepseek-v4.1-flash',goal:'fixture',outboundText:'fixture exact draft',startedAt:now,steps:structuredClone(history),draftInserted:history.some(s=>['intent','input-sent'].includes(s.state))};
  service.actionControl={};Object.defineProperty(service.actionControl,'reconcile',{get(){reconcileAccess++;throw Error('planner must not access an effect-reset API');}});
- service.tryBackgroundWorkBuddy=async()=>false;service.tryWorkBuddyHandoff=async()=>false;service.activateForTask=async()=>{};
+ // Exercise the generic planner's durable effect barrier, independently of
+ // the optional structured WorkBuddy adapter.
+ service.tryBackgroundWorkBuddy=async()=>false;service.tryForegroundWorkBuddy=async()=>false;service.tryWorkBuddyHandoff=async()=>false;service.activateForTask=async()=>{};
  service.tryBindVisualWorkBuddyMonitor=async()=>{if(positive&&plans>=3){service.task.handoffSent=true;service.task.monitorSessionId='fixture-session';return true;}return false;};
  service.ensureWorkBuddyMonitor=async()=>{service.running=false;return true;};
- service.capture=async()=>service.screenshot={at:Date.now(),revision:plans+1,rect,preview:'same fixture image',ocr:[{text:'DeepSeek-V4.1-Flash',confidence:1,x:.6,y:.8,width:.3,height:.03}]};
  service.act=async action=>{if(action.purpose==='submit'){if(rejectSubmit)throw Object.assign(Error('fixture foreground refusal'),{code:'E_GUI_FOCUS_CHANGED',dispatched:false});clicks++;}else assert.equal(action.action,'type');};
  const scope={id:'fixture',target,operation:'send',recipient:'fixture person',workModel:'deepseek-v4.1-flash',goal:'fixture',outboundText:service.task.outboundText,startedAt:now,attemptStartedAt:now};
  return {service,scope,clicks:()=>clicks,plans:()=>plans,reconcileAccess:()=>reconcileAccess,interpretation,run:()=>service.runOwned(service.generation,scope)};

@@ -35,7 +35,11 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
     async run(ctx){
       const {task,event:initialEvent,call,enqueue,checkpoint,report,signal,now,progress}=ctx,behavior=task.parameters.behavior,clock=ctx.clock||Date.now;let event=initialEvent;
       task.state.conversations??={};
-      const decide=args=>progress?progress.stage('plan').measure('model',()=>brain.decide({...args,timing:progress.snapshot(),actionRecovery:ctx.recovery})):brain.decide({...args,actionRecovery:ctx.recovery});
+      const decide=async args=>{
+        const decision=await (progress?progress.stage('plan').measure('model',()=>brain.decide({...args,timing:progress.snapshot(),actionRecovery:ctx.recovery})):brain.decide({...args,actionRecovery:ctx.recovery}));
+        if(signal?.aborted||ctx.isLive&&!ctx.isLive())throw signal?.reason||Object.assign(Error('会话回应已被新输入替换'),{code:'E_ACTION_SUPERSEDED',dispatched:false});
+        return decision;
+      };
       const stateFor=subject=>task.state.conversations[subjectKey(subject)]??=( {subject,cursor:{},introduced:false,progress:{},summary:''} );
       const wait=(note,consumeEvent=true,active=false)=>({status:'waiting',note,consumeEvent,nextCheckAt:clock()+(active?task.schedule.activeIntervalSeconds:task.schedule.intervalSeconds)*1000,state:task.state});
       const waitGui=(note,consumeEvent=false)=>({...wait(note,consumeEvent),waitReason:'gui',nextCheckAt:clock()+1000});
@@ -65,10 +69,16 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
           // Continue cheap observation while a prepared reply waits for the GUI.
           // Merge only before any send starts; the first event keeps its stable key.
           const observation=await this.run({...ctx,event:undefined,observeOnly:true,observationSubjectKey:event.subjectKey});
+          if(signal?.aborted||ctx.isLive&&!ctx.isLive())throw signal?.reason||Object.assign(Error('会话回应已被新输入替换'),{code:'E_ACTION_SUPERSEDED',dispatched:false});
           if(observation.status==='needs_attention')return {...observation,consumeEvent:false};
           const first=task.inbox.find(e=>e.key===event.key),batch=task.inbox.filter(e=>e.type==='conversation.messages'&&e.subjectKey===event.subjectKey);
           const messages=batch.flatMap(e=>e.messages||[]);
-          if(first&&behavior!=='owner'&&batch.length>1&&Buffer.byteLength(JSON.stringify(messages))<60000){
+          if(first&&batch.length>1&&Buffer.byteLength(JSON.stringify(messages))<60000){
+            // Preserve each original ingestion batch. Authenticated channels
+            // reuse their exact receipts instead of replaying old credentials
+            // or transferring an earlier grant to newly merged words.
+            first.inputBatches=batch.flatMap(e=>e.inputBatches||[{sequences:(e.messages||[]).map(m=>m.sequence)}]);
+            first.voiceStates=Object.assign({},...batch.map(e=>e.voiceStates||{}));
             first.messages=messages;first.replyRevision=(first.replyRevision||0)+1;delete first.decision;const keys=new Set(batch.slice(1).map(e=>e.key));task.inbox=task.inbox.filter(e=>!keys.has(e.key));await checkpoint();
           }
           event=structuredClone(first||event);
@@ -163,7 +173,7 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
         }
         if(event.decision&&!decisionCurrent(event.decision)){delete event.decision;const queued=task.inbox.find(e=>e.key===event.key);if(queued)delete queued.decision;}
         const memory=event.decision||channelDialogue?{items:[]}:await call({tool:'memory.related',key:'memory:'+event.key+':'+task.counters.wakes,args:{...subject,query:require('./owner-security').redact(incoming.map(m=>m.text).join(' ')).slice(0,800)}});
-        let decision;try{decision=event.decision||await decide({task,subject,conversation:state,incoming,memories:memory.items||[],signal});}catch(error){if(error.code!=='E_CHANNEL_CHANGED'||error.dispatched!==false)throw error;return wait('渠道权限已变化，重新组装回复',false,true);}
+        let decision;try{decision=event.decision||await decide({task,subject,conversation:state,incoming,incomingBatches:event.inputBatches,memories:memory.items||[],signal});}catch(error){if(error.code!=='E_CHANNEL_CHANGED'||error.dispatched!==false)throw error;return wait('渠道权限已变化，重新组装回复',false,true);}
         // Persist the decision before waiting or sending, so a busy desktop does
         // not lose a message and retries do not create a different reply.
         event.decision=decision;event.decisionAt??=clock();const queued=task.inbox.find(e=>e.key===event.key);if(queued){queued.decision=decision;queued.decisionAt=event.decisionAt;}await checkpoint();

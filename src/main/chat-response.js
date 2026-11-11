@@ -88,6 +88,7 @@ class ChatResponse {
   constructor(model, { label = '模型', onDelta } = {}) {
     Object.assign(this, { model, label, onDelta });
     this.raw = '';
+    this.explicitContent = false;
     this.usage = null;
     this.finishReason = null;
     this.hasReasoning = false;
@@ -107,6 +108,7 @@ class ChatResponse {
     const { delta, message } = choice;
     this.hasReasoning ||= hasReasoningContent(delta) || hasReasoningContent(message);
     const content = delta?.content ?? (!this.raw ? message?.content : undefined);
+    if(typeof content==='string')this.explicitContent=true;
     if (typeof content === 'string' && content) {
       this.raw += content;
       this.onDelta?.(content);
@@ -143,7 +145,8 @@ class ChatResponse {
     const raw = toolCalls.length ? '' : this.raw;
     if (toolCalls.length && limited || !toolCalls.length && !raw.trim()) {
       const error = new Error(limited ? this.label + ' 输出达到 token 上限，整理结果不完整。' : this.label + ' 没有返回可用回答，请重试。');
-      throw Object.assign(error, { code: limited ? 'E_OUTPUT_LIMIT' : 'E_EMPTY_RESPONSE', finishReason, usage, hasReasoning });
+      throw Object.assign(error, { code: limited ? 'E_OUTPUT_LIMIT' : 'E_EMPTY_RESPONSE', finishReason, usage, hasReasoning,
+        completedEmptyContent:!limited&&finishReason==='stop'&&this.explicitContent&&!hasReasoning });
     }
     if (toolCalls.length && ['content_filter', 'error', 'cancelled', 'timeout'].includes(finishReason)) throw toolProtocolError();
     return { raw, model, usage, finishReason, hasReasoning, ...(toolCalls.length ? { toolCalls } : {}) };

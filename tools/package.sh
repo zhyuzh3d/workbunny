@@ -33,7 +33,7 @@ if [ ! -x "$ROOT/bin/speech/speech" ]; then
   zsh "$ROOT/tools/build-tts-runtime.sh"
 fi
 for helper in vault desktop asr-legacy; do
-  if [ ! -x "$ROOT/bin/$helper" ] || [ "$ROOT/native/$helper.swift" -nt "$ROOT/bin/$helper" ] || { [ "$helper" = asr-legacy ] && { [ "$ROOT/native/speaker-features.swift" -nt "$ROOT/bin/$helper" ] || [ "$ROOT/native/wake-name.swift" -nt "$ROOT/bin/$helper" ]; }; }; then
+  if [ ! -x "$ROOT/bin/$helper" ] || [ "$ROOT/native/$helper.swift" -nt "$ROOT/bin/$helper" ] || { [ "$helper" = asr-legacy ] && { [ "$ROOT/native/speaker-features.swift" -nt "$ROOT/bin/$helper" ] || [ "$ROOT/native/wake-name.swift" -nt "$ROOT/bin/$helper" ] || [ "$ROOT/native/speech-context.swift" -nt "$ROOT/bin/$helper" ]; }; }; then
     zsh "$ROOT/tools/build-$helper.sh"
   fi
 done

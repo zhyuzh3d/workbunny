@@ -1,4 +1,5 @@
 'use strict';
+const actualReplyPolicy=()=>require('../src/main/reply-policy');
 // Execute the actual main-process think() source with a real disposable Vault.
 // Transport/speech/UI are doubles; no Electron instance or account is touched.
 const assert = require('node:assert/strict'), vm = require('node:vm');
@@ -23,10 +24,11 @@ const ctx = { storageBusy: false, storageError: '', connection: { status: () => 
   dialogueActions: localRequire('./dialogue-actions'), SELF_RULE: localRequire('./dialogue-cognition').SELF_RULE, JUDGE_RULE: '',
   dialogueHistory: localRequire('./reply-format').dialogueHistory, requestReply: localRequire('./reply-request').requestReply,
   llm: { ...localRequire('./llm'), chat: async options => { calls.push(options.messages); return { raw: reply() }; } },
-  send: (name, value) => shown.push({ name, value }), log: () => {}, publishRecall() {}, publishWebSources() {}, speak() {},
+  send: (name, value) => shown.push({ name, value }), log: () => {}, publishRecall() {}, publishWebSources() {}, speak() {}, stopSpeaking() {},
   presentConversation: text => text, conversationText: text => text, maintenance: { requestReflection() {} },
   pushHistory: (...args) => m.addMessage(...args), selfMutationOwner: false };
-vm.createContext(ctx);
+Object.assign(ctx,{voiceThoughts:new Map(),speechAbort:null,speechQueue:[],speechGen:0,activeAudioId:null,lastAcceptedOwnerAt:0,replyPolicy:actualReplyPolicy(),speechEcho:ctx.speechEcho||{rows:[]}});
+ vm.createContext(ctx);
 vm.runInContext(source.slice(source.indexOf('function dialogueReady('), source.indexOf('/* ── 主动播报')), ctx);
 vm.runInContext(source.slice(source.indexOf('function worthJudging('), source.indexOf('/** Exact configured name')), ctx);
 async function run() {
@@ -64,7 +66,7 @@ async function run() {
   assert.equal(messageReads, 0, 'disabled memory must never load persisted dialogue/predictions');
   const current = JSON.stringify(calls.at(-1)); assert(current.includes('你好小周')); assert(!current.includes('PrivateHistorySentinel'));
   assert.equal(JSON.parse(calls.at(-1).find(r => r._contextLane === 'cognition').content).previous, null);
-  assert(ctx.worthJudging('嗯')); ctx.lastDialogueAt = 0; assert(!ctx.worthJudging('嗯'));
+  assert(ctx.worthJudging('嗯')); ctx.lastDialogueAt = 0; assert(ctx.worthJudging('嗯'));
   assert(shown.some(e => e.name === 'chat' && e.value.final));
   settings.enabled = true;
   const interrupted = (await m.query('message', 1, { sort: 'ingestion' }))[0];

@@ -1,4 +1,5 @@
 'use strict';
+const actualReplyPolicy=()=>require('../src/main/reply-policy');
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),{createRequire}=require('node:module');
 const source=fs.readFileSync(path.resolve('src/main/index.js'),'utf8'),actual=createRequire(path.resolve('src/main/index.js'));
 function fixture({protocolFailure=false,sensitive=false}={}){
@@ -10,7 +11,8 @@ function fixture({protocolFailure=false,sensitive=false}={}){
   avatarCatalog:{prompt:()=>[]},embodiment:{context:()=>({})},lastInterruption:null,SELF_RULE:'',JUDGE_RULE:'',taskSupervision:{key:()=>'',context:()=>''},inputAdmission:{containsSecret:()=>false},log:()=>{},
   require:name=>name==='./dialogue-cognition'?{context:()=>({data:{consecutiveMisses:0},sourceIds:[]}),RULE:''}:name==='./perception'?{speech:()=>({}),keyboard:()=>({})}:name==='./sensitive-policy'?{hasProtectedContent:()=>sensitive}:actual(name),
   speak:()=>calls.speak++,llm:{},requestReply:async()=>{calls.model++;if(protocolFailure)throw Object.assign(Error('offline protocol failure'),{code:'E_REPLY_PROTOCOL',protocolStage:'json'});return {reply:{skipped:true}};},
-  worthJudging:()=>true,recentEcho:()=>false,traceSpeech:()=>{},voiceMetadata:value=>metadata.push(value),speaking:false,nameHit:()=>false,turnT0:0,lastHeardAt:0,quietUntil:0,autonomy:{pause:()=>{}},stopSpeaking:()=>calls.stop++};
+  worthJudging:()=>true,recentEcho:()=>false,traceSpeech:()=>{},voiceMetadata:value=>metadata.push(value),speaking:false,nameHit:()=>false,turnT0:0,lastHeardAt:0,lastDialogueAt:0,quietUntil:0,autonomy:{pause:()=>{}},stopSpeaking:()=>calls.stop++};
+ Object.assign(ctx,{voiceThoughts:new Map(),speechAbort:null,speechQueue:[],speechGen:0,activeAudioId:null,lastAcceptedOwnerAt:0,replyPolicy:actualReplyPolicy(),speechEcho:ctx.speechEcho||{rows:[]}});
  vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('async function committedVoice('),source.indexOf('/* ── 主动播报')),ctx);
  vm.runInContext('const QUIET_WORDS = '+source.match(/^const QUIET_WORDS = (.+);$/m)[1]+';\n'+source.slice(source.indexOf('async function handleUtterance('),source.indexOf('/** 主动要权限')),ctx);
  const token=committed=>({accepted:committed,id:1,isCurrent:()=>true,canCommit:()=>committed,waitForCommit:async()=>committed,remember:()=>calls.remember++,rememberConversation:()=>calls.remember++,skip(){}});
@@ -147,4 +149,78 @@ test('a submitted protocol failure retires its input without claiming business s
  const f=fixture({protocolFailure:true});f.ctx.asrFailStreak=2;const h=realTurns(f);await h.admit();await h.result();
  assert.equal(f.calls.chat,1);assert.equal(f.calls.speak,1);assert.equal(f.calls.task,0);assert.equal(f.ctx.asrFailStreak,2);assert.equal(h.turns.snapshot(),null);
  assert(f.metadata.some(row=>row.stage==='voice-model-end'&&row.ok===false));h.activity('active');await h.advance(9000);assert.equal(h.errors.length,0);assert.equal(f.calls.model,1);
+});
+test('the actual candidate interrupts old work immediately while ignore and empty decisions remain silent',async()=>{
+ for(const reply of [{skipped:true},{text:''}]){
+  const f=fixture();completeReply(f);f.ctx.speaking=true;f.ctx.requestReply=async options=>{f.calls.model++;const wire=JSON.parse(options.request.messages.at(-1).content);assert.equal(wire.character,'microphone-observation');assert.equal(wire.trust,'unconfirmed-speaker-and-intent');return {reply};};
+  const token=controlledToken(f);let recognized=0;token.recognize=()=>{recognized++;return true;};const result=await f.ctx.think({userText:'you',voiceTurn:token,judge:true,perception:{sensor:'local.asr',channel:'microphone'}});
+  assert.equal(result.ignored,true);assert.equal(f.calls.model,1);assert.equal(f.calls.aborts,1);assert.equal(f.calls.stop,1);assert.equal(f.calls.remember,0);assert.equal(f.calls.chat,0);assert.equal(f.calls.speak,0);assert.equal(recognized,0);assert.equal(f.ctx.activeThought,null);assert.equal(f.ctx.busy,false);assert.equal(token.completed,true);
+ }
+});
+
+test('voice ownership still requires the same model decision after old output is interrupted',async()=>{
+ const f=fixture();completeReply(f);const token=controlledToken(f);token.open();let recognized=0;token.recognize=()=>{recognized++;token.semanticAccepted=true;return true;};
+ f.ctx.speechEcho.rows=[{text:'private-old-context',startedAt:1,contextEpoch:0},{text:'current-playback',startedAt:2,contextEpoch:1}];
+ f.ctx.requestReply=async options=>{f.calls.model++;assert.equal(f.calls.stop,1);assert.equal(f.calls.aborts,1);assert.equal(f.calls.remember,0);assert.equal(options.request.inputExperience.revision,8);assert(options.request.messages[0].content.endsWith(options.request.inputExperience.instructions));const current=JSON.parse(options.request.messages.at(-1).content);assert.deepEqual(Array.from(current.voiceContext.recentPlayback,row=>row.text),['current-playback']);return {reply:{text:'a real reply',turnDisposition:'replace'}};};
+ await f.ctx.think({userText:'a real short question',voiceTurn:token,judge:true,perception:{sensor:'local.asr',channel:'microphone'}});assert.equal(recognized,1);assert.equal(f.calls.model,1);assert.equal(f.calls.stop,1);assert.equal(f.calls.aborts,1);assert.equal(f.calls.remember,1);assert.equal(f.calls.speak,1);assert.equal(f.ctx.busy,false);
+});
+
+test('an ASR resume-shaped candidate does not enter the local Task fast path before semantic judgment',async()=>{
+ const f=fixture();completeReply(f);f.ctx.dialogueActions.taskControl=()=>({action:'resume'});f.ctx.requestReply=async()=>{f.calls.model++;return {reply:{skipped:true}};};await f.ctx.think({userText:'continue',voiceTurn:controlledToken(f),judge:true});assert.equal(f.calls.model,1);assert.equal(f.calls.task,0);assert.equal(f.calls.remember,0);assert.equal(f.calls.stop,1);
+});
+test('an ignored successor resumes the retained voice input through a fresh response without reusing a cancelled result',async t=>{
+ const f=fixture();completeReply(f);f.ctx.activeThought=null;let at=0,serial=0,seq=0;const timers=new Map(),runs=[],replies=[];
+ f.ctx.requestReply=options=>{f.calls.model++;return new Promise(resolve=>replies.push({resolve,signal:options.request.signal,request:options.request}));};
+ f.ctx.secretary.dispatch=async()=>{f.calls.task++;return {text:'fixture operation accepted',ok:true,id:'fixture-task'};};
+ const turns=require('../src/main/voice-turns').createVoiceTurns({deferRecognition:true,requireActivity:true,now:()=>at,setTimer:(fn,ms)=>{const id=++serial;timers.set(id,{fn,at:at+ms});return id;},clearTimer:id=>timers.delete(id),
+  onRequest:token=>{const run=f.ctx.think({userText:token.text,voiceTurn:token,judge:true,perception:{sensor:'local.asr',channel:'microphone'}});runs.push(run);return run;},
+  onInvalidate:token=>f.ctx.voiceThoughts.get(token)?.abort(),onRemember:()=>{f.calls.remember++;return {id:'fixture-owner',value:{turnId:'fixture'}};}});t.after(()=>turns.reset());
+ const advance=async ms=>{const end=at+ms;for(;;){const due=[...timers].filter(([,v])=>v.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!due)break;at=due[1].at;timers.delete(due[0]);due[1].fn();await flush();}at=end;};
+ const activity=(state,gen)=>turns.activity({state,quietSeconds:state==='quiet'?1:0,at,seq:++seq,recognizer:1,sourceGen:gen});
+ const quiet=async(ms,gen)=>{for(let i=0;i<ms;i+=100){await advance(100);activity('quiet',gen);}await advance(0);await flush();};
+ activity('quiet',1);turns.final('a real requested operation',{recognizer:1,sourceGen:1});await quiet(400,1);assert.equal(replies.length,1);
+ activity('active',3);f.ctx.interruptDialogue('voice');turns.partial('To',{recognizer:1,sourceGen:3});turns.final('To',{recognizer:1,sourceGen:3});await quiet(400,3);assert.equal(replies.length,2);assert.equal(replies[0].signal.aborted,true);
+ const current=JSON.parse(replies[1].request.messages.at(-1).content);assert.equal(current.voiceContext.ongoingResponses.length,0);assert.deepEqual(Array.from(current.inputParts,row=>row.text),['a real requested operation','To']);assert.equal(current.inputParts[0].trust,'unconfirmed-speaker-and-intent');
+ replies[0].resolve({reply:{intent:{action:'agent'}}});await flush();assert.equal(f.calls.task,0);assert.equal(f.calls.remember,0);
+ replies[1].resolve({reply:{skipped:true}});await Promise.all(runs);await flush();assert.equal(replies.length,3);assert.equal(JSON.parse(replies[2].request.messages.at(-1).content).text,'a real requested operation');
+ replies[2].resolve({reply:{intent:{action:'agent'}}});await new Promise(resolve=>setImmediate(resolve));assert.equal(f.calls.model,3);assert.equal(f.calls.task,1);assert.equal(f.calls.remember,1);assert.equal(f.ctx.voiceThoughts.size,0);assert.equal(f.ctx.busy,false);
+});
+
+test('candidate context cannot import the pending inference of another scene epoch or a revoked generation',async()=>{
+ for(const state of [{epoch:0,generation:undefined},{epoch:1,generation:88}]){
+  const f=fixture();completeReply(f);f.ctx.activeThought.dialogueWork={...state,phase:'interpreting',inputText:'private-pending-canary',semanticAccepted:true};
+  f.ctx.requestReply=async options=>{f.calls.model++;const current=JSON.parse(options.request.messages.at(-1).content);assert.equal(current.voiceContext.ongoingResponses.length,0);assert(!JSON.stringify(options.request.messages).includes('private-pending-canary'));return {reply:{skipped:true}};};
+  await f.ctx.think({userText:'synthetic candidate',judge:true,voiceTurn:controlledToken(f),perception:{sensor:'local.asr',channel:'microphone'}});assert.equal(f.calls.model,1);assert.equal(f.calls.stop,1);assert.equal(f.calls.remember,0);
+ }
+});
+test('legacy ASR keep and missing disposition cannot keep cancelled work alive',async()=>{
+ for(const disposition of ['keep',undefined]){
+  const f=fixture();completeReply(f);const token=controlledToken(f);let replace;token.recognize=options=>{replace=options.replace;token.semanticAccepted=true;token.turnDisposition=replace?'replace':'keep';return true;};
+  f.ctx.speaking=true;f.ctx.requestReply=async()=>{f.calls.model++;return {reply:{text:'a courtesy answer',...(disposition?{turnDisposition:disposition}:{})}};};
+  await f.ctx.think({userText:'a genuine courtesy',judge:true,voiceTurn:token,perception:{sensor:'local.asr',channel:'microphone'}});assert.equal(replace,true);assert.equal(f.calls.aborts,1);assert.equal(f.calls.stop,1);assert.equal(f.calls.speak,1);assert.equal(f.calls.remember,1);assert.equal(f.ctx.busy,false);
+ }
+});
+
+test('actual invalidation of a keep token by a newer partial aborts only that token and never stops the preserved response',()=>{
+ const f=fixture(),invalidate=vm.runInContext('('+source.match(/^  onInvalidate: (.+),$/m)[1]+')',f.ctx);let aCancelled=0,bCancelled=0;
+ const a={semanticAccepted:true,turnDisposition:'replace'},b={semanticAccepted:true,turnDisposition:'keep'};f.ctx.voiceThoughts.set(a,{abort:()=>aCancelled++});f.ctx.voiceThoughts.set(b,{abort:()=>bCancelled++});
+ invalidate(b);assert.equal(bCancelled,1);assert.equal(aCancelled,0);assert.equal(f.calls.stop,0);invalidate(a);assert.equal(aCancelled,1);assert.equal(f.calls.stop,1);
+});
+test('accepted owner timing follows captured event time and cannot go backwards when an older kept inference records late',()=>{
+ const ctx={Date:{now:()=>10000},lastAcceptedOwnerAt:0,history:[],memory:null,autonomy:null,currentScene:()=> 'life',visibleHere:()=>true,scopePolicy:{rank:()=>0},require:actual,log(){}};vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function pushHistory('),source.indexOf('function publishRecall(')),ctx);
+ ctx.pushHistory('user','newer voice',{occurredAt:9000,perception:{sensor:'local.asr',channel:'microphone'}});assert.equal(ctx.lastAcceptedOwnerAt,9000);
+ ctx.pushHistory('user','older voice records late',{occurredAt:7000,perception:{sensor:'local.asr',channel:'microphone'}});assert.equal(ctx.lastAcceptedOwnerAt,9000);
+ ctx.pushHistory('user','typed input',{perception:{sensor:'local.keyboard',channel:'keyboard'}});assert.equal(ctx.lastAcceptedOwnerAt,10000);
+ ctx.pushHistory('user','stale voice',{occurredAt:9500,perception:{sensor:'local.asr',channel:'microphone'}});assert.equal(ctx.lastAcceptedOwnerAt,10000);
+});
+test('a legacy keep reply answers merged input once and the cancelled model can never deliver later',async t=>{
+ const f=fixture();completeReply(f);f.ctx.activeThought=null;const replies=[],runs=[],spoken=[];let serial=0;const timers=new Map();const ready=async()=>{for(const [id,timer]of [...timers])if(timer.ms===0){timers.delete(id);timer.fn();}await flush();};
+ f.ctx.speak=text=>{f.calls.speak++;spoken.push(text);};f.ctx.requestReply=options=>{f.calls.model++;return new Promise(resolve=>replies.push({resolve,signal:options.request.signal,request:options.request}));};
+ const turns=require('../src/main/voice-turns').createVoiceTurns({deferRecognition:true,turnMs:0,pauseMs:0,now:()=>1000,setTimer:(fn,ms)=>{const id=++serial;timers.set(id,{fn,ms});return id;},clearTimer:id=>timers.delete(id),
+  onRequest:token=>{const run=f.ctx.think({userText:token.text,voiceTurn:token,judge:true,perception:{sensor:'local.asr',channel:'microphone'}});runs.push(run);return run;},
+  onInvalidate:vm.runInContext('('+source.match(/^  onInvalidate: (.+),$/m)[1]+')',f.ctx),onRemember:(_text,meta)=>{f.calls.remember++;return{id:meta.turnId,value:{turnId:meta.turnId}};}});t.after(()=>turns.reset());
+ turns.final('original story request',{recognizer:1,sourceGen:1});await ready();assert.equal(replies.length,1);
+ turns.final('a genuine acknowledgement',{recognizer:1,sourceGen:3});await ready();assert.equal(replies.length,2);assert(replies[0].signal.aborted);assert.equal(JSON.parse(replies[1].request.messages.at(-1).content).text,'original story request\na genuine acknowledgement');
+ replies[1].resolve({reply:{text:'one merged response',turnDisposition:'keep'}});await runs[1];assert.equal(f.ctx.busy,false);
+ replies[0].resolve({reply:{text:'stale original story',turnDisposition:'keep'}});await runs[0];assert.deepEqual(spoken,['one merged response']);assert.equal(f.calls.remember,1);assert.equal(f.ctx.voiceThoughts.size,0);
 });

@@ -10,6 +10,7 @@ const qwenVoices = require('./qwen-voices');
 const modelCatalog = require('./model-catalog');
 const { SCENES, LABELS, normalizeScene } = require('./memory-scope');
 const { containsSecret } = require('./conversation-input');
+const hearingHotwords = require('./hearing-hotwords');
 
 const HOME = os.homedir();
 
@@ -221,12 +222,13 @@ const DEFAULTS = {
     device: '',              // 输入设备名（子串匹配）。空 = 系统默认输入
     probeAll: false,         // 一次性体检：逐个麦克风测电平
     probeSec: 3,
-    silenceMs: 900,          // 一句话说完静多久算「说完了」
+    silenceMs: 600,          // 一句话说完静多久算「说完了」
+    sensitivity: 1,          // 0低、1中、2高；仅调整原生人声检测
     maxSeconds: 45,          // 单次识别最长时长（常驻模式不生效）
     recycleUtterances: 30,   // 常驻模式听够这么多句就换个新进程，防长会话漂移
     wakeAliases: [],
+    hotwords: [...hearingHotwords.DEFAULT_HOTWORDS],
     wakeOnly: false,       // 每句话先叫名字，再进入正常对话判断
-    judge: true,             // 先判断「这句是不是在对我说」，是才回
     ownerOnly: false,        // 需显式朗读录入声音；不是身份认证
   },
   voice: { enabled: true, volume: 100, autoSpeak: true, alwaysListen: true },
@@ -307,9 +309,14 @@ function migrateBrain(c) {
   for (const p of PROVIDERS) b.profiles[p.id] = { apiKey: '', modelId: p.models[0], thinking: 'none', baseURL: p.baseURL, ...b.profiles[p.id] };
   return c;
 }
-function preview(patch) { return deepMerge(load(), patch || {}); }
+function preview(patch) {
+  const next = deepMerge(load(), patch || {});
+  if (next.asr) delete next.asr.judge; // Intent recognition is an unconditional microphone rule.
+  return next;
+}
 function publicConfig(c = load()) {
   const out = JSON.parse(JSON.stringify(c));
+  if (out.asr) delete out.asr.judge;
   for (const section of [out.brain, out.llm, out.tts, out.tts?.doubao, ...Object.values(out.brain?.profiles || {})]) {
     if (section && Object.hasOwn(section, 'apiKey')) {
       section.hasApiKey = !!section.apiKey;
@@ -321,6 +328,37 @@ function publicConfig(c = load()) {
   return out;
 }
 
+// Repair malformed legacy data at startup; new saves use strict validation.
+function repairHearingConfig(c) {
+  let repaired = false;
+  if (!c.buddy || typeof c.buddy !== 'object' || Array.isArray(c.buddy)) { c.buddy = { ...DEFAULTS.buddy }; repaired = true; }
+  try { c.buddy.name = hearingHotwords.normalizeWords([c.buddy.name], { label: '名字', max: 1 })[0]; }
+  catch { c.buddy.name = DEFAULTS.buddy.name; repaired = true; }
+  if (!c.asr || typeof c.asr !== 'object' || Array.isArray(c.asr)) { c.asr = { ...DEFAULTS.asr }; repaired = true; }
+  function words(value, fallback, max) {
+    if (!Array.isArray(value)) { value = fallback; repaired = true; }
+    const valid = [];
+    for (const item of value) {
+      try { valid.push(...hearingHotwords.normalizeWords([item], { max: 1 })); }
+      catch { repaired = true; }
+    }
+    const normalized = hearingHotwords.normalizeWords(valid, { max: valid.length });
+    if (normalized.length > max) repaired = true;
+    return normalized.slice(0, max);
+  }
+  c.asr.wakeAliases = words(c.asr.wakeAliases, [], 8);
+  const hotwords = words(c.asr.hotwords, hearingHotwords.DEFAULT_HOTWORDS, hearingHotwords.LIMIT);
+  const seen = new Set([c.buddy.name, ...c.asr.wakeAliases].map(word => word.toLowerCase()));
+  c.asr.hotwords = hotwords.filter(word => {
+    const key = word.toLowerCase();
+    if (seen.has(key)) return true;
+    if (seen.size >= hearingHotwords.LIMIT) { repaired = true; return false; }
+    seen.add(key); return true;
+  });
+  if (repaired) console.warn('[config] repaired invalid or excess hearing words');
+  return c;
+}
+
 function load() {
   if (cache) return cache;
   let disk = {};
@@ -330,6 +368,8 @@ function load() {
     disk = {};
   }
   let merged = deepMerge(JSON.parse(JSON.stringify(DEFAULTS)), disk);
+  if (merged.asr) delete merged.asr.judge;
+  repairHearingConfig(merged);
 
   if (disk.tts?.qwen && !disk.tts.qwen.modelKind) merged.tts.qwen.modelKind = 'legacy-base';
   if (disk.window && disk.window.canvasWidthVersion !== 1) merged.window.canvasWidthVersion = 0;
@@ -355,7 +395,7 @@ function validVoiceVolume(value) {
 function save(patch, { replaceAvatarDescriptions = false } = {}) {
   if(patch?.taskSupervision)for(const [key,value] of Object.entries(patch.taskSupervision))if(!['enabled','proactive'].includes(key)||typeof value!=='boolean')throw Error('主脑督导配置只接受明确开关');
   if (patch?.voice && Object.hasOwn(patch.voice, 'volume') && !validVoiceVolume(patch.voice.volume)) throw new Error('音量须为 0 至 100 的整数');
-  const next = deepMerge(load(), patch || {});
+  const next = preview(patch);
   if (replaceAvatarDescriptions) next.avatarDescriptions = { ...patch?.avatarDescriptions };
   if (patch?.brain) {
     if (!['workbuddy', 'apikey'].includes(next.brain.source)) throw new Error('未知的智力服务');
@@ -376,13 +416,21 @@ function save(patch, { replaceAvatarDescriptions = false } = {}) {
     if (!next.ui.dialogueVisible) next.ui.avatarHidden = false;
   }
   next.settingsRevision = (Number(load().settingsRevision) || 0) + 1;
-  if (patch?.asr?.wakeAliases !== undefined && (!Array.isArray(next.asr.wakeAliases) || next.asr.wakeAliases.length > 8 || next.asr.wakeAliases.some(v => typeof v !== 'string' || v.length > 64 || containsSecret(v)))) throw new Error('其他叫法最多8个，每个不超过64字，不得包含密钥');
+  if (patch?.asr?.sensitivity !== undefined && (!Number.isInteger(next.asr.sensitivity) || next.asr.sensitivity < 0 || next.asr.sensitivity > 2)) throw new Error('声音敏感度须为低、中或高');
   if (patch?.buddy) {
-    next.buddy.name = String(next.buddy.name || 'baby').trim().slice(0, 64) || 'baby';
+    next.buddy.name = hearingHotwords.normalizeWords([String(next.buddy.name || 'baby')], { label: '名字', max: 1 })[0];
     next.buddy.ownerName = String(next.buddy.ownerName || '主人').trim().slice(0, 64) || '主人';
     next.buddy.profile = String(next.buddy.profile ?? DEFAULTS.buddy.profile).slice(0, 2000);
     next.buddy.sceneProfiles = Object.fromEntries(SCENES.map(scene => [scene, String(next.buddy.sceneProfiles?.[scene] || '').slice(0, 2000)]));
     if ([next.buddy.profile, ...Object.values(next.buddy.sceneProfiles)].some(containsSecret)) throw new Error('角色设定会发送给对话模型，请不要填写密码或密钥');
+  }
+  const changesHearing = (patch?.asr && ['wakeAliases', 'hotwords'].some(key => Object.hasOwn(patch.asr, key))) || (patch?.buddy && Object.hasOwn(patch.buddy, 'name'));
+  if (changesHearing) {
+    for (const [key, label, max] of [['wakeAliases', '其他叫法', 8], ['hotwords', '语音热词', hearingHotwords.LIMIT]]) {
+      if (patch?.asr && Object.hasOwn(patch.asr, key)) hearingHotwords.normalizeWords(patch.asr[key], { label, max });
+    }
+    const hearing = hearingHotwords.snapshot(next);
+    next.asr = { ...next.asr, wakeAliases: hearing.aliases, hotwords: hearing.hotwords };
   }
   if (patch?.memory && Object.hasOwn(patch.memory, 'scene') && !SCENES.includes(patch.memory.scene)) throw new Error('未知的对话场景');
   if (patch?.avatarDescriptions) {

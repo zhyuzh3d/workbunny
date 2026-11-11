@@ -161,13 +161,13 @@ async function datesAndImmediate() {
   await m.write([old]); const before = fingerprint((await readRecords(m, [old.id]))[0]); await m.backfillReferences(); assert.equal(fingerprint((await readRecords(m, [old.id]))[0]), before); total++;
 }
 async function shortVoice() {
-  let time = 0, next = 0, active = false; const timers = new Map(), requests = [], remembered = [];
-  const voice = createVoiceTurns({ now: () => time, allowShort: () => active, setTimer(fn, delay) { const id = ++next; timers.set(id, { fn, at: time + delay }); return id; }, clearTimer: id => timers.delete(id),
+  let time = 0, next = 0; const timers = new Map(), requests = [], remembered = [];
+  const voice = createVoiceTurns({ now: () => time, setTimer(fn, delay) { const id = ++next; timers.set(id, { fn, at: time + delay }); return id; }, clearTimer: id => timers.delete(id),
     onRequest: t => requests.push(t), onRemember: t => remembered.push(t), onInvalidate() {} });
   function advance(ms) { const end = time + ms; for (;;) { const item = [...timers].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0]; if (!item) break; time = item[1].at; timers.delete(item[0]); item[1].fn(); } time = end; }
-  voice.partial('嗯'); voice.final('嗯。'); advance(4000); assert.equal(requests.length, 0); voice.reset();
-  active = true; voice.partial('嗯'); advance(1000); voice.final('嗯。'); advance(2000); assert.equal(requests.length, 1); assert(await requests[0].waitForCommit()); requests[0].remember(); assert.deepEqual(remembered, ['嗯。']);
-  assert(!meaningful('噪', true)); assert(!meaningful('好', false)); assert(meaningful('对', true)); total++;
+  voice.partial('嗯'); voice.final('嗯。'); advance(4000); assert.equal(requests.length, 1); voice.reset();
+  voice.partial('嗯'); advance(1000); voice.final('嗯。'); advance(2000); assert.equal(requests.length, 2); assert(await requests[1].waitForCommit()); requests[1].remember(); assert.deepEqual(remembered, ['嗯。']);
+  assert(meaningful('噪')); assert(meaningful('好')); assert(meaningful('对')); assert(!meaningful('……')); total++;
 }
 (async () => { for (const run of [correction, expiry, longMessages, selfAndLocks, forecastAndMemorySwitch, datesAndImmediate, shortVoice]) await run(); console.log(`memory/dialogue repair acceptance: ${total} groups passed, real encrypted Vault, no production data or network`); })()
   .catch(e => { console.error(e); process.exitCode = 1; }).finally(async () => { for (const w of workers) await w.close(); for (const m of services) await m.close(); fs.rmSync(root, { recursive: true, force: true }); });

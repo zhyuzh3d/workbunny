@@ -24,6 +24,13 @@ async function testOrdinaryReplyDoesNotSearch() {
   assert.deepEqual(result.webSearch, { enabled: true, searched: false, calls: 0, modelCalls: 1, sources: [] });
   assert.equal(result.text, '你好。');
 }
+async function testOptInTextStreamingDoesNotWaitForFinalResponse() {
+  const events=[];let finish,entered;const ready=new Promise(resolve=>{entered=resolve;});
+  const pending=chatWithSearch({messages:[],webSearch:false,streamText:true,onStreamReset:()=>events.push('reset'),onDelta:text=>events.push(text)},
+    {chat:async options=>{options.onDelta('第一句。');entered();await new Promise(resolve=>{finish=resolve;});options.onDelta('第二句。');return final('第一句。第二句。');}});
+  await ready;assert.deepEqual(events,['reset','第一句。'],'the first delta arrives while the model is still pending');
+  finish();await pending;assert.deepEqual(events,['reset','第一句。','第二句。'],'final body is not replayed');
+}
 
 async function testToolRoundStructureAndSpeechIsolation() {
   const query = '2026年东京天气预报';
@@ -253,6 +260,7 @@ async function testOverallDeadlineDecreases() {
 }
 
 async function main() {
+  await testOptInTextStreamingDoesNotWaitForFinalResponse();
   await testOrdinaryReplyDoesNotSearch();
   await testToolRoundStructureAndSpeechIsolation();
   testPublicURLPolicy();

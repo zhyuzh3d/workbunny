@@ -33,7 +33,8 @@ typedef struct {
  * Supported rates: 16000 / 32000 / 48000 Hz. Capture is mono; render is 1 or 2
  * deinterleaved channels. Every frame is exactly sample_rate / 100 samples.
  * Samples use normalized Float32 [-1, 1]. AEC3 includes automatic acoustic
- * delay estimation and double-talk handling. Low noise suppression is enabled.
+ * delay estimation and double-talk handling. Standard noise suppression is enabled
+ * with upstream defaults shared by all input devices.
  * All automatic microphone / digital gain controls are disabled. */
 WBAEC *wb_aec_create(int sample_rate, int render_channels);
 void wb_aec_destroy(WBAEC *aec);

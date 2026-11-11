@@ -5,32 +5,34 @@ test('an owned menu beyond the main window expands the visual scene and actions 
  const scene=applicationScene(root,[menu,root,{...menu,windowId:3,pid:88,bundleId:'other',rect:{x:0,y:0,width:4000,height:3000}}]);assert.deepEqual(scene.rect,{x:0,y:31,width:821,height:1132});assert(scene.expanded);
  const anchor={...root,rect:scene.rect,windowRect:root.rect,sceneWindows:scene.windows.map(w=>({windowId:w.windowId,rect:w.rect}))};assert.equal(actionWindow(anchor,[menu,root],{x:450,y:1040}).windowId,2);assert.throws(()=>actionWindow(anchor,[root],{x:450,y:1040}),/重新观察/);assert.throws(()=>actionWindow(anchor,[{...menu,rect:{...menu.rect,x:400}},root],{x:450,y:1040}),/位置已变化/);
 });
-test('popup observation falls back to full external display capture then crops the whole application scene',async()=>{
- const calls=[],tools=new ToolRegistry(),native={request:async(op,args)=>{calls.push({op,args});if(op==='recognize')return {texts:[{text:'打开',confidence:.95,x:.5,y:.3,width:.1,height:.03}]};if(op==='frontmost')return {application:{bundleId:root.bundleId,pid:77},windows:[menu,root]};if(op==='capture')return {pngBase64:Buffer.from('fixture').toString('base64'),width:821,height:1132};throw Error('Unexpected call: '+op);}};
- registerScreenTools(tools,{native,wechatScene:{assertHealthy:async()=>{}},imageResize:()=>({mime:'image/jpeg',preview:Buffer.from('fixture')})});const task={id:'popup',state:{}},r=await tools.get('screen.observe').execute({application:'wechat'},{task});assert(r.changed&&r.preview);assert.deepEqual(calls.map(c=>c.op),['frontmost','capture','recognize']);assert.equal(r.ocr[0].text,'打开');assert.equal(calls[1].args.relocate,true);assert.equal(calls[1].args.captureMode,'displayStream');assert.equal(task.state.screenAnchors.wechat.rect.height,1132);assert.equal(task.state.screenAnchors.wechat.windowRect.height,909);await tools.get('screen.commit').execute({application:'wechat'},{task});const quiet=await tools.get('screen.observe').execute({application:'wechat'},{task});assert.equal(quiet.changed,false);assert.equal(quiet.preview,undefined);assert.equal(calls.at(-1).args.relocate,false);
+const {fixture,paint}=require('./support/visual-fixture.cjs');
+function popupFixture(options={}){
+ const h=fixture(options);h.location={...h.location,software:'微信',region:{x:.1,y:.1,width:.8,height:.85},mainRegion:{x:.1,y:.1,width:.8,height:.6},monitorRegions:[{x:.1,y:.1,width:.8,height:.85}],texts:[{text:'另存为…',confidence:.3,x:.52,y:.86,width:.08,height:.03}]};
+ const tools=new ToolRegistry(),task={id:'popup',skill:'software.execute',state:{}};
+ registerScreenTools(tools,{native:h.native,wechatScene:{visual:h.visual},imageResize:bytes=>({mime:'image/png',preview:bytes})});
+ const observe=tools.get('screen.observe'),action=tools.get('screen.action');
+ return {h,tools,task,observe,action,watch:args=>observe.execute({application:'wechat',...args},{task}),click:frameId=>action.execute(action.validate({application:'wechat',frameId,action:'click',label:'另存为…'}),{task})};
+}
+test('popup observation crops the entire visually located scene from display pixels without window discovery',async()=>{
+ const f=popupFixture(),r=await f.watch();assert(r.changed&&r.preview);assert.equal(r.ocr[0].text,'另存为…');assert.deepEqual(f.h.calls.map(c=>c.op),['displayCapture']);assert.deepEqual(f.h.calls[0].args,{output:'base64'});
+ const anchor=f.task.state.screenAnchors.wechat;assert.equal(anchor.mode,'visual');assert.equal(anchor.rect.height,102);assert(anchor.mainRegion.height<1);assert.equal(anchor.windowId,undefined);
+ await f.tools.get('screen.commit').execute({application:'wechat'},{task:f.task});const quiet=await f.watch();assert.equal(quiet.changed,false);assert.equal(f.h.requests.length,1,'unchanged pixels reuse visual recognition');assert(f.h.calls.every(c=>c.op==='displayCapture'));
 });
-test('an actual screen primitive projects a menu click below the parent to the owned popup',async()=>{
- const {registerScreenActions}=require('../src/main/screen-action-tools'),scene=applicationScene(root,[menu,root]),calls=[],tools=new ToolRegistry();registerScreenActions(tools,{native:{request:async(op,args)=>{calls.push({op,args});if(op==='frontmost')return {application:{bundleId:root.bundleId,pid:77},windows:[menu,root]};if(op==='capture')return {pngBase64:'fixture'};if(op==='recognize')return {texts:[{text:'另存为…',confidence:.3,x:440/821,y:(1030-31)/1132,width:20/821,height:20/1132}]};return {performed:true};}},wechatScene:{assertTaskIdentity:async()=>{}},applications:{wechat:root.bundleId}});
- const task={id:'popup',state:{screenAnchors:{wechat:{windowId:1,pid:77,bundleId:root.bundleId,rect:scene.rect,windowRect:root.rect,sceneWindows:scene.windows.map(w=>({windowId:w.windowId,rect:w.rect})),previewWidth:821,previewHeight:1132,frameId:'popup',at:Date.now()}}}},tool=tools.get('screen.action');assert((await tool.execute(tool.validate({application:'wechat',frameId:'popup',action:'click',label:'另存为…'}),{task})).verified);assert.equal(calls.find(c=>c.op==='click').args.windowId,2);assert.equal(calls.find(c=>c.op==='click').args.y,1040);
+test('an actual screen primitive projects a visual menu click below the main application region',async()=>{
+ const f=popupFixture(),r=await f.watch(),anchor=f.task.state.screenAnchors.wechat;assert((await f.click(r.frameId)).verified);
+ const input=f.h.calls.find(c=>c.op==='displayInput');assert(Math.abs(input.args.x-109.6)<1e-9);assert(Math.abs(input.args.y-101.25)<1e-9);assert(input.args.y>anchor.rect.y+anchor.mainRegion.height*anchor.rect.height);assert.equal(input.args.windowId,undefined);assert(f.h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
 });
-test('closing an expanded menu forces a fresh image reference and geometry instead of reusing its old image with parent coordinates',async()=>{
- let popup=true;const calls=[],tools=new ToolRegistry(),native={request:async(op,args)=>{calls.push({op,args});if(op==='recognize')return {texts:[{text:'打开',confidence:.95,x:.5,y:.3,width:.1,height:.03}]};if(op==='frontmost')return {application:{bundleId:root.bundleId,pid:77},windows:popup?[menu,root]:[root]};if(op==='capture')return {pngBase64:Buffer.from('popup').toString('base64'),width:821,height:1132};if(op==='visualSample'){assert.equal(args.reset,true);return {changed:false,baseline:true,pngBase64:Buffer.from('parent').toString('base64'),width:821,height:909};}throw Error(op);}};
- registerScreenTools(tools,{native,wechatScene:{assertHealthy:async()=>{}},imageResize:bytes=>({mime:'image/jpeg',preview:bytes})});const task={id:'scene-transition',state:{}},tool=tools.get('screen.observe'),first=await tool.execute({application:'wechat'},{task});popup=false;const second=await tool.execute({application:'wechat'},{task});assert.notEqual(second.frameId,first.frameId);assert(second.preview);assert.equal(second.height,909);assert.equal(task.state.screenAnchors.wechat.rect.height,909);assert.equal(task.state.screenAnchors.wechat.frameId,second.frameId);
+test('closing an expanded menu returns fresh image geometry and prevents using the old menu frame',async()=>{
+ const f=popupFixture(),first=await f.watch();paint(f.h.image,{x:.1,y:.7,width:.8,height:.25});
+ f.h.location={...f.h.location,region:{x:.1,y:.1,width:.8,height:.6},monitorRegions:[{x:.1,y:.1,width:.8,height:.6}],texts:[]};
+ const second=await f.watch();assert.notEqual(second.frameId,first.frameId);assert(second.preview);assert.equal(second.height,72);assert.equal(f.task.state.screenAnchors.wechat.rect.height,72);assert.equal(f.task.state.screenAnchors.wechat.frameId,second.frameId);
+ await assert.rejects(f.click(first.frameId),e=>e.dispatched===false);assert(!f.h.calls.some(c=>c.op==='displayInput'));
 });
-
-test('a popup disappearing during OCR cannot receive its old click',async()=>{
- const scene=applicationScene(root,[menu,root]),tools=new ToolRegistry();let fronts=0,inputs=0;
- require('../src/main/screen-action-tools').registerScreenActions(tools,{applications:{wechat:root.bundleId},wechatScene:{assertTaskIdentity:async()=>{}},native:{request:async op=>{
-  if(op==='frontmost')return {application:{bundleId:root.bundleId,pid:77},windows:++fronts===1?[menu,root]:[root]};
-  if(op==='capture')return {pngBase64:'fixture'};
-  if(op==='recognize')return {texts:[{text:'另存为…',confidence:.9,x:440/821,y:999/1132,width:20/821,height:20/1132}]};inputs++;return {performed:true};
- }}});
- const task={id:'vanished',state:{screenAnchors:{wechat:{windowId:1,pid:77,bundleId:root.bundleId,rect:scene.rect,windowRect:root.rect,sceneWindows:scene.windows.map(w=>({windowId:w.windowId,rect:w.rect})),previewWidth:821,previewHeight:1132,frameId:'popup',at:Date.now()}}}},tool=tools.get('screen.action');
- await assert.rejects(tool.execute(tool.validate({application:'wechat',frameId:'popup',action:'click',label:'另存为…'}),{task}),e=>e.dispatched===false);assert.equal(inputs,0);
+test('a popup disappearing after recognition cannot receive its old click',async()=>{
+ let captures=0,f;f=popupFixture({beforeCapture:()=>{if(++captures===2)paint(f.h.image,{x:.1,y:.7,width:.8,height:.25});}});
+ const first=await f.watch();await assert.rejects(f.click(first.frameId),e=>e.dispatched===false);assert.equal(captures,2);assert(!f.h.calls.some(c=>c.op==='displayInput'));
 });
 test('forced revalidation returns a new image even when an expanded scene is unchanged',async()=>{
- const tools=new ToolRegistry(),native={request:async op=>op==='frontmost'?{application:{bundleId:root.bundleId,pid:77},windows:[menu,root]}:op==='recognize'?{texts:[]}:op==='capture'?{pngBase64:Buffer.from('same').toString('base64'),width:821,height:1132}:Promise.reject(Error(op))};
- registerScreenTools(tools,{native,wechatScene:{assertHealthy:async()=>{}},imageResize:bytes=>({mime:'image/jpeg',preview:bytes})});const task={id:'recheck',state:{}},observe=tools.get('screen.observe');
- const first=await observe.execute({application:'wechat'},{task});await tools.get('screen.commit').execute({application:'wechat'},{task});
- const force=await observe.execute(observe.validate({application:'wechat',force:true}),{task});assert(force.preview);assert.notEqual(force.frameId,first.frameId);
+ const f=popupFixture(),first=await f.watch();await f.tools.get('screen.commit').execute({application:'wechat'},{task:f.task});
+ const force=await f.watch({force:true});assert(force.preview);assert(force.changed);assert.notEqual(force.frameId,first.frameId);assert.equal(f.h.requests.length,2);assert(f.h.calls.every(c=>c.op==='displayCapture'));
 });

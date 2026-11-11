@@ -181,8 +181,13 @@ func emit(_ obj: [String: Any]) {
     outLock.unlock()
 }
 
-func fail(_ msg: String, code: Int32) -> Never {
-    emit(["t": "error", "v": msg, "code": Int(code)])
+enum ASRFailureKind: String { case recognition, capture, permission, resources, startup, unknown }
+
+func fail(_ msg: String, code: Int32, kind: ASRFailureKind = .unknown, reason: String? = nil, gen: Int? = nil) -> Never {
+    var output: [String: Any] = ["t": "error", "v": msg, "code": Int(code), "kind":kind.rawValue, "fatal":true]
+    if let reason { output["reason"] = reason }
+    if let gen { output["gen"] = gen }
+    emit(output)
     emit(["t": "end"])
     exitASR(code)
 }
@@ -197,7 +202,11 @@ func argValue(_ name: String, _ def: String) -> String {
 func hasFlag(_ name: String) -> Bool { CommandLine.arguments.contains(name) }
 
 let localeId = argValue("--lang", "zh-CN")
-let silenceMs = Double(argValue("--silence", "900")) ?? 900
+let silenceMs = Double(argValue("--silence", "600")) ?? 600
+// UI sensitivity runs from conservative to permissive; Apple's enum describes
+// filtering aggressiveness, so its direction is intentionally reversed.
+let speechSensitivity = Int(argValue("--sensitivity", "1")) ?? 1
+let speechContextStrings = SpeechContextStrings()
 let maxSeconds = Double(argValue("--max", "45")) ?? 45
 let maxUtterances = Int(argValue("--utterances", "30")) ?? 30
 let alwaysMode = hasFlag("--always")
@@ -214,6 +223,9 @@ let stateLock = NSLock()
 var sessionText = ""      // 当前这句的识别文本
 var sessionTranscript = SpeechTranscript()
 var sessionAcousticEvidence = SpeechAcousticEvidence()
+var sessionSpeechSupported = false
+var sessionEverHadText = false
+var sessionEndingQuiet = false
 let speechActivity = SpeechActivity()
 var endpointPolicy = SpeechEndpointPolicy(generation: 0, silenceMs: silenceMs, maxSeconds: maxSeconds)
 var finalizationBarrier = SpeechFinalizationBarrier(generation: 0)
@@ -236,6 +248,15 @@ struct SpeechEndpointNotifications {
     }
 }
 var endpointNotifications = SpeechEndpointNotifications()
+var captureEpoch = 0
+var captureRecoveryNotifications = SpeechEndpointNotifications()
+var captureConfigurationChanged = false
+var captureConfigurationObserver: NSObjectProtocol?
+let captureControlQueue = DispatchQueue(label: "workbunny.speech.capture-control")
+var enqueueCaptureRecovery: (@escaping () -> Void) -> Void = { work in captureControlQueue.async(execute: work) }
+var handleCaptureFault: (SpeechCaptureFault, Bool) -> Void = { reason, pending in
+    fail(reason.message(pendingText: pending), code: reason.exitCode, kind: .capture, reason: reason.rawValue)
+}
 var activityOutputSequence = 0
 var finalizedActivitySequence = 0
 // Test injection changes only the scheduler/handler, never a model or engine.
@@ -262,9 +283,30 @@ enum SpeechTraceStage: String, CaseIterable {
     case sessionStart = "session-start", result, finishStart = "finish-start"
     case finishReturn = "finish-return", resultsEnd = "results-end", utterance, recycle
 }
-let speechTraceFields: Set<String> = ["at", "gen", "currentGen", "frames", "rate", "channels", "measuredChannels", "rms", "peak", "muted", "aec", "accepted", "converted", "conversionError", "buffers", "pendingFrames", "pendingSeconds", "directBuffers", "directFrames", "queuedBuffers", "queuedFrames", "replayedBuffers", "replayedFrames", "start", "end", "finalizedThrough", "isFinal", "textChars", "combinedChars", "removedSegments", "touchesFinalized", "confirmed", "current", "ok", "utteranceCount", "sampleStartAt", "sampleEndAt", "aecRenderFrames", "aecCaptureFrames", "aecResets", "aecDelayMs", "aecErleDb", "referenceRms", "referenceAt", "referenceLagMs", "captureHeadroomMs", "capturePendingFrames"]
+let speechTraceFields: Set<String> = ["at", "gen", "currentGen", "frames", "rate", "channels", "measuredChannels", "rms", "peak", "muted", "aec", "accepted", "converted", "conversionError", "buffers", "pendingFrames", "pendingSeconds", "directBuffers", "directFrames", "queuedBuffers", "queuedFrames", "replayedBuffers", "replayedFrames", "start", "end", "finalizedThrough", "isFinal", "textChars", "combinedChars", "removedSegments", "touchesFinalized", "confirmed", "current", "ok", "utteranceCount", "sampleStartAt", "sampleEndAt", "aecRenderFrames", "aecCaptureFrames", "aecResets", "aecDelayMs", "aecBufferingDelayMs", "aecErleDb", "referenceRms", "referenceAt", "referenceLagMs", "captureHeadroomMs", "capturePendingFrames"]
 var traceDirectBuffers = 0, traceDirectFrames = 0, traceQueuedBuffers = 0, traceQueuedFrames = 0
 var traceReplayedBuffers = 0, traceReplayedFrames = 0
+
+enum SpeechFinalizationStage: String {
+    case requested, resultsEnded = "results-ended", finalizerReturned = "finalizer-returned", committed, failed
+}
+// Always available, fixed metadata only: a failed last-result watermark and
+// a failed finalizer are different conditions. Never include words or PCM.
+func emitFinalization(_ stage: SpeechFinalizationStage, gen: Int, ok: Bool,
+                      reason: SpeechFinalizationBarrier.Failure? = nil) {
+    stateLock.lock()
+    let current = gen == sessionGen
+    var event: [String: Any] = ["t":"finalization", "stage":stage.rawValue, "gen":gen,
+        "at":ProcessInfo.processInfo.systemUptime, "ok":ok, "current":current]
+    if current {
+        event["inputSeconds"] = sessionAcousticEvidence.duration
+        event["textChars"] = sessionText.count
+        if let confirmed = finalizationBarrier.resultsConfirmed { event["resultsConfirmed"] = confirmed }
+    }
+    if let reason { event["reason"] = reason.rawValue }
+    stateLock.unlock()
+    emit(event)
+}
 
 func speechTraceRecord(_ stage: SpeechTraceStage, _ fields: [String: Any], enabled: Bool = speechTraceEnabled) -> [String: Any]? {
     guard enabled else { return nil }
@@ -324,6 +366,12 @@ var echoCancellation: SpeechEchoCancellation?
 var tapInstalled = false
 var inputCont: AsyncStream<AnalyzerInput>.Continuation?
 var analyzer: SpeechAnalyzer?
+// Test fixtures replace only this completion operation. Production always
+// requires the SpeechAnalyzer's complete-input finalization receipt.
+var finishAnalyzerInput: (SpeechAnalyzer?) async throws -> Void = { value in
+    guard let value else { throw NSError(domain: "bunny.speech-finalization", code: 1) }
+    try await value.finalizeAndFinishThroughEndOfInput()
+}
 var sessionTask: Task<Void, Never>?
 var sessionTimer: DispatchSourceTimer?
 var curLocale: Locale?
@@ -339,6 +387,61 @@ var bufCount = 0
 var convFail = 0
 var lastAudioAt: TimeInterval = 0
 var lastCaptureReportAt: TimeInterval = 0
+
+func currentCaptureFaultLocked(at now: Double) -> SpeechCaptureFault? {
+    let fault = SpeechCaptureHealthPolicy.fault(now: now, captureAt: lastAudioAt, activityAt: endpointPolicy.healthAt,
+        activityTimeout: endpointPolicy.vadHealthTimeoutSeconds, freshness: endpointPolicy.freshnessSeconds)
+    // Analyzer rollover intentionally queues audio without delivering VAD
+    // evidence. Preserve its existing finalization/startup bounds.
+    return fault == .vadTimeout && (ending || starting) ? nil : fault
+}
+func disarmCaptureRecovery() {
+    if let observer = captureConfigurationObserver { NotificationCenter.default.removeObserver(observer); captureConfigurationObserver = nil }
+    stateLock.withLock { captureRecoveryNotifications.close(); captureConfigurationChanged = false }
+}
+func observeCaptureConfiguration(_ source: AVAudioEngine, epoch: Int) {
+    captureConfigurationObserver = NotificationCenter.default.addObserver(
+        forName: .AVAudioEngineConfigurationChange, object: source, queue: nil) { _ in
+            // The framework owns this callback queue. Do not acquire audio
+            // state locks or mutate the engine here; hand off immediately.
+            enqueueCaptureRecovery { requestCaptureRecovery(epoch: epoch, reason: .configurationChanged) }
+        }
+}
+func requestCaptureRecovery(epoch: Int, reason: SpeechCaptureFault) {
+    stateLock.lock()
+    guard epoch == captureEpoch, !finished else { stateLock.unlock(); return }
+    if reason == .configurationChanged { captureConfigurationChanged = true }
+    guard let ticket = captureRecoveryNotifications.request(generation: epoch) else { stateLock.unlock(); return }
+    stateLock.unlock()
+    enqueueCaptureRecovery {
+        stateLock.lock()
+        let now = ProcessInfo.processInfo.systemUptime
+        let claimed = captureRecoveryNotifications.claim(ticket, generation: captureEpoch)
+        let current = claimed && epoch == captureEpoch && !finished
+        // A delayed watchdog decision cannot retire a recovered stream. A
+        // configuration notification invalidates the graph independently.
+        let fault = captureConfigurationChanged ? .configurationChanged : currentCaptureFaultLocked(at: now)
+        guard current, let fault else { stateLock.unlock(); return }
+        let gen = sessionGen
+        // A barrier claim precedes stdout publication; it is not proof that
+        // the host already received this text. Empty successor sessions are
+        // the unambiguous case that must never ask the owner to repeat.
+        let pendingText = !sessionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let event: [String: Any] = ["t":"capture-health", "reason":fault.rawValue, "gen":gen,
+            "captureEpoch":epoch, "at":now, "captureAgeMs":max(0, now - lastAudioAt) * 1000,
+            "activityAgeMs":max(0, now - endpointPolicy.healthAt) * 1000,
+            "textChars":sessionText.count, "pendingText":pendingText, "current":true]
+        captureRecoveryNotifications.close(); endpointNotifications.close()
+        finalizationBarrier.fail(.unconfirmed, generation: gen)
+        finished = true; ending = true; sessionGen += 1
+        stateLock.unlock()
+        emit(event)
+        if pendingText { emitTranscriptUpdate("", gen: gen, audioRange: nil, retracting: true) }
+        // The established helper exit / host retry owns recovery. Never stop,
+        // destroy or rebuild AVAudioEngine on its internal notification queue.
+        handleCaptureFault(fault, pendingText)
+    }
+}
 
 // The routing lock binds acoustic evidence to the same generation and order as
 // actual Analyzer offers, including audio captured during the previous drain.
@@ -359,7 +462,7 @@ func requestQuietEndpointLocked(gen: Int) {
 func observeDeliveredAudioLocked(_ buffer: AVAudioPCMBuffer, gen: Int, at: TimeInterval, seq: Int?, route: String) {
     let receivedAt = ProcessInfo.processInfo.systemUptime
     let observed = gen == sessionGen && !finished ? speechActivity.observe(buffer, generation: gen, at: at) :
-        SpeechActivity.Observation(generation: gen, state: .unknown, quietSeconds: 0, at: receivedAt, frames: [])
+        SpeechActivity.Observation(generation: gen, state: .unknown, quietSeconds: 0, at: receivedAt)
     if gen == sessionGen && !finished {
         sessionAcousticEvidence.append(seconds: Double(buffer.frameLength) / buffer.format.sampleRate,
             capturedAt: at, classified: observed.frames)
@@ -398,7 +501,7 @@ func enqueueAudio(_ buffer: AVAudioPCMBuffer, diagnosticSequence: Int? = nil, ca
         let duration = Double(buffer.frameLength) / buffer.format.sampleRate
         guard pendingAudioSeconds + duration <= 5,
               let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else {
-            fail("语音切句缓冲已满，请重新说出完整要求", code: 24)
+            fail("语音切句缓冲已满，请重新说出完整要求", code: 24, kind: .recognition, reason: "rollover-buffer-full", gen: sessionGen)
         }
         copy.frameLength = buffer.frameLength
         let source = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
@@ -433,14 +536,15 @@ func deliverSpeechChunk(_ signal: AudioPCMChunk, captureGen: Int, report: Bool) 
     } catch {
         if speechTraceEnabled && report { traceSpeechState(.analyzerInput, fields: ["frames": 0, "conversionError": true, "accepted": false]) }
         convFail += 1
-        emit(["t": "error", "v": "麦克风流格式转换失败，正在重新连接", "code": 21])
-        if convFail >= 3 { fail("麦克风格式转换持续失败，重新连接音频输入", code: 21) }
+        emit(["t": "error", "v": "麦克风流格式转换失败，正在重新连接", "code": 21, "kind":"capture", "reason":"conversion", "fatal":false])
+        if convFail >= 3 { fail("麦克风格式转换持续失败，重新连接音频输入", code: 21, kind: .capture, reason: "conversion") }
     }
 }
 // Only after removing the hardware tap: do not race a converter/AEС context
 // against its callback. Normal Analyzer endpoints leave this physical stream
 // running; only an explicit capture stop flushes its remaining samples.
 func flushAudioCapture() {
+    disarmCaptureRecovery()
     if tapInstalled { engine.inputNode.removeTap(onBus: 0); tapInstalled = false }
     engine.stop()
     let gen = stateLock.withLock { sessionGen }
@@ -454,6 +558,11 @@ func flushAudioCapture() {
 /// 不启用 AVAudioEngine VoiceProcessing：它的 other-audio ducking 会压低
 /// 整台电脑的外放，且 Electron 的实际播放不在这个原生引擎的输出图中。
 func startAudio(aec: Bool, bind: (AudioDeviceID, String)?, target: AVAudioFormat?) throws {
+    disarmCaptureRecovery()
+    let epoch = stateLock.withLock { () -> Int in
+        captureEpoch += 1; captureConfigurationChanged = false
+        captureRecoveryNotifications.reset(generation: captureEpoch); return captureEpoch
+    }
     if tapInstalled { engine.inputNode.removeTap(onBus: 0); tapInstalled = false }
     engine.stop()
     echoCancellation?.stop(); echoCancellation = nil
@@ -538,7 +647,8 @@ func startAudio(aec: Bool, bind: (AudioDeviceID, String)?, target: AVAudioFormat
 
         // UI level and speaker features observe the same post-AEC signal;
         // the final Analyzer format may be Int16 and cannot be read as float.
-        if count % 3 == 0, let ch = signal.floatChannelData?[0] {
+        // Report every delivered chunk so the UI does not skip short peaks.
+        if let ch = signal.floatChannelData?[0] {
             let n = Int(signal.frameLength)
             var sum: Float = 0
             for i in 0..<n { sum += ch[i] * ch[i] }
@@ -549,14 +659,15 @@ func startAudio(aec: Bool, bind: (AudioDeviceID, String)?, target: AVAudioFormat
     tapInstalled = true
     engine.prepare()
     try engine.start()
+    observeCaptureConfiguration(engine, epoch: epoch)
 }
 
 // ---------------------------------------------------------------- 上报一句
 
-func emitTranscriptUpdate(_ text: String, gen: Int, audioRange: (Double, Double)?, retracting: Bool) {
+func emitTranscriptUpdate(_ text: String, gen: Int, audioRange: (Double, Double)?, retracting: Bool, speechSupported: Bool = false) {
     if !text.isEmpty {
         var output: [String: Any] = ["t":"partial", "v":text, "gen":gen,
-            "emittedAt":ProcessInfo.processInfo.systemUptime]
+            "emittedAt":ProcessInfo.processInfo.systemUptime, "speechSupported":speechSupported]
         if let (from, to) = audioRange { output["audioStartAt"] = from; output["audioEndAt"] = to }
         if speechDiagnostic != nil { output["diagnosticSourceGen"] = gen }
         emit(output)
@@ -575,6 +686,7 @@ func emitUtterance(_ raw: String, traceGen: Int? = nil, audioRange: (Double, Dou
     stateLock.lock(); utteranceCount += 1; let n = utteranceCount; stateLock.unlock()
     traceSpeechState(.utterance, gen: traceGen, fields: ["textChars": seg.count, "utteranceCount": n, "accepted": true])
     var output: [String: Any] = ["t": "utterance", "v": seg]
+    output["speechSupported"] = sessionSpeechSupported
     if let gen = traceGen { output["gen"] = gen }
     if let (from, to) = audioRange { output["audioStartAt"] = from; output["audioEndAt"] = to }
     output["emittedAt"] = ProcessInfo.processInfo.systemUptime
@@ -594,6 +706,7 @@ func emitUtterance(_ raw: String, traceGen: Int? = nil, audioRange: (Double, Dou
 // ---------------------------------------------------------------- 会话
 
 func teardown() {
+    disarmCaptureRecovery()
     sessionTimer?.cancel()
     sessionTimer = nil
     inputCont?.finish()
@@ -615,7 +728,10 @@ func startSession() async {
     ending = false
     sessionGen += 1
     let gen = sessionGen
+    let contextSnapshot = speechContextStrings.snapshot()
     endpointPolicy = SpeechEndpointPolicy(generation: gen, silenceMs: silenceMs, maxSeconds: maxSeconds)
+    sessionSpeechSupported = false
+    sessionEverHadText = false; sessionEndingQuiet = false
     finalizationBarrier = SpeechFinalizationBarrier(generation: gen)
     finalizedActivitySequence = 0
     endpointNotifications.reset(generation: gen)
@@ -629,17 +745,24 @@ func startSession() async {
         locale: locale,
         transcriptionOptions: [],
         reportingOptions: [.volatileResults, .fastResults],
-        attributeOptions: []
+        attributeOptions: [.audioTimeRange, .transcriptionConfidence]
     )
     let (stream, cont) = AsyncStream<AnalyzerInput>.makeStream()
     speakerFeatures.requireSpeechConfirmation()
-    // SpeechDetector is an input gate, not just a reporting module. On saved
-    // processed PCM it omitted complete clauses; the transcriber alone kept
-    // them. Independent VAD observes every delivered buffer without gating it.
-    let an = SpeechAnalyzer(modules: [transcriber])
+    let detectionLevel: SpeechDetector.SensitivityLevel = speechSensitivity <= 0 ? .high : speechSensitivity >= 2 ? .low : .medium
+    let detector = SpeechDetector(detectionOptions: .init(sensitivityLevel: detectionLevel), reportResults: false)
+    // Continuous ambient audio requires the system's voice-activated input.
+    // Independent VAD remains responsible for endpoints, not word filtering.
+    let an = SpeechAnalyzer(modules: [detector, transcriber])
     let context = AnalysisContext()
-    context.contextualStrings[.general] = WakeName.configured.names
-    try? await an.setContext(context)
+    context.contextualStrings[.general] = contextSnapshot.strings
+    do {
+        try await an.setContext(context)
+        emit(["t":"context", "stage":"submitted", "revision":contextSnapshot.revision, "gen":gen, "count":contextSnapshot.strings.count])
+    } catch {
+        let ns = error as NSError
+        emit(["t":"context", "stage":"failed", "revision":contextSnapshot.revision, "gen":gen, "count":contextSnapshot.strings.count, "domain":ns.domain, "code":ns.code])
+    }
 
     stateLock.lock()
     // Flush under the same lock as audio routing so newer buffers cannot
@@ -667,8 +790,7 @@ func startSession() async {
     do {
         try await an.start(inputSequence: stream)
     } catch {
-        emit(["t": "error", "v": "识别器启动失败：\(error.localizedDescription)", "code": 6])
-        return
+        fail("识别器启动失败：\(error.localizedDescription)", code: 24, kind: .recognition, reason: "start", gen: gen)
     }
 
     sessionTask = Task {
@@ -678,12 +800,14 @@ func startSession() async {
                 stateLock.lock()
                 guard gen == sessionGen && !finished else { stateLock.unlock(); return }
                 let resultText = String(result.text.characters)
-                let supported = sessionAcousticEvidence.supports(start: result.range.start.seconds, end: result.range.end.seconds)
-                // Keep the complete input in SpeechAnalyzer. Only recognized
-                // ranges with independent speech evidence may become words.
-                // An unsupported revision also removes its volatile words.
-                let observation = sessionTranscript.accept(text: supported ? resultText : "", start: result.range.start.seconds,
-                    end: result.range.end.seconds, finalizedThrough: result.resultsFinalizationTime.seconds, observing: speechTraceEnabled)
+                sessionEverHadText = sessionEverHadText || !resultText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let speechSupported = sessionAcousticEvidence.supports(start: result.range.start.seconds, end: result.range.end.seconds)
+                sessionSpeechSupported = sessionSpeechSupported || speechSupported
+                // Preserve the system's whole revision. VAD is endpoint
+                // observation, never a word-content classifier.
+                let observation = sessionTranscript.accept(text: resultText, start: result.range.start.seconds,
+                    end: result.range.end.seconds, finalizedThrough: result.resultsFinalizationTime.seconds,
+                    observing: speechTraceEnabled, inputEnd: sessionAcousticEvidence.duration)
                 let text = sessionTranscript.text
                 let audioRange = sessionTranscript.range.flatMap { sessionAcousticEvidence.captureRange(start: $0.0, end: $0.1) }
                 let retracted = text.isEmpty && !sessionText.isEmpty
@@ -695,23 +819,24 @@ func startSession() async {
                     traceMetadata?.merge(["start": result.range.start.seconds, "end": result.range.end.seconds,
                         "finalizedThrough": result.resultsFinalizationTime.seconds, "isFinal": result.isFinal,
                         "textChars": resultText.count, "combinedChars": text.count, "removedSegments": observation?.removedSegments ?? 0,
-                        "touchesFinalized": observation?.touchesFinalized ?? false, "accepted": supported && (observation?.accepted ?? false),
+                        "touchesFinalized": observation?.touchesFinalized ?? false, "accepted": observation?.accepted ?? false,
                         "confirmed": sessionTranscript.confirmed]) { _, next in next }
                 }
                 stateLock.unlock()
                 speechDiagnostic?.record("raw-result", ["gen": gen, "text": resultText, "combinedText": text,
                     "start": result.range.start.seconds, "end": result.range.end.seconds,
-                    "finalizedThrough": result.resultsFinalizationTime.seconds, "isFinal": result.isFinal, "acousticSupport": supported])
+                    "finalizedThrough": result.resultsFinalizationTime.seconds, "isFinal": result.isFinal, "inputRangeValid": sessionTranscript.validRevisions, "speechSupported":speechSupported])
                 if let metadata = traceMetadata { traceSpeech(.result, metadata) }
                 // A final result is one phrase, not the end of this session.
-                emitTranscriptUpdate(text, gen: gen, audioRange: audioRange, retracting: retracted)
+                emitTranscriptUpdate(text, gen: gen, audioRange: audioRange, retracting: retracted, speechSupported: speechSupported)
             }
             stateLock.lock()
             let text = sessionText, confirmed = sessionTranscript.confirmed
             let live = gen == sessionGen && !finished
             if live { finalizationBarrier.resultsEnded(confirmed: confirmed, text: text, generation: gen) }
-            let invalidEnd = live && finalizationBarrier.failure != nil
+            let failure = live ? finalizationBarrier.failure : nil
             stateLock.unlock()
+            emitFinalization(.resultsEnded, gen: gen, ok: failure == nil, reason: failure)
             speechDiagnostic?.record("results-end", ["gen": gen, "ok": true, "current": live, "confirmed": confirmed, "text": text])
             if speechTraceEnabled {
                 var fields: [String: Any] = ["ok": true, "current": live]
@@ -719,15 +844,41 @@ func startSession() async {
                 traceSpeechState(.resultsEnd, gen: gen, fields: fields)
             }
             if live {
-                guard !invalidEnd else { fail("语音收尾未能确认完整结果，请重新说出完整要求", code: 24) }
+                guard failure == nil else {
+                    emitFinalization(.failed, gen: gen, ok: false, reason: failure)
+                    fail("语音收尾未能确认完整结果，请重新说出完整要求", code: 24, kind: .recognition, reason: "unexpected-results-end", gen: gen)
+                }
                 await publishFinalizedSession(gen: gen)
             }
         } catch {
             stateLock.lock(); let live = gen == sessionGen && !finished
-            if live { finalizationBarrier.fail(.results, generation: gen) }; stateLock.unlock()
+            let ns = error as NSError
+            let rejection = ns.domain == "SFSpeechErrorDomain" && ns.code == 1 && ns.localizedDescription == "RecogRejected"
+            var errorMetadata: [String:Any] = ["t":"recognitionError", "gen":gen, "domain":ns.domain, "code":ns.code,
+                "rejected":rejection, "hasText":!sessionText.isEmpty, "ending":ending, "requested":finalizationBarrier.requestedAt != nil]
+            let emptyRejection = isEmptySpeechRejection(error, detectorEnabled: true, current: live, endingQuiet: ending && sessionEndingQuiet,
+                requested: finalizationBarrier.requestedAt != nil, inputSeconds: sessionAcousticEvidence.duration,
+                everHadText: sessionEverHadText, textEmpty: sessionText.isEmpty && sessionTranscript.text.isEmpty,
+                validRevisions: sessionTranscript.validRevisions)
+            errorMetadata["expectedEmpty"] = emptyRejection
+            if live {
+                if emptyRejection { finalizationBarrier.resultsEnded(confirmed: true, text: "", generation: gen) }
+                else { finalizationBarrier.fail(.results, generation: gen) }
+            }; stateLock.unlock()
+            emit(errorMetadata)
+            if emptyRejection {
+                emitFinalization(.resultsEnded, gen: gen, ok: true)
+                speechDiagnostic?.record("results-empty-rejection", ["gen":gen,"current":true])
+                await publishFinalizedSession(gen: gen)
+                return
+            }
             traceSpeechState(.resultsEnd, gen: gen, fields: ["ok": false, "current": live])
             speechDiagnostic?.record("results-end", ["gen": gen, "ok": false, "current": live])
-            if live { fail("语音识别中断，未提交未确认的句子，请重新说出完整要求", code: 24) }
+            emitFinalization(.resultsEnded, gen: gen, ok: false, reason: .results)
+            if live {
+                emitFinalization(.failed, gen: gen, ok: false, reason: .results)
+                fail("语音识别中断，未提交未确认的句子，请重新说出完整要求", code: 24, kind: .recognition, reason: "results", gen: gen)
+            }
         }
     }
 }
@@ -736,8 +887,22 @@ func startSession() async {
 func publishFinalizedSession(gen: Int) async {
     stateLock.lock()
     let text = gen == sessionGen && !finished ? finalizationBarrier.claim(generation: gen) : nil
+    // A successful complete-input finalizer confirms the latest drained
+    // revisions, including unchanged volatile results. It does not supply
+    // semantic acceptance or authorize text outside this generation's input.
+    let valid = text.map { value in
+        sessionTranscript.text == value &&
+        sessionTranscript.completeFinalization(through: sessionAcousticEvidence.duration)
+    } ?? true
     stateLock.unlock()
-    if let text { await endSession(gen: gen, text: text) }
+    guard valid else {
+        emitFinalization(.failed, gen: gen, ok: false, reason: .unconfirmed)
+        fail("语音收尾包含未确认的音频范围，请重新说出完整要求", code: 24, kind: .recognition, reason: "unconfirmed-range", gen: gen)
+    }
+    if let text {
+        emitFinalization(.committed, gen: gen, ok: true)
+        await endSession(gen: gen, text: text)
+    }
 }
 
 func abortUnconfirmedSession(gen: Int, reason: String) {
@@ -748,7 +913,8 @@ func abortUnconfirmedSession(gen: Int, reason: String) {
     finished = true; ending = true; sessionGen += 1
     stateLock.unlock()
     speechDiagnostic?.record("endpoint-abort", ["gen": gen, "reason": reason])
-    fail("语音输入尚未可靠确认，已取消本段识别并准备重连，请重新说出完整要求", code: 25)
+    let kind: ASRFailureKind = reason == "activity-unavailable" ? .capture : .recognition
+    fail("语音输入尚未可靠确认，已取消本段识别并准备重连，请重新说出完整要求", code: 25, kind: kind, reason: reason, gen: gen)
 }
 
 /// 收掉当前这句：上报 → （常驻）立刻起下一个会话
@@ -789,7 +955,9 @@ func beginEnd(_ reason: String = "unspecified", expectedGen: Int? = nil) {
     stateLock.lock()
     if let expectedGen, expectedGen != sessionGen { stateLock.unlock(); return }
     if ending || finished || starting { stateLock.unlock(); return }
-    if reason == "checkpoint" && sessionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { stateLock.unlock(); return }
+    if reason == "checkpoint" && sessionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+       !endpointPolicy.allowsEmptyCheckpoint(deliveredSeconds: sessionAcousticEvidence.duration,
+           at: ProcessInfo.processInfo.systemUptime, generation: sessionGen) { stateLock.unlock(); return }
     if reason == "quiet" && endpointPolicy.decision(at: ProcessInfo.processInfo.systemUptime, generation: sessionGen) != .quiet { stateLock.unlock(); return }
     let an = analyzer
     let gen = sessionGen
@@ -798,21 +966,23 @@ func beginEnd(_ reason: String = "unspecified", expectedGen: Int? = nil) {
     finalizedActivitySequence = activityOutputSequence
     ending = true
     let activityAtEnd = endpointPolicy.evidence(at: ProcessInfo.processInfo.systemUptime, generation: gen)
+    sessionEndingQuiet = activityAtEnd == .quiet && ["quiet", "checkpoint"].contains(reason)
     inputCont = nil
     var traceMetadata = speechTraceEnabled ? speechTraceStateLocked(gen: gen) : nil
     if speechTraceEnabled { traceMetadata?.merge(["confirmed": sessionTranscript.confirmed, "combinedChars": sessionText.count]) { _, next in next } }
     stateLock.unlock()
+    emitFinalization(.requested, gen: gen, ok: true)
     speechDiagnostic?.record("endpoint", ["gen": gen, "reason": reason, "activity": activityAtEnd.rawValue])
     continuation?.finish()
     if let metadata = traceMetadata { traceSpeech(.finishStart, metadata) }
 
     Task {
         do {
-            guard let an else { throw NSError(domain: "bunny.speech-finalization", code: 1) }
-            try await an.finalizeAndFinishThroughEndOfInput()
+            try await finishAnalyzerInput(an)
             stateLock.lock()
             if gen == sessionGen && !finished { finalizationBarrier.finalizerSucceeded(generation: gen) }
             stateLock.unlock()
+            emitFinalization(.finalizerReturned, gen: gen, ok: true)
             speechDiagnostic?.record("finish-return", ["gen": gen, "ok": true])
             traceSpeechState(.finishReturn, gen: gen, fields: ["ok": true])
             await publishFinalizedSession(gen: gen)
@@ -822,14 +992,22 @@ func beginEnd(_ reason: String = "unspecified", expectedGen: Int? = nil) {
             traceSpeechState(.finishReturn, gen: gen, fields: ["ok": false])
             stateLock.lock(); let live = gen == sessionGen && !finished
             if live { finalizationBarrier.fail(.finalizer, generation: gen) }; stateLock.unlock()
-            if live { fail("语音定稿失败，未提交未确认的句子，请重新说出完整要求", code: 24) }
+            emitFinalization(.finalizerReturned, gen: gen, ok: false, reason: .finalizer)
+            if live {
+                emitFinalization(.failed, gen: gen, ok: false, reason: .finalizer)
+                fail("语音定稿失败，未提交未确认的句子，请重新说出完整要求", code: 24, kind: .recognition, reason: "finalizer", gen: gen)
+            }
         }
     }
     Task {
         try? await Task.sleep(nanoseconds: 3_000_000_000)
-        stateLock.lock(); let still = gen == sessionGen && ending && !finished && !finalizationBarrier.claimed
-        if still { finalizationBarrier.timeout(generation: gen) }; stateLock.unlock()
-        if still { fail("语音定稿超时，未提交未确认的句子，请重新说出完整要求", code: 24) }
+        stateLock.lock()
+        let still = gen == sessionGen && ending && !finished && finalizationBarrier.timeout(generation: gen)
+        stateLock.unlock()
+        if still {
+            emitFinalization(.failed, gen: gen, ok: false, reason: .timeout)
+            fail("语音定稿超时，未提交未确认的句子，请重新说出完整要求", code: 24, kind: .recognition, reason: "timeout", gen: gen)
+        }
     }
 }
 
@@ -906,11 +1084,11 @@ func run() async {
         ])
     }
 
-    guard micOK else { fail("麦克风未授权（系统设置 → 隐私与安全性 → 麦克风）", code: 4) }
+    guard micOK else { fail("麦克风未授权（系统设置 → 隐私与安全性 → 麦克风）", code: 4, kind: .permission, reason: "microphone") }
 
     // 3. 没装资产就地装
     if !localeReady {
-        if speechDiagnostic != nil { fail("私有语音诊断所需语言资源未安装，未下载或启动识别", code: 47) }
+        if speechDiagnostic != nil { fail("私有语音诊断所需语言资源未安装，未下载或启动识别", code: 47, kind: .resources, reason: "not-installed") }
         emit(["t": "installing", "locale": localeIdentifier(locale)])
         let probe = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
         do {
@@ -918,7 +1096,7 @@ func run() async {
                 try await req.downloadAndInstall()
             }
         } catch {
-            fail("语音模型安装失败：\(error.localizedDescription)", code: 12)
+            fail("语音模型安装失败：\(error.localizedDescription)", code: 12, kind: .resources, reason: "install")
         }
     }
 
@@ -975,7 +1153,7 @@ func run() async {
             emit(["t": "warn", "v": "音频方案「\(plan.0)」起不来：\(lastErr)"])
         }
     }
-    if !audioOK { fail("音频启动失败：\(lastErr)", code: 6) }
+    if !audioOK { fail("音频启动失败：\(lastErr)", code: 6, kind: .capture, reason: "start") }
     emit(["t": "aec", "on": aecEnabled, "engine": useEchoCancellation ? "webrtc-aec3" : "none",
           "state": useEchoCancellation ? (aecEnabled ? "active" : "degraded") : "off", "systemDucking": false])
     startedAt = Date()
@@ -990,24 +1168,21 @@ func run() async {
     timer.setEventHandler {
         if isFinished() { return }
         stateLock.lock()
-        let audioAge = ProcessInfo.processInfo.systemUptime - lastAudioAt
-        if audioAge > 4 {
-            stateLock.unlock()
-            fail("麦克风音频输入中断，正在重新连接", code: 22)
-        }
         let now = ProcessInfo.processInfo.systemUptime
+        let epoch = captureEpoch
+        let captureFault = currentCaptureFaultLocked(at: now)
         let gen = sessionGen
         let decision = endpointPolicy.decision(at: now, generation: gen)
-        let vadUnavailable = now - endpointPolicy.healthAt >= endpointPolicy.vadHealthTimeoutSeconds
         let endingNow = ending || starting
         stateLock.unlock()
+        if let captureFault { requestCaptureRecovery(epoch: epoch, reason: captureFault); return }
         if endingNow { return }
         if !alwaysMode && Date().timeIntervalSince(startedAt) > maxSeconds {
             abortUnconfirmedSession(gen: gen, reason: "capture-max-duration"); return
         }
         switch decision {
         case .quiet: beginEnd("quiet", expectedGen: gen)
-        case .unconfirmed: abortUnconfirmedSession(gen: gen, reason: vadUnavailable ? "activity-unavailable" : "max-duration")
+        case .unconfirmed: abortUnconfirmedSession(gen: gen, reason: "max-duration")
         case .wait: break
         }
     }
@@ -1016,6 +1191,65 @@ func run() async {
 }
 
 // ---------------------------------------------------------------- 入口
+
+func selftestCaptureRecovery() throws -> [String: Any] {
+    var checks = 0, jobs: [() -> Void] = [], handled: [(SpeechCaptureFault, Bool)] = []
+    func check(_ value: Bool) throws { checks += 1; if !value { throw NSError(domain: "bunny.capture-recovery-selftest", code: checks) } }
+    enqueueCaptureRecovery = { jobs.append($0) }
+    handleCaptureFault = { handled.append(($0, $1)) }
+    defer { disarmCaptureRecovery(); finished = true }
+    func prepare(_ epoch: Int, rawAge: Double = 0.1, activityAge: Double = 0.1, text: String = "") {
+        let now = ProcessInfo.processInfo.systemUptime
+        captureEpoch = epoch; captureConfigurationChanged = false; captureRecoveryNotifications.reset(generation: epoch)
+        finished = false; ending = false; starting = false; sessionGen = 7; sessionText = text
+        finalizationBarrier = SpeechFinalizationBarrier(generation: 7)
+        endpointNotifications.reset(generation: 7)
+        lastAudioAt = now - rawAge
+        endpointPolicy = SpeechEndpointPolicy(generation: 7, silenceMs: 900, maxSeconds: 45, startedAt: now - activityAge)
+    }
+    try check(SpeechCaptureHealthPolicy.fault(now: 10, captureAt: 6.1, activityAt: 5.9) == .transportTimeout)
+    try check(SpeechCaptureHealthPolicy.fault(now: 10, captureAt: 9.9, activityAt: 5.9) == .vadTimeout)
+    try check(SpeechCaptureHealthPolicy.fault(now: 10, captureAt: 5.9, activityAt: 9.9) == .transportTimeout)
+    try check(SpeechCaptureHealthPolicy.fault(now: 10, captureAt: 9.9, activityAt: 9.8) == nil)
+    prepare(10, rawAge: 3.9, activityAge: 4.1)
+    requestCaptureRecovery(epoch: 10, reason: .transportTimeout); requestCaptureRecovery(epoch: 10, reason: .transportTimeout)
+    try check(jobs.count == 1 && handled.isEmpty); jobs.removeFirst()()
+    try check(handled.count == 1 && handled[0].0 == .transportTimeout && !handled[0].1 && sessionGen == 8)
+    prepare(11, activityAge: 4.1, text: "fixture provisional")
+    requestCaptureRecovery(epoch: 11, reason: .vadTimeout); jobs.removeFirst()()
+    try check(handled.count == 2 && handled[1].0 == .vadTimeout && handled[1].1)
+    prepare(12)
+    requestCaptureRecovery(epoch: 12, reason: .transportTimeout)
+    requestCaptureRecovery(epoch: 12, reason: .configurationChanged)
+    try check(jobs.count == 1); jobs.removeFirst()()
+    try check(handled.count == 3 && handled[2].0 == .configurationChanged)
+    prepare(13); requestCaptureRecovery(epoch: 13, reason: .configurationChanged)
+    let stale = jobs.removeFirst()
+    prepare(14); requestCaptureRecovery(epoch: 14, reason: .configurationChanged)
+    stale(); try check(handled.count == 3 && jobs.count == 1)
+    jobs.removeFirst()(); try check(handled.count == 4)
+    prepare(15); requestCaptureRecovery(epoch: 15, reason: .configurationChanged)
+    disarmCaptureRecovery(); jobs.removeFirst()(); try check(handled.count == 4)
+    prepare(16, rawAge: 4.1, activityAge: 4.2)
+    requestCaptureRecovery(epoch: 16, reason: .transportTimeout)
+    let now = ProcessInfo.processInfo.systemUptime; lastAudioAt = now
+    endpointPolicy.resetActivity(at: now, generation: 7)
+    jobs.removeFirst()(); try check(handled.count == 4 && !finished)
+    prepare(17); observeCaptureConfiguration(engine, epoch: 17)
+    NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
+    NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
+    try check(jobs.count == 2 && handled.count == 4)
+    jobs.removeFirst()(); jobs.removeFirst()()
+    try check(jobs.count == 1 && handled.count == 4); jobs.removeFirst()()
+    try check(handled.count == 5 && handled[4].0 == .configurationChanged)
+    for fault in [SpeechCaptureFault.configurationChanged, .transportTimeout, .vadTimeout] {
+        try check(!fault.message(pendingText: false).contains("重新说"))
+        try check(fault.message(pendingText: true).contains("重新说"))
+    }
+    return ["t":"selfTest", "captureRecovery":true, "transportBeforeVad":true, "liveCaptureVadFailure":true,
+        "coalesced":true, "generationIsolation":true, "lateJobCancelled":true, "resumedCaptureRecheck":true,
+        "notificationAsync":true, "pendingTextFeedback":true, "checks":checks, "recognizerStarted":false]
+}
 
 func selftestEndpointNotifications() throws -> [String: Any] {
     var checks = 0, jobs: [() -> Void] = [], handled: [Int] = [], yielded = false
@@ -1078,6 +1312,22 @@ func selftestEndpointNotifications() throws -> [String: Any] {
 
 @main struct ASRMain {
 static func main() {
+    if hasFlag("--self-test-capture-recovery") {
+        do { emit(try selftestCaptureRecovery()); return }
+        catch { emit(["t":"selfTestFailure", "stage":(error as NSError).code]); fail("采集恢复离线夹具失败", code: 1) }
+    }
+    if hasFlag("--self-test-capture-abort") {
+        let reason = SpeechCaptureFault(rawValue: argValue("--fixture", "transport-timeout")) ?? .transportTimeout
+        let now = ProcessInfo.processInfo.systemUptime
+        captureEpoch = 7; captureRecoveryNotifications.reset(generation: 7)
+        sessionGen = 7; sessionText = hasFlag("--pending-text") ? "fixture provisional" : ""
+        lastAudioAt = now - (reason == .transportTimeout ? 3.9 : 0.1)
+        endpointPolicy = SpeechEndpointPolicy(generation: 7, silenceMs: 900, maxSeconds: 45,
+            startedAt: now - (reason == .configurationChanged ? 0.1 : 4.1))
+        finalizationBarrier = SpeechFinalizationBarrier(generation: 7)
+        requestCaptureRecovery(epoch: 7, reason: reason)
+        RunLoop.main.run(); return
+    }
     if hasFlag("--self-test-short-final") {
         emitTranscriptUpdate("好", gen: 7, audioRange: (1, 2), retracting: false)
         emitUtterance("好", traceGen: 7, audioRange: (1, 2))
@@ -1090,34 +1340,71 @@ static func main() {
         emit(["t":"selfTest", "transcriptRetraction":true, "recognizerStarted":false]); return
     }
     if hasFlag("--self-test-acoustic-evidence") {
-        var evidence = SpeechAcousticEvidence(), transcript = SpeechTranscript()
-        evidence.append(seconds: 2, capturedAt: 12, classified: [SpeechAcousticFrame(start: 0, end: 2, active: false)])
-        guard !evidence.supports(start: 0, end: 1), !evidence.supports(start: 0, end: 0),
-              !evidence.supports(start: .nan, end: 1) else { fail("静音或无效范围冒充人声", code: 1) }
-        evidence.append(seconds: 0.1, capturedAt: 12.1, classified: [SpeechAcousticFrame(start: 0, end: 0.03, active: true), SpeechAcousticFrame(start: 0.03, end: 0.1, active: false)])
-        guard !evidence.supports(start: 2, end: 2.1) else { fail("单帧瞬态冒充人声", code: 1) }
-        evidence.append(seconds: 0.1, capturedAt: 12.2, classified: [SpeechAcousticFrame(start: 0, end: 0.1, active: true)])
-        guard evidence.supports(start: 2.1, end: 2.2), !evidence.supports(start: 0, end: 2),
-              !evidence.supports(start: 2.19, end: 2.21), !evidence.supports(start: 3, end: 4),
+        var evidence = SpeechAcousticEvidence()
+        evidence.append(seconds: 2.2, capturedAt: 12.2)
+        guard evidence.contains(start: 0, end: 1), !evidence.contains(start: .nan, end: 1),
+              !evidence.contains(start: 0, end: 0), !evidence.contains(start: 2, end: 3),
+              evidence.captureRange(start: 2, end: 3) == nil,
               let range = evidence.captureRange(start: 2.1, end: 2.2), abs(range.0 - 12.1) < 0.000001,
-              abs(range.1 - 12.2) < 0.000001 else { fail("声学范围归属不正确", code: 1) }
-        let supported = evidence.supports(start: 2.1, end: 2.2)
-        transcript.accept(text: supported ? "真实短指令" : "", start: 2.1, end: 2.2, finalizedThrough: 2.2)
-        transcript.accept(text: evidence.supports(start: 0, end: 1) ? "任意幻觉词" : "", start: 0, end: 1, finalizedThrough: 2.2)
-        guard transcript.text == "真实短指令", transcript.confirmed else { fail("识别范围未隔离静音与真实人声", code: 1) }
-        var unknown = SpeechAcousticEvidence()
-        unknown.append(seconds: 1, capturedAt: 11, classified: [])
-        guard !unknown.supports(start: 0, end: 1) else { fail("未知音频冒充人声", code: 1) }
-        // The previous buffer's uncompleted 10ms frame can be classified by
-        // its successor. Keep that sample range, but never cross a new gen.
-        unknown.append(seconds: 0.1, capturedAt: 11.1, classified: [SpeechAcousticFrame(start: -0.005, end: 0.065, active: true)])
-        guard unknown.supports(start: 0.995, end: 1.035) else { fail("跨缓冲帧证据丢失", code: 1) }
-        var successor = SpeechAcousticEvidence()
-        successor.append(seconds: 0.1, capturedAt: 11.2, classified: [SpeechAcousticFrame(start: -0.005, end: 0.01, active: true)])
-        guard !successor.supports(start: 0, end: 0.1) else { fail("旧代部分帧污染新代", code: 1) }
-        emit(["t":"selfTest", "acousticEvidence":true, "quietRejected":true, "unknownRejected":true,
-              "transientRejected":true, "rangeOwnership":true, "captureClock":true, "realSpeechPreserved":true,
-              "partialFrameOwnership":true, "recognizerStarted":false]); return
+              abs(range.1 - 12.2) < 0.000001 else { fail("音频输入范围或采集时钟不正确", code: 1) }
+        emit(["t":"selfTest", "inputClockEvidence":true, "rangeOwnership":true, "captureClock":true,
+              "recognizerStarted":false]); return
+    }
+    if hasFlag("--self-test-timed-acoustic-support") {
+        var transcript = SpeechTranscript()
+        // Missing, zero-duration or fine timing attributes cannot veto words.
+        // A quiet VAD observation does not override the system ASR's revision.
+        transcript.accept(text: "fixture you", start: 0, end: 1, finalizedThrough: 0, inputEnd: 1)
+        emitTranscriptUpdate(transcript.text, gen: 7, audioRange: (11, 12), retracting: false)
+        transcript.accept(text: "fixture you", start: 0, end: 1, finalizedThrough: 1, inputEnd: 1)
+        guard transcript.text == "fixture you", transcript.completeFinalization(through: 1) else { fail("系统识别候选被本地删词", code: 1) }
+        emitUtterance(transcript.text, traceGen: 7, audioRange: (11, 12))
+        for value in ["好", "不", "you", "A"] {
+            var short = SpeechTranscript()
+            short.accept(text: value, start: 0, end: 0.1, finalizedThrough: 0.1, inputEnd: 0.1)
+            guard short.text == value, short.confirmed else { fail("系统短词被拒绝", code: 1) }
+        }
+        emit(["t":"selfTest", "systemCandidatesPreserved":true, "shortWordsPreserved":true,
+              "timingIsEvidenceOnly":true, "recognizerStarted":false]); return
+    }
+    if hasFlag("--self-test-completed-finalization") {
+        Task {
+            let fixture = argValue("--fixture", "revised")
+            let finalizerFirst = hasFlag("--finalizer-first")
+            sessionGen = 7; ending = true; finished = false; utteranceCount = 0
+            finalizationBarrier = SpeechFinalizationBarrier(generation: 7)
+            sessionTranscript = SpeechTranscript(); sessionAcousticEvidence = SpeechAcousticEvidence()
+            sessionAcousticEvidence.append(seconds: 1, capturedAt: 12)
+            sessionTranscript.accept(text: "fixture superseded", start: 0, end: 1, finalizedThrough: 0)
+            let rangeEnd = fixture == "future" ? 2.0 : 1.0
+            let supported = sessionAcousticEvidence.contains(start: 0, end: rangeEnd)
+            let latest = fixture == "withdrawn" ? "" : "fixture latest"
+            // Invalid-range/unbacked fixtures deliberately bypass the result
+            // handler to verify the final publication boundary rejects them.
+            sessionTranscript.accept(text: supported || fixture == "future" || fixture == "unbacked" ? latest : "",
+                start: 0, end: rangeEnd, finalizedThrough: 0)
+            if fixture == "conflicted" {
+                sessionTranscript = SpeechTranscript()
+                sessionTranscript.accept(text: "fixture stable", start: 0, end: 0.5, finalizedThrough: 0.5)
+                sessionTranscript.accept(text: "fixture conflicting", start: 0.25, end: 1, finalizedThrough: 1)
+            }
+            sessionText = sessionTranscript.text
+            let resultConfirmed = sessionTranscript.confirmed
+            finalizationBarrier.request(at: 1, generation: 7)
+            if finalizerFirst { finalizationBarrier.finalizerSucceeded(generation: 7) }
+            else { finalizationBarrier.resultsEnded(confirmed: resultConfirmed, text: sessionText, generation: 7) }
+            await publishFinalizedSession(gen: 7)
+            guard sessionGen == 7 && utteranceCount == 0 else { fail("仅单侧收尾回执提前提交", code: 1) }
+            if finalizerFirst { finalizationBarrier.resultsEnded(confirmed: resultConfirmed, text: sessionText, generation: 7) }
+            else { finalizationBarrier.finalizerSucceeded(generation: 7) }
+            await publishFinalizedSession(gen: 7)
+            await publishFinalizedSession(gen: 7)
+            guard sessionGen == 8, sessionTranscript.confirmed,
+                  utteranceCount == (latest.isEmpty ? 0 : 1) else { fail("完整收尾回执未确认最新结果", code: 1) }
+            emit(["t":"selfTest", "completedFinalization":true, "bothReceiptsRequired":true,
+                  "latestRevision":true, "onceOnly":true, "recognizerStarted":false])
+        }
+        RunLoop.main.run(); return
     }
     if hasFlag("--self-test-empty-audio-final") {
         Task {
@@ -1137,6 +1424,75 @@ static func main() {
         }
         RunLoop.main.run(); return
     }
+    if hasFlag("--self-test-empty-checkpoint") {
+        Task {
+            func prepare(_ state: SpeechEndpointPolicy.Activity, age: Double = 0,
+                         delivered: Bool = true, activeHistory: Bool = true) {
+                let now = ProcessInfo.processInfo.systemUptime
+                sessionGen = 7; ending = false; finished = false; starting = false; sessionText = ""
+                sessionTranscript = SpeechTranscript(); sessionAcousticEvidence = SpeechAcousticEvidence()
+                finalizationBarrier = SpeechFinalizationBarrier(generation: 7)
+                endpointPolicy = SpeechEndpointPolicy(generation: 7, silenceMs: 900, maxSeconds: 45, startedAt: now - 2)
+                if activeHistory { endpointPolicy.observe(.active, quietSeconds: 0, at: now - age - 0.4, generation: 7, now: now - age - 0.4) }
+                endpointPolicy.observe(state, quietSeconds: state == .quiet ? 0.35 : 0, at: now - age, generation: 7, now: now - age)
+                if delivered { sessionAcousticEvidence.append(seconds: 0.1, capturedAt: now) }
+            }
+            for state in [SpeechEndpointPolicy.Activity.active, .unknown] {
+                prepare(state); beginEnd("checkpoint", expectedGen: 7)
+                guard !ending && finalizationBarrier.requestedAt == nil else { fail("非安静空会话触发覆盖定稿", code: 1) }
+            }
+            prepare(.quiet, age: 0.6); beginEnd("checkpoint", expectedGen: 7)
+            guard !ending else { fail("旧安静窗口触发覆盖定稿", code: 1) }
+            prepare(.quiet, delivered: false); beginEnd("checkpoint", expectedGen: 7)
+            guard !ending else { fail("未投喂音频触发覆盖定稿", code: 1) }
+            prepare(.quiet, activeHistory: false); beginEnd("checkpoint", expectedGen: 7)
+            guard !ending else { fail("无活动来源的空会话触发覆盖定稿", code: 1) }
+            prepare(.quiet); beginEnd("checkpoint", expectedGen: 6)
+            guard !ending else { fail("旧代空会话触发覆盖定稿", code: 1) }
+            prepare(.quiet)
+            let now = ProcessInfo.processInfo.systemUptime
+            endpointPolicy.observe(.active, quietSeconds: 0, at: now, generation: 7, now: now)
+            beginEnd("checkpoint", expectedGen: 7)
+            guard !ending else { fail("消失的安静窗口触发覆盖定稿", code: 1) }
+            prepare(.quiet)
+            guard endpointPolicy.decision(at: ProcessInfo.processInfo.systemUptime, generation: 7) == .wait else {
+                fail("覆盖定稿夹具意外达到900毫秒收尾", code: 1)
+            }
+            let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+            let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600)!; buffer.frameLength = 1600
+            buffer.int16ChannelData![0].update(repeating: 0, count: 1600)
+            continuation.yield(AnalyzerInput(buffer: buffer)); inputCont = continuation
+            activityOutputSequence = 42
+            let drain = Task { () -> Int in
+                var count = 0
+                for await _ in stream { count += 1 }
+                stateLock.withLock { finalizationBarrier.resultsEnded(confirmed: true, text: "", generation: 7) }
+                return count
+            }
+            var finishCalls = 0
+            finishAnalyzerInput = { _ in
+                finishCalls += 1
+                guard await drain.value == 1, stateLock.withLock({ !finalizationBarrier.claimed }) else {
+                    throw NSError(domain: "bunny.empty-checkpoint-fixture", code: 1)
+                }
+                if hasFlag("--fail-finalizer") { throw NSError(domain: "bunny.empty-checkpoint-fixture", code: 2) }
+            }
+            beginEnd("checkpoint", expectedGen: 7); beginEnd("checkpoint", expectedGen: 7)
+            let drained = await drain.value
+            for _ in 0..<100 {
+                if stateLock.withLock({ sessionGen != 7 }) { break }
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+            guard stateLock.withLock({ sessionGen == 8 }), drained == 1, finishCalls == 1 else {
+                fail("空会话覆盖定稿未排空或重复发布", code: 1)
+            }
+            emit(["t":"selfTest", "emptyCheckpoint":true, "rejectsUncoveredActivity":true,
+                "freshQuietRechecked":true, "inputStreamDrained":true, "bothReceiptsRequired":true,
+                "coverageOnce":true, "recognizerStarted":false])
+        }
+        RunLoop.main.run(); return
+    }
     if hasFlag("--self-test-speech-endpoint-notifications") {
         do { emit(try selftestEndpointNotifications()); return }
         catch { fail("语音端点事件通知离线夹具失败", code: 1) }
@@ -1153,7 +1509,7 @@ static func main() {
         endpointPolicy.observe(.active, quietSeconds: 0, at: now, generation: 7, now: now)
         beginEnd("quiet", expectedGen: 7)
         beginEnd("checkpoint", expectedGen: 7)
-        beginEnd("checkpoint", expectedGen: 9) // Empty text has no checkpoint authority.
+        beginEnd("checkpoint", expectedGen: 9) // A stale generation has no checkpoint authority.
         guard !ending && !finished else { fail("旧静音判断未被新语音撤销", code: 1) }
         sessionGen = 9
         endpointPolicy = SpeechEndpointPolicy(generation: 9, silenceMs: 900, maxSeconds: 45, startedAt: now)
@@ -1220,6 +1576,14 @@ static func main() {
         // another copy of that result.
         transcript.accept(text: "", start: 5, end: 5, finalizedThrough: 5)
         guard transcript.confirmed else { fail("未处理定稿时间推进", code: 1) }
+        var unchanged = SpeechTranscript()
+        unchanged.accept(text: "fixture latest", start: 0, end: 1, finalizedThrough: 0)
+        guard !unchanged.confirmed, !unchanged.completeFinalization(through: 0.9), !unchanged.confirmed,
+              !unchanged.completeFinalization(through: .infinity), unchanged.completeFinalization(through: 1),
+              unchanged.confirmed else { fail("完整输入收尾范围未正确确认", code: 1) }
+        var invalid = SpeechTranscript()
+        invalid.accept(text: "fixture invalid", start: -1, end: 1, finalizedThrough: 0)
+        guard !invalid.completeFinalization(through: 1) else { fail("负音频范围被收尾确认", code: 1) }
         let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160)!
         for frame in 0..<160 { buffer.floatChannelData![0][frame] = 0.25 }
@@ -1237,7 +1601,7 @@ static func main() {
             let observation = observed.accept(text: "replacement", start: 0.999999, end: 2, finalizedThrough: 2, observing: true)
             let levels = speechTraceLevels(buffer)
             guard plain.text == observed.text, plain.confirmed == observed.confirmed,
-                  observation?.removedSegments == 1, observation?.touchesFinalized == true,
+                  observed.segments.count == 2, observation?.removedSegments == 0, observation?.touchesFinalized == false,
                   (levels["rms"] as? [Double]) == [0.25], (levels["peak"] as? [Double]) == [0.25],
                   speechTraceRecord(.result, ["textChars": 1], enabled: false) == nil,
                   let safe = speechTraceRecord(.result, ["text": "private-trace-canary", "deviceUID": "private-trace-canary", "frames": "123", "start": Double.nan, "rms": [Double.infinity], "peak": [true], "isFinal": true], enabled: true),
@@ -1255,6 +1619,42 @@ static func main() {
             }
         }
         emit(["t":"selfTest", "transcriptRanges":true, "rolloverAudio":true]); return
+    }
+    if hasFlag("--self-test-transcript-protection") {
+        var value = SpeechTranscript()
+        value.accept(text: "不要发布。", start: 0, end: 1, finalizedThrough: 1)
+        value.accept(text: "fixture provisional", start: 1, end: 2, finalizedThrough: 1)
+        let withdrawn = value.accept(text: "", start: 0.999999, end: 2, finalizedThrough: 2, observing: true)
+        guard value.text == "不要发布。", value.confirmed, withdrawn?.removedSegments == 1,
+              value.completeFinalization(through: 2) else { fail("范围舍入误删已定稿前文", code: 1) }
+        var conflict = SpeechTranscript()
+        conflict.accept(text: "不要发布。", start: 0, end: 1, finalizedThrough: 1)
+        let rejected = conflict.accept(text: "", start: 0.5, end: 2, finalizedThrough: 2, observing: true)
+        guard conflict.text == "不要发布。", rejected?.accepted == false,
+              !conflict.confirmed, !conflict.completeFinalization(through: 2) else { fail("冲突修订伪装为完整定稿", code: 1) }
+        var split = SpeechTranscript()
+        split.accept(text: "fixture confirmed prefix and provisional suffix", start: 0, end: 2, finalizedThrough: 1)
+        split.accept(text: "fixture revised suffix", start: 1, end: 3, finalizedThrough: 3)
+        guard split.text == "fixture confirmed prefix and provisional suffix", !split.completeFinalization(through: 3) else {
+            fail("部分定稿范围的前文被后半修订删除", code: 1)
+        }
+        var unchanged = SpeechTranscript()
+        unchanged.accept(text: "fixture unchanged", start: 0, end: 2, finalizedThrough: 1)
+        unchanged.accept(text: "fixture unchanged", start: 0, end: 2, finalizedThrough: 2)
+        guard unchanged.confirmed, unchanged.segments.count == 1 else { fail("未变化范围推进水位被误当冲突", code: 1) }
+        var duplicate = SpeechTranscript()
+        duplicate.accept(text: "好", start: 0, end: 1, finalizedThrough: 1)
+        duplicate.accept(text: "好", start: 0, end: 1, finalizedThrough: 1)
+        duplicate.accept(text: "好", start: 0.0000005, end: 1.0000005, finalizedThrough: 1.0000005)
+        duplicate.accept(text: "", start: 0, end: 0, finalizedThrough: 1)
+        guard duplicate.text == "好", duplicate.confirmed else { fail("重复结果或零长度水位误删已定稿词", code: 1) }
+        var idle = SpeechEndpointPolicy(generation: 7, silenceMs: 900, maxSeconds: 45, startedAt: 0)
+        for second in 0...600 { idle.observe(.quiet, quietSeconds: Double(second), at: Double(second), generation: 7, now: Double(second)) }
+        guard idle.decision(at: 600, generation: 7) == .wait else { fail("长期有音频的静默误判为故障", code: 1) }
+        emit(["t":"selfTest", "transcriptProtection":true, "finalizedPrefixPreserved":true,
+              "conflictRejected":true, "duplicateFinalSafe":true, "zeroLengthWatermarkSafe":true,
+              "missingTimingCompatible":true, "zeroDurationCompatible":true, "punctuationSafe":true, "longQuietHealthy":true,
+              "recognizerStarted":false]); return
     }
     if CommandLine.arguments.contains("--wake-name-test") { emit(WakeName.selfTest()); return }
     if CommandLine.arguments.contains("--voice-feature-test") { SpeakerFeatures.selfTest(emit); return }
@@ -1303,6 +1703,10 @@ DispatchQueue.global().async {
     while let line = readLine(strippingNewline: true) {
         let cmd = line.trimmingCharacters(in: .whitespaces)
         switch cmd {
+        case let update where update.hasPrefix("context "):
+            if let value = speechContextStrings.replace(json: String(update.dropFirst("context ".count))) {
+                emit(["t":"context", "stage":"queued", "revision":value.revision, "count":value.strings.count])
+            }
         case let checkpoint where checkpoint.hasPrefix("checkpoint "):
             if alwaysMode, let gen = Int(checkpoint.dropFirst("checkpoint ".count)), gen >= 0 {
                 beginEnd("checkpoint", expectedGen: gen)
