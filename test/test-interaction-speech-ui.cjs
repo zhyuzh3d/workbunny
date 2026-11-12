@@ -86,6 +86,23 @@ async function checkStatusWidth() {
     assert(Math.abs((await measure()).width - idle.width) < 1, 'clearing a long task restores content width');
   }
 }
+async function checkCaptionReplacement() {
+  win.setContentSize(420,660);
+  win.webContents.send('pet:ev',{type:'listen',on:true});
+  win.webContents.send('pet:ev',{type:'asrStatus',speech:3,mic:true,captureReady:true});
+  win.webContents.send('pet:ev',{type:'asrLive',text:'用于检查滚动字幕替换是否立即显示的合成语音文字'.repeat(5),turn:1000,phase:'partial'});
+  await until(async()=>await evaluate('document.getElementById("earTxt").getAnimations().length')>0,'long caption starts scrolling');
+  await evaluate('(()=>{const a=document.getElementById("earTxt").getAnimations()[0];a.currentTime=a.effect.getTiming().duration*.8;return true;})()');
+  const before=await evaluate('getComputedStyle(document.getElementById("earTxt")).transform');
+  assert.notEqual(before,'none','the previous caption really has an active scrolling transform');
+  win.webContents.send('pet:ev',{type:'asrLive',text:'新的短句',turn:1001,phase:'partial'});
+  await until(async()=>await evaluate('document.getElementById("earTxt").textContent')==='新的短句','new caption arrives');
+  const after=await evaluate('(()=>{const t=document.getElementById("earTxt");return {animations:t.getAnimations().length,transform:getComputedStyle(t).transform};})()');
+  assert.equal(after.animations,0,'new words do not wait for the old 340ms marquee timer');
+  assert.equal(after.transform,'none','new words appear at the leading edge immediately');
+  win.webContents.send('pet:ev',{type:'asrLive',text:'',turn:1001,phase:'reset'});
+  win.webContents.send('pet:ev',{type:'listen',on:false});
+}
 async function checkListeningResponse(mainSource) {
   const mainRequire = require('node:module').createRequire(path.resolve('src/main/index.js'));
   const section = (from, to) => mainSource.slice(mainSource.indexOf(from), mainSource.indexOf(to, mainSource.indexOf(from)));
@@ -267,6 +284,7 @@ async function main() {
   await until(async () => (await evaluate('window.__pet().mouth')) === 0, 'PCM stop closes mouth');
   await checkListeningResponse(mainSource);
   await checkStatusWidth();
+  await checkCaptionReplacement();
   assert.equal(errors.length, 0, errors.join('; '));
   console.log('Actual speech pipeline passed: 4 accepted clicks within 4.5s -> 4 bubbles, 4 WebAudio starts/completions, 1 synthesis + 3 disk-cache hits. Typing interrupts real playback within 500ms. Production ASR pipeline/voiceTurns/think/requestReply keeps pending visible, streams bubble/first-sentence audio before model completion, rejects late cancelled output and never repeats final speech. Status width adapts at 340/420/630px; logo is gray when idle and colored when busy.');
 }

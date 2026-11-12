@@ -11,6 +11,26 @@ function setup(){const h=fixture(),faults=[];let inspections=0;h.location.texts=
 test('shared unchanged scene reuses VLM interpretation for multiple contacts without OCR or app queries',async()=>{
  const f=setup();assert((await f.scene.observe({recipient:'Alice'})).headerMatched);await f.scene.observe({recipient:'文件传输助手'});assert.equal(f.inspections(),1);f.advance();assert.equal((await f.scene.observe({recipient:'Alice'})).changed,false);assert.equal(f.inspections(),1);assert.equal(f.h.requests.length,1);assert(f.h.calls.every(c=>c.op==='displayCapture'));
 });
+test('invalidating a scene detaches old inspection without letting its result replace a fresh view',async()=>{
+ const f=setup(),entered=Promise.withResolvers(),delayed=Promise.withResolvers();
+ f.scene.observer.inspect=async()=>{entered.resolve();await delayed.promise;return {headerMatched:true,messages:[{text:'old synthetic view'}],draft:''};};
+ const old=f.scene.observe({recipient:'Alice'});await entered.promise;f.scene.invalidate();
+ f.scene.observer.inspect=async()=>({headerMatched:true,messages:[{text:'fresh synthetic view'}],draft:''});
+ const freshView=f.scene.observe({recipient:'Alice'},{force:true});await new Promise(r=>setImmediate(r));
+ const rejected=assert.rejects(old,e=>e.dispatched===false);delayed.resolve();const fresh=await freshView;await rejected;
+ assert.equal(fresh.messages[0].text,'fresh synthetic view');
+ assert.equal(f.scene.last.messages[0].text,'fresh synthetic view');assert.equal(f.scene.inflight,null);
+ assert(f.h.calls.every(c=>c.op==='displayCapture'));
+});
+test('a security interpretation from an invalidated observation cannot trip the current scene',async()=>{
+ const f=setup(),entered=Promise.withResolvers(),delayed=Promise.withResolvers();
+ f.scene.observer.inspect=async()=>{entered.resolve();await delayed.promise;throw Object.assign(Error('old synthetic security view'),{code:'E_APP_CIRCUIT'});};
+ const old=f.scene.observe({recipient:'Alice'});await entered.promise;f.scene.invalidate();
+ f.scene.observer.inspect=async()=>({headerMatched:true,messages:[],draft:''});
+ const fresh=await f.scene.observe({recipient:'Alice'},{force:true});
+ const rejected=assert.rejects(old,e=>e.code==='E_VISUAL_TARGET'&&e.dispatched===false);delayed.resolve();await rejected;
+ assert(fresh.headerMatched);assert.equal(f.scene.circuit,null);assert.equal(f.faults.length,0);assert(f.scene.last.headerMatched);
+});
 test('occlusion preserves the visual identity and can recover without latching an account circuit or sending input',async()=>{
  const f=setup();await f.scene.observe({recipient:'Alice'});const original=f.h.location,identity=f.scene.knownIdentity;f.h.location={available:false,unavailableKind:'occluded',reason:'目标被遮挡，无法从实际画面确认'};paint(f.h.image,{x:.1,y:.1,width:.8,height:.8},250);f.advance();
  await assert.rejects(f.scene.observe({recipient:'Alice'}),e=>e.code==='E_VISUAL_TARGET'&&e.dispatched===false&&e.diagnostic.visualState.kind==='occluded');assert.equal(f.scene.circuit,null);assert.equal(f.faults.length,0);

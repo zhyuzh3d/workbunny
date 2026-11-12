@@ -458,3 +458,41 @@ test('a recognized keep response preserves the retained operation and a third pa
 test('the semantic owner receipt carries actual capture end time for monotonic conversation timing',()=>{
  let metadata;const f=fixture({deferRecognition:true,onRemember:(_text,value)=>{metadata=value;}});f.c.final('real input',{recognizer:1,sourceGen:1,audioStartAtMs:100,audioEndAtMs:700});f.advance(3000);const token=f.requests[0];token.recognize({replace:false});token.remember();assert.equal(metadata.audioEndAtMs,700);assert.notEqual(metadata.audioEndAtMs,metadata.heardAt);
 });
+test('identical words finalized by distinct audio sources remain distinct segments before semantic admission',()=>{
+ const f=fixture({deferRecognition:true});
+ f.c.final('好',{recognizer:1,sourceGen:1});f.advance(500);
+ f.c.final('好',{recognizer:1,sourceGen:3});f.advance(3000);
+ assert.equal(f.requests.length,1);assert.equal(f.requests[0].text,'好\n好');
+});
+test('a duplicate old final cannot cover the unconfirmed audio of a newer source',async()=>{
+ const f=fixture({deferRecognition:true,requireActivity:true,pauseMs:350,turnMs:0}),first={recognizer:1,sourceGen:1};
+ f.c.final('已确认的操作',first);f.quietFor(400);f.advance(0);
+ const token=f.requests[0];token.recognize();
+ f.activity('active',0,{sourceGen:3});const pending=token.waitForCommit();
+ f.quietFor(400,{sourceGen:3});assert.equal(token.canCommit(),false);
+ f.c.final('已确认的操作',first);f.advance(0);
+ assert.equal(token.canCommit(),false);assert.equal(f.c.snapshot().awaitingAudioFinal,true);
+ assert.equal(f.audioFinal({sourceGen:3}),true);assert.equal(await pending,true);
+});
+test('recognizer stop and replacement retire a retained request after its successor was ignored',async()=>{
+ for(const event of ['stop','replacement']){
+  const f=fixture({deferRecognition:true,requireActivity:true,pauseMs:350,turnMs:0});
+  f.c.final('原先的操作',{recognizer:1,sourceGen:1});f.quietFor(400);f.advance(0);
+  const old=f.requests[0];old.hold();old.recognize();
+  f.activity('active',0,{sourceGen:3});f.c.final('背景候选',{recognizer:1,sourceGen:3});f.quietFor(400,{sourceGen:3});f.advance(0);
+  const ignored=f.requests[1];ignored.skip();ignored.complete();assert(old.isCurrent());assert.equal(f.c.snapshot(),null);
+  f.activity('unknown',0,{sourceGen:3});const pending=old.waitForCommit();
+  if(event==='stop')f.c.recognizerStopped();else f.activity('quiet',1,{recognizer:2,sourceGen:1});
+  assert.equal(old.isCurrent(),false,event);assert.equal(await pending,false,event);assert.equal(old.canCommit(),false,event);
+ }
+});
+test('a finalized audio source cannot be admitted again after completion, reset or a newer source',()=>{
+ for(const retire of ['complete','reset','newer']){
+  const f=fixture({deferRecognition:true}),first={recognizer:1,sourceGen:1};
+  f.c.final('不可重复提交的原句',first);f.advance(3000);const token=f.requests[0];
+  if(retire==='complete')token.complete();else if(retire==='reset')f.c.reset();
+  else{f.c.final('新的原句',{recognizer:1,sourceGen:3});f.advance(3000);}
+  const before=f.requests.length;f.c.final('不可重复提交的原句',first);f.advance(3000);
+  assert.equal(f.requests.length,before,retire);
+ }
+});

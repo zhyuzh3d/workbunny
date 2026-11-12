@@ -10,10 +10,10 @@ const normalized=s=>String(s||'').normalize('NFKC').replace(/\s/gu,'').toLowerCa
 class WeChatScene{
   constructor({native=new DesktopNative(),imageResize,imageCrop,bitmap,subjects=()=>[],clock=Date.now,onCircuit=async()=>{}}={}){
     Object.assign(this,{native,bitmap,subjects,clock,onCircuit});this.observer=new WeChatObserver({native,imageResize,imageCrop,bitmap});
-    this.visual=this.observer.visual;this.binding={id:'agent-wechat-scene'};this.last=null;this.lastAt=0;this.knownIdentity=null;this.circuit=null;this.inflight=null;
+    this.visual=this.observer.visual;this.binding={id:'agent-wechat-scene'};this.last=null;this.lastAt=0;this.knownIdentity=null;this.circuit=null;this.inflight=null;this.captureGeneration=0;this.closed=false;
     this.metrics={samples:0,recognitions:0,modelInspections:0,quietSamples:0,lastPixelArea:0};
   }
-  async trip(reason,kind='unclear'){if(!this.circuit){this.circuit={reason,kind,at:this.clock()};await this.onCircuit(this.circuit);}return {unavailable:true,reason:this.circuit.reason};}
+  async trip(reason,kind='unclear'){if(!this.circuit){this.circuit={reason,kind,at:this.clock()};this.invalidate();await this.onCircuit(this.circuit);}return {unavailable:true,reason:this.circuit.reason};}
   async classifyFailure(error){
     const state=error.diagnostic?.visualState;
     if(error.code==='E_APP_CIRCUIT'||state?.requiresOwner===true){await this.trip(error.message,state?.kind||'unclear');error.code='E_APP_CIRCUIT';error.dispatched=false;}
@@ -34,16 +34,18 @@ class WeChatScene{
   }
   unreadFor(name,rows){return rows.some(row=>normalized(row.text)===normalized(name)&&row.badge==='notification');}
   async capture(force=false,repairProfile,referenceMessages){
+    this.assertCaptureCurrent(this.captureGeneration);
     if(this.circuit)return {unavailable:true,reason:this.circuit.reason};
     if(!force&&this.last&&this.clock()-this.lastAt<500)return this.last;
     if(this.inflight)return this.inflight;
-    this.inflight=this.captureOwned(force,repairProfile,referenceMessages).finally(()=>{this.inflight=null;});return this.inflight;
+    const pending=this.captureOwned(force,repairProfile,referenceMessages,this.captureGeneration).finally(()=>{if(this.inflight===pending)this.inflight=null;});this.inflight=pending;return pending;
   }
-  async captureOwned(force,repairProfile,referenceMessages){
+  assertCaptureCurrent(generation){if(this.closed||generation!==this.captureGeneration)throw Object.assign(Error('微信观察已失效，请重新观察当前画面'),{code:'E_VISUAL_TARGET',dispatched:false});}
+  async captureOwned(force,repairProfile,referenceMessages,generation=this.captureGeneration){
     try{
       if(this.circuit)return {unavailable:true,reason:this.circuit.reason};
       const observedAt=this.clock();
-      const frame=await this.observer.sample(this.binding,{reset:force||!this.last});this.metrics.samples++;this.knownIdentity=this.visual.identity();
+      const frame=await this.observer.sample(this.binding,{reset:force||!this.last});this.assertCaptureCurrent(generation);this.metrics.samples++;this.knownIdentity=this.visual.identity();
       if(frame.unstable)return {...this.last,unstable:true,changed:false};
       this.metrics.lastPixelArea=(frame.width||0)*(frame.height||0);
       if(!frame.changed&&!frame.baseline&&!frame.geometryChanged&&this.last){
@@ -57,10 +59,15 @@ class WeChatScene{
       const unread={};for(const name of allowed)unread[name]=this.unreadFor(name,ocr,frame.pngBase64);
       let view={headerMatched:false,messages:[],draft:''};
       if(header){view=await this.observer.inspect({recipient:header,identity:this.knownIdentity,...(referenceMessages?.recipient===header?{referenceMessages:referenceMessages.messages}:{})},{...frame,ocr},undefined,repairProfile);this.metrics.modelInspections++;}
+      this.assertCaptureCurrent(generation);
       await this.observer.commit(this.binding);
+      this.assertCaptureCurrent(generation);
       this.lastAt=this.clock();this.last={...view,messages:(view.messages||[]).map(message=>({...message,observedAt})),header,unread,latestPending:view.latestPending===true||ocr.some(r=>r.x>.65&&r.y>.55&&/(?:条新消息|new messages?)/iu.test(r.text)),changed:true,revision:randomUUID(),at:this.lastAt};return this.last;
     }catch(error){
       if(this.circuit)return {unavailable:true,reason:this.circuit.reason};
+      // An old inspection cannot repopulate cache or classify the current
+      // account after an operation, reconnection or shutdown invalidated it.
+      this.assertCaptureCurrent(generation);
       const classified=await this.classifyFailure(error);
       if(this.circuit)return {unavailable:true,reason:this.circuit.reason};
       // Uncertain pixels, focus and transient capture/model failures belong to
@@ -90,12 +97,12 @@ class WeChatScene{
     if(frame.preview!==shot.preview&&!require('./screen-evidence').sameTargetRegion(this.bitmap,image(frame.preview),image(shot.preview),{x:.32,y:.02,width:.67,height:bottom-.02},.000001))return null;
     return {headerMatched:true,messages:last.messages||[],latestPending:false,revision:last.revision,at:shot.at};
   }
-  invalidate(){this.last=null;this.lastAt=0;}
+  invalidate(){this.captureGeneration++;this.last=null;this.lastAt=0;this.inflight=null;}
   async reconnect(){
     const prior=this.circuit;this.circuit=null;this.knownIdentity=null;this.visual.reset();this.invalidate();
     try{const result=await this.capture(true);if(result.unavailable)throw new Error(result.reason);return {ok:true};}
     catch(error){this.circuit=this.circuit||prior||{reason:error.message,at:this.clock()};return {ok:false,error:this.circuit.reason};}
   }
-  async close(){await this.observer.close();}
+  async close(){this.closed=true;this.invalidate();await this.observer.close();}
 }
 module.exports={WeChatScene};

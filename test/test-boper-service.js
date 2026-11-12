@@ -96,3 +96,30 @@ test('explicit own-device recovery reaps the old runtime, requires release/readi
  let recovered=false;f.control.recover=async()=>{assert.equal(f.service.proc,null);recovered=true;return {ready:true,releaseConfirmed:true,sessionActive:false};};const status=await f.service.recover();assert(recovered);assert.equal(status.state,'ready');assert.equal(f.messages.filter(m=>m.action==='execute').length,before);await f.service.shutdown();
  const g=fixture({enabled:true,stop:async()=>({releaseConfirmed:false})});await g.service.refreshStatus();await g.service.execute({action:'key',params:{key:'a'}},g.context,{scopeId:'failed'});await assert.rejects(g.service.endScope('owner-a','failed'));g.control.recover=async()=>({ready:true,releaseConfirmed:false});await assert.rejects(g.service.recover(),{code:'E_BOPER_RECOVERY_UNCONFIRMED'});assert.equal(g.service.status().state,'fault');await g.service.shutdown();
 });
+test('a late renewal failure from a released session cannot fault or stop its replacement',async t=>{
+ t.mock.timers.enable({apis:['setInterval']});
+ const f=fixture({enabled:true}),renewal=Promise.withResolvers();
+ f.control.renewSession=()=>renewal.promise;
+ await f.service.refreshStatus();
+ await f.service.execute({action:'key',params:{key:'a'}},f.context,{scopeId:'old-scope'});
+ t.mock.timers.tick(500);await new Promise(r=>setImmediate(r));
+ await f.service.endScope('owner-a','old-scope');
+ await f.service.execute({action:'key',params:{key:'b'}},{...f.context,ownerId:'owner-b'},{scopeId:'new-scope'});
+ const replacement=f.service.active,stops=f.messages.filter(m=>m.action==='stop').length;
+ renewal.reject(Object.assign(Error('old lease no longer exists'),{code:'E_EXPIRED_SESSION'}));
+ await new Promise(r=>setImmediate(r));
+ try{
+  assert.equal(f.service.active,replacement);
+  assert.equal(f.service.status().state,'ready');
+  assert.equal(f.messages.filter(m=>m.action==='stop').length,stops);
+ }finally{await f.service.shutdown();}
+});
+test('failure of the current lease still stops its exact session and faults further input',async t=>{
+ t.mock.timers.enable({apis:['setInterval']});
+ const f=fixture({enabled:true});f.control.renewSession=async()=>{throw Object.assign(Error('current lease expired'),{code:'E_EXPIRED_SESSION'});};
+ await f.service.refreshStatus();await f.service.execute({action:'key',params:{key:'a'}},f.context,{scopeId:'current-scope'});
+ t.mock.timers.tick(500);await new Promise(r=>setImmediate(r));
+ try{assert.equal(f.service.active,null);assert.equal(f.service.status().state,'fault');assert.equal(f.messages.filter(m=>m.action==='stop').length,1);
+  await assert.rejects(f.service.execute({action:'key',params:{key:'b'}},f.context,{scopeId:'refused'}),{code:'E_BOPER_FAULT'});
+ }finally{await f.service.shutdown();}
+});

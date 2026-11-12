@@ -33,6 +33,39 @@ test('focus has to be visible, cancellation before dispatch sends nothing, cance
  const before=new AbortController();before.abort();await assert.rejects(h.visual.input(shot.visualFrameId,{action:'click',x:100,y:60},{signal:before.signal}),e=>e.dispatched===false);assert(!h.calls.some(c=>c.op==='displayInput'));
  const after=new AbortController(),b=fixture({onInput:()=>after.abort()}),next=await b.visual.observe();const result=await b.visual.input(next.visualFrameId,{action:'key',key:'a',modifiers:[]},{signal:after.signal});assert.equal(result.performed,true);assert.equal(result.cancelledAfterDispatch,true);assert.equal(b.calls.filter(c=>c.op==='displayInput').length,1);
 });
+test('a location result from before reset cannot adopt the new session or revoke its fresh frames',async()=>{
+ const entered=Promise.withResolvers(),delayed=Promise.withResolvers();let models=0;
+ const h=fixture({beforeModel:async()=>{if(++models===1){entered.resolve();await delayed.promise;}}});
+ const stale=h.visual.observe();await entered.promise;h.visual.reset();
+ const fresh=await h.visual.observe(),anchor=h.visual.anchor;
+ const rejected=assert.rejects(stale,e=>e.code==='E_VISUAL_TARGET'&&e.dispatched===false);
+ delayed.resolve();await rejected;
+ assert.equal(h.visual.anchor,anchor);assert(h.visual.frames.has(fresh.visualFrameId));
+ assert.equal(h.visual.frames.size,1);assert(h.calls.every(c=>c.op==='displayCapture'));
+});
+test('a capture started before reset cannot be located or cached in the replacement session',async()=>{
+ const entered=Promise.withResolvers(),delayed=Promise.withResolvers();let captures=0;
+ const h=fixture({beforeCapture:async()=>{if(++captures===1){entered.resolve();await delayed.promise;}}});
+ const stale=h.visual.observe();await entered.promise;h.visual.reset();
+ const fresh=await h.visual.observe(),models=h.requests.length;
+ const rejected=assert.rejects(stale,e=>e.dispatched===false);delayed.resolve();await rejected;
+ assert(h.visual.frames.has(fresh.visualFrameId));assert.equal(h.requests.length,models);
+ assert.equal(h.visual.frames.size,1);
+});
+test('reset at the final dispatch check revokes the old operation before any input',async()=>{
+ const h=fixture(),frame=await h.visual.observe();
+ await assert.rejects(h.visual.input(frame.visualFrameId,{action:'click',x:100,y:60},{beforeDispatch:()=>h.visual.reset()}),e=>e.dispatched===false);
+ assert(h.calls.every(c=>c.op==='displayCapture'));
+});
+test('an old dispatched input preserves its receipt without changing a replacement session or its typing proof',async()=>{
+ const entered=Promise.withResolvers(),delayed=Promise.withResolvers();
+ const h=fixture({onInput:async()=>{entered.resolve();await delayed.promise;}}),old=await h.visual.observe();
+ const input=h.visual.input(old.visualFrameId,{action:'type',text:'synthetic text'});await entered.promise;
+ h.visual.reset();const fresh=await h.visual.observe(),anchor=h.visual.anchor;delayed.resolve();
+ const result=await input;assert.equal(result.performed,true);assert.equal(result.cancelledAfterDispatch,true);
+ assert.equal(h.visual.anchor,anchor);assert.equal(anchor.needsRelocate,undefined);assert.equal(h.visual.acknowledgedInput,null);
+ assert(h.visual.frames.has(fresh.visualFrameId));assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);
+});
 test('ambiguous or security/login screens never dispatch and clear previously reusable input proof',async()=>{
  const h=fixture(),shot=await h.visual.observe();h.location={available:false,reason:'可见安全登录提示'};await assert.rejects(h.visual.observe({relocate:true}),/安全登录/);await assert.rejects(h.visual.input(shot.visualFrameId,{action:'click',x:100,y:60}),/不可用/);assert(!h.calls.some(c=>c.op==='displayInput'));
 });

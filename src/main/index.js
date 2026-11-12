@@ -286,7 +286,7 @@ const activeAvatarPack = () => avatarPacks.get(config.load().avatar) || null;
 const avatarCatalog = new (require('./avatar-catalog-router').AvatarCatalogRouter)(motionLibrary, activeAvatarPack);
 function avatarList() {
   const packages = [...avatarPacks.values()].map(({ entry, runtime }) => ({ key: entry.key, file: entry.key, label: entry.key === 'builtin_soft_bunny' ? '兔兔' : entry.name,
-    title: entry.key === 'builtin_soft_bunny' ? '兔兔' : entry.name, personal: !entry.builtin, overridden: !!entry.overridden, kind: 'avatar-pack', version: entry.version, description: '',
+    title: entry.key === 'builtin_soft_bunny' ? '兔兔' : entry.name, personal: !entry.builtin, overridden: !!entry.overridden, kind: 'avatar-pack', version: entry.version, description: require('./avatar-descriptions').DESCRIPTIONS[entry.key] || '',
     palettes: (runtime.palettes || []).map(({ id, label, base }) => ({ id, label, color: base })), defaultPalette: runtime.defaultPalette || null }));
   const builtin = packages.filter(item => item.key === 'builtin_soft_bunny');
   return [...builtin, ...avatars.scan(), ...packages.filter(item => item.key !== 'builtin_soft_bunny')].map(item => ({ ...item, description: config.load().avatarDescriptions?.[item.key] || item.description || '' }));
@@ -294,7 +294,10 @@ function avatarList() {
 const currentAvatar = () => {
   const list = avatarList(), key = avatars.resolve(config.load().avatar, list);
   const item = list.find(a => a.key === key);
-  return item ? { key, name: item.label, description: config.load().avatarDescriptions?.[key] || item.description || '', personal: !!item.personal, kind: item.kind || 'vrm' } : null;
+  if (!item) return null;
+  const settings = config.load();
+  const description = require('./avatar-descriptions').contextDescription(key, item.description || '', avatarPacks.get(key)?.runtime, settings.avatarPalettes?.[key]);
+  return { key, name: item.label, description, personal: !!item.personal, kind: item.kind || 'vrm' };
 };
 const embodiment = new (require('./embodiment').Embodiment)({ catalog: avatarCatalog, avatar: currentAvatar,
   send: event => send('motion', event), persist: recentActions => {
@@ -2756,7 +2759,7 @@ ipcMain.on('pet:audio-started', (event, value) => {
   voiceMetadata({stage:'voice-playback-start',gen:speechGen});
   if (turnT0 && speaking) { log(`[turn] 停顿→开始播放 ${Date.now() - turnT0}ms`); turnT0 = 0; }
 });
-ipcMain.on('pet:listen', (_e, v) => {
+function setListening(v) {
   const want = v === 'toggle' ? !alwaysOn : !!v;
   if (storageBusy) return;
   if(speechDiagnostic?.active){if(!want){void speechDiagnostic.finish('owner-stop');stopListen();config.save({voice:{alwaysListen:false}});sendConfig(config.load());}return;}
@@ -2767,7 +2770,8 @@ ipcMain.on('pet:listen', (_e, v) => {
     else startListen('user');
   } else { stopListen(); config.save({ voice: { alwaysListen:false } }); }
   send('listen', { on:alwaysOn }); sendConfig(config.load());
-});
+}
+ipcMain.on('pet:listen', (_e, v) => setListening(v));
 ipcMain.handle('pet:speech-diagnostic',async(event,args={})=>{
   trustedCompanion(event,'settings');
   if(!args||typeof args!=='object'||Object.keys(args).some(key=>!['action','pcm'].includes(key)))throw Error('诊断参数无效');
@@ -3765,6 +3769,14 @@ if (!lock) {
     const settingsPanel=require('./settings-panel');
     localControl=new LocalControl({userData:USER_DIR,methods:ownerMethods({getScene:currentScene,
       setScene:scene=>applySettings({memory:{scene}}),boperControl:controlBoper,
+      speechControl:async(params,context)=>{
+        if(currentScene()!=='life')throw Object.assign(Error('语音调试仅允许生活场景'),{code:'E_LOCAL_SCENE'});
+        if(params.action==='listen'){setListening(params.on);return {listening:alwaysOn};}
+        if(params.action==='diagnostic_start'){const status=await speechDiagnostic.start({durationMs:params.durationMs??20000,pcm:params.pcm===true});if(context?.signal?.aborted)await speechDiagnostic.finish('owner-stop');return status;}
+        if(params.action==='diagnostic_stop')return speechDiagnostic.finish('owner-stop');
+        if(params.action==='diagnostic_clear')return speechDiagnostic.clear();
+        return {...speechDiagnostic.status(),listening:alwaysOn,captureReady:asr?.ready===true,busy:busy===true,speaking:speaking===true,memoryReady:memory?.ready===true};
+      },
       settingsTabs:settingsPanel.SETTINGS_TAB_NAMES,openSettings:tab=>settingsPanel.openSettingsPanel({openPanel,tab})})});
     await localControl.start().catch(error=>{console.error('[local-control]',error.code||'E_LOCAL_START',error.message);});
     app.on('activate', () => showWindow());

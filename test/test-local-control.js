@@ -10,6 +10,16 @@ test('private host registry publishes JSON Schemas and routes only owner scene/B
  assert.deepEqual((await f.call('scene_get')).result.structuredContent,{scene:'life'});assert.equal((await f.call('scene_set',{scene:'life'})).result.isError,false);assert.deepEqual(f.calls,[['scene','life']]);assert.equal((await f.call('boper_status')).result.structuredContent.action,'status');
  const unknown=await f.call('conversation_history');assert.equal(unknown.ok,false);assert.equal(unknown.error.code,'E_LOCAL_METHOD');const invalid=await f.call('scene_set',{scene:'invalid'});assert.equal(invalid.result.isError,true);assert.equal(invalid.result.structuredContent.error.code,'E_LOCAL_PARAMS');assert.equal(f.calls.length,2);
 });
+test('speech controls use the shared registry, validate strict bounded arguments and refuse non-life scenes',async t=>{
+ let scene='life';const calls=[],root=await fs.mkdtemp(path.join(os.tmpdir(),'wb-speech-control-'));
+ const server=new LocalControl({endpoint:socketPath(root),methods:ownerMethods({getScene:()=>scene,setScene:()=>{},boperControl:()=>({}),speechControl:async(params,context)=>{calls.push({params,signal:context.signal});return {active:params.action==='diagnostic_start'};}})});
+ await server.start();t.after(async()=>{await server.close();await fs.rm(root,{recursive:true,force:true});});
+ const call=params=>sendRequest(server.endpoint,{schema:SCHEMA,id:randomUUID(),method:'tools.call',params:{name:'speech_control',arguments:params}});
+ assert.equal((await call({action:'diagnostic_start',durationMs:20000,pcm:false})).result.structuredContent.active,true);assert(calls[0].signal instanceof AbortSignal);
+ for(const args of [{action:'diagnostic_start',durationMs:20001},{action:'diagnostic_start',pcm:'true'},{action:'listen'},{action:'status',on:true},{action:'read_transcript'},{action:'diagnostic_start',directory:'/untrusted'}])assert.equal((await call(args)).result.structuredContent.error.code,'E_LOCAL_PARAMS');
+ for(scene of ['private','work'])assert.equal((await call({action:'status'})).result.structuredContent.error.code,'E_LOCAL_SCENE');
+ assert.equal(calls.length,1);
+});
 test('mutations remain serialized while status stays available and timed-out work is never replayed',async t=>{
  const gate=Promise.withResolvers(),entered=Promise.withResolvers();const f=await fixture(t,{timeoutMs:60,setScene:async()=>{entered.resolve();await gate.promise;}});const pending=f.call('scene_set',{scene:'life'});await entered.promise;assert.equal((await f.call('scene_get')).result.structuredContent.scene,'life');assert.equal((await f.call('boper_enable')).result.isError,true);const timeout=await pending;assert.equal(timeout.error.code,'E_LOCAL_TIMEOUT');assert.equal(f.calls.filter(x=>x[0]==='scene').length,1);assert.equal((await f.call('boper_test')).result.structuredContent.error.code,'E_LOCAL_BUSY');gate.resolve();await new Promise(r=>setImmediate(r));
 });

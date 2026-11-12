@@ -75,7 +75,22 @@ class BoperService extends EventEmitter{
    await this._request('beginSession',{backend:this.enabled?'virtual-hid':'cg-event',inputSessionId:active.inputSessionId,leaseMs:1500,displayBounds:active.context.displayBounds||[],...delegation});
    if(active.cancelled||this.active!==active)throw failure('E_ABORTED','输入会话已取消');
    active.phase='ready';
-   active.renew=setInterval(()=>{if(this.active!==active||active.cancelled||active.renewing)return;active.renewing=true;Promise.resolve().then(()=>{this._validate(active.context);return this.enabled?this._bounded(this.control().renewSession({inputSessionId:active.inputSessionId,leaseMs:1500})):null;}).then(()=>{if(this.active===active&&!active.cancelled)return this._request('renewSession',{inputSessionId:active.inputSessionId,leaseMs:1500},1000,true);}).catch(error=>{this.fault=error;this.faultKind='input';return this.stop('lease-invalid').catch(()=>{});}).finally(()=>{active.renewing=false;});},500);active.renew.unref?.();
+   active.renew=setInterval(()=>{
+    if(this.active!==active||active.cancelled||active.renewing)return;
+    active.renewing=true;
+    Promise.resolve().then(()=>{
+     if(this.active!==active||active.cancelled)return;
+     this._validate(active.context);
+     return active.virtual?this._bounded(this.control().renewSession({inputSessionId:active.inputSessionId,leaseMs:1500})):null;
+    }).then(()=>{
+     if(this.active===active&&!active.cancelled)return this._request('renewSession',{inputSessionId:active.inputSessionId,leaseMs:1500},1000,true);
+    }).catch(error=>{
+     // A released lease can fail after another owner has begun. Only its
+     // still-current session may fault input or invoke the shared stop path.
+     if(this.active!==active||active.cancelled)return;
+     this.fault=error;this.faultKind='input';return this.stop('lease-invalid').catch(()=>{});
+    }).finally(()=>{active.renewing=false;});
+   },500);active.renew.unref?.();
   }catch(error){
    this._discardRuntime(active.child,error);
    try{await this._revoke(active);}catch(revokeError){this.fault=revokeError;this.faultKind='input';}

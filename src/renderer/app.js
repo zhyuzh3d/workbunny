@@ -1,3 +1,4 @@
+import { configureBaniSprings } from './bani-spring-setup.mjs';
 import * as THREE from 'three';
 import { createDialogueOverlay } from './dialogue-overlay.mjs';
 import { modelContextHit } from './model-context-hit.mjs';
@@ -346,7 +347,7 @@ function buildClip(id, anim) {
       if (w && !item.sourceId) clip = cutClip(clip, w[0], w[1]);
       if (groundRig && !/swim/i.test(id)) {
         if (id === IDLE && groundReference == null) groundReference = soleHeight(clip, groundRig);
-        groundClip(clip, groundRig, groundReference);
+        groundClip(clip, groundRig, groundReference, { loop: !!item.loop });
       }
       processMotionClip(clip, { loop: !!item.loop });
       if (item.thumbAdaptation !== false) bakeThumbPolicy(clip, vrm, thumbPolicy(modelThumbReference, thumbReferences.get(id), item.label));
@@ -566,8 +567,12 @@ function playPCM(event) {
   if (event.start) {
     stopAudio(true);
     activeAudioId = event.id;
+    const revision = audioRevision;
     const ctx = ensureAudio();
-    if (ctx.state === 'suspended') ctx.resume().catch(() => { pcmPlayer.stop(event.id); pet.audioDone(false, event.id); });
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {
+      if (revision !== audioRevision) return;
+      pcmPlayer.stop(event.id); pet.audioDone(false, event.id);
+    });
     pcmPlayer.begin(event.id);
   }
   if (event.stop) pcmPlayer?.stop(event.id);
@@ -712,6 +717,7 @@ function clearMountedAvatar() {
 function prepareVrm(gltf, info) {
   const candidate = gltf.userData.vrm;
   if (!candidate?.humanoid) throw new Error('模型缺少 VRM 骨骼');
+  if (info.file === 'Bani.vrm' && !info.personal) configureBaniSprings(candidate);
   const root = candidate.scene, hidden = [];
   root.position.x = 0;
   if (candidate.meta?.metaVersion === '0') root.rotation.y = Math.PI;
@@ -1173,7 +1179,12 @@ function paintEar() {
   const txt = earLabel();
   if (txt !== earShown) {
     earShown = txt;
-    if (t) t.textContent = txt;
+    if (t) {
+      // The previous long caption may still be scrolled out of view.
+      for (const a of t.getAnimations()) a.cancel();
+      t.style.transform = '';
+      t.textContent = txt;
+    }
     // 只有换了字才重新量一次：撑宽是 260ms 的过渡，等它撑开再量，
     // 否则量到的是旧宽度，长句子会被判成"没超出"而不滚。
     if (marqueeTimer) clearTimeout(marqueeTimer);

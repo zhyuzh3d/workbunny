@@ -83,9 +83,9 @@ flowchart TB
 
 ## 下载与上手
 
-当前提供 **Apple Silicon Mac** 的 **v0.26.44 早期 Beta**。本版主要加入 BOPER 统一键鼠模块，并优化芭尼模型细节。macOS 13 是最低构建目标，持续端侧语音识别需要 macOS 26，系统兼容性仍在验证。安装包使用本机开发签名，苹果公证待完成。复杂任务、界面识别和长期学习仍处于早期试用阶段。[发行说明与校验文件](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.26.44)
+当前提供 **Apple Silicon Mac** 的 **v0.26.47 早期 Beta**。本版更新芭尼形象与弹簧骨骼表现，改善循环动作的脚部接地，补充七个内置形象的外观描述，并修复语音字幕和桌面操作的异步状态问题。macOS 13 是最低构建目标，持续端侧语音识别需要 macOS 26，系统兼容性仍在验证。安装包使用本机开发签名，苹果公证待完成。复杂任务、界面识别和长期学习仍处于早期试用阶段。[发行说明与校验文件](https://github.com/zhyuzh3d/workbunny/releases/tag/v0.26.47)
 
-1. **安装应用**。下载 [DMG 安装镜像](https://github.com/zhyuzh3d/workbunny/releases/download/v0.26.44/workbunny-0.26.44-macos-arm64.dmg)，打开后将 `workbunny.app` 拖入 Applications（应用程序）。也可使用发行页的应用 ZIP。升级前先退出旧版并备份资料。若 macOS 拦截首次启动，可在核对发行页的 SHA-256 后按系统提示允许打开。
+1. **安装应用**。下载 [DMG 安装镜像](https://github.com/zhyuzh3d/workbunny/releases/download/v0.26.47/workbunny-0.26.47-macos-arm64.dmg)，打开后将 `workbunny.app` 拖入 Applications（应用程序）。也可使用发行页的应用 ZIP。升级前先退出旧版并备份资料。若 macOS 拦截首次启动，可在核对发行页的 SHA-256 后按系统提示允许打开。
 2. **先用文字聊一句**。保持 WorkBuddy 已登录，在 Bunny 设置里确认使用 WorkBuddy 模式。想用其他模型聊天时，也可以配置自己的模型 API。
 3. **随口交办一件小事**。例如「我想问问同事午休都喜欢做什么。五道题就好，请交给 WorkBuddy 做个能在本机打开的网页草稿，做好了告诉我。」
 4. **按需要开启更多能力**。语音输入需要麦克风与语音识别权限。可选择系统音色、本地 Qwen3-TTS（至少 16 GiB 内存）、局域网 CHP 或自有 HTTP 朗读服务。[HTTP 语音配置示例](examples/tts-profiles/)

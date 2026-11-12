@@ -10,9 +10,12 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
   pauseMs = 350, turnMs = 350, finalWaitMs = 8000, requireActivity = false, activityFreshMs = 500,
   now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, sessionId = randomUUID(),
   deferRecognition = false }) {
-  let current = null, retained = null, serial = 0, requestTimer, confirmationTimer, checkpointTimer, activityTimer, latestActivity = null, rejectedPartialKey = null;
+  let current = null, retained = null, serial = 0, requestTimer, confirmationTimer, checkpointTimer, activityTimer, latestActivity = null, rejectedPartialKey = null, finalizedSource = null;
   const reasons = { none: 0, text: 1, reset: 2, epoch: 3, stopped: 4, confirmation: 5, commit: 6, next: 7, active: 8, unknown: 9, stale: 10, completed: 11, acoustic: 12, ineligible: 13 };
   const contentKey = s => String(s || '').replace(/\s+/g, ' ').trim().replace(/[。.!?！？]+$/u, '').trim();
+  const audioSource = meta => meta && ['recognizer','sourceGen'].every(key => Number.isSafeInteger(meta[key]) && meta[key] >= 0)
+    ? {recognizer:meta.recognizer,sourceGen:meta.sourceGen} : null;
+  const sameSource = (a,b) => a && b ? a.recognizer === b.recognizer && a.sourceGen === b.sourceGen : !a && !b;
   const recordAudio = (t, meta) => {
     if (!meta || !Number.isFinite(meta.audioStartAtMs) || !Number.isFinite(meta.audioEndAtMs) || meta.audioEndAtMs < meta.audioStartAtMs) return;
     t.audioStartAtMs = Math.min(t.audioStartAtMs ?? Infinity, meta.audioStartAtMs);
@@ -68,18 +71,20 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if (latestActivity) latestActivity = { ...latestActivity, state: 'unknown', quietSeconds: 0, at: now() };
     live(t, 'reset', '');
   }
-  function unconfirmed(message, reason, reasonCode) {
-    if (!current) return;
-    const text = textOf(current), hasWords = meaningful(text), rejected = contentKey(current.partial || current.segments.at(-1));
-    const metadata = { reason, turn: current.id, turnId: `${sessionId}:${current.id}`,
-      admitted: accepted(current), effectWaiting: current.request?.commitRequested === true && current.request?.semanticAccepted === true,
-      awaitingAudioFinal: current.awaitingAudioFinal, finalized: current.finalized,
-      partialChars: current.partial.length, segments: current.segments.length, chars: text.length,
-      lastTextAt: current.lastTextAt, recognizer: latestActivity?.recognizer ?? null, sourceGen: latestActivity?.sourceGen ?? null };
-    trace('turn-unconfirmed', current, reasonCode);
+  function unconfirmed(message, reason, reasonCode, t = current) {
+    if (!t) return;
+    const wasCurrent=current===t,text = textOf(t), hasWords = meaningful(text), rejected = contentKey(t.partial || t.segments.at(-1));
+    const metadata = { reason, turn: t.id, turnId: `${sessionId}:${t.id}`,
+      admitted: accepted(t), effectWaiting: t.request?.commitRequested === true && t.request?.semanticAccepted === true,
+      awaitingAudioFinal: t.awaitingAudioFinal, finalized: t.finalized,
+      partialChars: t.partial.length, segments: t.segments.length, chars: text.length,
+      lastTextAt: t.lastTextAt, recognizer: latestActivity?.recognizer ?? null, sourceGen: latestActivity?.sourceGen ?? null };
+    trace('turn-unconfirmed', t, reasonCode);
     // A newer unconfirmed candidate cannot erase an older held inference.
-    if(deferRecognition&&retained){const failed=current;clearTurnTimers();invalidate(failed,reasonCode);current=null;live(failed,'reset','');updateGate(retained);}else reset(reasonCode);
-    rejectedPartialKey = rejected;
+    // A recognizer failure can also retire the held inference itself.
+    if(t===retained)invalidate(t,reasonCode);
+    else if(deferRecognition&&retained){clearTurnTimers();invalidate(t,reasonCode);current=null;live(t,'reset','');updateGate(retained);}else reset(reasonCode);
+    if(wasCurrent)rejectedPartialKey = rejected;
     if (hasWords) onError(message, metadata);
   }
   function fresh(at) { return { id: ++serial, segments: [], partial: '', finalized: false, awaitingAudioFinal: false,
@@ -220,10 +225,19 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
   function final(raw, meta) {
     const text = String(raw || '').trim();
     if (!text) return;
+    const source = audioSource(meta);
+    // Native finals are immutable receipts for monotonically increasing
+    // sources. Retirement/reset cannot make a sealed source a fresh command.
+    if(source&&finalizedSource&&(source.recognizer<finalizedSource.recognizer||
+       source.recognizer===finalizedSource.recognizer&&source.sourceGen<=finalizedSource.sourceGen))return;
     rejectedPartialKey = null;
     if (current?.finalized && !current.partial && contentKey(current.segments.at(-1)) === contentKey(text) &&
-        (!deferRecognition||current.finalSource?.recognizer===meta?.recognizer&&current.finalSource?.sourceGen===meta?.sourceGen)) {
-      if (current.awaitingAudioFinal) { current.awaitingAudioFinal = false; current.awaitingAudioSource = null; trace('turn-final'); live(current, accepted(current) ? 'pending' : 'final'); schedule(); }
+        sameSource(current.finalSource,source)) {
+      // This receipt already sealed its source. Replaying it cannot cover
+      // audio observed later, even when the old transcript is identical.
+      // Older recognizers have no source metadata; retain their existing
+      // final-event contract rather than inventing a generation for them.
+      if(!source&&current.awaitingAudioFinal){current.awaitingAudioFinal=false;current.awaitingAudioSource=null;trace('turn-final');live(current,accepted(current)?'pending':'final');schedule();}
       return;
     }
     detachHeld();
@@ -231,7 +245,8 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if (!current) current = fresh(now());
     recordAudio(current, meta);
     if(meta?.voiceObservation)current.observation={...meta.voiceObservation};
-    current.finalSource=meta?{recognizer:meta.recognizer,sourceGen:meta.sourceGen}:null;
+    const newSource = !!source && !!current.finalSource && !sameSource(current.finalSource,source);
+    current.finalSource=source;
     // A native final is complete audio coverage even while its interpretation
     // is pending. The candidate still vetoes the retained request's effects.
     if(retained?.awaitingAudioFinal&&meta&&latestActivity&&
@@ -239,12 +254,13 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
        meta.recognizer===latestActivity.recognizer&&meta.sourceGen===latestActivity.sourceGen){
       retained.lastAudioActiveAt=retained.awaitingAudioSource.previousActiveAt;retained.awaitingAudioFinal=false;retained.awaitingAudioSource=null;
     }
-    const changed = contentKey(text) !== contentKey(current.partial || current.segments.at(-1));
+    const changed = newSource || contentKey(text) !== contentKey(current.partial || current.segments.at(-1));
     if (changed || current.partial) invalidate(current, reasons.text);
     if (changed) current.lastTextAt = now();
     if (changed || current.acousticWaitStartedAt == null) current.acousticWaitStartedAt = now();
-    if (current.segments.at(-1) !== text || current.partial) current.segments.push(text);
+    if (newSource || current.segments.at(-1) !== text || current.partial) current.segments.push(text);
     current.partial = ''; current.partialSource = null; current.audioBeforePartial = null; current.finalized = true; current.awaitingAudioFinal = false; current.awaitingAudioSource = null;
+    if(source)finalizedSource=source;
     trace('turn-final'); live(current, 'final');if(retained)updateGate(retained,reasons.text); schedule();
   }
   function activity(meta) {
@@ -254,6 +270,7 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
     if (latestActivity && (meta.recognizer < latestActivity.recognizer || meta.recognizer === latestActivity.recognizer &&
       (meta.seq <= latestActivity.seq || meta.sourceGen < latestActivity.sourceGen))) return false;
     if (latestActivity && meta.recognizer > latestActivity.recognizer) {
+      if(retained)unconfirmed('语音识别已重新连接，前句待提交操作已暂停，请完整重说或输入文字。','recognizer-changed',reasons.epoch,retained);
       if (accepted(current) || current && (!current.finalized || current.awaitingAudioFinal)) unconfirmed('语音识别已重新连接，本轮已暂停，请完整重说或输入文字。', 'recognizer-changed', reasons.epoch);
       latestActivity = null; rejectedPartialKey = null;
     }
@@ -312,6 +329,7 @@ function createVoiceTurns({ onRequest, onInvalidate, onRemember, onLive = () => 
   }
   return { partial, final, activity, audioFinal, reset, retract,
     recognizerStopped: ({ graceful = false } = {}) => {
+      if(retained)unconfirmed('语音识别中断，前句待提交操作已暂停，请完整重说或输入文字。','recognizer-stopped',reasons.stopped,retained);
       if (!current) return;
       if (graceful && !accepted(current) && current.finalized && !current.awaitingAudioFinal) {
         if (latestActivity) latestActivity = { ...latestActivity, state: 'unknown', quietSeconds: 0, at: now() };

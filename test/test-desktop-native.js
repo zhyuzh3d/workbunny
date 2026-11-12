@@ -146,6 +146,65 @@ test('a later native failure cannot erase earlier BOPER input or clipboard effec
  const pending=client.request('workbuddyFill',{text:'fixture'},1000);const request=child.lines[0];child.stdio[3].write(JSON.stringify({id:1,requestId:request.id,operation:{action:'typeText',params:{text:'fixture'}},displayBounds:[{x:0,y:0,width:100,height:100}]})+'\n');await new Promise(r=>setImmediate(r));child.stdout.write(JSON.stringify({id:request.id,ok:false,error:'draft changed after input',dispatched:false})+'\n');await assert.rejects(pending,error=>error.dispatched===true&&error.inputOutcome.clipboardChanged===true);await client.close();
 });
 
+function inputLifecycleFixture(options={}) {
+ const children=[],stops=[];let finishInput,releaseInput;
+ const release=new Promise(resolve=>{releaseInput=resolve;});
+ const boper={assertAvailable:()=>({backend:'virtual-hid'}),execute:()=>new Promise(resolve=>{finishInput=resolve;}),
+  endScope:async(ownerId,scopeId)=>{stops.push({ownerId,scopeId});await release;return {releaseConfirmed:true};},
+  cancelOwner:async()=>{throw Error('cleanup must identify the exact input scope');}};
+ const client=new DesktopNative('/fixture/input-lifecycle',{...options,boper,inputContext:()=>({ownerId:'fixture-owner',validate:()=>true}),spawn:()=>{
+  const child=new EventEmitter();child.lines=[];child.stdout=new PassThrough();child.stderr=new PassThrough();
+  child.stdin=new Writable({write(chunk,_encoding,done){child.lines.push(JSON.parse(chunk));if(options.delayedWrite)child.failWrite=()=>done(Error('synthetic write failure'));else done();}});
+  child.stdio=[child.stdin,child.stdout,child.stderr,new PassThrough(),new Writable({write(_chunk,_encoding,done){done();}})];
+  child.kill=()=>queueMicrotask(()=>child.emit('close',0));children.push(child);return child;
+ }});
+ const start=()=>{const request=client.request('type',{text:'synthetic'},1000),child=children.at(-1),message=child.lines.at(-1);
+  child.stdio[3].write(JSON.stringify({id:1,requestId:message.id,operation:{action:'typeText',params:{text:'synthetic'}},displayBounds:[{x:0,y:0,width:100,height:100}]})+'\n');
+  return {request,child,message};};
+ return {client,children,stops,start,finish:value=>finishInput(value),release:()=>releaseInput()};
+}
+
+for(const cause of ['close','break','write-error'])test('input lifecycle '+cause+' stops its exact scope before rejecting an in-flight request',async()=>{
+ const f=inputLifecycleFixture({delayedWrite:cause==='write-error'}),operation={id:'fixture-operation'};let current;
+ const pending=require('../src/main/boper-outcome').collect(operation,()=>{current=f.start();return current.request;});
+ let settled=false;const result=pending.then(value=>{settled=true;return value;},error=>{settled=true;return error;});
+ try{
+  await new Promise(resolve=>setImmediate(resolve));
+  if(cause==='close')current.child.emit('close',1);else if(cause==='write-error')current.child.failWrite();else{current.child.kill=()=>{};current.child.stdin.emit('error',Error('synthetic broken pipe'));current.child.emit('close',1);}
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(settled,false,'request must retain GUI ownership until input release settles');
+  assert.deepEqual(f.stops,[{ownerId:'fixture-owner',scopeId:f.client.diagnosticId+':'+current.message.id}]);
+  f.release();const error=await result;assert(error instanceof Error);assert.equal(error.inputOutcome.completion,'unknown');assert.equal(error.inputOutcome.releaseConfirmed,true);await f.client.stopPromise;
+  f.finish({dispatched:true,reportsSubmitted:4,clipboardChanged:true,completion:'local-submitted'});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(operation.inputOutcome.completion,'unknown');assert.equal(operation.inputOutcome.dispatched,true);assert.equal(operation.inputOutcome.reportsSubmitted,4);assert.equal(operation.inputOutcome.clipboardChanged,true);
+  assert.equal(f.stops.length,1,'late input receipt must not start another cleanup or replay');
+ }finally{f.release();f.finish({dispatched:false,completion:'not-dispatched'});await f.client.close().catch(()=>{});await result;}
+});
+
+test('input lifecycle keeps response cleanup registered through process exit and isolates a later child',async()=>{
+ const f=inputLifecycleFixture(),first=f.start();const firstResult=first.request.catch(error=>error);
+ try{
+  f.finish({dispatched:true,reportsSubmitted:4,clipboardChanged:true,completion:'local-submitted'});await new Promise(resolve=>setImmediate(resolve));
+  first.child.stdout.write(JSON.stringify({id:first.message.id,ok:true,result:{performed:true}})+'\n');await new Promise(resolve=>setImmediate(resolve));
+  first.child.emit('close',1);await new Promise(resolve=>setImmediate(resolve));
+  const restart=f.client.request('frontmost');restart.catch(()=>{});assert.equal(f.children.length,1,'restart must wait for old input cleanup');await assert.rejects(restart,/正在停止/);
+  assert.equal(f.stops.length,1);f.release();const receipt=await firstResult;assert.equal(receipt.performed,true);assert.equal(receipt.inputOutcome.dispatched,true);
+  await f.client.stopPromise;
+  const next=f.start(),nextResult=next.request.catch(error=>error);await new Promise(resolve=>setImmediate(resolve));
+  first.child.emit('close',1);await new Promise(resolve=>setImmediate(resolve));assert.equal(f.stops.length,1,'an old close cannot stop a new same-owner scope');
+  f.finish({dispatched:true,reportsSubmitted:2,completion:'local-submitted'});await new Promise(resolve=>setImmediate(resolve));
+  next.child.stdout.write(JSON.stringify({id:next.message.id,ok:true,result:{performed:true}})+'\n');assert.equal((await nextResult).performed,true);assert.equal(f.stops.length,2);
+ }finally{f.release();await f.client.close().catch(()=>{});await firstResult;}
+});
+
+test('input lifecycle bounds missing release receipts and preserves an unknown outcome',async()=>{
+ const f=inputLifecycleFixture({inputStopTimeoutMs:20}),current=f.start();const pending=current.request.catch(error=>error);
+ try{
+  await new Promise(resolve=>setImmediate(resolve));const before=Date.now();current.child.emit('close',1);const error=await pending;
+  assert.equal(error.inputOutcome.completion,'unknown');assert.equal(error.inputOutcome.releaseConfirmed,false);assert(Date.now()-before<1000);
+ }finally{f.release();f.finish({dispatched:false,completion:'not-dispatched'});await f.client.close().catch(()=>{});await pending;}
+});
+
 test('native key map explicitly covers ANSI letters, digits, editing keys, and F1-F12', () => {
   const source = fs.readFileSync(require.resolve('../native/desktop.swift'), 'utf8');
   const keyMap = source.slice(source.indexOf('func keyCode('), source.indexOf('func modifiers('));

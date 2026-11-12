@@ -244,7 +244,7 @@ function solveLeg(upper, lower, foot, target, bendState = null) {
  * footskate cleanup：接触段里把脚钉住，两端权重混合。
  * 直接改写 clip 里大腿/小腿/脚掌的旋转轨道，运行时不增加任何计算。
  */
-export function cleanFootSkate(clip, rig, { stabilizeKnee = false } = {}) {
+export function cleanFootSkate(clip, rig, { stabilizeKnee = false, loop = false } = {}) {
   const S = sampleFeet(clip, rig);
   if (!S) return null;
   const { n, dt, dur, lx, lz, cl, rx, rz, cr } = S;
@@ -255,7 +255,7 @@ export function cleanFootSkate(clip, rig, { stabilizeKnee = false } = {}) {
     { x: rx, z: rz, c: cr, ...rig.legs[1] },
   ];
   if (!legs[0].up || !legs[0].low || !legs[1].up || !legs[1].low) return null;
-  for (const L of legs) L.bones = [L.up, L.low, L.foot];
+  for (const L of legs) { L.bones = [L.up, L.low, L.foot]; L.raw = new Map(L.bones.map(nd => [nd.name, new Float32Array(n * 4)])); }
 
   // 地面线取"每帧最低那只脚"的中位数：单帧踩深一点不会把整条动作带偏
   const lo = [];
@@ -271,6 +271,21 @@ export function cleanFootSkate(clip, rig, { stabilizeKnee = false } = {}) {
     L.tx = new Float32Array(n);
     L.tz = new Float32Array(n);
     L.w = new Float32Array(n);
+    // A continuous footplant split by a looping clip's boundary must share one
+    // anchor; only join it when the source foot positions also match closely.
+    let wrapAnchor = null;
+    if (loop && L.c[0] - ground <= eps && L.c[n-1] - ground <= eps &&
+        Math.hypot(L.x[0] - L.x[n-1], L.z[0] - L.z[n-1]) <= U * 0.01) {
+      let end = 0, start = n - 1;
+      while (end + 1 < n && L.c[end + 1] - ground <= eps) end++;
+      while (start - 1 > end && L.c[start - 1] - ground <= eps) start--;
+      if (end < start && end + 1 >= 3 && n - start >= 3) {
+        let x = 0, z = 0, count = 0;
+        for (let j = 0; j <= end; j++) { x += L.x[j]; z += L.z[j]; count++; }
+        for (let j = start; j < n; j++) { x += L.x[j]; z += L.z[j]; count++; }
+        wrapAnchor = { x: x / count, z: z / count };
+      }
+    }
     let s = -1;
     for (let i = 0; i <= n; i++) {
       const touch = i < n && L.c[i] - ground <= eps;
@@ -283,13 +298,15 @@ export function cleanFootSkate(clip, rig, { stabilizeKnee = false } = {}) {
           let ax = 0, az = 0;
           for (let k = s; k <= e; k++) { ax += L.x[k]; az += L.z[k]; }
           ax /= len; az /= len;
+          if (wrapAnchor && (s === 0 || e === n - 1)) { ax = wrapAnchor.x; az = wrapAnchor.z; }
           const ramp = Math.min(Math.max(1, Math.round(BLEND_SEC / dt)), Math.floor(len / 2));
           for (let k = s; k <= e; k++) {
             // 端点权重低、中间满 —— 抬脚落脚处不跳
             // A foot planted for the whole clip must stay locked at both ends,
             // including a loop seam; fade only at real landing/liftoff edges.
-            const enter = s === 0 ? 1 : Math.min(1, (k - s + 1) / (ramp + 1));
-            const leave = e === n - 1 ? 1 : Math.min(1, (e - k + 1) / (ramp + 1));
+            const ease = t => t * t * (3 - 2 * t);
+            const enter = s === 0 ? 1 : (loop ? ease(Math.min(1, (k - s) / ramp)) : Math.min(1, (k - s + 1) / (ramp + 1)));
+            const leave = e === n - 1 ? 1 : (loop ? ease(Math.min(1, (e - k) / ramp)) : Math.min(1, (e - k + 1) / (ramp + 1)));
             const w = Math.min(enter, leave);
             if (w <= 0) continue;
             let dx = ax - L.x[k], dz = az - L.z[k];
@@ -325,6 +342,7 @@ export function cleanFootSkate(clip, rig, { stabilizeKnee = false } = {}) {
     resetRig(rig);
     apply(Math.min(dur, i * dt));
     for (const L of legs) {
+      for (const nd of L.bones) nd.quaternion.toArray(L.raw.get(nd.name), i * 4);
       if (L.w[i] > 0.004) {
         L.foot.getWorldPosition(ank);
         target.set(L.tx[i], ank.y, L.tz[i]);      // 只治水平滑动，竖直交给地面线
@@ -339,6 +357,28 @@ export function cleanFootSkate(clip, rig, { stabilizeKnee = false } = {}) {
         out.get(nd.name).set(q4, i * 4);
       }
     }
+  }
+
+  // If locking injects a sharp rotation absent from the source, keep that
+  // entire leg's original tracks. This avoids both knee flips and seams at a
+  // local correction boundary; a little foot sliding is preferable to a snap.
+  const discardedLegs = [];
+  const stepAngle = (a, i) => {
+    const k = i * 4, j = k - 4;
+    const dot = a[k]*a[j] + a[k+1]*a[j+1] + a[k+2]*a[j+2] + a[k+3]*a[j+3];
+    return 2 * Math.acos(Math.min(1, Math.abs(dot)));
+  };
+  for (const [side,L] of legs.entries()) {
+    let unstable = false;
+    for (const nd of [L.up,L.low]) {
+      const corrected=out.get(nd.name), original=L.raw.get(nd.name);
+      for (let i=1; i<n; i++) {
+        const a=stepAngle(corrected,i), b=stepAngle(original,i);
+        if (a > 12*Math.PI/180 && a > b + 8*Math.PI/180) { unstable=true; break; }
+      }
+      if (unstable) break;
+    }
+    if (unstable) { discardedLegs.push(side ? 'right' : 'left'); for (const nd of L.bones) out.delete(nd.name); }
   }
 
   // 写回轨道：60Hz 采样 + 四元数符号连续（不然 slerp 会转反）
@@ -357,7 +397,7 @@ export function cleanFootSkate(clip, rig, { stabilizeKnee = false } = {}) {
     if (at >= 0) clip.tracks[at] = track;
     else clip.tracks.push(track);
   }
-  return { contacts, frames: n, maxPull, kneeStability:stabilizeKnee ? legs.map(L=>L.bendState ? {fallbacks:L.bendState.fallbacks, flips:L.bendState.flips} : null) : undefined };
+  return { contacts, frames: n, maxPull, discardedLegs, kneeStability:stabilizeKnee ? legs.map(L=>L.bendState ? {fallbacks:L.bendState.fallbacks, flips:L.bendState.flips} : null) : undefined };
 }
 
 /* ═══════════ 对外主入口 ═══════════ */

@@ -45,3 +45,25 @@ test('actual playback start immediately replaces pending response status',()=>{
  ctx.markReplyStarted('obsolete');assert.equal(ctx.shownState,'pending');assert.equal(paints,0);
  ctx.markReplyStarted('current');assert.equal(ctx.shownState,'reply');assert.equal(paints,1);
 });
+test('new caption immediately cancels an old scrolling offset',()=>{
+ const source=fs.readFileSync('src/renderer/app.js','utf8'),timers=[];
+ const animation={cancelled:false,cancel(){this.cancelled=true;}};
+ const text={textContent:'old long caption',style:{transform:'translateX(-100px)'},getAnimations:()=>[animation]};
+ const ear={classList:{toggle(){}},style:{setProperty(){}}};
+ const ctx={document:{getElementById:id=>({ear,earTxt:text}[id])},listening:true,asrHealthy:()=>true,
+  shownState:'',shownHeard:'',liveText:'new caption',earLabel:()=>ctx.liveText,
+  clearTimeout(){},setTimeout(fn){timers.push(fn);return timers.length;}};
+ vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('let marqueeTimer ='),source.indexOf('/** 实时字幕')),ctx);
+ ctx.paintEar();assert.equal(text.textContent,'new caption');assert.equal(animation.cancelled,true);
+ assert.equal(text.style.transform,'');assert.equal(timers.length,1);
+});
+test('obsolete audio context failure cannot report failure for a replaced stream',async()=>{
+ const source=fs.readFileSync('src/renderer/app.js','utf8'),rejects=[],receipts=[],stops=[];
+ const ctx={audioRevision:0,activeAudioId:null,pcmPlayer:{begin(){},stop:id=>stops.push(id)},
+  ensureAudio:()=>({state:'suspended',resume:()=>new Promise((_,reject)=>rejects.push(reject))}),
+  stopAudio(){ctx.audioRevision++;},pet:{audioDone:(...args)=>receipts.push(args)}};
+ vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function playPCM('),source.indexOf('function markReplyStarted(')),ctx);
+ ctx.playPCM({start:true,id:'old'});ctx.playPCM({start:true,id:'new'});
+ rejects[0](new Error('old failure'));await Promise.resolve();assert.deepEqual(receipts,[]);assert.deepEqual(stops,[]);
+ rejects[1](new Error('new failure'));await Promise.resolve();assert.deepEqual(receipts,[[false,'new']]);assert.deepEqual(stops,['new']);
+});
