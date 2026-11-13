@@ -18,11 +18,16 @@ async function runLocalTest({BrowserWindow,boper,lease,screen,parent,getScene}){
   const context={ownerId,application:'boper-local-receiver',requiredInputBackend:'virtual-hid',displayBounds:[bounds],signal:abort.signal,validate:()=>getScene()==='life'&&!win.isDestroyed()&&win.isFocused()&&!abort.signal.aborted&&lease.owner===ownerId};
   const execute=async(action,params)=>{const result=await boper.execute({action,params},context,{scopeId,operationId:randomUUID(),timeoutMs:12000});evidence.steps.push({action,...result});return result;};
   native=new(require('./desktop-native').DesktopNative)(undefined,{boper,inputContext:()=>context});
-  const visual=async(action,params)=>{
+  const captureEvidence=async(frameId=randomUUID())=>{
    const frame=await native.request('displayCapture',{output:'base64',region:rect},12000);
    if(frame.backend!=='CGDisplayStream')throw Error('本地测试未取得规定的显示像素');
-   const result=await native.request('displayInput',{action,...params,visualEvidence:{frameId:randomUUID(),capturedAt:frame.capturedAt,displayRect:bounds,region:rect}},12000);
-   evidence.steps.push({action,via:'desktop-native/displayInput',captureBackend:frame.backend,...result});return result;
+   return {frameId,capturedAt:frame.capturedAt,displayRect:bounds,region:rect};
+  };
+  const visual=async(action,params)=>{
+   const proof=await captureEvidence();
+   const result=await native.request('displayInput',{action,...params,visualEvidence:proof},12000,
+    {...(['click','scroll'].includes(action)?{refreshVisualEvidence:()=>captureEvidence(proof.frameId)}:{})});
+   evidence.steps.push({action,via:'desktop-native/displayInput',captureBackend:'CGDisplayStream',...result});return result;
   };
   // The starting pointer may be across a large display. Move first, then take
   // a fresh receiver-only frame before committing the click; retain the same
@@ -40,9 +45,18 @@ async function runLocalTest({BrowserWindow,boper,lease,screen,parent,getScene}){
   evidence.selectAllExact=await win.webContents.executeJavaScript('(()=>{const t=document.querySelector("textarea");return t.selectionStart===0&&t.selectionEnd===t.value.length})()');
   if(!evidence.selectAllExact)throw Error('本地接收窗口未确认 Cmd+A');
   await visual('key',{key:'right'});await delay(1100);
+  const scrollStart=await win.webContents.executeJavaScript('(()=>{const t=document.querySelector("textarea");t.value=Array.from({length:100},(_,i)=>"Synthetic scroll row "+i).join("\\n");t.scrollTop=1000;return t.scrollTop})()');
   await visual('scroll',{...point,deltaY:-120});await delay(1100);
+  const scrollEnd=await win.webContents.executeJavaScript('({top:document.querySelector("textarea").scrollTop,deltas:window.wheelDeltas})');
+  evidence.scrollDirection={requestedDeltaY:-120,startTop:scrollStart,endTop:scrollEnd.top,observed:scrollEnd.top>scrollStart?'down':scrollEnd.top<scrollStart?'up':'none',wheelDeltas:scrollEnd.deltas};
   evidence.wheelEvents=await win.webContents.executeJavaScript('window.wheelEvents');
   if(evidence.wheelEvents<1)throw Error('本地接收窗口未收到虚拟滚轮');
+  if(evidence.scrollDirection.observed!=='down')throw Error('本地接收窗口滚轮方向与负数向下的工具契约不符');
+  const reverseStart=await win.webContents.executeJavaScript('(()=>{const t=document.querySelector("textarea");t.scrollTop=1000;window.wheelDeltas=[];return t.scrollTop})()');
+  await visual('scroll',{...point,deltaY:120});await delay(1100);
+  const reverseEnd=await win.webContents.executeJavaScript('({top:document.querySelector("textarea").scrollTop,deltas:window.wheelDeltas})');
+  evidence.scrollReverseDirection={requestedDeltaY:120,startTop:reverseStart,endTop:reverseEnd.top,observed:reverseEnd.top>reverseStart?'down':reverseEnd.top<reverseStart?'up':'none',wheelDeltas:reverseEnd.deltas};
+  if(evidence.scrollReverseDirection.observed!=='up')throw Error('本地接收窗口滚轮方向与正数向上的工具契约不符');
   await execute('drag',{fromX:point.x-100,fromY:point.y,toX:point.x+80,toY:point.y,button:'left'});await delay(1100);
   const drag=await win.webContents.executeJavaScript('({dragMoves:window.dragMoves,buttons:window.lastButtons,x:window.lastPointer?.x,y:window.lastPointer?.y})');
   evidence.dragMoves=drag.dragMoves;evidence.dragEndError=Math.hypot(drag.x-point.x-80,drag.y-point.y);

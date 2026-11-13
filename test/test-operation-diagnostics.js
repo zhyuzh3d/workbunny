@@ -4,6 +4,13 @@ const fs=require('node:fs/promises'),os=require('node:os'),path=require('node:pa
 const trace=require('../src/main/operation-diagnostics');
 const {fixture,paint}=require('./support/visual-fixture.cjs');
 async function temporary(t){const parent=await fs.mkdtemp(path.join(os.tmpdir(),'bunny-operation-evidence-'));t.after(()=>fs.rm(parent,{recursive:true,force:true}));return path.join(parent,'diagnostics');}
+test('exact retained metadata is filtered before the timeline limit without expanding storage or ownership scope',async t=>{
+ const root=await temporary(t),session=crypto.randomUUID(),incidentId='a'.repeat(32),captureId='b'.repeat(32),target={schema:'bunny.operation-diagnostic/v1',session,seq:1,at:10,monoUs:10,stage:'evidence-retained',incidentId,captureId,taskId:trace.ref('fixture-task'),operationId:trace.ref('fixture-operation')};
+ const later=Array.from({length:700},(_,i)=>({...target,seq:i+2,at:i+11,monoUs:i+11,stage:'operation-receipt',captureId:'c'.repeat(32)}));await fs.mkdir(root,{mode:0o700});await fs.writeFile(path.join(root,'events-'+crypto.randomUUID()+'.ndjson'),[target,...later].map(e=>JSON.stringify(e)).join('\n'),{mode:0o600});
+ assert(!(await trace.readTimeline(root,{limit:512})).events.some(e=>e.seq===1));
+ const exact=await trace.readTimeline(root,{from:0,to:1000,limit:1,session,incidentId,captureId});assert.equal(exact.events.length,1);assert.equal(exact.events[0].seq,1);assert.equal(exact.events[0].taskId,target.taskId);assert.equal(exact.events[0].operationId,target.operationId);
+ assert.equal((await trace.readTimeline(root,{session,incidentId,captureId:'d'.repeat(32)})).events.length,0);assert.equal((await trace.readTimeline(root,{from:11,session,incidentId,captureId})).events.length,0);await assert.rejects(trace.readTimeline(root,{session:'invalid'}));
+});
 test('actual visual sequence links capture, VLM, frame, preflight and one acknowledged input without private content',async()=>{
  const recorder=new trace.OperationDiagnostics(),h=fixture();
  await trace.using(recorder,()=>trace.scope({taskId:'task-private-name',operationId:'operation-one'},async()=>{
@@ -123,4 +130,10 @@ test('real operation ledger scopes propagate into the native request and failure
  await trace.using(recorder,()=>assert.rejects(ledger.execute({task,call:{tool:'fixture.direct',key:'once',args:{}},isCurrent:()=>true}),/private-error-body/));
  const events=recorder.events;for(const stage of ['operation-intent','operation-dispatch','native-dispatch','native-error','operation-error','incident'])assert(events.some(e=>e.stage===stage),stage);
  assert(events.every(e=>e.taskId===trace.ref(task.id)&&e.operationId));assert.equal(events.find(e=>e.stage==='native-error').status,'uncertain');assert(!JSON.stringify(events).match(/private-error-body|private-input-body|private-task-goal/));assert.equal(Object.values(task.operations)[0].status,'intent');await native.close();
+});
+test('native outcome diagnostics retain bounded effect counts without input or target contents',()=>{
+ const recorder=new trace.OperationDiagnostics();
+ recorder.record('native-error',{code:'E_NATIVE_TIMEOUT',inputOutcome:{dispatched:true,moved:true,reportsSubmitted:3,reportsAttempted:4,completion:'unknown',text:'private-canary',recipient:'private-canary',clipboard:'private-canary'}});
+ assert.deepEqual(recorder.events[0].inputOutcome,{dispatched:true,moved:true,reportsSubmitted:3,reportsAttempted:4,completion:'unknown'});
+ assert(!JSON.stringify(recorder.events).includes('private-canary'));
 });

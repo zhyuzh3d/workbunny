@@ -49,7 +49,7 @@ async function main() {
   const mainSource = fs.readFileSync(path.resolve('src/main/index.js'), 'utf8');
   const handler = mainSource.slice(mainSource.indexOf("ipcMain.handle('pet:interact'"), mainSource.indexOf("ipcMain.handle('pet:init'"));
   vm.runInNewContext(handler, { ipcMain: { handle(name, fn) { ipcMain.handle(name, (event, request) => { requests.push(request); return fn(event, request); }); } },
-    win, config, embodiment, speakerFilter: { enrollment: null }, Date, Set, desktop: null, busy: false, speaking: false, lastSpokeAt: -Infinity, quietUntil: 0,
+    win, config, embodiment, activeThought: null, interruptDialogue() {}, speakerFilter: { enrollment: null }, Date, Set, desktop: null, busy: false, speaking: false, lastSpokeAt: -Infinity, quietUntil: 0,
     interactions: new Interactions({ clock: () => now += 8000, random: () => 0 }), presentedReplies: new Map(), publishWebSources() {},
     send: (type, payload) => win.webContents.send('pet:ev', { type, ...payload }), speechQueue: queue, pumpSpeech() {},
   });
@@ -132,7 +132,7 @@ async function main() {
       win.webContents.sendInputEvent({type:'mouseDown',x:blank.x,y:blank.y,button:'left',clickCount:1});
       win.webContents.sendInputEvent({type:'mouseUp',x:blank.x,y:blank.y,button:'left',clickCount:1});await delay(100);
       assert.equal(requests.length,beforeBlank,'dialogue-only space does not interact with character');
-      assert.deepEqual(hits.at(-1), { inside: true, taskUi: false }, 'dialogue space captures the pointer as regular UI');
+      assert.deepEqual(hits.at(-1), { inside: true, taskUi: false, ui: true }, 'dialogue space captures the pointer as regular UI');
       const menuStart=menus.length;
       win.webContents.sendInputEvent({type:'mouseDown',x:blank.x,y:blank.y,button:'right',clickCount:1});
       win.webContents.sendInputEvent({type:'mouseUp',x:blank.x,y:blank.y,button:'right',clickCount:1});await delay(100);

@@ -150,6 +150,8 @@ zsh tools/run-dev.sh
 
 开发资料保存在独立的 `.data/dev`。首次解锁时按提示完成系统钥匙串授权。提交代码和反馈时请使用合成或脱敏数据。
 
+实验、测试和调试默认使用开发版。BOPER 支持任意本机程序用24字符 KEY 接入，相同 KEY 可主动共享控制组；开发版不要求 Bunny 宿主签名。准备其原生组件使用 `zsh tools/prepare-dev-boper.sh`，然后在开发版的键鼠设置中启用或更新后台服务。调用方式见 [BOPER 接口说明](native/boper/README.md)。
+
 ### 测试与打包
 
 ```sh

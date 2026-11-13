@@ -7,6 +7,10 @@ app.setPath('userData',path.join(tmp,'userData'));
 const renderer = path.resolve('src/renderer'), out = path.resolve('.cache/ui-upgrade'); fs.mkdirSync(out,{recursive:true});
 let cfg = {ui:{dialogueVisible:false,dialogueBehind:false},memory:{enabled:true,scene:'life'},buddy:{name:'Bunny',ownerName:'主人'}};
 let messages = Array.from({length:450},(_,i)=>({id:String(i).padStart(4,'0'),ts:Date.UTC(2020,0,1)+Math.floor(i/2)*86400000,role:i%2?'assistant':'user',text:i===449?'这是最新的消息，消息层和底部控件保持同宽。':'历史对话 '+i+'。可以逐页向上浏览，也可以返回最新消息。',scene:i%3===0?'work':'life'}));
+messages[448].text = '主人第一行\n \n主人第二行';
+messages[449].text = '回复第一行\r\n \t\r\n回复第二行\n\nhttps://example.com/result';
+messages[449].taskId = 'synthetic-task';
+messages[449].links = [{ url: 'https://example.com/result' }];
 let delayNext=0, failNext=false, win, requests=0;
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 function event(value){win.webContents.send('fixture:event',value);}
@@ -31,7 +35,7 @@ fs.writeFileSync(path.join(tmp,'index.html'),html);
 const evaluate=code=>win.webContents.executeJavaScript(code,true);
 async function until(code,label){const end=Date.now()+6000;while(Date.now()<end){if(await evaluate(code))return;await delay(25);}throw Error('Timed out: '+label);}
 const state=()=>evaluate('window.overlay.state');
-async function snapshot(name){await delay(40);fs.writeFileSync(path.join(out,name+'.png'),(await win.webContents.capturePage()).toPNG());}
+async function snapshot(name){if(process.env.BUNNY_SKIP_FIXTURE_SNAPSHOTS)return;await delay(40);fs.writeFileSync(path.join(out,name+'.png'),(await win.webContents.capturePage()).toPNG());}
 async function main(){
  await app.whenReady();win=new BrowserWindow({width:896,height:600,show:false,webPreferences:{preload:path.join(tmp,'preload.cjs'),contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});
  win.webContents.on('console-message',(_e,level,message)=>{if(level>=2)console.error(message);});
@@ -55,6 +59,10 @@ async function main(){
  assert.equal(await evaluate('document.querySelector("#dialogueBtn .dialogue-mode-icon").tagName.toLowerCase()'), 'svg');
 
  await evaluate('document.getElementById("dialogueBtn").click()');await until('document.querySelector("[data-id=\\"0449\\"]")&&!window.overlay.state.loading','latest page');
+ assert.equal(await evaluate('document.querySelector("[data-id=\\"0448\\"] .dialogue-text").textContent'), messages[448].text, 'owner text keeps its blank lines');
+ assert.equal(await evaluate('document.querySelector("[data-id=\\"0449\\"] .dialogue-text").textContent'), '回复第一行\n回复第二行\nhttps://example.com/result', 'reply display removes blank lines');
+ assert.equal(await evaluate('document.querySelector("[data-id=\\"0449\\"] .result-link").textContent'), 'https://example.com/result', 'result link remains a control');
+ assert.equal(messages[449].text, '回复第一行\r\n \t\r\n回复第二行\n\nhttps://example.com/result', 'stored reply remains unchanged');
  assert.equal(await evaluate('document.getElementById("dialogueBtn").dataset.mode'),'behind');
  await evaluate('testBubble.show("气泡正常说话",60000)');
  assert.equal(await evaluate('getComputedStyle(document.getElementById("bubble")).display!=="none"'),true,'speech bubble stays visible over behind mode');

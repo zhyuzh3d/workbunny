@@ -2,10 +2,13 @@
 const {fields,text}=require('./agent-contract');
 const {deliveryText}=require('./task-result');
 const {resultLinks}=require('./result-links');
+const collectedDelivery=task=>task.delivery?.channel==='wechat'&&!!task.delivery.recipient&&!!task.state?.result;
 function registerResultTools(tools,{deliver}){
- tools.register({name:'result.deliver',description:'向本任务指定的微信对象交付已回收成果，不重做工作，不重复播报。',effect:'write',capabilities:['conversation.send'],
+ tools.register({name:'result.deliver',description:'交付宿主已回收至Task.state.result的成果，仅在成果已设立且原Task.delivery为微信时可用。工作已完成、只差最终交付时输出done:true和summary，由宿主先保存成果再自动交付，不另建交付Action。收件人由原Task.delivery.recipient绑定，独立于Task.subjects；args仅为{message:已回收成果原文}，不接受application或recipient参数，不重做工作，不重复播报。',effect:'write',capabilities:['conversation.send'],available:collectedDelivery,continuationPolicy:(task,input)=>require('./effect-review').boundedPolicy(task,input),
+ inputSchema:{type:'object',properties:{message:{type:'string',minLength:1,maxLength:3000,description:'已回收的实际成果正文；收件人沿用原Task.delivery，不在args中指定。'}},required:['message'],additionalProperties:false},
  validate:v=>{fields(v,['message'],'成果交付');return {message:text(v.message,'成果消息',3000)};},execute:(a,c)=>deliver(a.message,c.task,c.signal,undefined,c.operationId)});
- tools.register({name:'result.attach',description:'发送当前成果清单里的真实文件，核对文件指纹以及新增文件卡片。',effect:'write',capabilities:['conversation.send'],
+ tools.register({name:'result.attach',description:'发送宿主已回收至Task.state.result.artifacts的真实文件，仅在成果已设立且原Task.delivery为微信时可用。工作完成后输出done:true及真实文件清单，由宿主自动交付；收件人由原Task.delivery.recipient绑定，args仅为{index:文件序号}，不接受application或recipient参数。核对文件指纹以及新增文件卡片。',effect:'write',capabilities:['conversation.send'],available:collectedDelivery,continuationPolicy:(task,input)=>require('./effect-review').boundedPolicy(task,input),
+ inputSchema:{type:'object',properties:{index:{type:'integer',minimum:0,maximum:3,description:'当前成果artifacts中的真实文件序号。'}},required:['index'],additionalProperties:false},
  validate:v=>{fields(v,['index'],'成果附件');if(!Number.isInteger(v.index)||v.index<0||v.index>3)throw Error('附件序号无效');return v;},execute:(a,c)=>deliver(null,c.task,c.signal,a.index,c.operationId)});
 }
 async function deliverResult({task,call,checkpoint,report}){

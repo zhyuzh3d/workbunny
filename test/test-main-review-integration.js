@@ -5,9 +5,14 @@ const owner={role:'owner',verified:true,sources:['synthetic-owner'],scene:'life'
 const suspension={assessmentSummary:'Local interpretation conflicts with retained evidence and existing paths could not resolve it',attemptedPaths:['independent local fixture checks'],remainingUncertainty:'The old premise can be wrong',requestedHelp:'Find an alternate strategy for the same goal'};
 const guidance={type:'replan',rationaleSummary:'The initial premise was wrong; use the independent fixture result',sourceRefs:[],guidance:{hypotheses:['The first interpretation was wrong'],alternativeStrategies:['Use the independent fixture path'],verificationIdeas:['Read the alternate result and compare it to the original criterion']}};
 const flush=async()=>{for(let i=0;i<8;i++)await new Promise(resolve=>setImmediate(resolve));};
-function service(request){
+async function finishReview(h,id){
+ const runtime=h.agent.runtime;assert.equal(runtime.tasks.get(id).state.completionProposal.status,'pending');
+ runtime.mainReviews.inspect();const active=runtime.mainReviews.active;if(active)await active.work;await flush();
+ assert.equal(runtime.tasks.get(id).state.completionProposal.status,'accepted');
+}
+function service(request,{reviewTask}={}){
  const records=new Map(),reviews=[],reports=[];
- const agent=new AgentService({request,reviewTask:async args=>{reviews.push(args);return guidance;},autoSchedule:false,ready:()=>true,epoch:()=>1,
+ const agent=new AgentService({request,reviewTask:async args=>{reviews.push(args);return reviewTask?reviewTask(args):args.completionProposal?{type:'accept',rationaleSummary:'The actual retained result satisfies the authorized goal',sourceRefs:[],guidance:{}}:guidance;},autoSchedule:false,ready:()=>true,epoch:()=>1,
   scene:{metrics:{},native:{request:async()=>({})},close:async()=>{}},journal:{put:async task=>records.set(task.id,structuredClone(task)),list:async()=>[...records.values()].map(structuredClone),authorized:async()=>true},
   report:async report=>reports.push(report)});
  return {agent,records,reviews,reports};
@@ -25,7 +30,21 @@ for(const skill of ['software.execute','system.operate'])test(skill+' consumes m
  const started=await h.agent.start({skill,goal:'Confirm the authorized fixture outcome',subjects:[{application:skill==='system.operate'?'system':'workbuddy'}]},owner);assert(started.ok,started.error);
  await h.agent.runtime.tick(started.id);let task=h.agent.runtime.tasks.get(started.id);const actionId=Object.keys(task.actionRuns)[0];assert.equal(task.status,'paused');
  await h.agent.runtime.tick();await flush();await h.agent.runtime.tick(started.id);await h.agent.runtime.tick(started.id);task=h.agent.runtime.tasks.get(started.id);
- assert.equal(task.status,'completed');assert.equal(executions,1);assert.equal(h.reviews.length,1);assert.equal(Object.keys(task.actionRuns)[0],actionId);assert(sawGuidance);assert.equal(h.reports.length,1);
+ await finishReview(h,started.id);assert.equal(task.status,'completed');assert.equal(executions,1);assert.equal(h.reviews.length,2);assert(h.reviews[1].completionProposal);assert.equal(Object.keys(task.actionRuns)[0],actionId);assert(sawGuidance);assert.equal(h.reports.length,1);
+});
+test('a rejected actual planner result is revised by the same task brain, with one final callback and no duplicate report',async t=>{
+ let requests=0,callbacks=0,terminalReviews=0;
+ const h=service(async opts=>{
+  const input=JSON.parse(opts.messages[1].content[0].text);requests++;
+  if(requests===2){assert(input.recoveryGuidance.reviewedResult);assert(input.recoveryGuidance.alternativeStrategies.length);}
+  return {response:{text:JSON.stringify({done:true,summary:requests===1?'Initial actual result':'Revised actual result after broader guidance'})}};
+ },{reviewTask:async args=>{assert(args.completionProposal);return ++terminalReviews===1?guidance:{type:'accept',rationaleSummary:'The revised result now meets the goal',sourceRefs:[],guidance:{}};}});t.after(()=>h.agent.close());
+ h.agent.runtime.completed=async()=>{callbacks++;};
+ const started=await h.agent.start({skill:'system.operate',goal:'Answer from the already supplied synthetic context',context:'All necessary synthetic facts are present',subjects:[{application:'system'}]},owner);
+ await h.agent.runtime.tick(started.id);assert.equal(h.agent.runtime.tasks.get(started.id).status,'paused');
+ h.agent.runtime.mainReviews.inspect();await h.agent.runtime.mainReviews.active.work;await flush();assert.equal(h.agent.runtime.tasks.get(started.id).status,'waiting');
+ await h.agent.runtime.tick(started.id);await finishReview(h,started.id);
+ const task=h.agent.runtime.tasks.get(started.id);assert.equal(task.status,'completed');assert.equal(task.state.result.summary,'Revised actual result after broader guidance');assert.equal(requests,2);assert.equal(terminalReviews,2);assert.equal(callbacks,1);assert.equal(h.reports.length,1,'the original already-delivered report is retained without replay');assert.equal(task.state.previousCompletionResults.length,1);
 });
 test('the conversation model can self-suspend an event, then consume guidance and send one verified reply',async t=>{
  let phase=0,sends=0,sawGuidance=false;
@@ -39,7 +58,7 @@ test('the conversation model can self-suspend an event, then consume guidance an
  const task=h.agent.runtime.tasks.get(started.id);task.state.conversations={'wechat:synthetic contact':{cursor:{ready:true,recent:[]},introduced:true,progress:{},summary:''}};
  await h.agent.runtime.enqueue(started.id,{key:'synthetic-event',subjectKey:require('../src/main/conversation-skill').subjectKey(task.subjects[0]),type:'conversation.messages',messages:[{kind:'text',text:'synthetic question',direction:'incoming',incomingVerified:true}]});
  await h.agent.runtime.tick(started.id);assert.equal(task.status,'paused');assert.equal(sends,0);await h.agent.runtime.tick();await flush();await h.agent.runtime.tick(started.id);
- assert.equal(task.status,'completed');assert.equal(sends,1);assert(sawGuidance);assert.equal(h.reviews.length,1);assert.equal(task.inbox.length,0);
+ await finishReview(h,started.id);assert.equal(task.status,'completed');assert.equal(sends,1);assert(sawGuidance);assert.equal(h.reviews.length,2);assert(h.reviews[1].completionProposal);assert.equal(task.inbox.length,0);
 });
 test('WorkBuddy monitor signals are routed into the canonical review and do not duplicate outside-task alerts',async t=>{
  const h=service(async()=>{throw Error('no extra task model needed');});t.after(()=>h.agent.close());

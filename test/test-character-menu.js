@@ -2,19 +2,22 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 test('character menu exposes native toggles and checked scene, avatar and size submenus',async()=>{
  const code=fs.readFileSync('src/main/index.js','utf8'),start=code.indexOf('function buildCharacterMenu()'),end=code.indexOf("function rebuildTray()",start),patches=[],events=[];
- const cfg={ui:{dialogueVisible:true},avatar:'a',voice:{enabled:true,alwaysListen:true},window:{scale:.5},memory:{scene:'life'}};
- const context={config:{load:()=>cfg},Menu:{buildFromTemplate:items=>items},applySettings:async p=>patches.push(p),send:(...e)=>events.push(e),openPanel:()=>{},SCALES:[.25,.5,1,1.5,2],activeAvatarPack:()=>null,clampScale:v=>v,SCALE_LABELS:{.25:'50%',.5:'100%',1:'全身',1.5:'150%',2:'200%'},currentScene:()=>cfg.memory.scene,scopePolicy:{LABELS:{private:'私聊',life:'生活',work:'工作'}},avatarList:()=>[{key:'a',label:'A'},{key:'b',label:'B'}],speaking:true,speechQueue:[],stopSpeaking:(...args)=>events.push(['stopSpeaking',...args]),systemPreferences:{getMediaAccessStatus:()=> 'granted'},requestAsrPermission:async()=>{},startListen:()=>{},textInputOpen:false,setInteractive:()=>{},win:{focus:()=>{}}};
+ const cfg={ui:{dialogueVisible:true},avatar:'a',voice:{enabled:true,alwaysListen:true},window:{scale:.5,vrmFraming:'half'},memory:{scene:'life'}};
+ const context={config:{load:()=>cfg},Menu:{buildFromTemplate:items=>items},applySettings:async p=>patches.push(p),send:(...e)=>events.push(e),openPanel:()=>{},SCALES:[.25,.5,1.5,2],activeAvatarPack:()=>null,clampScale:v=>v,SCALE_LABELS:{.25:'50%',.5:'100%',1.5:'150%',2:'200%'},currentScene:()=>cfg.memory.scene,scopePolicy:{LABELS:{private:'私聊',life:'生活',work:'工作'}},avatarList:()=>[{key:'a',label:'A'},{key:'b',label:'B'}],speaking:true,speechQueue:[],stopSpeaking:(...args)=>events.push(['stopSpeaking',...args]),systemPreferences:{getMediaAccessStatus:()=> 'granted'},requestAsrPermission:async()=>{},startListen:()=>{},textInputOpen:false,setInteractive:()=>{},win:{focus:()=>{}}};
  vm.createContext(context);vm.runInContext(code.slice(start,end)+'\nglobalThis.menu=buildCharacterMenu();',context);
  const menu=context.menu,find=label=>menu.find(i=>i.label===label);
  assert.equal(find('静音不说话').checked,false);assert.equal(find('关闭耳朵').checked,false);
  assert.equal(find('显示对话内容').checked,true);assert.equal(find('显示文字输入').checked,false);
  assert.deepEqual(Array.from(find('对话场景').submenu,i=>i.checked),[false,true,false]);
  assert.deepEqual(Array.from(find('形象').submenu,i=>i.checked),[true,false]);
- assert.deepEqual(Array.from(find('外观大小').submenu,i=>i.checked),[false,true,false,false,false]);
+ assert.deepEqual(Array.from(find('形象大小').submenu,i=>i.checked),[false,true,false,false]);
+ assert.deepEqual(Array.from(find('形象取景框').submenu,i=>i.checked),[true,false]);
  find('显示对话内容').click({checked:false});find('显示文字输入').click({checked:true});find('形象').submenu[1].click();
  await Promise.resolve();assert.equal(patches[0].ui.dialogueVisible,false);assert.equal(patches[1].avatar,'b');assert.equal(events[0][0],'ask');assert.equal(events[0][1].open,true);
  find('静音不说话').click({checked:true});await find('关闭耳朵').click({checked:true});
  assert.equal(patches[2].voice.enabled,false);assert.equal(patches[3].voice.alwaysListen,false);
+ find('形象取景框').submenu[1].click();assert.equal(patches[4].window.vrmFraming,'full');
+ context.activeAvatarPack=()=>({});context.menu=context.buildCharacterMenu();assert.equal(context.menu.some(i=>i.label==='形象取景框'),false);
 });
 
 test('character avatar menu groups personal avatars after official avatars only when needed', () => {

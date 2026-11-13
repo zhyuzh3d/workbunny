@@ -35,6 +35,7 @@ test('invalid catalogs are rejected before publication', () => {
     d => { d.actions[1].category = 'missing'; },
     d => { d.actions[1].duration = Infinity; },
     d => { d.actions[1].weight = -1; },
+    d => { d.actions[1].performanceMode = 'guess'; },
     d => { d.actions[0].loop = false; },
     d => { d.actions.push({ ...d.actions[0] }); },
     d => { d.categories[1].id = 'idle'; },
@@ -64,4 +65,14 @@ test('an explicitly requested manual-only action remains discoverable without ra
   assert.equal(c.select('pet_one_jump').key, 'pet_one_jump');
   assert.equal(c.select('pet_one_jump', { autonomous: true }), null);
   assert.equal(c.prompt('开心跳').find(group => group.category === 'cheer').actions[0].id, 'pet_one_jump');
+});
+
+test('optional performance metadata is retained independently of the original loop processing flag', () => {
+  const source = fixture(); source.actions[1].performanceMode = 'cycle';
+  const catalog = new AvatarActionCatalog(source);
+  const motion = catalog.select('pet_one_jump', { exact: true });
+  assert.equal(motion.performanceMode, 'cycle');
+  assert.equal(motion.loop, false);
+  source.actions[1].performanceMode = 'once';
+  assert.equal(motion.performanceMode, 'cycle');
 });

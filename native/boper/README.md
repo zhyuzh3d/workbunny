@@ -10,10 +10,31 @@ copies the helper to `/Library/PrivilegedHelperTools/cn.haminn.workbunny.boper-h
 and `cn.haminn.workbunny.boper-hid.root.plist` to
 `/Library/LaunchDaemons/cn.haminn.workbunny.boper-hid.plist`. Both installed files
 are root:wheel, regular non-symlink files without group/other write permissions.
-The source SMAppService plist is retained only for legacy migration. Signing
-identifiers are fixed by the build policy: `cn.haminn.workbunny`, `.boper-runtime`, and `.boper-hid`. The build
-pins a certificate SHA1 from `WORKBUNNY_BOPER_CERT_SHA1`, or the local
-`WORKBUNNY_SIGN_IDENTITY` certificate. Ad-hoc authentication is rejected.
+The source SMAppService plist is retained only for legacy migration. BOPER's helper and runtime keep their fixed component signing requirements. Caller applications are unrestricted: no Bunny bundle identity, caller signature or sealed resource check is required. The service accepts clients in the current unlocked local login session. Each client supplies a 24-character KEY matching `[A-Za-z0-9_-]{24}`. Equal keys intentionally identify one shared control group. The KEY is caller-managed; it is never returned in status or logs.
+
+
+## Public local client
+
+Development tests use source mode by default. Prepare native components with `zsh tools/prepare-dev-boper.sh`, run `zsh tools/run-dev.sh`, then enable/update BOPER in the keymouse settings. This signs only BOPER components and leaves Electron's permissions and source execution intact.
+
+Any Node/Electron program may use the API:
+
+```js
+const { BoperClient, createKey } = require('./src/main/boper-client');
+const key = createKey(); // Persist once; use the same key in cooperating programs.
+const client = new BoperClient({ key });
+console.log(await client.status());
+// Supply desktop display bounds in logical points, obtained by the caller.
+await client.execute({ action: 'move', params: { x: 100, y: 100 } }, {
+  displayBounds: [{ x: 0, y: 0, width: 1920, height: 1080 }]
+});
+await client.release(); // Release this client's current operation session.
+await client.close();
+```
+
+A second program using the same key may call `status()` and `stop()` for the shared group. `close()` only releases its own operation session; closing a status observer does not stop another client. Different keys cannot stop or renew the current group. An explicit stale `inputSessionId` is rejected so delayed cleanup cannot stop a newer session, even in the same group. There is one live input session globally; simultaneous execution receives a busy result before input, without an automatic retry or backlog.
+
+`node tools/boperctl.cjs keygen` generates a KEY. For language-independent access, `node tools/boperctl.cjs` reads one JSON request from stdin and returns one JSON result. Supported requests are `{key, action:"status"}`, `{key, action:"stop"}`, and `{key, action:"execute", operation:{action,params}, displayBounds:[...]}`. Pass the key on stdin, not in command-line arguments. Execution releases its session before CLI exit. No network listener is opened.
 
 ## Ordinary process protocol
 

@@ -41,3 +41,13 @@ test('a continuation service ignoring its signal cannot hold the worker lane or 
  let release;const f=fixture(()=>new Promise(resolve=>release=resolve));f.keepalive.timeoutMs=15;f.keepalive.inspect(f.runtime);f.setTime(60000);f.keepalive.inspect(f.runtime);const entry=[...f.keepalive.pending.values()][0];await entry.work;
  assert.equal(f.keepalive.pending.size,0);assert.equal(f.task.nextCheckAt,60000);assert.equal(f.task.state.recoveryGuidance.source,'keepalive');const guidance=structuredClone(f.task.state.recoveryGuidance);release({action:'ask_owner',nextStep:'late'});await flush();assert.deepEqual(f.task.state.recoveryGuidance,guidance);
 });
+test('quiet subscriptions, timers and unmet condition routes stay passive while real idle actions still receive attention',async()=>{
+ const f=fixture();f.task.state.goalPlan={schema:require('../src/main/goal-actions').SCHEMA,goalRevision:2};
+ f.task.actionRuns.watch={id:'watch',subscription:true,status:'waiting',keepalive:{lastActivityAt:0},progress:{lastProgressAt:0,repeats:9}};
+ f.task.actionRuns.timer={id:'timer',status:'waiting',keepalive:{lastActivityAt:0,wait:{reason:'timer',until:5000}},progress:{waitReason:'timer'}};
+ f.task.actionRuns.condition={id:'condition',goalAction:true,goalRevision:2,key:'condition',status:'waiting',after:{actionKey:'source',path:'changed',equals:true},keepalive:{lastActivityAt:0}};
+ for(const at of [0,60000,120000]){f.setTime(at);f.keepalive.inspect(f.runtime);await flush();}
+ assert.equal(f.calls,0);assert.equal(f.keepalive.nextWake(f.runtime,f.task,120000),Infinity);assert.equal(f.task.state.recoveryGuidance,undefined);
+ const active=f.task.actionRuns.active={id:'active',status:'waiting',keepalive:{lastActivityAt:0},progress:{lastProgressAt:0}};
+ f.keepalive.inspect(f.runtime);await flush();assert.equal(f.calls,1);assert.equal(active.recovery.source,'keepalive');assert.equal(f.task.actionRuns.watch.recovery,undefined);
+});

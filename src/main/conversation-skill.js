@@ -13,13 +13,14 @@ function validateConversationParameters(spec){
   if(p.questions!==undefined&&(!Array.isArray(p.questions)||p.questions.length>12||p.questions.some(q=>typeof q!=='string'||!q.trim()||q.length>300)))throw new Error('询问目标不合法');
   return spec;
 }
-function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurrent=()=>true,selfChannel=()=>false,observationBlocked=()=>false,ownerBindings=()=>false,sentMessages=()=>[]}){
-  return {
+function conversationSkill({brain,canOperate,request,channelDialogue=false,decisionCurrent=()=>true,selfChannel=()=>false,observationBlocked=()=>false,ownerBindings=()=>false,sentMessages=()=>[]}){
+  const skill={
     id:'conversation.manage',title:'会话代管',version:1,subjectApplications:['wechat'],description:'持续照看指定会话、按上下文回复、主动询问并跟进主人目标，或接收已绑定主人通道的交办。',
     activeAction:task=>task.subjects.some(subject=>{
       const state=task.state.conversations?.[subjectKey(subject)];
       return !state?.cursor?.ready||task.parameters.behavior==='inquiry'&&(!state.introduced||(task.state.goalRevision||0)>(state.goalRevision||0));
     })?'prepare:'+(task.state.goalRevision||0):null,
+    activeScope:task=>task.subjects.length===1?'subject:'+subjectKey(task.subjects[0]):null,
     parameters:{behavior:'notify只通知 / reply等来信再回复 / inquiry主动开口问清目标 / owner已绑定主人',questions:'可选问题列表',language:'可选交流语言',openingMessage:'可选指定开场原文',minReplySeconds:'仅主人明确要求间隔时填写10到300秒，否则省略并尽快回复'},
     tools:['conversation.observe','conversation.open','conversation.transcribe','conversation.send','memory.related','owner.dispatch',...(channelDialogue?['conversation.save']:[])],
     capabilities:['screen.read','screen.input','conversation.read','conversation.send','memory.read','owner.command'],
@@ -41,12 +42,33 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
         return decision;
       };
       const stateFor=subject=>task.state.conversations[subjectKey(subject)]??=( {subject,cursor:{},introduced:false,progress:{},summary:''} );
+      const finish=async(summary,key)=>{
+        if(task.delivery){
+          task.state.result??={schema:'bunny.result/v1',revision:1,summary,text:summary,artifacts:[],collectedAt:clock()};await checkpoint();await require('./result-delivery').deliverResult(ctx);
+        }else await report(summary,key);
+        return {status:'completed',note:'本次会话目标已完成',state:task.state};
+      };
+      if(task.state.result&&task.delivery)return finish(task.state.result.summary,'conversation-result');
       const wait=(note,consumeEvent=true,active=false)=>({status:'waiting',note,consumeEvent,nextCheckAt:clock()+(active?task.schedule.activeIntervalSeconds:task.schedule.intervalSeconds)*1000,state:task.state});
       const waitGui=(note,consumeEvent=false)=>({...wait(note,consumeEvent),waitReason:'gui',nextCheckAt:clock()+1000});
       const send=async(subject,state,message,key,eventKey)=>{
         const result=await call({tool:'conversation.send',key,eventKey,args:{...subject,message}});
         const cursor=new ConversationCursor(state.cursor);cursor.noteSent(result.receipt?.sentText||message,result.receipt);state.cursor=cursor.snapshot();state.introduced=true;state.lastSentAt=result.receipt?.submittedAt||clock();
         await checkpoint();return result;
+      };
+      const assessSentGoal=async(subject,state,decision,sent,sendKey)=>{
+        if(task.completion!=='goal')return;
+        if(!sent?.verified||!sent.receipt)throw Object.assign(Error('目标评估尚缺已核验的发送回执'),{code:'E_CONVERSATION_RECEIPT',dispatched:false});
+        const goalRevision=task.state.goalRevision||0,queued=task.inbox.find(item=>item.key===event.key);
+        let assessment=queued?.completionAssessment||event.completionAssessment;
+        if(!assessment||assessment.goalRevision!==goalRevision||assessment.sendKey!==sendKey){
+          const result=await decide({task,subject,conversation:state,incoming:event.messages||[],phase:'post-send',deliveryReceipt:{verified:true,receipt:sent.receipt},replyDecision:decision,signal});
+          if((task.state.goalRevision||0)!==goalRevision)throw Object.assign(Error('发送后目标已更新，丢弃旧评估'),{code:'E_ACTION_SUPERSEDED',dispatched:false});
+          assessment={goalRevision,sendKey,completed:result.completed,summary:result.summary,progress:result.progress,unknown:result.unknown,assessedAt:clock()};
+          event.completionAssessment=assessment;if(queued)queued.completionAssessment=assessment;
+        }
+        state.completed=assessment.completed;state.summary=assessment.summary||state.summary;state.progress={...state.progress,...assessment.progress};state.unknown=assessment.unknown;
+        await checkpoint();
       };
       const dispatchAcknowledged=async(subject,event)=>{
         if(!channelDialogue||event.decision?.ownerAction?.type!=='task')return;
@@ -94,10 +116,11 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
           const cursor=new ConversationCursor(state.cursor),receipt=delivered.receipt;
           if(!receipt.operationId||!cursor.snapshot().consumedSentIds?.includes(receipt.operationId))cursor.noteSent(receipt.sentText||'',receipt);
           state.cursor=cursor.snapshot();state.introduced=true;state.lastSentAt=receipt.submittedAt||clock();
-          const prior=event.decision;if(prior){state.summary=prior.summary||state.summary;state.progress={...state.progress,...prior.progress};state.completed=prior.completed;state.unknown=prior.unknown;}
+          const prior=event.decision;if(prior){state.summary=prior.summary||state.summary;state.progress={...state.progress,...prior.progress};if(task.completion!=='goal')state.completed=prior.completed;state.unknown=prior.unknown;}
           await checkpoint();
           await dispatchAcknowledged(subject,event);
-          if(event.type!=='task.report'&&(task.completion==='first_match'||task.completion==='goal'&&task.subjects.every(s=>stateFor(s).completed))){await report(state.summary||'已核对本次回复送达','completed:'+event.key);return {status:'completed',note:'本次会话目标已完成',state:task.state};}
+          if(event.type!=='task.report')await assessSentGoal(subject,state,prior,delivered,deliveredKey);
+          if(event.type!=='task.report'&&(task.completion==='first_match'||task.completion==='goal'&&task.subjects.every(s=>stateFor(s).completed))){return finish(state.summary||'已核对本次回复送达','completed:'+event.key);}
           return wait('已核对本次回复送达，继续关注',true,true);
         }
         if(event.type==='task.report'){
@@ -135,7 +158,10 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
           await report(`${subject.recipient} 发来消息：${incoming.map(m=>m.text).join('\n')}`,event.key);
           return task.completion==='first_match'?{status:'completed',note:'已通知主人',state:task.state}:wait('已通知主人');
         }
-        if(incoming.some(m=>m.kind==='text'&&!(m.incomingVerified||(behavior==='owner'||selfChannel(subject))&&m.observedVerified))){
+        // Legacy bound-owner dispatch needs verified command input. Ordinary
+        // conversation uses the observation as data, including its uncertainty;
+        // authenticated channels enforce command authority in their own ingest.
+        if(behavior==='owner'&&!channelDialogue&&incoming.some(m=>m.kind==='text'&&!(m.incomingVerified||m.observedVerified))){
           if(!await canOperate(task))return waitGui('正在等待空闲，以重新核对新消息');
           let fresh=await call({tool:'conversation.observe',key:'verify-message:'+event.key+':'+task.counters.wakes,args:{...subject,force:true}});
           if(!fresh.headerMatched&&!fresh.unstable){
@@ -160,14 +186,14 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
             return retry;
           }
         }
-        if(!incoming.some(m=>m.kind==='text'||channelDialogue&&m.kind==='file'&&m.direction==='incoming'&&m.incomingVerified&&m.fileName)){
+        if(!incoming.length||behavior==='owner'&&!channelDialogue&&!incoming.some(m=>m.kind==='text')){
           await report(`${subject.recipient} 有一条需要核对的非文字消息，尚未自动回复。`,event.key);
           return wait('保留会话记录，等待下一次观察');
         }
         if(behavior==='owner'&&!channelDialogue){
           if(!ownerBindings(subject,task.authority))throw new Error('主人入口绑定已失效');
           if(!await canOperate(task))return waitGui('主人交办已排队，等待执行');
-          const accepted=await call({tool:'owner.dispatch',key:'owner:'+event.key,args:{...subject,text:incoming.map(m=>m.text).join('\n'),eventKey:event.key}});
+          const accepted=await call({tool:'owner.dispatch',key:'owner:'+event.key,args:{...subject,text:incoming.filter(m=>m.kind==='text'&&(m.incomingVerified||m.observedVerified)).map(m=>m.text).join('\n'),eventKey:event.key}});
           if(accepted.reply)await send(subject,state,accepted.reply,'owner-ack:'+event.key);
           return wait('已处理主人交办');
         }
@@ -208,10 +234,10 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
         await dispatchAcknowledged(subject,{...event,decision});
         task.state.responseTimings=[...(task.state.responseTimings||[]),{eventKey:event.key,recognizedAt:event.at,decisionAt:event.decisionAt,voiceMessages:incoming.filter(m=>m.fromVoice).length,submittedAt:sent.receipt?.submittedAt||clock(),verifiedAt:sent.receipt?.verifiedAt||clock()}].slice(-20);
         state.summary=decision.summary;state.progress={...state.progress,...decision.progress};state.unknown=decision.unknown;
-        state.completed=decision.completed;
+        if(task.completion!=='goal')state.completed=decision.completed;
+        await assessSentGoal(subject,state,decision,sent,deliveredKey);
         if(task.completion==='first_match'||task.completion==='goal'&&task.subjects.every(s=>stateFor(s).completed)){
-          await report(`${subject.recipient}：${decision.summary}${decision.unknown.length?'；尚未确认：'+decision.unknown.join('、'):''}`,'completed:'+event.key);
-          return {status:'completed',note:'本次会话目标已完成',state:task.state};
+          return finish(`${subject.recipient}：${state.summary}${state.unknown.length?'；尚未确认：'+state.unknown.join('、'):''}`,'completed:'+event.key);
         }
         return wait('已按上下文回复，继续关注',true,true);
       }
@@ -219,25 +245,31 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
       for(const subject of task.subjects){
         if(ctx.observationSubjectKey&&subjectKey(subject)!==ctx.observationSubjectKey)continue;
         const state=stateFor(subject),ownerChannel=behavior==='owner'||selfChannel(subject);
-        if(!state.cursor.ready&&!ctx.observeOnly){
-          if(!await canOperate(task))return waitGui('保留消息基线，等待空闲后打开指定会话并从全屏重新定位',true);
-          await call({tool:'conversation.open',key:(state.cursor.ready?'recover:':'baseline:')+task.counters.wakes+':'+subjectKey(subject),args:subject});
-        }
         const periodicRefresh=!ctx.observeOnly&&state.cursor.ready&&now-(state.lastFullObservationAt||0)>=60000;
         let view=await call({tool:'conversation.observe',key:`observe:${task.counters.wakes}:${subjectKey(subject)}`,args:{...subject,sampleId:task.id,...(ctx.recovery?.action==='change_method'?{force:true,relocate:true}:state.uncertainCount?{force:true,relocate:state.uncertainCount===1}:periodicRefresh||ctx.recovery?.action==='reobserve'?{force:true}:{})}});
         if(periodicRefresh&&!view.unstable&&!view.unavailable)state.lastFullObservationAt=now;
         if(!view.unavailable)task.state.lastCheckedAt=now;
         if(view.unavailable){return {status:'needs_attention',note:'会话应用异常，已停止相关操作；'+(view.reason||''),state:task.state};}
         const preview=view.headerMatched&&state.cursor.ready?new ConversationCursor(state.cursor).observe(view.messages||[],{ownerChannel,sentMessages:sentMessages(subject,task)}):null;
-        const needsLatest=!ctx.observeOnly&&view.latestPending&&state.cursor.ready&&!preview?.messages?.length;
+        const needsLatest=!ctx.observeOnly&&view.latestPending&&(!state.cursor.ready||!preview?.messages?.length);
         const unreadNeedsOpen=view.unread&&(!view.headerMatched||!preview?.messages?.length);
-        let justOpened=false;
+        let justOpened=false,openResult,openKey;
         if((!view.headerMatched||needsLatest||unreadNeedsOpen)&&!view.unstable){
           const reconcile=now-(state.lastReconcileAt||0)>=300000;
           if(!ctx.observeOnly&&(needsLatest||unreadNeedsOpen||!state.cursor.ready||reconcile)&&await canOperate(task)){
-            await call({tool:'conversation.open',key:`open:${task.counters.wakes}:${subjectKey(subject)}`,args:subject});state.lastReconcileAt=now;
+            openKey=`open:${task.counters.wakes}:${subjectKey(subject)}`;openResult=await call({tool:'conversation.open',key:openKey,args:subject});state.lastReconcileAt=now;
             justOpened=true;view=await call({tool:'conversation.observe',key:`opened:${task.counters.wakes}:${subjectKey(subject)}`,args:{...subject,sampleId:task.id,force:true}});
           }
+        }
+        if(justOpened&&!view.headerMatched&&!view.unstable&&!view.unavailable){
+          if(signal?.aborted||ctx.isLive&&!ctx.isLive())throw signal?.reason||Object.assign(Error('动作已停止'),{code:'E_ACTION_SUPERSEDED',dispatched:false});
+          const operation=Object.values(task.operations||{}).find(op=>op.tool==='conversation.open'&&op.key===openKey);
+          const feedback={kind:'target-mismatch',expected:{application:subject.application,target:subject.recipient},observed:{target:typeof view.headerText==='string'?view.headerText.slice(0,160):'',matched:false},observationId:view.observationId,at:view.at||clock(),execution:{operationId:operation?.id,physicalId:openResult?.receipt?.operationId||openResult?.executionClaim?.physicalId,claimedCompleted:openResult?.executionClaim?.completed===true,evidence:String(openResult?.executionClaim?.evidence||'').slice(0,800)}};
+          // Keep only the target conflict, never the other conversation's
+          // messages. The original cursor and permission remain unchanged.
+          task.state.outcomeFeedback=[...(task.state.outcomeFeedback||[]),feedback].slice(-8);state.lastTargetObservation=feedback;
+          progress?.observe('action.outcome',{expected:feedback.expected,observed:feedback.observed});await checkpoint();
+          throw Object.assign(Error('执行目标与实际观察不一致，已保留结果反例，需要重新规划策略'),{code:'E_NO_PROGRESS',dispatched:false,diagnostic:{guardChecks:{targetMatched:false,executionClaimedComplete:feedback.execution.claimedCompleted}}});
         }
         const followupPending=behavior==='inquiry'&&state.introduced&&(task.state.goalRevision||0)>(state.goalRevision||0);
         const openingPending=behavior==='inquiry'&&(!state.introduced||followupPending);
@@ -266,7 +298,7 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
           if(view.draft)return wait('保留已有草稿，核对输入框后开始交谈');
           const memories=!followupPending&&task.parameters.openingMessage?[]:(await call({tool:'memory.related',key:'opening-memory:'+subjectKey(subject)+':'+(task.state.goalRevision||0),args:{...subject,query:task.goal.slice(0,800)}})).items||[];
           const opening=!followupPending&&task.parameters.openingMessage?{reply:task.parameters.openingMessage}:await decide({task,subject,conversation:state,memories,phase:followupPending?'followup':'opening',signal});
-          if(opening.reply)await send(subject,state,opening.reply,(followupPending?'followup:'+task.state.goalRevision+':':'opening:')+subjectKey(subject));
+          if(opening.reply)await send(subject,state,opening.reply,(followupPending?'followup:'+task.state.goalRevision+':':'opening:')+subjectKey(subject),'opening:'+subjectKey(subject)+':'+(task.state.goalRevision||0));
           state.goalRevision=task.state.goalRevision||0;
         }
       }
@@ -275,5 +307,23 @@ function conversationSkill({brain,canOperate,channelDialogue=false,decisionCurre
       return waiting;
     }
   };
+  if(!request)return skill;
+  const adaptive=require('./adaptive-task').adaptiveSkill({id:skill.id,title:skill.title,description:skill.description,tools:skill.tools,capabilities:skill.capabilities,request,goalActions:false});
+  const goal=require('./goal-actions').withGoalActions({...skill,run:adaptive.run},{request,
+    initialObservation:ctx=>skill.run({...ctx,observeOnly:true}),
+    onResult:async(ctx,operation,result)=>{
+      const subject=ctx.task.subjects.find(s=>s.application===operation.args.application&&s.recipient===operation.args.recipient);if(!subject)return;
+      const key=subjectKey(subject),state=ctx.task.state.conversations[key]??={subject,cursor:{},introduced:false,progress:{},summary:''};
+      if(operation.tool==='conversation.observe'&&result.headerMatched&&!result.unstable&&!result.latestPending){
+        const prior=state.cursor,cursor=new ConversationCursor(prior),delta=cursor.observe(result.messages||[],{ownerChannel:false,sentMessages:sentMessages(subject,ctx.task)}),next=cursor.snapshot();
+        if(delta.uncertain)return;
+        const advance=target=>{const current=target.state.conversations[key];current.cursor=structuredClone(next);current.draft=!!result.draft;if(result.revision)current.lastSceneRevision=result.revision;};
+        if(delta.messages.length){const queued=await ctx.enqueue({key:`conversation:${key}:${next.sequence}`,subjectKey:key,type:'conversation.messages',messages:delta.messages},{advance,current:()=>state.cursor===prior,recoveryEvidence:delta.messages.some(m=>m.incomingVerified||m.observedVerified)});if(!queued.ok)throw Error('会话变化尚未保存');}
+        else advance(ctx.task);
+      }
+      if(operation.tool==='conversation.send'&&result.verified&&result.receipt){const cursor=new ConversationCursor(state.cursor);cursor.noteSent(result.receipt.sentText||operation.args.message,result.receipt);state.cursor=cursor.snapshot();state.introduced=true;state.goalRevision=ctx.task.state.goalRevision||0;state.lastSentAt=result.receipt.submittedAt||ctx.clock();}
+    }});
+  return {...skill,goalDirected:true,actionSelection:(task,now)=>{if(task.parameters.behavior!=='inquiry')return null;const selection=goal.actionSelection(task,now);if(selection?.phase&&!selection.scope&&task.subjects.length===1)selection.scope='subject:'+subjectKey(task.subjects[0]);return selection;},actionNextWake:(task,now)=>task.parameters.behavior==='inquiry'?goal.actionNextWake(task,now):Infinity,
+    run:ctx=>ctx.task.parameters.behavior==='inquiry'&&!ctx.event&&!ctx.observeOnly?goal.run(ctx):skill.run(ctx)};
 }
 module.exports={conversationSkill,subjectKey,validateConversationParameters};

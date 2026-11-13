@@ -4,6 +4,8 @@ import { SurfaceEyes } from './eyes.mjs';
 import { StageEffects } from './effects.mjs';
 import { samplePerformance } from './performance.mjs';
 import { AvatarHitTest } from '../avatar-hit-test.mjs';
+import { playbackRepetitions } from '../performance-playback.mjs';
+import { installOvalAreaLighting } from './oval-area-light.mjs';
 
 // A host-owned procedural surface preset. Its mesh, animations and interaction
 // rules come from a validated data package; packages cannot run scripts.
@@ -12,16 +14,24 @@ export class SoftSurfaceRuntime {
   async load(context, descriptor) {
     this.context = context;
     const model = await context.loadSurface(descriptor.model);
+    this.studioAppearance = context.avatarKey === 'builtin_soft_bunny' && Array.isArray(model.normals);
     this.root = new T.Group(); this.visualRoot = new T.Group(); this.root.add(this.visualRoot);
     const geometry = new T.BufferGeometry();
     geometry.setAttribute('position', new T.Float32BufferAttribute(model.positions, 3)); geometry.setIndex(model.indices);
-    geometry.setAttribute('color', new T.Float32BufferAttribute(new Float32Array(model.positions.length), 3)); geometry.computeVertexNormals();
-    const fur = new T.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: .47, metalness: 0 });
-    this.eyeMaterial = new T.MeshStandardMaterial({ color: 0x08070e, roughness: .55 });
+    geometry.setAttribute('color', new T.Float32BufferAttribute(new Float32Array(model.positions.length), 3));
+    if (this.studioAppearance) geometry.setAttribute('normal', new T.Float32BufferAttribute(model.normals, 3));
+    else geometry.computeVertexNormals();
+    const fur = this.studioAppearance
+      ? new T.MeshPhysicalMaterial({ color: 0xffffff, vertexColors: true, roughness: .18, metalness: 0, clearcoat: 0, specularIntensity: 1 })
+      : new T.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: .47, metalness: 0 });
+    this.eyeMaterial = this.studioAppearance
+      ? new T.MeshPhysicalMaterial({ color: 0x08070e, roughness: .18, metalness: 0, clearcoat: 1, clearcoatRoughness: .12 })
+      : new T.MeshStandardMaterial({ color: 0x08070e, roughness: .55 });
     const rim = new T.MeshStandardMaterial({ color: 0xffffff, roughness: .55 });
     this.geometry = geometry; this.model = model;
-    this.rig = new SoftAppendageRig(this.visualRoot, geometry, new Float32Array(geometry.attributes.position.array), fur); this.rig.setDebug(false);
-    this.eyes = new SurfaceEyes(this.visualRoot, this.eyeMaterial, rim);
+    this.rig = new SoftAppendageRig(this.visualRoot, geometry, new Float32Array(geometry.attributes.position.array), fur, { modern: this.studioAppearance }); this.rig.setDebug(false);
+    if (this.studioAppearance) for (const material of [fur, this.eyeMaterial, rim]) installOvalAreaLighting(material);
+    this.eyes = new SurfaceEyes(this.visualRoot, this.eyeMaterial, rim, { modern: this.studioAppearance });
     this.base = new T.Color(descriptor.palette.base); this.inner = new T.Color(descriptor.palette.inner);
     this.palettes = descriptor.palettes || []; this.defaultPalette = descriptor.defaultPalette;
     this.blushColor = new T.Color(0xff365c); this.earColor = new T.Color(0xff435d);
@@ -68,21 +78,26 @@ export class SoftSurfaceRuntime {
     this.lastBlush = -1; this.lastEar = -1; this.recolor(blush, ear);
   }
   getActions() { return [...this.actions.keys()]; }
+  getActionDuration(key) { return this.actions.get(key)?.performance.duration; }
   play(request) {
     const action = this.actions.get(request?.key); if (!action) return { ok: false, error: 'unknown-action' };
+    const repetitions = playbackRepetitions(request, action); if (repetitions === null) return { ok: false, error: 'invalid-repetitions' };
     for (const axis of ['py', 'pz']) this.motion[axis] = ((this.motion[axis] + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
     this.transition = { start: this.clock, from: { ...this.motion } };
-    this.current = { action, loop: request.loop === undefined ? action.loop : request.loop === true }; this.elapsed = 0;
+    this.current = { action, repetitions, loop: repetitions > 1, completedCycles: 0 }; this.elapsed = 0;
     return { ok: true };
   }
   update(delta) {
     if (!this.current || !Number.isFinite(delta) || delta <= 0) return;
     const dt = Math.min(delta, .05); this.clock += dt; this.elapsed += dt;
     let current = this.current, piece = current.action.performance;
-    if (this.elapsed >= piece.duration) {
-      if (piece.turns) for (const axis of ['py', 'pz']) if (piece.turns[axis]) this.motion[axis] -= piece.turns[axis] * Math.PI * 2;
-      if (current.loop) this.elapsed %= piece.duration;
-      else { this.current = null; this.context.onFinished?.(current.action.key); if (!this.current) this.play({ key: this.defaultIdle, loop: true }); current = this.current; piece = current.action.performance; }
+    const completed = Math.floor((this.elapsed + Number.EPSILON * Math.max(1, piece.duration) * 8) / piece.duration);
+    if (completed > 0) {
+      current.completedCycles += completed;
+      if (piece.turns) for (const axis of ['py', 'pz']) if (piece.turns[axis]) this.motion[axis] -= completed * piece.turns[axis] * Math.PI * 2;
+      if (current.completedCycles >= current.repetitions) {
+        this.current = null; this.context.onFinished?.(current.action.key); if (!this.current) this.play({ key: this.defaultIdle, loop: true }); current = this.current; piece = current.action.performance;
+      } else this.elapsed = Math.max(0, this.elapsed - completed * piece.duration);
     }
     const expression = samplePerformance(piece, this.elapsed), laugh = Math.max(expression.giggle || 0, Math.max(0, (expression.joy - .80) / .20) * .50);
     const laughWave = (Math.sin(this.elapsed * Math.PI * 7.2) + .28 * Math.sin(this.elapsed * Math.PI * 14.4 + .7)) / 1.28;
@@ -91,7 +106,7 @@ export class SoftSurfaceRuntime {
     for (const key of Object.keys(this.motion)) this.motion[key] = this.transition ? this.transition.from[key] * (1 - mix) + expression[key] * mix : expression[key];
     const m = this.motion, inflation = 1 + m.inflate * .28, squash = m.squash + laugh * laughWave * .15, scaleY = inflation * (1 - squash * .15);
     const upright = Math.cos(m.pz) > .8 && Math.cos(m.px) > .8 && Math.abs(m.axial) < .15;
-    const groundY = .91 * (scaleY - 1); let bodyY = upright ? Math.max(m.y + laugh * Math.max(0, laughWave) * .055, groundY) : m.y;
+    const groundY = (this.studioAppearance ? .86 : .91) * (scaleY - 1); let bodyY = upright ? Math.max(m.y + laugh * Math.max(0, laughWave) * .055, groundY) : m.y;
     this.visualRoot.rotation.set(m.px + laugh * laughWave * .065, m.py, m.pz + laugh * laughWave * .035);
     this.axial.setFromAxisAngle(this.longAxis, m.axial); this.visualRoot.quaternion.multiply(this.axial);
     this.visualRoot.scale.set(inflation * (1 + squash * .10), scaleY, inflation * (1 + squash * .08));

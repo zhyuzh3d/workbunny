@@ -3,6 +3,7 @@
 const path = require('path');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { JsonLines, MAX_NATIVE_LINE_BYTES } = require('./json-lines');
 const diagnostics=require('./operation-diagnostics');
 const {randomUUID}=require('node:crypto');
@@ -11,7 +12,7 @@ const DISPLAY_OPS=new Set(['displayCapture','capture','visualSample','visualComm
 const INPUT_OPS=new Set(['displayInput','click','move','scroll','key','type','pasteFile','workbuddyFill','workbuddySend']);
 
 function defaultBinary() {
-  return process.resourcesPath
+  return require('./packaged-resources')()
     ? path.join(process.resourcesPath, 'bin', 'desktop')
     : path.join(__dirname, '..', '..', 'bin', 'desktop');
 }
@@ -38,6 +39,7 @@ class DesktopNative extends EventEmitter {
     this.boper=options.boper||require('./boper-service').getBoperService();
     this.inputContext=options.inputContext||null;
     this.inputStopTimeoutMs=Number.isInteger(options.inputStopTimeoutMs)&&options.inputStopTimeoutMs>0?Math.min(3000,options.inputStopTimeoutMs):2500;
+    this.clock=options.clock||Date.now;
   }
 
   setInputContext(provider){if(typeof provider!=='function')throw new TypeError('输入授权提供者必须为函数');this.inputContext=provider;}
@@ -87,7 +89,7 @@ class DesktopNative extends EventEmitter {
         pending.settling=true;
         clearTimeout(pending.timer);
         if(response.inputOutcome?.clipboardChanged===true){pending.inputOutcome.seen=true;pending.inputOutcome.clipboardChanged=true;pending.recordInputOutcome({clipboardChanged:true});}
-        pending.trace.record(response.ok?'native-receipt':'native-error',{ok:response.ok,status:response.ok?'acknowledged':response.dispatched===false?'not-dispatched':'uncertain',nativeAcknowledged:response.result?.performed===true,dispatched:response.dispatched,code:response.code});
+        pending.trace.record(response.ok?'native-receipt':'native-error',{ok:response.ok,status:response.ok?'acknowledged':response.dispatched===false?'not-dispatched':'uncertain',nativeAcknowledged:response.result?.performed===true,dispatched:response.dispatched,code:response.code,...(pending.inputOutcome.seen?{inputOutcome:pending.inputOutcome}:{})});
         const settle=async()=>{const cleanup=await this._endInputScope(pending);if(this.pending.get(response.id)===pending)this.pending.delete(response.id);
         if (response.ok) pending.resolve(pending.inputOutcome.seen?{...response.result,inputOutcome:{...pending.inputOutcome,...cleanup}}:response.result);
         else {
@@ -129,6 +131,7 @@ class DesktopNative extends EventEmitter {
   async request(op, payload = {}, timeoutMs = 12000, inputContext = {}) {
     if(op==='permissions'&&payload.inputBackend===undefined)payload={...payload,inputBackend:this.boper.status().enabled?'virtual-hid':'cg-event'};
     const pixelSource=process.env.WORKBUNNY_DISPLAY_PIXEL_SOURCE;
+    if(DISPLAY_OPS.has(op)&&!pixelSource&&!this.shareDisplay&&[...this.pending.values()].some(p=>p.pointerPreflight))throw Object.assign(Error('指针提交核查不能重入正在等待输入回执的原生采集连接'),{code:'E_CAPTURE_REENTRANT',dispatched:false});
     if(pixelSource&&DISPLAY_OPS.has(op)){
       if(this.terminal)throw new Error('桌面原生客户端已关闭');
       if(op!=='displayCapture')throw Object.assign(Error('共享显示像素模式不允许旧窗口采集或独立显示流；请使用通用视觉观察'),{code:'E_PIXEL_SOURCE_MODE',dispatched:false});
@@ -187,12 +190,15 @@ class DesktopNative extends EventEmitter {
     const trace=diagnostics.bind({nativeClientId:this.diagnosticId,nativeRequestId:this.diagnosticId+':'+id,nativeOperation:op,operation:payload.action});
     const message = { ...payload, id, op, timeoutMs, sentAtMs: Date.now() };
     let inputContext;try{const owned=this.inputContext?.(op,payload)||{};inputContext={...owned,...explicitContext,ownerId:owned.ownerId,validate:owned.validate,signal:explicitContext.signal||owned.signal};}catch(error){return Promise.reject(error);}
+    // stdio can deliver this callback while another observer owns the current
+    // async context. Fresh evidence belongs to the request that created it.
+    if(typeof inputContext.refreshVisualEvidence==='function')inputContext.refreshVisualEvidence=AsyncLocalStorage.bind(inputContext.refreshVisualEvidence);
     if(INPUT_OPS.has(op)&&inputContext.validate){try{this.boper.assertAvailable({...inputContext,...(payload.background&&op==='workbuddyFill'?{background:true,targetPid:payload.expected?.pid}:{background:false})});}catch(error){return Promise.reject(error);}}
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         const pending=this.pending.get(id);
         if(!pending)return;pending.settling=true;
-        trace.record('native-error',{code:'E_NATIVE_TIMEOUT',status:'uncertain',timeoutMs});
+        trace.record('native-error',{code:'E_NATIVE_TIMEOUT',status:'uncertain',timeoutMs,inputOutcome:{...pending.inputOutcome,completion:'unknown'}});
         // A timeout is not permission to keep emitting after the caller releases
         // its GUI lease. Stop this exact scope before settling the request.
         this._endInputScope(pending).then(()=>{if(this.pending.get(id)===pending)this.pending.delete(id);if(pending.inputStarted||INPUT_OPS.has(op)){pending.inputOutcome.seen=true;pending.inputOutcome.completion='unknown';pending.recordInputOutcome({completion:'unknown'});}reject(Object.assign(new Error(`桌面原生请求超时：${op}`),{code:'E_NATIVE_TIMEOUT',...(pending.inputOutcome.seen?{dispatched:pending.inputOutcome.dispatched||undefined,inputOutcome:{...pending.inputOutcome}}:{})}));});
@@ -259,17 +265,32 @@ class DesktopNative extends EventEmitter {
     const pending=this.pending.get(message.requestId);let response={id:message.id,ok:false,error:'输入请求已失效',code:'E_BOPER_CONTEXT',dispatched:false};
     if(pending&&!pending.settling&&Number.isSafeInteger(message.id)&&message.operation&&typeof message.operation==='object'){
       try{
-        const operation=message.operation,context={...pending.inputContext};
+        let operation=message.operation;const context={...pending.inputContext},outcomes=require('./boper-outcome');
+        const record=value=>{pending.recordInputOutcome(value);pending.inputOutcome={...pending.inputOutcome,...outcomes.merge(pending.inputOutcome,value),seen:true};};
+        const current=()=>{if(this.proc!==child||this.closed||pending.settling||this.pending.get(message.requestId)!==pending||context.signal?.aborted)throw Object.assign(Error('指针输入已停止，未继续提交'),{code:'E_ABORTED',dispatched:false});const checked=context.validate?.();if(checked&&typeof checked.then==='function'){Promise.resolve(checked).catch(()=>{});throw Object.assign(Error('输入授权复核必须同步完成'),{code:'E_BOPER_CONTEXT',dispatched:false});}if(checked===false)throw Object.assign(Error('输入授权已失效'),{code:'E_BOPER_CONTEXT',dispatched:false});};
+        const execute=async input=>{
+          current();const kind=({move:'move',click:'click',scroll:'scroll',typeText:'type',key:'key',pasteFile:'paste'})[input.action]||'other';
+          record({inputKinds:[kind],inputKindsComplete:true});pending.inputStarted=true;
+          try{const result=await this.boper.execute(input,context,{scopeId:pending.scopeId,operationId:pending.operationId,timeoutMs:Math.min(30000,Math.max(3000,message.timeoutMs||12000))});record(result);return result;}
+          catch(error){const value=error.inputOutcome||{};record({...value,...(error.dispatched===true?{dispatched:true}:{}),completion:value.completion||(error.dispatched===false?'not-dispatched':'unknown')});error.inputRecorded=true;throw error;}
+        };
         if(!context.displayBounds?.length)context.displayBounds=message.displayBounds;
         if(operation.params?.clipboardChanged===true){pending.inputOutcome.seen=true;pending.inputOutcome.clipboardChanged=true;pending.recordInputOutcome({clipboardChanged:true});}
         if(operation.params?.targetPid){if(pending.payload.background!==true||operation.params.targetPid!==pending.payload.expected?.pid||pending.op==='displayInput')throw Object.assign(Error('定向输入与本次已授权目标不一致'),{code:'E_BOPER_TARGET',dispatched:false});context.targetPid=operation.params.targetPid;context.background=true;}
         if(pending.op==='displayInput'){context.visual=true;context.displayBounds=[pending.payload.visualEvidence.displayRect];operation.params={...operation.params,visualEvidence:pending.payload.visualEvidence};}
-        pending.inputStarted=true;
-        const result=await this.boper.execute(operation,context,{scopeId:pending.scopeId,operationId:pending.operationId,timeoutMs:Math.min(30000,Math.max(3000,message.timeoutMs||12000))});
-        pending.recordInputOutcome(result);
-        pending.inputOutcome.seen=true;pending.inputOutcome.dispatched||=result.dispatched===true;pending.inputOutcome.reportsSubmitted+=result.reportsSubmitted||0;pending.inputOutcome.clipboardChanged||=result.clipboardChanged===true;pending.inputOutcome.moved||=result.moved===true;pending.inputOutcome.completion=result.completion;if(result.clipboardChangeCount!==undefined)pending.inputOutcome.clipboardChangeCount=result.clipboardChangeCount;
-        response={id:message.id,ok:true,result};
-      }catch(error){const result=error.inputOutcome||{};pending.recordInputOutcome({...result,...(error.dispatched===true?{dispatched:true}:{}),completion:result.completion||(error.dispatched===false?'not-dispatched':'unknown')});pending.inputOutcome.seen=true;pending.inputOutcome.dispatched||=error.dispatched===true||result.dispatched===true;pending.inputOutcome.clipboardChanged||=result.clipboardChanged===true;pending.inputOutcome.moved||=result.moved===true;pending.inputOutcome.completion=result.completion||(error.dispatched===false?'not-dispatched':'unknown');pending.inputOutcome.reportsSubmitted+=result.reportsSubmitted||0;response={id:message.id,ok:false,error:error.message,code:error.code==='E_UNSUPPORTED_TARGET_PID'?'E_BACKGROUND_UNSUPPORTED':error.code||'E_BOPER_INPUT',dispatched:pending.inputOutcome.dispatched,result};}
+        if(pending.op==='displayInput'&&['click','scroll'].includes(operation.action)){
+          if(operation.action!==pending.payload.action||pending.pointerStarted||typeof context.refreshVisualEvidence!=='function')throw Object.assign(Error('视觉指针输入缺少本轮受信提交核查'),{code:'E_VISUAL_TARGET',dispatched:false});
+          pending.pointerStarted=true;record({pointerCommitState:'not-requested'});
+          const prepared=await execute({action:'move',params:{x:operation.params.x,y:operation.params.y,visualEvidence:pending.payload.visualEvidence}});current();
+          if(prepared.completion!=='local-submitted'||prepared.dispatchOutcomeUnknown===true||prepared.releaseConfirmed===false)throw Object.assign(Error('指针准备回执不明，未继续提交'),{code:'E_POINTER_PREPARATION_UNCERTAIN',dispatched:true});
+          let proof;pending.pointerPreflight=true;try{proof=await context.refreshVisualEvidence();}finally{pending.pointerPreflight=false;}current();
+          const original=pending.payload.visualEvidence,age=this.clock()-proof?.capturedAt,sameRect=(a,b)=>a&&b&&['x','y','width','height'].every(k=>Number.isFinite(a[k])&&a[k]===b[k]);
+          if(!proof||proof.frameId!==original.frameId||!Number.isFinite(age)||age<0||age>=1500||proof.capturedAt<original.capturedAt||!sameRect(proof.displayRect,original.displayRect)||!sameRect(proof.region,original.region))throw Object.assign(Error('移动后未取得同一视觉目标的新鲜原始像素证据'),{code:'E_VISUAL_EVIDENCE_EXPIRED',dispatched:false});
+          operation={...operation,params:{...operation.params,pointerPrepared:true,visualEvidence:proof}};current();record({pointerCommitState:'requested'});
+          try{await execute(operation);record({pointerCommitState:'acknowledged'});}catch(error){record({pointerCommitState:'unknown'});throw error;}
+        }else await execute(operation);
+        response={id:message.id,ok:true,result:{...pending.inputOutcome}};
+      }catch(error){if(!error.inputRecorded&&error.inputOutcome){pending.recordInputOutcome(error.inputOutcome);pending.inputOutcome={...pending.inputOutcome,...require('./boper-outcome').merge(pending.inputOutcome,error.inputOutcome),seen:true};}response={id:message.id,ok:false,error:error.message,code:error.code==='E_UNSUPPORTED_TARGET_PID'?'E_BACKGROUND_UNSUPPORTED':error.code||'E_BOPER_INPUT',dispatched:pending.inputOutcome.dispatched,result:{...pending.inputOutcome}};}
     }
     if(this.proc===child&&!this.closed)child.stdio[4].write(JSON.stringify(response)+'\n');
   }

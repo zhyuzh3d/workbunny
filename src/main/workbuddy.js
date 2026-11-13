@@ -170,6 +170,7 @@ async function chatWithTransport(opts, transport) {
   opts = require('./context-budget').fitRequest({ ...opts, provider: 'workbuddy' });
   const { model = 'hy3', signal, onDelta, onSentence } = opts;
   const payload = chatPayload(opts);
+  const trace=require('./task-model-trace').wire({...payload,provider:'workbuddy',contextBudget:opts.contextBudget});
   let response, parsing = false;
   try {
     const r = await transport({ method: 'POST', path: '/v2/chat/completions',
@@ -180,6 +181,7 @@ async function chatWithTransport(opts, transport) {
     response = parseChatBody(r.body, model);
   }
   catch (error) {
+    trace.failed(error);
     const prior = error.diagnostic && typeof error.diagnostic === 'object' && !Array.isArray(error.diagnostic) ? error.diagnostic : {};
     const usage = parsing ? sanitizeUsage(error.usage) : null;
     error.diagnostic = { ...prior, ...(opts.contextBudget?{budget:require('./context-budget').diagnostic(opts.contextBudget)}:{}), completion: {
@@ -192,14 +194,14 @@ async function chatWithTransport(opts, transport) {
     throw error;
   }
   const { raw, model: usedModel, usage, toolCalls, finishReason } = response;
-  if (toolCalls?.length) return { text: '', raw: '', model: usedModel, usage, finishReason, provider: 'workbuddy', toolCalls,contextBudget:opts.contextBudget };
+  if (toolCalls?.length) {const result={ text: '', raw: '', model: usedModel, usage, finishReason, provider: 'workbuddy', toolCalls,contextBudget:opts.contextBudget };trace.complete(result);return result;}
   // The broker has already buffered the entire response. Consumers must
   // validate this completion before presenting it as incremental content.
   if (onDelta) onDelta(raw, { complete: true });
   const { extractTags, makeSentenceSplitter } = require('./llm');
   if (onSentence) { const split = makeSentenceSplitter(onSentence); split.push(raw); split.flush(); }
   const parsed = extractTags(raw);
-  return { ...parsed, text: parsed.clean.trim(), raw, model: usedModel, usage, finishReason, provider: 'workbuddy',contextBudget:opts.contextBudget };
+  const result={ ...parsed, text: parsed.clean.trim(), raw, model: usedModel, usage, finishReason, provider: 'workbuddy',contextBudget:opts.contextBudget };trace.complete(result);return result;
 }
 
 async function chat(opts) {

@@ -149,8 +149,28 @@ test('protocol diagnostics contain only fixed categories and counts', async () =
   const diagnostics = [], raw = '{"private-field-name":"private-user-words"}';
   await assert.rejects(requestReply({ maxRepairs: 0, request: { ...base(), provider: 'private-provider-value', onProtocolDiagnostic: stats => diagnostics.push(stats) }, chat: async () => ({ raw }) }), { code: 'E_REPLY_PROTOCOL' });
   assert.deepEqual(diagnostics, [{ stage: 'envelope', attempt: 1, charCount: raw.length, streamPresented: false, provider: 'other', delivery: 'none',
-    cognitive: true, coreFallback: false, jsonValid: true, rootType: 'object', rootFieldCount: 1, stageCount: 0 }]);
+    cognitive: true, coreFallback: false, jsonValid: true, rootType: 'object', rootFieldCount: 1, stageCount: 0,
+    hasRootPerformance: false, hasRootTurnDisposition: false, replyKind: 'other', replyFieldCount: 0, hasReplyPerformance: false }]);
   assert(!JSON.stringify(diagnostics).includes('private-'));
+});
+
+test('protocol diagnostics distinguish misplaced performance without exposing field names or values', async () => {
+  const cases = [
+    [Object.assign(JSON.parse(cognition({ kind: 'chat', text: 'private-body' })), { performance: 'private-root-performance' }),
+      { hasRootPerformance: true, hasRootTurnDisposition: false, replyKind: 'chat', replyFieldCount: 2, hasReplyPerformance: false }],
+    [Object.assign(JSON.parse(cognition({ kind: 'chat', text: '', performance: 'private-inner-performance' })), { turnDisposition: 'private-disposition' }),
+      { hasRootPerformance: false, hasRootTurnDisposition: true, replyKind: 'chat', replyFieldCount: 3, hasReplyPerformance: true }],
+    [JSON.parse(cognition({ kind: 'private-kind', text: 'private-body', performance: 'private-inner-performance', 'private-field-name': true })),
+      { hasRootPerformance: false, hasRootTurnDisposition: false, replyKind: 'other', replyFieldCount: 4, hasReplyPerformance: true }],
+  ];
+  for (const [value, expected] of cases) {
+    const diagnostics = [];
+    await assert.rejects(requestReply({ maxRepairs: 0, request: { ...base(), onProtocolDiagnostic: stats => diagnostics.push(stats) },
+      chat: async () => ({ raw: JSON.stringify(value) }) }), { code: 'E_REPLY_PROTOCOL' });
+    assert.equal(diagnostics.length, 1);
+    for (const [key, expectedValue] of Object.entries(expected)) assert.equal(diagnostics[0][key], expectedValue, key);
+    assert(!JSON.stringify(diagnostics).includes('private-'));
+  }
 });
 
 test('unfinished typed control containers never leak payload words or invalidate a valid streamed answer', async () => {

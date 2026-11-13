@@ -3,23 +3,26 @@ const { fields, clone } = require('./agent-contract');
 class ToolRegistry {
   constructor() { this.tools = new Map(); }
   register(definition) {
-    const { name, description, effect, capabilities, execute, validate = value => value, scope,inputSchema,lifecycle,available } = definition;
+    const { name, description, effect, capabilities, execute, validate = value => value, scope,inputSchema,lifecycle,available,continuationPolicy,resultContract } = definition;
     if (!/^[a-z][a-z0-9_.]+$/u.test(name) || !description || !['read','write'].includes(effect) || !Array.isArray(capabilities) || typeof execute !== 'function' || this.tools.has(name)) throw new Error('工具定义不合法或重复');
-    this.tools.set(name, Object.freeze({ name, description, effect, capabilities: Object.freeze([...capabilities]), execute, validate, scope,inputSchema,lifecycle,available }));
+    const contract=resultContract===undefined?undefined:Object.freeze(clone(resultContract));
+    this.tools.set(name, Object.freeze({ name, description, effect, capabilities: Object.freeze([...capabilities]), execute, validate, scope,inputSchema,lifecycle,available,continuationPolicy,...(contract?{resultContract:contract}:{}) }));
     return this;
   }
   get(name) { const tool = this.tools.get(name); if (!tool) throw new Error('未注册的工具：' + name); return tool; }
   catalog(names = [...this.tools.keys()],task) {
     return names.flatMap(name => { const { name: id, description, effect, capabilities,inputSchema,available } = this.get(name);
+      if(task&&!require('./interaction-policy').taskAllowsChannel(task,require('./interaction-policy').channelForTool(id)))return [];
       if(task&&capabilities.some(c=>!task.capabilities.includes(c)))return [];
       if(task&&available&&!available(task))return [];
       const schema=inputSchema?clone(inputSchema):null,application=schema?.properties?.application;
       if(task&&application){const allowed=[...new Set(task.subjects.map(s=>s.application))].filter(a=>application.const?a===application.const:application.enum?application.enum.includes(a):true);if(!allowed.length)return [];if(!application.const)application.enum=allowed;}
-      return [{name:id,description,effect,capabilities,...(schema?{inputSchema:schema}:{})}];
+      return [{name:id,description,effect,capabilities,...(this.get(name).resultContract?{resultContract:clone(this.get(name).resultContract)}:{}),...(this.get(name).continuationPolicy?{effectContinuation:'fresh-observation-and-explicit-bounded-risk-assessment-required'}:{}),...(schema?{inputSchema:schema}:{})}];
     });
   }
   check(name, args, task) {
     const tool = this.get(name);
+    require('./interaction-policy').assertTaskChannel(task,require('./interaction-policy').channelForTool(name));
     if(require('./owner-security').contains(JSON.stringify(args)))throw Object.assign(Error('Identity credential cannot be passed to tools'),{code:'E_IDENTITY_OUTPUT',dispatched:false});
     if(task.state?.sensitiveContext&&(['terminal.execute','software.command'].includes(name)||['screen.action','software.control'].includes(name)&&['wechat','workbuddy'].includes(args?.application)))throw Object.assign(Error('本任务已读取敏感信息，请使用受控的工作委派或会话交付通道'),{dispatched:false,code:'E_SENSITIVE_ROUTE'});
     // Skill lists describe familiar methods, not authority. The task's actual
@@ -29,7 +32,7 @@ class ToolRegistry {
     const normalized=clone(args??{});if(typeof normalized.application==='string')normalized.application=require('./interaction-policy').profile(normalized.application)?.application||normalized.application;
     const input = tool.validate(normalized);
     const target = tool.scope?.(input);
-    const channel=require('./interaction-policy').channelForTool(name);if(channel&&target?.application)require('./interaction-policy').assertChannel(target.application,channel,input.bundleId||task.state?.software?.[target.application]?.interactionProfile);
+    const channel=require('./interaction-policy').channelForTool(name,target?.application,input.bundleId||task.state?.software?.[target?.application]?.interactionProfile);if(channel&&target?.application)require('./interaction-policy').assertChannel(target.application,channel,input.bundleId||task.state?.software?.[target.application]?.interactionProfile);
     if (target && !task.subjects.some(s => s.application === target.application && (!target.recipient || s.recipient === target.recipient))) throw new Error('工具对象不属于主人交办范围');
     return { tool, input };
   }

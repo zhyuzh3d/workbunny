@@ -212,6 +212,24 @@ class MemoryService {
   }
   cancelExtraction() { this.extractionAbort?.abort(); this.maintenance?.cancel(); }
   serial(fn) { const result = this.tail.then(() => { this.check(); return fn(); }); this.tail = result.catch(() => {}); return result; }
+  removeRecord(recordId, { assertCurrent = () => {} } = {}) {
+    // Housekeeping deletes advance the same native epoch as source removal.
+    // Share the journal's mutation lane; never leave later checkpoints on an
+    // obsolete epoch, or rebase an already prepared write across a revocation.
+    return this.serial(async () => {
+      assertCurrent();
+      const db = this.db, generation = this.generation;
+      const result = await db.request('remove', { epoch: this.epoch, id: recordId });
+      if (this.db !== db) throw Object.assign(Error('资料库代次已变化'), { code: 'E_MEMORY_STALE' });
+      this.epoch = result.epoch;
+      // Owner revocation can retire generation before its serial job starts.
+      // The same DB has already committed this delete: keep its epoch receipt
+      // even while rejecting the now-retired caller's remaining work.
+      if (this.generation !== generation) throw Object.assign(Error('资料库代次已变化'), { code: 'E_MEMORY_STALE' });
+      assertCurrent();
+      return result;
+    });
+  }
   encode(record, restoreSequence = false) {
     const scope = scopes.scopeOf(record);
     return { id: record.id, kind: record.kind, ts: record.ts, updatedAt: record.updatedAt || record.ts, state: record.state || 'active', expiresAt: record.expiresAt || null,

@@ -14,33 +14,12 @@
 
 static std::mutex connectionMutex;
 static NSXPCConnection *connection;
-static std::atomic<int> sealedHost{-1};
-static std::mutex sealMutex;
 static void clearConnection(NSXPCConnection *expected=nil){
   NSXPCConnection *old;
-  {std::lock_guard<std::mutex> lock(connectionMutex);old=expected?:connection;if(connection==old){connection=nil;sealedHost=-1;}}
+  {std::lock_guard<std::mutex> lock(connectionMutex);old=expected?:connection;if(connection==old)connection=nil;}
   // Invalidating under connectionMutex can synchronously schedule a handler
   // that needs the same lock. An old handler must not clear a new connection.
   [old invalidate];
-}
-static bool hostContext(){
-  NSBundle *bundle=NSBundle.mainBundle;
-  if(![bundle.bundleIdentifier isEqual:@"cn.haminn.workbunny"]||![bundle.bundlePath.pathExtension isEqual:@"app"])return false;
-  NSDictionary *environment=NSProcessInfo.processInfo.environment;
-  for(NSString *name in environment)if([name hasPrefix:@"DYLD_"]||[name isEqual:@"NODE_OPTIONS"]||[name isEqual:@"ELECTRON_RUN_AS_NODE"])return false;
-  NSArray *forbidden=@[@"--inspect",@"--remote-debugging",@"--eval",@"--require",@"--run-as-node",@"--js-flags",@"--app",@"--disable-web-security",@"--extensions"];
-  for(NSString *argument in NSProcessInfo.processInfo.arguments){
-    if([argument isEqual:@"-e"]||[argument isEqual:@"-r"])return false;
-    for(NSString *prefix in forbidden)if([argument hasPrefix:prefix])return false;
-  }
-  int cached=sealedHost.load();if(cached>=0)return cached==1;
-  std::lock_guard<std::mutex> lock(sealMutex);cached=sealedHost.load();if(cached>=0)return cached==1;
-  SecCodeRef selfCode=nullptr;SecStaticCodeRef code=nullptr;SecRequirementRef requirement=nullptr;
-  OSStatus e=SecCodeCopySelf(kSecCSDefaultFlags,&selfCode);
-  if(!e)e=SecCodeCopyStaticCode(selfCode,kSecCSDefaultFlags,&code);
-  if(!e)e=SecRequirementCreateWithString(CFSTR(BOPER_HOST_REQUIREMENT),kSecCSDefaultFlags,&requirement);
-  if(!e)e=SecStaticCodeCheckValidity(code,kSecCSStrictValidate|kSecCSCheckNestedCode|kSecCSCheckAllArchitectures,requirement);
-  if(requirement)CFRelease(requirement);if(code)CFRelease(code);if(selfCode)CFRelease(selfCode);sealedHost=e==errSecSuccess?1:0;return e==errSecSuccess;
 }
 static NSDictionary *hostRPC(NSString *action,NSDictionary *params){
   NSXPCConnection *c;
@@ -48,13 +27,13 @@ static NSDictionary *hostRPC(NSString *action,NSDictionary *params){
     connection=[[NSXPCConnection alloc]initWithMachServiceName:BoperControlService options:NSXPCConnectionPrivileged];
     [connection setCodeSigningRequirement:@BOPER_HELPER_REQUIREMENT];connection.remoteObjectInterface=BoperInterface(@protocol(BoperHostProtocol));
     __weak NSXPCConnection *expected=connection;
-    connection.invalidationHandler=^{std::lock_guard<std::mutex> lock(connectionMutex);if(connection==expected){connection=nil;sealedHost=-1;}};[connection resume];
+    connection.invalidationHandler=^{std::lock_guard<std::mutex> lock(connectionMutex);if(connection==expected)connection=nil;};[connection resume];
   }c=connection;}
   __block NSDictionary *response;dispatch_semaphore_t semaphore=dispatch_semaphore_create(0);
   id<BoperHostProtocol>proxy=[c remoteObjectProxyWithErrorHandler:^(NSError *e){response=BoperError(@"E_HELPER_DISCONNECTED",e.localizedDescription?:@"Helper disconnected");clearConnection(c);dispatch_semaphore_signal(semaphore);}];
   BoperReply reply=^(NSDictionary *value){response=value;dispatch_semaphore_signal(semaphore);};
-  if([action isEqual:@"status"])[proxy statusWithReply:reply];
-  else if([action isEqual:@"recover"])[proxy recoverWithReply:reply];
+  if([action isEqual:@"status"])[proxy status:params reply:reply];
+  else if([action isEqual:@"recover"])[proxy recover:params reply:reply];
   else if([action isEqual:@"authorizeRuntime"])[proxy authorize:params reply:reply];
   else if([action isEqual:@"renewSession"])[proxy renew:params reply:reply];
   else [proxy revoke:params reply:reply];
@@ -102,14 +81,32 @@ static NSString *codeDirectoryHash(SecStaticCodeRef code){
   NSMutableString *value=[NSMutableString stringWithCapacity:hash.length*2];const uint8_t *bytes=(const uint8_t *)hash.bytes;
   for(NSUInteger i=0;i<hash.length;++i)[value appendFormat:@"%02x",bytes[i]];return value;
 }
-static NSString *bundledHelperHash(){
-  NSURL *url=[NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:@"Contents/Library/LaunchServices/boper-hid-helper"];
-  SecStaticCodeRef code=nullptr;if(SecStaticCodeCreateWithPath((__bridge CFURLRef)url,kSecCSDefaultFlags,&code)!=errSecSuccess)return @"";
-  NSString *value=codeDirectoryHash(code);CFRelease(code);return value;
+static NSString *expectedHelperHash(NSDictionary *params,NSDictionary **failure){
+  id supplied=params[@"helperPath"];
+  NSString *path=nil;
+  if(supplied){
+    if(![supplied isKindOfClass:NSString.class]||![supplied isAbsolutePath]||[supplied length]>4096){*failure=@{@"code":@"E_HELPER_SOURCE_PATH",@"message":@"helperPath must be an absolute local helper path"};return @"";}
+    path=supplied;
+  }else{
+    NSString *candidate=[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Contents/Library/LaunchServices/boper-hid-helper"];
+    if([NSFileManager.defaultManager fileExistsAtPath:candidate])path=candidate;
+  }
+  if(!path)return @"";
+  // The expected hash comes only from BOPER's own pinned signed helper. A
+  // caller-supplied path never changes the trusted helper identity.
+  SecStaticCodeRef code=nullptr;SecRequirementRef requirement=nullptr;
+  OSStatus error=SecStaticCodeCreateWithPath((__bridge CFURLRef)[NSURL fileURLWithPath:path],kSecCSDefaultFlags,&code);
+  if(!error)error=SecRequirementCreateWithString(CFSTR(BOPER_HELPER_REQUIREMENT),kSecCSDefaultFlags,&requirement);
+  if(!error)error=SecStaticCodeCheckValidity(code,kSecCSStrictValidate|kSecCSCheckAllArchitectures,requirement);
+  NSString *value=error?@"":codeDirectoryHash(code);
+  if(requirement)CFRelease(requirement);if(code)CFRelease(code);
+  if(error||!value.length)*failure=@{@"code":@"E_HELPER_SOURCE_SIGNATURE",@"message":@"Expected BOPER helper does not have the pinned valid signature",@"nativeCode":@(error)};
+  return value;
 }
-static NSDictionary *installedComponents(){
-  NSString *bundledHash=bundledHelperHash();
-  NSMutableDictionary *result=[@{@"installed":@NO,@"ready":@NO,@"helperConnected":@NO,@"installationMode":@"local-admin-launchdaemon",@"serviceStatus":@"not-found",@"state":@"install-required",@"approvalRequired":@NO,@"settingsRequired":@NO,@"protocolVersion":@1,@"automaticPhysicalTakeover":@NO,@"helperRequirement":@BOPER_HELPER_REQUIREMENT,@"bundledHelperCDHash":bundledHash,@"installedHelperCDHash":@"",@"updateRequired":@YES}mutableCopy];
+static NSDictionary *installedComponents(NSDictionary *params){
+  NSDictionary *sourceError=nil;NSString *bundledHash=expectedHelperHash(params,&sourceError);
+  NSMutableDictionary *result=[@{@"installed":@NO,@"ready":@NO,@"helperConnected":@NO,@"sessionActive":@NO,@"groupActive":@NO,@"installationMode":@"local-admin-launchdaemon",@"serviceStatus":@"not-found",@"state":@"install-required",@"approvalRequired":@NO,@"settingsRequired":@NO,@"protocolVersion":@1,@"automaticPhysicalTakeover":@NO,@"helperRequirement":@BOPER_HELPER_REQUIREMENT,@"bundledHelperCDHash":bundledHash,@"installedHelperCDHash":@"",@"updateRequired":@YES}mutableCopy];
+  if(sourceError){result[@"state"]=@"faulted";result[@"error"]=sourceError;return result;}
   struct stat ignored;
   if(lstat(BoperInstalledHelper.fileSystemRepresentation,&ignored)!=0||lstat(BoperInstalledPlist.fileSystemRepresentation,&ignored)!=0){
     result[@"error"]=@{@"code":@"E_HELPER_INSTALL_REQUIRED",@"message":@"BOPER 后台组件尚未安装，需要本机管理员授权安装。"};return result;
@@ -129,14 +126,14 @@ static NSDictionary *installedComponents(){
   if(!error)result[@"installedHelperCDHash"]=codeDirectoryHash(code);
   if(requirement)CFRelease(requirement);if(code)CFRelease(code);
   if(error){result[@"state"]=@"faulted";result[@"error"]=@{@"code":@"E_HELPER_INSTALL_SIGNATURE",@"message":@"BOPER 已安装组件的本地签名与本应用不匹配，需要管理员授权更新。",@"nativeCode":@(error)};return result;}
-  BOOL update=bundledHash.length==0||![result[@"installedHelperCDHash"]isEqual:bundledHash];
+  BOOL update=bundledHash.length>0&&![result[@"installedHelperCDHash"]isEqual:bundledHash];
   result[@"installed"]=@YES;result[@"updateRequired"]=@(update);result[@"serviceStatus"]=@"installed";result[@"state"]=update?@"update-required":@"faulted";
   if(update)result[@"error"]=@{@"code":@"E_HELPER_UPDATE_REQUIRED",@"message":@"BOPER 已安装后台组件与本应用版本不同，需要管理员授权更新。"};return result;
 }
-static NSDictionary *localServiceStatus(bool trusted){
-  NSMutableDictionary *result=[installedComponents()mutableCopy];result[@"hostContextTrusted"]=@(trusted);
-  if(trusted&&[result[@"installed"]boolValue]&&![result[@"updateRequired"]boolValue]){
-    NSDictionary *reply=hostRPC(@"status",@{});
+static NSDictionary *localServiceStatus(NSDictionary *params){
+  NSMutableDictionary *result=[installedComponents(params)mutableCopy];
+  if([result[@"installed"]boolValue]&&![result[@"updateRequired"]boolValue]){
+    NSDictionary *reply=hostRPC(@"status",params);
     if([reply[@"ok"]boolValue]){[result addEntriesFromDictionary:reply[@"result"]];result[@"helperConnected"]=@YES;result[@"serviceStatus"]=@"enabled";result[@"state"]=[result[@"ready"]boolValue]?@"ready":@"faulted";}
     else result[@"error"]=reply[@"error"];
   }
@@ -145,13 +142,14 @@ static NSDictionary *localServiceStatus(bool trusted){
 struct Work{napi_env env;napi_deferred deferred;napi_async_work work;NSString *action;NSDictionary *params;NSDictionary *result;NSDictionary *error;};
 static void perform(napi_env env,void *data){
   Work *w=(Work *)data;@autoreleasepool{@try{
-    bool trusted=hostContext();
-    if([w->action isEqual:@"status"]||[w->action isEqual:@"refresh"]){w->result=localServiceStatus(trusted);return;}
-    if(!trusted){w->error=@{@"code":@"E_HOST_CONTEXT",@"message":@"BOPER management requires the sealed signed Bunny app without script or debug flags"};return;}
+    bool status=[w->action isEqual:@"status"]||[w->action isEqual:@"refresh"];
+    bool groupAction=[w->action isEqual:@"authorizeRuntime"]||[w->action isEqual:@"renewSession"]||[w->action isEqual:@"revokeSession"]||[w->action isEqual:@"recover"];
+    if((groupAction||((status||[w->action isEqual:@"register"])&&w->params[@"key"]))&&!BoperValidKey(w->params[@"key"])){w->error=@{@"code":@"E_KEY_INVALID",@"message":@"KEY must contain exactly 24 ASCII letters, digits, '_' or '-'"};return;}
+    if(status){w->result=localServiceStatus(w->params);return;}
     if([w->action isEqual:@"openSettings"]){dispatch_async(dispatch_get_main_queue(), ^{[SMAppService openSystemSettingsLoginItems];});w->result=@{@"opened":@YES};return;}
-    if([w->action isEqual:@"register"]){NSDictionary *status=localServiceStatus(true);if(status[@"error"])w->error=status[@"error"];else w->result=status;return;}
+    if([w->action isEqual:@"register"]){NSDictionary *status=localServiceStatus(w->params);if(status[@"error"])w->error=status[@"error"];else w->result=status;return;}
     if([w->action isEqual:@"unregister"]||[w->action isEqual:@"unregisterLegacyService"]){clearConnection();NSDictionary *reply=unregisterLegacyService();if([reply[@"ok"]boolValue])w->result=reply[@"result"];else w->error=reply[@"error"];return;}
-    if(![w->action isEqual:@"renewSession"]&&![w->action isEqual:@"revokeSession"]){NSDictionary *installed=installedComponents();if(installed[@"error"]){w->error=installed[@"error"];return;}}
+    if(![w->action isEqual:@"renewSession"]&&![w->action isEqual:@"revokeSession"]){NSDictionary *installed=installedComponents(w->params);if(installed[@"error"]){w->error=installed[@"error"];return;}}
     NSMutableDictionary *params=[w->params mutableCopy]?:[NSMutableDictionary dictionary];NSString *secret;
     if([w->action isEqual:@"authorizeRuntime"]){
       uint8_t random[32];if(SecRandomCopyBytes(kSecRandomDefault,sizeof(random),random)!=errSecSuccess){w->error=@{@"code":@"E_RANDOM",@"message":@"Secure delegation generation failed"};return;}

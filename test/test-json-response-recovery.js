@@ -28,7 +28,7 @@ test('schema recovery repairs the rejected answer and preserves its audit if the
  assert.equal(calls,2);assert(diagnostics.some(d=>d.phase==='failed'&&d.schemaAudit));
 });
 test('explicit output budgets survive verification transport without being floored',async()=>{
- for(const vision of [false,true])for(const maxTokens of [1024,2048]){let sent;await requestVerification({messages,vision,maxTokens},{chat:async options=>{sent=options;return {model:options.model,text:'{}'};}});assert.equal(sent.maxTokens,maxTokens);assert.equal(sent.messages,messages);}
+ for(const vision of [false,true])for(const maxTokens of [1024,2048]){let sent;await requestVerification({messages,vision,maxTokens},{selectFree:async()=> 'hy3',chat:async options=>{sent=options;return {model:options.model,text:'{}'};}});assert.equal(sent.maxTokens,maxTokens);assert.equal(sent.messages,messages);}
 });
 test('Observer request preserves its default and ceiling while forwarding a smaller controlled-recovery budget to chat',async()=>{
  const free=require('../src/main/workbuddy-free'),wb=require('../src/main/workbuddy'),original={freeModel:free.freeModel,chat:wb.chat},calls=[];
@@ -43,11 +43,30 @@ test('Observer request preserves its default and ceiling while forwarding a smal
   assert.equal(result.value.ok,true);assert.deepEqual(calls.map(c=>c.maxTokens),[2048,1024]);assert(calls.every(c=>c.model==='hy3'&&c.timeoutMs===25000));
  }finally{free.freeModel=original.freeModel;wb.chat=original.chat;}
 });
-test('the caller owns two total inference attempts, including the free-model alternative',async()=>{
+test('the caller owns two total inference attempts using the catalog-selected free model',async()=>{
  const calls=[],original=structuredClone(messages);
  const request=options=>requestVerification(options,{selectFree:async()=> 'hy3',chat:async options=>{calls.push(options);if(calls.length===1)throw failure('E_PAYLOAD_TOO_LARGE');return {model:options.model,text:'{"ok":true}'};}});
  const result=await checkedJSON({vision:true,maxTokens:4096,messages,extraBody:{max_tokens:4096}},value=>value,{request});
- assert.equal(result.value.ok,true);assert.deepEqual(calls.map(c=>[c.model,c.maxTokens]),[['deepseek-v4.1-flash',4096],['hy3',2048]]);assert.equal(calls[1].extraBody.max_tokens,undefined);assert.equal(calls[1].extraBody.reasoning_effort,'low');assert.deepEqual(messages,original);
+ assert.equal(result.value.ok,true);assert.deepEqual(calls.map(c=>[c.model,c.maxTokens]),[['hy3',4096],['hy3',2048]]);assert.equal(calls[1].extraBody.max_tokens,undefined);assert.equal(calls[1].extraBody.reasoning_effort,'low');assert.deepEqual(messages,original);
+});
+test('omitted text and vision output budgets recover from their actual default before the second real call',async()=>{
+ for(const vision of [false,true]){
+  const calls=[],original=structuredClone(messages);
+  const request=options=>requestVerification(options,{selectFree:async()=> 'synthetic-free',chat:async options=>{calls.push(options);if(calls.length===1)throw Object.assign(failure('E_OUTPUT_LIMIT'),{diagnostic:{completion:{maxOutputTokens:options.maxTokens,finishReason:'length'}}});return {model:options.model,text:'{"ok":true}'};}});
+  const result=await checkedJSON({messages,vision},value=>value,{request});assert.equal(result.value.ok,true);assert.deepEqual(calls.map(call=>call.maxTokens),[vision?4096:2048,8192]);assert.deepEqual(messages,original);assert.equal(calls.length,2);
+ }
+});
+test('a provider cap below the real default or explicit budget still prevents output expansion',async()=>{
+ for(const options of [{},{vision:true},{maxTokens:4096}]){
+  const calls=[],request=input=>requestVerification(input,{selectFree:async()=> 'synthetic-free',chat:async sent=>{calls.push(sent);throw Object.assign(failure('E_OUTPUT_LIMIT'),{diagnostic:{completion:{maxOutputTokens:1024}}});}});
+  await assert.rejects(checkedJSON({...options,messages},value=>value,{request}),{code:'E_OUTPUT_LIMIT'});assert.equal(calls.length,1);
+ }
+});
+test('default-budget output recovery still stops after two failures and respects cancellation',async()=>{
+ for(const cancel of [false,true]){
+  const controller=new AbortController(),calls=[],request=options=>requestVerification(options,{selectFree:async()=> 'synthetic-free',chat:async sent=>{calls.push(sent.maxTokens);if(cancel)controller.abort();throw Object.assign(failure('E_OUTPUT_LIMIT'),{diagnostic:{completion:{maxOutputTokens:sent.maxTokens}}});}});
+  await assert.rejects(checkedJSON({messages,signal:controller.signal},value=>value,{request}));assert.deepEqual(calls,cancel?[2048]:[2048,8192]);
+ }
 });
 test('opposite or repeated response caps stop after two actual model calls',async()=>{
  for(const errors of [['E_OUTPUT_LIMIT','E_PAYLOAD_TOO_LARGE'],['E_PAYLOAD_TOO_LARGE','E_OUTPUT_LIMIT'],['E_PAYLOAD_TOO_LARGE','E_PAYLOAD_TOO_LARGE']]){
@@ -56,9 +75,9 @@ test('opposite or repeated response caps stop after two actual model calls',asyn
  }
 });
 test('cancellation during a size rejection prevents the alternate model request',async()=>{
- const controller=new AbortController();let calls=0;
- const request=options=>requestVerification(options,{chat:async()=>{calls++;controller.abort();throw failure('E_PAYLOAD_TOO_LARGE');},selectFree:async()=>{throw Error('must not query another model');}});
- await assert.rejects(checkedJSON({maxTokens:4096,messages,signal:controller.signal},value=>value,{request}));assert.equal(calls,1);
+ const controller=new AbortController();let calls=0,selections=0;
+ const request=options=>requestVerification(options,{chat:async()=>{calls++;controller.abort();throw failure('E_PAYLOAD_TOO_LARGE');},selectFree:async()=>{assert.equal(++selections,1,'cancellation prevents another catalog selection');return 'hy3';}});
+ await assert.rejects(checkedJSON({maxTokens:4096,messages,signal:controller.signal},value=>value,{request}));assert.equal(calls,1);assert.equal(selections,1);
 });
 test('response adaptation changes only the next output policy and retains all evidence',()=>{
  const options={messages,maxTokens:2048,inputBudgetTokens:32768,extraBody:{max_tokens:2048,max_completion_tokens:2048,reasoning_effort:'high'}},before=structuredClone(options),repaired=responseRecovery(options,failure('E_PAYLOAD_TOO_LARGE'));

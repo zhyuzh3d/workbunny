@@ -57,13 +57,13 @@ BOPER 不接管截图、软件语义判断、联系人授权或任务验收。�
 
 ## 进程边界与状态归属
 
-### 宿主负责授权和协调
+### 调用方通过 KEY 分组
 
-BoperService 由现有装配入口创建，供所有 DesktopService 和任务路径共享，负责能力检查、GUI 使用权、输入会话、取消、结果映射和设置状态。进度仍写入原 Operation 账本。
+当前采用2026-11-13主人明确选择的通用 KEY 设计。当前本机解锁登录用户的任意程序都可接入，调用方传入24字符 `[A-Za-z0-9_-]` KEY；相同 KEY 主动共享一个调用组，允许跨程序查询、停止和依次操作，不限制应用名、bundle ID、签名或源码运行方式。
 
-宿主采用很薄的 Objective-C++ Node-API 绑定，核验固定 root 安装、探测认证 XPC、管理连接授权和停止，不承载运动循环，不在 renderer 暴露原始接口。安装者通过本机管理员授权安装 LaunchDaemon，不依赖开发者账号、Apple 开发者证书或账号配置。Node-API 避免绑定 V8 私有 ABI，仍须核对实际 Electron 的加载与签名结果，参见 [Node-API 文档](https://nodejs.org/api/n-api.html)。
+BoperService 仍由 WorkBunny 装配入口创建，供它内部的 DesktopService 和任务路径共享，负责其 GUI 使用权、输入会话、取消、结果映射和设置状态。WorkBunny 自己的业务授权仍由 WorkBunny 管理，公共 BOPER 不替其他客户端做任务判断。`boper-client.js` 和标准输入 JSON CLI 提供外部程序接入。
 
-这层绑定使管理调用处于真正的 Bunny 应用包上下文，并让 helper 验证 Bunny 宿主的委托，而非仅认出一个可被任意程序单独启动的输入可执行文件。P0 用真实 .app 布局验证，不用散落的 CLI 测试冒充装机结论。
+薄 Objective-C++ Node-API 绑定核验 BOPER 自身的固定 root 安装与 helper 签名、探测 XPC、管理 KEY 会话和停止。组件签名校验不再用于限制调用应用。管理员安装和真实输入分别验收；开发测试默认直接运行源码。
 
 ### 普通权限进程负责执行
 
@@ -77,9 +77,9 @@ BoperService 由现有装配入口创建，供所有 DesktopService 和任务路
 
 helper 直接整合 Karabiner 客户端，不再启动独立 kmbridge 子进程。只接收认证会话、有限键鼠报告、复位、停止和状态请求，不提供 shell、任意文件路径、剪贴板、截图、输入监听或目标应用接口。
 
-采用安装者明确授权的标准 root LaunchDaemon 和认证 XPC。固定 helper 为 `/Library/PrivilegedHelperTools/cn.haminn.workbunny.boper-hid`，固定 plist 为 `/Library/LaunchDaemons/cn.haminn.workbunny.boper-hid.plist`；复制到 root 暂存目录后核验字节摘要和固定本地签名，再原子安装；启动失败恢复原组件及原服务。使用 macOS 13 已有的 NSXPCConnection.setCodeSigningRequirement，不依赖私有 auditToken 属性或查询 PID 路径鉴权；核对指定客户端身份、签名、连接用户及登录会话，不仅检查同 Team ID。参考[连接签名要求](https://developer.apple.com/documentation/foundation/nsxpcconnection/setcodesigningrequirement(_:))。旧 SMAppService 仅保留等待 completion 的迁移注销，不再注册新服务，不修改 AMFI/Gatekeeper 或系统证书信任。
+采用安装者明确授权的标准 root LaunchDaemon 和认证 XPC。固定 helper 为 `/Library/PrivilegedHelperTools/cn.haminn.workbunny.boper-hid`，固定 plist 为 `/Library/LaunchDaemons/cn.haminn.workbunny.boper-hid.plist`；复制到 root 暂存目录后核验字节摘要和固定本地签名，再原子安装；启动失败恢复原组件及原服务。使用 macOS 13 已有的 NSXPCConnection.setCodeSigningRequirement，不依赖私有 auditToken 属性或查询 PID 路径鉴权；控制端不限制应用签名，核对当前登录用户和解锁会话；输入 runtime 与 helper 自身仍验证组件签名。参考[连接签名要求](https://developer.apple.com/documentation/foundation/nsxpcconnection/setcodesigningrequirement(_:))。旧 SMAppService 仅保留等待 completion 的迁移注销，不再注册新服务，不修改 AMFI/Gatekeeper 或系统证书信任。
 
-输入连接必须由受认证的 Bunny 宿主为本次原生执行进程授权，单独启动相同输入程序不能自动获得特权。委托材料不放命令行、环境变量或公共文件；P0 同时验证脚本、调试启动方式不会把 Bunny 借作授权代理。若该方案验证失败，先修订这一边界，不临时叠加宽权限 socket 作为第二实现。
+调用方使用 KEY 为本次 BOPER runtime 建立有界输入会话。相同 KEY 可从另一程序查询、续期或停止；指定旧 session ID 的迟到请求不得影响新 session。委托材料仍通过内部连接传递，不放命令行、环境变量或公共文件。脚本、开发版 Electron 和普通 Node 都是支持的调用方，不开放网络监听。
 
 helper 只允许一个活动输入拥有者。共享 Karabiner 驱动与 daemon，管理 BOPER 自己的设备实例；复位或销毁不得影响其他 Karabiner 客户端。没有有效会话时停发，锁屏、登录界面或其他用户会话不得接收输入。
 

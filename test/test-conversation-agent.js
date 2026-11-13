@@ -67,9 +67,9 @@ test('uncertain message order reobserves the visible exact conversation without 
  h.setVisible([message('old'),message('fresh verified')]);await h.runtime.tick(id);assert.equal(task.inbox.length,1);assert.equal(task.inbox[0].messages[0].text,'fresh verified');
 });
 function harness({behavior='reply',brain,completion='manual',subjects=[{application:'wechat',recipient:'Alice'}],observe,transcribe,onOpen,channelDialogue=false}={}){
- let visible=[message('old')],busy=false;const sent=[],reports=[],records=new Map(),tools=new ToolRegistry();let now=1000;
- tools.register({name:'conversation.observe',description:'pixels',effect:'read',capabilities:['conversation.read'],scope:a=>a,execute:async a=>observe?observe(a,visible):({headerMatched:true,changed:true,messages:visible,draft:''})});
- tools.register({name:'conversation.open',description:'open',effect:'read',capabilities:['screen.input'],scope:a=>a,execute:async(_args,context)=>{await onOpen?.(context);return {ok:true};}});
+ let visible=[message('old')],busy=false,opened=!onOpen;const sent=[],reports=[],records=new Map(),tools=new ToolRegistry();let now=1000;
+ tools.register({name:'conversation.observe',description:'pixels',effect:'read',capabilities:['conversation.read'],scope:a=>a,execute:async a=>!opened?{headerMatched:false,changed:true,messages:[],draft:''}:observe?observe(a,visible):({headerMatched:true,changed:true,messages:visible,draft:''})});
+ tools.register({name:'conversation.open',description:'open',effect:'read',capabilities:['screen.input'],scope:a=>a,execute:async(_args,context)=>{const result=await onOpen?.(context);opened=true;return result||{ok:true};}});
  tools.register({name:'conversation.transcribe',description:'voice',effect:'read',capabilities:['screen.input','conversation.read'],scope:a=>a,execute:async a=>transcribe?transcribe(a):({pending:true})});
  tools.register({name:'conversation.send',description:'send',effect:'write',capabilities:['conversation.send'],scope:a=>a,execute:async a=>{sent.push(a.message);visible=[...visible,message(a.message,'outgoing')];return {ok:true,verified:true,receipt:{at:now}};}});
  tools.register({name:'memory.related',description:'related shared memories',effect:'read',capabilities:['memory.read'],scope:a=>a,execute:async()=>({items:[]})});
@@ -98,6 +98,20 @@ test('successful preparation retires its active action and healthy passive watch
  await h.runtime.tick(id);const task=h.runtime.tasks.get(id),run=Object.values(task.actionRuns)[0];assert.equal(run.status,'completed');
  for(let i=0;i<6;i++){h.advance();await h.runtime.tick(id);}
  assert.equal(diagnoses,0);assert.equal(task.status,'waiting');assert.equal(Object.values(task.actionRuns).length,1);assert.equal(h.sent.length,0);await h.runtime.close();
+});
+test('a successful navigation claim contradicted by the observed target reaches action recovery without consuming another conversation',async()=>{
+ let wrong=true,opens=0,h;const recoveries=[];
+ h=harness({onOpen:context=>{if(++opens===2){assert.equal(context.task.state.outcomeFeedback.at(-1).observed.target,'Different fixture');assert.equal(context.action.recovery.action,'change_method');wrong=false;}return {ok:true,executionClaim:{completed:true,evidence:'The requested fixture was opened',physicalId:'synthetic-open'}};},observe:(_args,visible)=>wrong?{headerMatched:false,headerText:'Different fixture',changed:true,observationId:'wrong-observation',messages:[message('other-contact-body-canary')]}:{headerMatched:true,headerText:'Alice',changed:true,messages:visible}});
+ h.runtime.diagnoseRepair=async info=>{recoveries.push(info);return {action:'change_method',source:'llm',nextStep:'Use the preserved observed mismatch to choose the exact requested target'};};
+ const {id}=await h.start();await h.runtime.tick(id);const task=h.runtime.tasks.get(id),state=Object.values(task.state.conversations)[0];
+ assert.equal(recoveries.length,1);assert.equal(recoveries[0].kind,'stall');assert.equal(recoveries[0].code,'E_NO_PROGRESS');assert(!JSON.stringify(recoveries).includes('Different fixture'),'ordinary diagnostics contain no contact title');assert.equal(state.cursor.ready,undefined);assert.equal(task.inbox.length,0);assert.equal(h.sent.length,0);assert(!JSON.stringify(task).includes('other-contact-body-canary'));
+ const feedback=task.state.outcomeFeedback[0];assert.equal(feedback.expected.target,'Alice');assert.equal(feedback.observed.target,'Different fixture');assert.equal(feedback.execution.claimedCompleted,true);assert(feedback.execution.operationId);
+ await h.runtime.tick(id);assert.equal(opens,2);assert.equal(state.cursor.ready,true);assert.equal(Object.values(task.actionRuns).length,1);h.incoming('real fixture input');await h.runtime.tick(id);await h.runtime.tick(id);assert.deepEqual(h.sent,['reply real fixture input']);await h.runtime.close();
+});
+test('owner stop isolates a late target-mismatch observation from the retired preparation',async()=>{
+ let entered,release;const started=new Promise(resolve=>entered=resolve),h=harness({onOpen:()=>({ok:true,executionClaim:{completed:true}}),observe:()=>{entered();return new Promise(resolve=>release=resolve);}}),{id}=await h.start();
+ const pending=h.runtime.tick(id);await started;await h.runtime.stop(h.runtime.tasks.get(id));await pending;release({headerMatched:false,headerText:'Late different fixture',changed:true,messages:[message('late-other-body')]});await new Promise(resolve=>setImmediate(resolve));
+ const task=h.runtime.tasks.get(id);assert.equal(task.status,'stopped');assert.equal(task.state.outcomeFeedback,undefined);assert.equal(task.inbox.length,0);assert.deepEqual(h.sent,[]);assert(!JSON.stringify(task).includes('Late different fixture'));await h.runtime.close();
 });
 test('pause and restore retain active preparation progress without input until explicit resume',async()=>{
  let h;let opens=0;h=harness({onOpen:()=>{opens++;h.advance(20000);throw Error('synthetic planning timeout');}});
@@ -176,6 +190,48 @@ test('reply generation receives actual previous messages and only supplied relat
  assert.equal(payload.conversation[0].text,'The project is called Alpha.');assert.equal(payload.memories.length,1);
 });
 
+test('goal completion is assessed after the real receipt, independently of the unsent decision',async t=>{
+ for(const completed of [true,false]){
+  const h=harness({completion:'goal',brain:args=>args.phase==='post-send'?{decision:'ignore',reply:'',summary:'Actual result assessed',completed,progress:{},unknown:[]}:{decision:'reply',reply:'Acknowledged',summary:'Not yet sent',completed:!completed,progress:{},unknown:[]}});t.after(()=>h.runtime.close());
+  const {id}=await h.start();await h.runtime.tick(id);h.incoming('A new synthetic message');await h.runtime.tick(id);await h.runtime.tick(id);
+  assert.deepEqual(h.sent,['Acknowledged']);assert.deepEqual(h.decisions.map(args=>args.phase||'incoming'),['incoming','post-send']);assert.equal(h.decisions[1].deliveryReceipt.verified,true);assert(h.decisions[1].deliveryReceipt.receipt);
+  assert.equal(h.runtime.tasks.get(id).status,completed?'completed':'waiting');
+ }
+});
+
+test('failed post-send assessment retries only judgment against the confirmed send and persists it',async()=>{
+ const {subjectKey}=require('../src/main/conversation-skill'),subject={application:'wechat',recipient:'Synthetic Contact'},receipt={operationId:'verified-send',submittedAt:1000,sentText:'Acknowledged'},decision={decision:'reply',reply:'Acknowledged',summary:'Pending send',completed:false,progress:{},unknown:[]};
+ const event={key:'event',type:'conversation.messages',subjectKey:subjectKey(subject),messages:[message('New synthetic message')],decision};
+ const task={id:'synthetic-post-send',completion:'goal',parameters:{behavior:'reply'},subjects:[subject],state:{},operations:{send:{effect:'write',status:'confirmed',key:'reply:event'}},inbox:[event],schedule:{intervalSeconds:3,activeIntervalSeconds:3},counters:{wakes:1}};
+ let sends=0,assessments=0,reports=0;
+ const skill=conversationSkill({canOperate:async()=>true,brain:{decide:async args=>{assert.equal(args.phase,'post-send');assert.deepEqual(args.deliveryReceipt.receipt,receipt);if(++assessments===1)throw Object.assign(Error('synthetic assessment timeout'),{code:'E_MODEL_TIMEOUT'});return {decision:'ignore',reply:'',summary:'Real result completes the goal',completed:true,progress:{},unknown:[]};}}});
+ const context={task,event,clock:()=>2000,now:2000,signal:new AbortController().signal,checkpoint:async()=>{},report:async()=>{reports++;},call:async operation=>{assert.equal(operation.tool,'conversation.send');sends++;return {verified:true,receipt};}};
+ await assert.rejects(skill.run(context),{code:'E_MODEL_TIMEOUT'});assert.equal(sends,1);assert.equal(reports,0);assert.notEqual(task.state.conversations[subjectKey(subject)].completed,true);
+ const recovered={...context,completedCall:()=>({verified:true,receipt})};assert.equal((await skill.run(recovered)).status,'completed');assert.equal(sends,1);assert.equal(assessments,2);assert.equal(event.completionAssessment.completed,true);
+ await skill.run(recovered);assert.equal(assessments,2,'stored judgment is reused for the same goal revision');
+});
+
+test('post-send brain uses task inference budget, requires a receipt and cannot propose a new send',async()=>{
+ const requests=[],task={goal:'Respond and finish when the authorized objective is satisfied',criteria:'Real reply received',policy:'Only the authorized conversation',parameters:{behavior:'reply'}},subject={application:'synthetic',recipient:'Synthetic Contact'},conversation={cursor:{recent:[]}};
+ const brain=new ConversationBrain({request:async options=>{requests.push(options);return {response:{text:JSON.stringify({decision:'ignore',reply:'',summary:'Verified result satisfies the objective',completed:true,progress:{},unknown:[]})}};}});
+ await assert.rejects(brain.decide({task,subject,conversation,phase:'post-send'}),{code:'E_CONVERSATION_RECEIPT'});assert.equal(requests.length,0);
+ const deliveryReceipt={verified:true,receipt:{operationId:'confirmed-send',submittedAt:1000}},result=await brain.decide({task,subject,conversation,phase:'post-send',deliveryReceipt});assert.equal(result.completed,true);assert.equal(requests[0].timeoutMs,90000);assert.deepEqual(JSON.parse(requests[0].messages[1].content).deliveryReceipt,deliveryReceipt);
+ brain.request=async()=>({response:{text:JSON.stringify({decision:'reply',reply:'Do not send again',summary:'Wrong phase',completed:true,progress:{},unknown:[]})}});
+ await assert.rejects(brain.decide({task,subject,conversation,phase:'post-send',deliveryReceipt}),{code:'E_MODEL_SCHEMA'});
+});
+
+test('stop and a changed goal reject late post-send judgments without another input',async()=>{
+ for(const change of ['stop','goal']){
+  const {subjectKey}=require('../src/main/conversation-skill'),subject={application:'wechat',recipient:'Synthetic Contact'},gate=Promise.withResolvers(),entered=Promise.withResolvers(),controller=new AbortController();
+  const event={key:'event',type:'conversation.messages',subjectKey:subjectKey(subject),messages:[message('New synthetic message')],decision:{decision:'reply',reply:'Acknowledged',summary:'Pending',completed:false,progress:{},unknown:[]}};
+  const task={id:'synthetic-late-assessment',completion:'goal',parameters:{behavior:'reply'},subjects:[subject],state:{},operations:{send:{effect:'write',status:'confirmed',key:'reply:event'}},inbox:[event],schedule:{intervalSeconds:3,activeIntervalSeconds:3},counters:{wakes:1}};
+  const skill=conversationSkill({canOperate:async()=>true,brain:{decide:async()=>{entered.resolve();return gate.promise;}}});
+  const pending=skill.run({task,event,clock:()=>2000,now:2000,signal:controller.signal,checkpoint:async()=>{},report:async()=>assert.fail('late judgment cannot report completion'),call:async()=>assert.fail('confirmed send must not replay'),completedCall:()=>({verified:true,receipt:{operationId:'verified-send',submittedAt:1000}})});
+  await entered.promise;if(change==='stop')controller.abort();else task.state.goalRevision=1;gate.resolve({decision:'ignore',reply:'',summary:'Late',completed:true,progress:{},unknown:[]});
+  await assert.rejects(pending);assert.equal(event.completionAssessment,undefined);assert.notEqual(task.state.conversations[subjectKey(subject)].completed,true);
+ }
+});
+
 test('a shared scene revision is processed even after another observer marked it unchanged',async()=>{
  let rev='first';const h=harness({observe:(_a,visible)=>({headerMatched:true,changed:false,revision:rev,messages:visible,draft:''})}),{id}=await h.start();
  await h.runtime.tick(id);h.incoming('new');rev='second';await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).inbox.length,1);
@@ -207,16 +263,38 @@ test('an unread badge uses the already visible new message without unnecessary n
  let unread=false,opens=0;const h=harness({observe:(_a,visible)=>({headerMatched:true,changed:false,unread,messages:visible,draft:''}),onOpen:()=>{opens++;unread=false;}}),{id}=await h.start();
  await h.runtime.tick(id);const before=opens;unread=true;h.incoming('hello');await h.runtime.tick(id);assert.equal(opens,before);assert.equal(h.runtime.tasks.get(id).inbox.length,1);await h.runtime.tick(id);assert.deepEqual(h.sent,['reply hello']);
 });
-test('an initially unverified text is retained, visually rechecked and replied to',async()=>{
- let allow=false;const h=harness({observe:(args,visible)=>({headerMatched:true,changed:true,messages:visible.map(m=>m.text==='new'&&args.force&&allow?{...m,incomingVerified:true}:m),draft:''})}),{id}=await h.start();
- await h.runtime.tick(id);h.setVisible([message('old'),{...message('new'),incomingVerified:false}]);await h.runtime.tick(id);await h.runtime.tick(id);
- assert.equal(h.sent.length,0);assert.equal(h.runtime.tasks.get(id).inbox.length,1);allow=true;await h.runtime.tick(id);
- assert.deepEqual(h.sent,['reply new']);assert.equal(h.runtime.tasks.get(id).inbox.length,0);
+test('ordinary uncertain incoming text reaches the task brain without compulsory rechecking or changing its evidence',async()=>{
+ for(const behavior of ['reply','inquiry']){
+  const reads=[],h=harness({behavior,observe:(args,messages)=>{reads.push(args);return {headerMatched:true,changed:true,messages,draft:''};}}),{id}=await h.start();
+  await h.runtime.tick(id);const before=h.sent.length;h.setVisible([message('old'),{...message('new'),incomingVerified:false,observedVerified:false,visualEvidence:{confidence:.95,textBounds:null,seenText:false,localDirection:null}}]);await h.runtime.tick(id);await h.runtime.tick(id);
+  assert.deepEqual(h.sent.slice(before),['reply new']);assert.equal(h.runtime.tasks.get(id).inbox.length,0);assert(!Object.values(h.runtime.tasks.get(id).operations).some(op=>op.key.startsWith('verify-message:')),'ordinary replies do not schedule another message-verification model call');
+  const input=h.decisions.at(-1).incoming[0];assert.equal(input.incomingVerified,false);assert.equal(input.observedVerified,false);assert.equal(input.visualEvidence.seenText,false);
+  await h.runtime.close();
+ }
+});
+test('owner stop cancels a delayed decision for uncertain ordinary incoming text',async()=>{
+ let release,entered;const started=new Promise(resolve=>entered=resolve),h=harness({brain:()=>{entered();return new Promise(resolve=>release=resolve);}}),{id}=await h.start();
+ await h.runtime.tick(id);h.setVisible([message('old'),{...message('new'),incomingVerified:false,observedVerified:false}]);await h.runtime.tick(id);
+ const running=h.runtime.tick(id);await started;await h.runtime.stop(h.runtime.tasks.get(id));await running;
+ release({decision:'reply',reply:'late reply',summary:'late',completed:false,progress:{},unknown:[]});await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(h.sent,[]);assert.equal(h.runtime.tasks.get(id).status,'stopped');await h.runtime.close();
 });
 test('multiple voice messages are transcribed in order before one reply',async()=>{
  const seen=[];const h=harness({transcribe:async a=>{seen.push(a.sequence);return {verified:true,text:'语音'+a.sequence};}}),{id}=await h.start();
  await h.runtime.tick(id);h.setVisible([message('old'),{...message('[语音]'),kind:'voice'},{...message('[语音]'),kind:'voice'}]);await h.runtime.tick(id);await h.runtime.tick(id);
  assert.deepEqual(seen,[1,2]);assert.deepEqual(h.sent,['reply 语音1+语音2']);
+});
+test('ordinary unread media reaches the task brain without pretending it was transcribed',async()=>{
+ for(const behavior of ['reply','inquiry'])for(const kind of ['voice','image','file','other']){
+  const h=harness({behavior,transcribe:async()=>({blocked:true,reason:'no readable transcript'}),brain:args=>({decision:'reply',reply:args.phase?'Hello':'收到，谢谢',summary:'acknowledged receipt only',completed:false,progress:{},unknown:[]})}),{id}=await h.start();
+  await h.runtime.tick(id);const before=h.sent.length;h.setVisible([message('old'),...h.sent.map(text=>message(text,'outgoing')),{...message('[media]'),kind,incomingVerified:false,observedVerified:false}]);await h.runtime.tick(id);await h.runtime.tick(id);
+  assert.deepEqual(h.sent.slice(before),['收到，谢谢'],behavior+':'+kind);const observed=h.decisions.at(-1).incoming[0];assert.equal(observed.kind,kind);assert.equal(observed.text,'[media]');assert.equal(observed.fromVoice,undefined);assert.equal(observed.incomingVerified,false);assert.equal(observed.observedVerified,false);assert.equal(h.runtime.tasks.get(id).inbox.length,0);await h.runtime.close();
+ }
+});
+test('untranscribed media alone cannot enter legacy bound-owner command dispatch',async()=>{
+ const h=harness({behavior:'owner',transcribe:async()=>({blocked:true})}),{id}=await h.start();await h.runtime.tick(id);
+ h.setVisible([message('old'),{...message('unread command'),kind:'voice'}]);await h.runtime.tick(id);await h.runtime.tick(id);
+ assert.equal(h.decisions.length,0);assert(!Object.values(h.runtime.tasks.get(id).operations).some(op=>op.tool==='owner.dispatch'));assert.deepEqual(h.sent,[]);await h.runtime.close();
 });
 test('a reply from a delayed decision executes once even if subsequent samples are quiet',async()=>{
  let finish,entered;const startedDecision=new Promise(r=>entered=r),decision=new Promise(r=>finish=r);let changed=true,revision='base';

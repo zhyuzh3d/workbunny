@@ -50,12 +50,14 @@ class AgentLearning{
   const assembler=require('./context-assembler'),query=task.state.ownerRequest||task.goal;
   const useInnate=this.memory?.innateExperiences?.enabled?.()??true;
   const defaults=useInnate?assembler.selectExperience(this.packages.filter(p=>['common','workbuddy'].includes(p.id)).map(p=>({packageId:p.id,application:p.application,origin:'innate',revision:p.version,status:'bundled',instructions:p.instructions})),{applications:['workbuddy'],query,maxTokens:1600,maxItems:2}):[];
-  if(!this.memory?.ready||!this.memory.experienceRepository?.search)return defaults;
+  const declared=useInnate?require('./software-skill-package').interpretationKnowledge(this.packages):[];
+  const meanings=assembler.selectExperience(declared,{applications:declared.map(p=>p.application),query,maxTokens:2000,maxItems:4});
+  if(!this.memory?.ready||!this.memory.experienceRepository?.search)return [...meanings,...defaults];
   const scene=require('./dialogue-channels').ordinaryScene(task.scene),rows=await this.memory.experienceRepository.search({scene,query,limit:4,excludeTaskId:task.id});
   // Relevant learned evidence can justify a better route before that software's
   // operating guide is loaded. Do not include unrelated bundled runbooks.
   const learned=rows.filter(r=>!['retired','superseded','rejected'].includes(r.value.status)).map(r=>({sourceId:r.id,origin:r.value.origin,status:r.value.status,tags:r.value.tags,instructions:r.value.instructions.slice(0,800),purpose:'route-evidence-not-authorization'}));
-  return [...defaults,...learned];
+  return [...meanings,...defaults,...learned];
  }
  async reviewContext(task,{executorReport='',signal}={}){
   const assembler=require('./context-assembler'),evidence=require('./memory-evidence'),memory=this.memory;

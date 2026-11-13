@@ -93,7 +93,10 @@ function createReplyStream({ cognitive = false, isCurrent = () => true, onDelta,
       if (!started) { const start = replyStart(raw, cognitive); if (start < 0) return; offset = start; started = true; }
       const end = valueEnd(raw, offset), stop = end > 0 ? end : raw.length;
       if (end > 0) {
-        try { require('./reply-format').validateReply(raw.slice(offset, end), { allowActions: false, allowTurnDisposition: true }); }
+        try {
+          const reply = require('./reply-format').validateReply(raw.slice(offset, end), { allowTurnDisposition: true });
+          if (reply.intent || reply.skipped) { closed = true; return; }
+        }
         catch { closed = true; return; }
       }
       // The inner chat object ends before cognition's prediction fields.
@@ -110,4 +113,4 @@ function createReplyStream({ cognitive = false, isCurrent = () => true, onDelta,
   };
 }
 
-module.exports = { createReplyStream };
+module.exports = { createReplyStream, fields, valueEnd, parsed };

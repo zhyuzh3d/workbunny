@@ -1,8 +1,8 @@
 /* Pupil-free black eyelids: capsule at rest, continuously sculpted by emotion. */
 import * as T from 'three';
 class SurfaceEyes {
- constructor(group,black,rim){
-  this.items=[];
+ constructor(group,black,rim,options={}){
+  this.modern=options.modern===true;this.items=[];
   for(const side of [-1,1]){
    const root=new T.Group();group.add(root);
    const item={side,root,width:.105,height:.205,arch:0,slope:0,gaze:0,y:-.025,shape:3.2,meshes:[]};
@@ -37,7 +37,7 @@ class SurfaceEyes {
    e.root.position.set(side*.38+e.gaze,e.y,.96);
    for(let m=0;m<e.meshes.length;m++){
     const {mesh,rings,steps}=e.meshes[m],a=mesh.geometry.attributes.position.array;
-    const scale=m===0?1.28:1,zOffset=m===0?.002:.014;
+    const scale=m===0?(this.modern?1.18:1.28):1,zOffset=m===0?.002:.014;
     for(let r=0;r<=rings;r++)for(let j=0;j<=steps;j++){
      const u=r/rings,angle=j/steps*Math.PI*2,rawC=Math.cos(angle),rawS=Math.sin(angle),power=2/e.shape;
      let c=Math.sign(rawC)*Math.pow(Math.abs(rawC),power),sn=Math.sign(rawS)*Math.pow(Math.abs(rawS),power);
@@ -46,9 +46,9 @@ class SurfaceEyes {
      if(heart>0){const phi=Math.PI/2-angle,hx=Math.pow(Math.sin(phi),3),hy=(13*Math.cos(phi)-5*Math.cos(2*phi)-2*Math.cos(3*phi)-Math.cos(4*phi))/17;c=c*(1-heart)+hx*heart;sn=sn*(1-heart)+hy*heart}
      const x=e.width*scale*u*c;
      const yy=e.arch*scale*(1-u*u*c*c)+e.slope*scale*u*c+e.height*scale*u*sn+(expression.wavy||0)*.05*Math.sin(2*Math.PI*u*c-_t*7)*u;
-     const gx=e.root.position.x+x,gy=e.root.position.y+yy,p=2.25,fw=1.10*(1-.11*clamp(gy,-1,1));
-     const z=.98*Math.pow(Math.max(.02,1-Math.pow(Math.abs(gx/fw),p)-Math.pow(Math.abs(gy/.91),p)),1/p);
-     const bulge=.009*Math.sqrt(Math.max(0,1-u*u)),k=(r*(steps+1)+j)*3;
+     const gx=e.root.position.x+x,gy=e.root.position.y+yy,p=this.modern?2.08:2.25,fw=1.10*(1-.11*clamp(gy,-1,1));
+     const z=.98*Math.pow(Math.max(.02,1-Math.pow(Math.abs(gx/fw),p)-Math.pow(Math.abs(gy/(this.modern?.86:.91)),p)),1/p);
+     const bulge=(this.modern?.025:.009)*Math.sqrt(Math.max(0,1-u*u)),k=(r*(steps+1)+j)*3;
      a[k]=x;a[k+1]=yy;a[k+2]=z-.96+zOffset+bulge;
     }
     mesh.geometry.attributes.position.needsUpdate=true;mesh.geometry.computeVertexNormals();

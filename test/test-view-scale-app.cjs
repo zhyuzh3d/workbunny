@@ -20,7 +20,7 @@ async function main() {
       window.__v100=await window.__viewState();check(Math.abs(__v100.ui[0].w-(832*4/7-16)*.8)<.1,'control envelope must be 80%');check(Math.abs(__v100.ui[1].w-358*.8)<.1,'text input must be 80%');return {baseline:true};`),
     'window.pet.open("settings")',
     '@panel:settings:document.querySelector("[data-t=look]").click()',
-    '@panel:settings:({halfPreset:document.querySelector(\'#sizeRow [data-k="0.25"]\')?.textContent==="50% 半身"})',
+    '@panel:settings:({halfPreset:document.querySelector(\'#sizeRow [data-k="0.25"]\')?.textContent==="50%",framingVisible:!document.querySelector("#framingSection").hidden})',
     select(.25),
     wait('window.__frame().scale===.25&&window.__frame().viewport.width===416&&window.__frame().viewport.height===400'),
     check(`const v=await window.__viewState(),old=window.__v100;check(v.f.bust,'half preset remains bust framing');
@@ -31,9 +31,18 @@ async function main() {
     select(.5),
     wait('window.__frame().scale===.5&&window.__frame().viewport.width===832'),
     check(`const v=await window.__viewState(),old=window.__v100;check(v.anchor.x===old.anchor.x&&v.anchor.y===old.anchor.y,'restore anchor');check(Math.abs(v.head.y-old.head.y)<=1,'restore bust framing');return {restored:true};`),
+    '@panel:settings:document.querySelector(\'#framingRow [data-framing="full"]\').click()',
+    wait('window.__frame().bust===false'),
+    check(`const v=await window.__viewState();check(v.f.scale===.5&&v.f.viewport.width===832,'framing must not change size');window.__full100=v;return {fullAt100:true};`),
+    select(.25),
+    wait('window.__frame().scale===.25&&window.__frame().viewport.width===416'),
+    check(`const v=await window.__viewState();check(!v.f.bust,'50% must preserve full framing');check(v.anchor.x===__full100.anchor.x&&v.anchor.y===__full100.anchor.y,'full framing keeps anchor');return {fullAt50:true};`),
     'window.pet.scale(2)',
     wait('window.__frame().scale===2&&window.__frame().viewport.width===1664'),
-    check(`const v=await window.__viewState();check(v.ui.every((r,i)=>Math.abs(r.w-window.__v100.ui[i].w)<.1&&Math.abs(r.h-window.__v100.ui[i].h)<.1),'200% controls must remain fixed');return {largeControlsFixed:true};`),
+    check(`const v=await window.__viewState();check(!v.f.bust,'200% keeps full framing');check(v.ui.every((r,i)=>Math.abs(r.w-window.__v100.ui[i].w)<.1&&Math.abs(r.h-window.__v100.ui[i].h)<.1),'200% controls must remain fixed');return {largeControlsFixed:true};`),
+    '@panel:settings:document.querySelector(\'#framingRow [data-framing="half"]\').click()',
+    wait('window.__frame().bust===true&&window.__frame().scale===2'),
+    check('return {halfAt200:true};'),
     'window.pet.scale(.25)',
     wait('window.__frame().scale===.25&&window.__frame().viewport.width===416'),
     'window.__freeze(false)',
@@ -59,7 +68,7 @@ async function main() {
       assert(!log.includes('ERR:') && !log.includes('[selftest] fail'), log.slice(-8000));
     } finally { clearTimeout(timer); }
   }
-  await run(script, ['"baseline":true', '"halfPreset":true', '"halfCanvas":true', '"fixedControls":true', '"bottomAnchor":true', '"halfProjection":true', '"restored":true', '"largeControlsFixed":true', '"drawSuspended":true'], 'switching');
+  await run(script, ['"baseline":true', '"halfPreset":true', '"framingVisible":true', '"halfCanvas":true', '"fixedControls":true', '"bottomAnchor":true', '"halfProjection":true', '"restored":true', '"fullAt100":true', '"fullAt50":true', '"largeControlsFixed":true', '"halfAt200":true', '"drawSuspended":true'], 'switching');
   await run([wait('window.__pet?.().vrm&&!window.__pet().loading'), check(`const f=window.__frame();check(f.scale===.25&&f.bust&&f.viewport.width===416&&f.viewport.height===400,'half preset must survive restart');return {restartHalf:true};`)], ['"restartHalf":true'], 'restart');
   console.log(JSON.stringify({ ok: true, source, scope: '80% controls + 50% bust canvas + anchored projection + fixed UI + restart', artifacts: root }));
 }

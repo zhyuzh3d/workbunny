@@ -135,7 +135,7 @@ test('private desktop intents use trusted host context and retain BOPER effects 
  assert(!('application' in request));assert(!('ownerId' in request));
  child.stdio[3].write(JSON.stringify({id:1,requestId:request.id,operation:{action:'typeText',params:{text:'fixture'}}})+'\n');await new Promise(r=>setImmediate(r));
  assert.equal(calls[0].context.application,'wechat');assert.equal(calls[0].context.ownerId,'trusted-owner');assert.deepEqual(calls[0].operation.params.visualEvidence,proof);assert.equal(replies[0].ok,true);
- child.stdout.write(JSON.stringify({id:request.id,ok:true,result:{performed:true}})+'\n');const result=await pending;assert.equal(result.inputOutcome.clipboardChanged,true);assert.equal(result.inputOutcome.reportsSubmitted,4);assert.equal(result.inputOutcome.releaseConfirmed,true);assert.equal(calls[1].cleanup,true);await client.close();
+ child.stdout.write(JSON.stringify({id:request.id,ok:true,result:{performed:true}})+'\n');const result=await pending;assert.equal(result.inputOutcome.clipboardChanged,true);assert.equal(result.inputOutcome.reportsSubmitted,4);assert.equal(result.inputOutcome.releaseConfirmed,true);assert.deepEqual(result.inputOutcome.inputKinds,['type']);assert.equal(result.inputOutcome.inputKindsComplete,true);assert(!JSON.stringify(result.inputOutcome).includes('fixture'));assert.equal(calls[1].cleanup,true);await client.close();
 });
 
 test('a later native failure cannot erase earlier BOPER input or clipboard effects',async()=>{
@@ -144,6 +144,38 @@ test('a later native failure cannot erase earlier BOPER input or clipboard effec
   child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.lines=[];child.stdin=new Writable({write(c,_e,done){child.lines.push(JSON.parse(c));done();}});child.stdio=[child.stdin,child.stdout,child.stderr,new PassThrough(),new Writable({write(_c,_e,done){done();}})];child.kill=()=>queueMicrotask(()=>child.emit('close',0));return child;
  }});
  const pending=client.request('workbuddyFill',{text:'fixture'},1000);const request=child.lines[0];child.stdio[3].write(JSON.stringify({id:1,requestId:request.id,operation:{action:'typeText',params:{text:'fixture'}},displayBounds:[{x:0,y:0,width:100,height:100}]})+'\n');await new Promise(r=>setImmediate(r));child.stdout.write(JSON.stringify({id:request.id,ok:false,error:'draft changed after input',dispatched:false})+'\n');await assert.rejects(pending,error=>error.dispatched===true&&error.inputOutcome.clipboardChanged===true);await client.close();
+});
+function pointerTransactionFixture({action='click',failure,onPreflight,invokeInput=fn=>fn()}={}){
+ let now=100000,child,outer,authorized=true;const operations=[],order=[],releases=[],controller=new AbortController();
+ const proof={frameId:require('node:crypto').randomUUID(),capturedAt:now,displayRect:{x:0,y:0,width:200,height:120},region:{x:20,y:12,width:160,height:96}};
+ const boper={assertAvailable:()=>({}),execute:async(operation,context,scope)=>{operations.push({operation,scope});order.push(operation.action);assert.equal(context.ownerId,'pointer-owner');if(operation.action==='move'){now+=4000;if(failure==='move-unknown')return {dispatched:true,reportsSubmitted:2,completion:'unknown',dispatchOutcomeUnknown:true};return {dispatched:true,reportsSubmitted:46,reportsAttempted:46,moved:true,completion:'local-submitted'};}if(failure==='commit-unknown')throw Object.assign(Error('commit receipt unknown'),{dispatched:true,inputOutcome:{dispatchOutcomeUnknown:true,reportsAttempted:1,completion:'unknown'}});assert.equal(operation.params.pointerPrepared,true);assert.equal(operation.params.visualEvidence.capturedAt,now);return {dispatched:true,reportsSubmitted:2,reportsAttempted:2,completion:'local-submitted'};},endScope:async(owner,scope)=>{releases.push({owner,scope});return {releaseConfirmed:true};}};
+ const client=new DesktopNative('/fixture/desktop',{clock:()=>now,boper,inputContext:()=>({ownerId:'pointer-owner',validate:()=>authorized}),spawn:()=>{
+  child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.stdin=new Writable({write(c,_e,done){outer=JSON.parse(c);done();}});child.stdio=[child.stdin,child.stdout,child.stderr,new PassThrough(),new Writable({write(c,_e,done){const reply=JSON.parse(c);queueMicrotask(()=>child.stdout.write(JSON.stringify({id:outer.id,ok:reply.ok,...(reply.ok?{result:{performed:true}}:{error:reply.error,code:reply.code,dispatched:reply.dispatched})})+'\n'));done();}})];child.kill=()=>queueMicrotask(()=>child.emit('close',0));return child;
+ }});
+ const run=()=>{const result=client.request('displayInput',{action,x:100,y:60,deltaY:-50,visualEvidence:proof},1000,{visual:true,signal:controller.signal,refreshVisualEvidence:async()=>{order.push('CGDisplayStream-preflight');await onPreflight?.();if(failure==='cancel')controller.abort();if(failure==='authority')authorized=false;if(failure==='reentry')return client.request('displayCapture',{output:'base64'},1000);if(failure==='pixels')throw Object.assign(Error('target pixels changed'),{code:'E_VISUAL_TARGET',dispatched:false});return {...proof,capturedAt:failure==='stale'?100000:now,...(failure==='identity'?{frameId:'other-frame'}:{})};}});invokeInput(()=>child.stdio[3].write(JSON.stringify({id:1,requestId:outer.id,operation:{action,params:{x:100,y:60,deltaY:-50}}})+'\n'));return result;};
+ return {client,operations,order,releases,run};
+}
+test('native pointer preflight keeps its creating Task and Operation under a foreign observer async scope',async()=>{
+ const {AsyncLocalStorage}=require('node:async_hooks'),trace=require('../src/main/operation-diagnostics');
+ for(const failure of [undefined,'pixels','cancel']){
+  const taskScope=new AsyncLocalStorage(),recorder=new trace.OperationDiagnostics();let checks=0;
+  const f=pointerTransactionFixture({failure,invokeInput:fn=>taskScope.run('observer',()=>trace.scope({taskId:'foreign-task',operationId:'observe-operation'},fn)),onPreflight:async()=>{
+   await Promise.resolve();checks++;assert.equal(taskScope.getStore(),'send');trace.record('input-preflight',{status:'validated'});
+  }});
+  const request=trace.using(recorder,()=>taskScope.run('send',()=>trace.scope({taskId:'send-task',operationId:'send-operation'},()=>f.run())));
+  if(failure)await assert.rejects(request,error=>{assert.equal(error.inputOutcome.pointerCommitState,'not-requested');assert.deepEqual(error.inputOutcome.inputKinds,['move']);assert.equal(error.inputOutcome.releaseConfirmed,true);return true;});
+  else{const result=await request;assert.equal(result.inputOutcome.pointerCommitState,'acknowledged');assert.deepEqual(result.inputOutcome.inputKinds,['move','click']);}
+  assert.equal(checks,1);const event=recorder.events.find(e=>e.stage==='input-preflight');assert.equal(event.taskId,trace.ref('send-task'));assert.equal(event.operationId,trace.ref('send-operation'));assert.equal(f.releases.length,1);await f.client.close();
+ }
+});
+for(const action of ['click','scroll'])test('visual '+action+' prepares and commits on one BOPER scope with a fresh captured proof',async()=>{
+ const f=pointerTransactionFixture({action}),result=await f.run();assert.deepEqual(f.order,['move','CGDisplayStream-preflight',action]);assert.equal(f.operations[0].scope.scopeId,f.operations[1].scope.scopeId);assert.equal(f.operations[0].scope.operationId,f.operations[1].scope.operationId);assert.equal(f.releases.length,1);assert.equal(result.inputOutcome.reportsSubmitted,48);assert.deepEqual(result.inputOutcome.inputKinds,['move',action]);assert.equal(result.inputOutcome.pointerCommitState,'acknowledged');await f.client.close();
+});
+for(const failure of ['pixels','stale','identity','cancel','authority','reentry','move-unknown'])test('pointer preparation preserves actual move receipts and never commits after '+failure,async()=>{
+ const f=pointerTransactionFixture({failure});await assert.rejects(f.run(),error=>{assert.equal(error.dispatched,true);assert.equal(error.inputOutcome.pointerCommitState,'not-requested');assert.deepEqual(error.inputOutcome.inputKinds,['move']);if(failure==='move-unknown')assert.equal(error.inputOutcome.dispatchOutcomeUnknown,true);else assert.equal(error.inputOutcome.moved,true);return true;});assert.equal(f.operations.length,1);assert.equal(f.operations[0].operation.action,'move');assert.equal(f.releases.length,1);await f.client.close();
+});
+test('an unknown commit preserves both phases and is never downgraded to an undispatched movement',async()=>{
+ const f=pointerTransactionFixture({failure:'commit-unknown'});await assert.rejects(f.run(),error=>{assert.equal(error.dispatched,true);assert.equal(error.inputOutcome.pointerCommitState,'unknown');assert.equal(error.inputOutcome.completion,'unknown');assert.equal(error.inputOutcome.reportsSubmitted,46);assert.deepEqual(error.inputOutcome.inputKinds,['move','click']);return true;});assert.equal(f.releases.length,1);await f.client.close();
 });
 
 function inputLifecycleFixture(options={}) {

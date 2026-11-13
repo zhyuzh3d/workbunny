@@ -40,6 +40,12 @@ test('VirtualHID is exclusive for ordinary software and refuses directed input b
  const begin=f.messages.find(m=>m.action==='beginSession');assert.equal(begin.backend,'virtual-hid');assert.equal(begin.delegationToken,'private-test-token');assert.equal(f.authorizations.length,1);
  await f.service.endScope('owner-a','foreground');assert.equal(f.revocations.length,1);await f.service.shutdown();
 });
+test('a busy helper never authorizes input or revokes another group during failed setup',async()=>{
+ const f=fixture({enabled:true});await f.service.refreshStatus();
+ f.control.authorizeRuntime=async()=>{throw Object.assign(Error('Another group owns input'),{code:'E_HELPER_BUSY'});};
+ await assert.rejects(f.service.execute({action:'key',params:{key:'a'}},f.context,{scopeId:'busy-group'}),{code:'E_HELPER_BUSY'});
+ assert.equal(f.messages.some(m=>m.action==='execute'),false);assert.equal(f.revocations.length,0);assert.equal(f.service.status().state,'ready');await f.service.shutdown();
+});
 test('missing or expired host ownership cannot dispatch; cancelling another client leaves the active owner alone',async()=>{
  const f=fixture();await assert.rejects(f.service.execute({action:'key',params:{key:'a'}},{ownerId:'script'},{scopeId:'bad'}),{code:'E_BOPER_CONTEXT'});
  await assert.rejects(f.service.execute({action:'key',params:{key:'a'}},{...f.context,validate:()=>false},{scopeId:'stale'}),{code:'E_BOPER_CONTEXT'});

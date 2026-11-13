@@ -91,7 +91,7 @@ test('a queued conversation command that was canceled before execution emits no 
 test('a proven GUI-busy non-dispatch retries promptly without repeating a send',async()=>{
  const h=fixture();h.agent.canOperate=async()=>false;const start=await h.agent.start({skill:'conversation.send',goal:'send once',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'one reply'}},h.owner);
  await h.agent.runtime.tick(start.id);const task=h.agent.runtime.tasks.get(start.id);assert.equal(task.state.lastFailure,undefined);assert.equal(task.status,'waiting');assert(task.nextCheckAt-task.updatedAt<=1000);assert.equal(h.outgoing.length,0);
- h.agent.canOperate=async()=>true;await h.agent.runtime.tick(start.id);assert.equal(h.outgoing.length,1);assert.equal(task.status,'completed');await h.agent.close();
+ h.agent.canOperate=async()=>true;await h.agent.runtime.tick(start.id);assert.equal(h.outgoing.length,0,'manual ticks do not bypass the saved resource retry deadline');const retryAt=task.nextCheckAt+1;h.agent.runtime.clock=()=>retryAt;await h.agent.runtime.tick(start.id);assert.equal(h.outgoing.length,1);assert.equal(task.status,'completed');await h.agent.close();
 });
 test('a waiting software task does not block an unrelated conversation task',async()=>{
  const h=fixture(),conversation=await h.agent.start({skill:'conversation.manage',goal:'watch Alice',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{behavior:'reply'}},h.owner);
@@ -159,7 +159,7 @@ test('an unknown send without its original before-image cannot be reconciled or 
 test('reconciliation releases a journaled pre-dispatch failure without inventing a sent message',async()=>{
  const h=fixture(),started=await h.agent.start({skill:'conversation.send',goal:'send hello',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'hello'}},h.owner),task=h.agent.runtime.tasks.get(started.id);
  const physical={id:'focus-only',target:'wechat',operation:'send',status:'paused',message:'［ᕱᕱ］ hello',wechatOwnership:'owner',recipient:'Alice',sources:[task.id],steps:[{action:'type',purpose:'task',state:'not-dispatched'}]};
- h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{recipient:'Alice',message:'hello'}};await h.agent.runtime.save(task);
+ h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{application:'wechat',recipient:'Alice',message:'hello'}};await h.agent.runtime.save(task);
  h.agent.runtime.controllers.set(task.id,new AbortController());assert.equal((await h.agent.reconcile(task.id)).ok,false);assert.equal(task.operations.pending.status,'intent');h.agent.runtime.controllers.delete(task.id);
  const checked=await h.agent.reconcile(task.id);assert(checked.ok&&checked.notDispatched);assert.equal(task.operations.pending.status,'not_dispatched');assert.equal(h.outgoing.length,0);
  assert((await h.agent.control('resume',task.id)).ok);await h.agent.runtime.tick(task.id);assert.equal(h.outgoing.length,1);assert.equal(task.status,'completed');await h.agent.close();
@@ -168,20 +168,20 @@ test('reconciliation reads the physical operation belonging to its own action, n
  const h=fixture(),started=await h.agent.start({skill:'conversation.send',goal:'send hello',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'hello'}},h.owner),task=h.agent.runtime.tasks.get(started.id);
  const physical={id:'alice-physical',target:'wechat',operation:'send',status:'paused',message:'［ᕱᕱ］ hello',wechatOwnership:'owner',recipient:'Alice',sources:[task.id],steps:[{action:'type',purpose:'task',state:'not-dispatched'}]};
  h.conversationDesktop.task={id:'bob-physical',recipient:'Bob'};task.state.conversationOperationId='bob-physical';task.status='needs_attention';
- task.operations.pending={id:'pending',physicalId:'alice-physical',effect:'write',tool:'conversation.send',status:'intent',args:{recipient:'Alice',message:'hello'}};
+ task.operations.pending={id:'pending',physicalId:'alice-physical',effect:'write',tool:'conversation.send',status:'intent',args:{application:'wechat',recipient:'Alice',message:'hello'}};
  h.agent.memory={ready:true,db:{request:async(_op,{ids})=>({rows:ids[0]==='alice-physical'?[{state:'active',value:physical}]:[]})},decode:row=>row};
  const checked=await h.agent.reconcile(task.id);assert(checked.ok&&checked.notDispatched);assert.equal(task.operations.pending.status,'not_dispatched');assert.equal(h.conversationDesktop.task.recipient,'Bob');await h.agent.close();
 });
 test('a paused send before its first operation is known unsent, while a missing operation journal stays unknown',async()=>{
  const h=fixture(),started=await h.agent.start({skill:'conversation.send',goal:'send hello',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'hello'}},h.owner),task=h.agent.runtime.tasks.get(started.id);
- const physical={id:'before-any-operation',target:'wechat',operation:'send',status:'stopped',message:'［ᕱᕱ］ hello',wechatOwnership:'owner',recipient:'Alice',sources:[task.id]};h.conversationDesktop.task=physical;task.status='paused';task.state.conversationOperationId=physical.id;task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{recipient:'Alice',message:'hello'}};
+ const physical={id:'before-any-operation',target:'wechat',operation:'send',status:'stopped',message:'［ᕱᕱ］ hello',wechatOwnership:'owner',recipient:'Alice',sources:[task.id]};h.conversationDesktop.task=physical;task.status='paused';task.state.conversationOperationId=physical.id;task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{application:'wechat',recipient:'Alice',message:'hello'}};
  assert.equal((await h.agent.reconcile(task.id)).ok,false);assert.equal(task.operations.pending.status,'intent');physical.steps=[];
  const result=await h.agent.reconcile(task.id);assert(result.ok&&result.notDispatched);assert.equal(task.operations.pending.status,'not_dispatched');assert.equal(h.outgoing.length,0);await h.agent.close();
 });
 test('an uncertain input is resumed only after the exact original draft is visually observed',async()=>{
  const h=fixture(),started=await h.agent.start({skill:'conversation.send',goal:'send hello',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'hello'}},h.owner),task=h.agent.runtime.tasks.get(started.id);
  const physical={id:'maybe-draft',target:'wechat',operation:'send',status:'paused',message:'［ᕱᕱ］ hello',wechatOwnership:'owner',recipient:'Alice',sources:[task.id],steps:[{action:'type',purpose:'task',state:'intent',at:Date.now()}]};
- h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{recipient:'Alice',message:'hello'}};await h.agent.runtime.save(task);
+ h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{application:'wechat',recipient:'Alice',message:'hello'}};await h.agent.runtime.save(task);
  let resumed=0;h.conversationDesktop.resume=async()=>{resumed++;physical.submitAttemptedAt=Date.now();physical.sendState='confirmed';physical.status='review';return {ok:true};};
  const free=require('../src/main/workbuddy-free'),original=free.freeModel;free.freeModel=async()=> 'hy3';
  try{
@@ -195,11 +195,15 @@ test('reconciliation preserves the full source scope and opaque dialogue referen
  const h=fixture(),created=await h.agent.start({skill:'conversation.send',goal:'send hello',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'hello'}},h.owner),task=h.agent.runtime.tasks.get(created.id);
  const message='［ᕱᕱ］ hello',reference='channel-reply:original',physical={id:'scoped-send',target:'wechat',operation:'send',status:'paused',message,wechatOwnership:'owner',recipient:'Alice',sources:[task.id,'channel-message-source'],submitAttemptedAt:Date.now(),steps:[]};
  const messageKey=require('../src/main/conversation-cursor').messageKey({direction:'outgoing',kind:'text',text:message});
- task.state.outboundMessages=[{id:physical.id,recipient:'Alice',message:reference,messageKey,status:'pending'}];task.status='needs_attention';task.operations.pending={id:'pending',physicalId:physical.id,effect:'write',tool:'conversation.send',status:'intent',args:{recipient:'Alice',message:reference}};
+ task.state.outboundMessages=[{id:physical.id,recipient:'Alice',message:reference,messageKey,status:'pending'}];task.status='needs_attention';task.operations.pending={id:'pending',physicalId:physical.id,effect:'write',tool:'conversation.send',status:'intent',args:{application:'wechat',recipient:'Alice',message:reference}};
  h.conversationDesktop.task=physical;h.conversationDesktop.wechatBeforeSubmit={taskId:physical.id,preview:'before'};
  h.conversationDesktop.resume=async options=>{assert.deepEqual(options.sources,physical.sources);physical.status='review';physical.sendState='confirmed';return {ok:true};};
  const free=require('../src/main/workbuddy-free'),original=free.freeModel;free.freeModel=async()=> 'hy3';
- try{assert((await h.agent.reconcile(task.id)).ok);assert.equal(h.outgoing.length,0);assert.equal(task.operations.pending.result.receipt.sentText,reference);assert.equal(task.operations.pending.result.receipt.messageKey,messageKey);}finally{free.freeModel=original;await h.agent.close();}
+ try{
+  assert((await h.agent.reconcile(task.id)).ok);assert.equal(h.outgoing.length,0);
+  const receipt=task.operations.pending.result.receipt;assert.equal(receipt.desiredTextRef,reference);assert.equal(receipt.desiredText,undefined);assert.equal(receipt.observedText,null);assert.equal(receipt.sentText,undefined);assert.equal(receipt.messageKey,undefined);assert.equal(receipt.intentMessageKey,messageKey);
+  assert.equal(receipt.deliveryAssessment.completed,null,'legacy review status does not invent an absent model completion judgment');assert.equal(receipt.deliveryAssessment.source,'legacy-visual-record');assert.equal(receipt.reconciled,true);assert(!JSON.stringify(receipt).includes(message),'opaque intent is not replaced with the private transmitted body');assert.equal(task.state.outboundMessages[0].message,reference);assert.equal(task.operations.pending.status,'confirmed');
+ }finally{free.freeModel=original;await h.agent.close();}
 });
 test('automatic reconciliation keeps trying with backoff after two inconclusive checks',async()=>{
  const h=fixture(),started=await h.agent.start({skill:'conversation.send',goal:'send hello',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'hello'}},h.owner),task=h.agent.runtime.tasks.get(started.id);
@@ -211,14 +215,14 @@ test('automatic reconciliation keeps trying with backoff after two inconclusive 
 test('resume can finish the exact original pre-submit draft; read-only check cannot send it or create another operation',async()=>{
  const h=fixture(),started=await h.agent.start({skill:'conversation.send',goal:'send hello',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'hello'}},h.owner),task=h.agent.runtime.tasks.get(started.id);
  const physical={id:'original-draft',target:'wechat',operation:'send',status:'paused',draftInserted:true,message:'［ᕱᕱ］ hello',wechatOwnership:'owner',recipient:'Alice',sources:[task.id]};
- h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{recipient:'Alice',message:'hello'}};await h.agent.runtime.save(task);
+ h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{application:'wechat',recipient:'Alice',message:'hello'}};await h.agent.runtime.save(task);
  let resumed=0;h.conversationDesktop.resume=async()=>{resumed++;physical.submitAttemptedAt=Date.now();physical.sendState='confirmed';physical.status='review';return {ok:true};};
  const free=require('../src/main/workbuddy-free'),original=free.freeModel;free.freeModel=async()=> 'hy3';
  try{assert.equal((await h.agent.reconcile(task.id)).ok,false);assert.equal(resumed,0);assert((await h.agent.control('resume',task.id)).ok);assert.equal(resumed,1);assert.equal(task.operations.pending.status,'confirmed');assert.equal(task.operations.pending.result.receipt.operationId,physical.id);assert.equal(h.outgoing.length,0);}finally{free.freeModel=original;await h.agent.close();}
 });
 test('one resolve action queues verification on the same task while the owner is busy, with an explicit visible next step',async()=>{
  const h=fixture();h.agent.canOperate=async()=>false;const created=await h.agent.start({skill:'conversation.send',goal:'send one hello',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'hello'}},h.owner),task=h.agent.runtime.tasks.get(created.id);
- task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',status:'intent',tool:'conversation.send',args:{recipient:'Alice',message:'hello'}};await h.agent.runtime.save(task);
+ task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',status:'intent',tool:'conversation.send',args:{application:'wechat',recipient:'Alice',message:'hello'}};await h.agent.runtime.save(task);
  const before=h.agent.runtime.tasks.size,result=await h.agent.resolveAttention(task.id);assert(result.ok&&result.pending);assert.equal(h.agent.runtime.tasks.size,before);assert.equal(h.outgoing.length,0);
  const p=h.agent.status().tasks.find(t=>t.id===task.id).presentation;assert.equal(p.guidance.kind,'wechat-send');assert.equal(p.statusLabel,'等待空闲后核对');assert.equal(p.guidance.working,true);assert(p.guidance.detail.includes('不会重复发送'));
  await h.agent.close();
@@ -479,7 +483,7 @@ test('a proven pre-dispatch busy failure retries the shared visual Action withou
 test('an obsolete reply draft is never resumed or sent during reconciliation',async()=>{
  const h=fixture(),started=await h.agent.start({skill:'conversation.manage',goal:'reply',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{behavior:'reply'}},h.owner),task=h.agent.runtime.tasks.get(started.id);
  const physical={id:'old-draft',target:'wechat',operation:'send',status:'paused',draftInserted:true,supersededByNewMessage:true,message:'［ᕱᕱ］ old',wechatOwnership:'owner',recipient:'Alice',sources:[task.id]};
- h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{recipient:'Alice',message:'old'},lifecycle:{phase:'uncertain',reason:'newer-event'}};
+ h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{application:'wechat',recipient:'Alice',message:'old'},lifecycle:{phase:'uncertain',reason:'newer-event'}};
  let resumed=0;h.conversationDesktop.resume=async()=>{resumed++;return {ok:true};};const result=await h.agent.reconcile(task.id,{resumeDraft:true});assert.equal(result.ok,false);assert.match(result.error,/过期/);assert.equal(resumed,0);assert.equal(task.operations.pending.status,'intent');await h.agent.close();
 });
 test('a safely cleared obsolete draft allows the same contact messages to merge into one fresh reply',async()=>{
@@ -488,7 +492,7 @@ test('a safely cleared obsolete draft allows the same contact messages to merge 
  task.inbox=[{key:'first',type:'conversation.messages',subjectKey:key,messages:[incoming('first')]},{key:'second',type:'conversation.messages',subjectKey:key,messages:[incoming('second')]}];
  task.actionRuns.old={id:'old',eventKey:'first',scope:'subject:'+key,status:'needs_attention'};
  const physical={id:'old-draft',target:'wechat',operation:'send',status:'paused',draftInserted:true,supersededByNewMessage:true,message:'［ᕱᕱ］ old',wechatOwnership:'owner',recipient:'Alice',sources:[task.id],steps:[{action:'type',purpose:'task',state:'input-sent'}]};
- h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',actionId:'old',effect:'write',tool:'conversation.send',status:'intent',args:{recipient:'Alice',message:'old'},lifecycle:{phase:'uncertain',reason:'newer-event'}};
+ h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',actionId:'old',effect:'write',tool:'conversation.send',status:'intent',args:{application:'wechat',recipient:'Alice',message:'old'},lifecycle:{phase:'uncertain',reason:'newer-event'}};
  let cleaned=0;h.conversationDesktop.clearSupersededDraft=async()=>{cleaned++;physical.draftInserted=false;return {ok:true};};await h.agent.runtime.save(task);
  await h.agent.recoverPending();assert.equal(cleaned,1);assert.equal(task.operations.pending.status,'not_dispatched');assert.equal(task.status,'waiting');
  await h.agent.runtime.tick(task.id);assert.equal(h.outgoing.length,1);assert.equal(task.inbox.length,0);await h.agent.close();
@@ -497,7 +501,7 @@ test('a safely cleared obsolete draft allows the same contact messages to merge 
 test('an issued input without submit can recover only after observing an empty exact conversation',async()=>{
  const h=fixture(),started=await h.agent.start({skill:'conversation.send',goal:'send hello',subjects:[{application:'wechat',recipient:'Alice'}],parameters:{message:'hello'}},h.owner),task=h.agent.runtime.tasks.get(started.id);
  const physical={id:'lost-draft',target:'wechat',operation:'send',status:'paused',draftInserted:true,message:'［ᕱᕱ］ hello',wechatOwnership:'owner',recipient:'Alice',sources:[task.id],steps:[{action:'type',purpose:'task',state:'input-sent'}]};
- h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{recipient:'Alice',message:'hello'}};
+ h.conversationDesktop.task=physical;task.state.conversationOperationId=physical.id;task.status='needs_attention';task.operations.pending={id:'pending',effect:'write',tool:'conversation.send',status:'intent',args:{application:'wechat',recipient:'Alice',message:'hello'}};
  h.agent.scene.observe=async()=>({headerMatched:true,latestPending:false,draft:'',messages:[{direction:'outgoing',text:physical.message}]});
  assert.equal((await h.agent.reconcile(task.id,{resumeDraft:true})).ok,false);assert.equal(task.operations.pending.status,'intent');
  h.agent.scene.observe=async()=>({headerMatched:true,latestPending:false,draft:'',messages:[{direction:'incoming',text:'hello'}]});
@@ -542,4 +546,22 @@ test('a rejected native cancellation remains a cleanup failure instead of a swal
  const h=fixture(),subject={application:'wechat',recipient:'Alice'},messages=[{direction:'outgoing',kind:'text',text:'old',time:'',observedVerified:true}];let entered,stops=0;const at=new Promise(r=>entered=r);h.agent.scene.observe=async()=>({headerMatched:true,changed:true,draft:'',messages:structuredClone(messages)});
  h.conversationDesktop.start=async function(value){this.task={...value,id:value.operation==='open'?'open':'send',status:value.operation==='open'?'review':'running',steps:[]};this.running=value.operation==='send';if(this.running)entered();return {ok:true};};h.conversationDesktop.stop=async function(){stops++;this.running=false;throw Error('native cancellation not confirmed');};
  const a=await h.agent.start({skill:'conversation.manage',goal:'reply',subjects:[subject],parameters:{behavior:'reply'}},h.owner);await h.agent.runtime.tick(a.id);messages.push({direction:'incoming',kind:'text',text:'hello',time:'',incomingVerified:true});await h.agent.runtime.tick(a.id);const running=h.agent.runtime.tick(a.id);await at;const result=await h.agent.control('stop',a.id);await running;assert.equal(stops,1);assert.equal(result.ok,true);assert.equal(result.cleanupVerified,false);assert.match(result.message,/native cancellation not confirmed/);assert.equal(h.agent.runtime.tasks.get(a.id).status,'stopped');assert(h.agent.runtime.tasks.get(a.id).state.cleanupLog.some(row=>row.kind==='controller'&&!row.verified));await h.agent.close();
+});
+test('natural-language clearList archives all visible task records without stopping its own resolving command or deleting history',async t=>{
+ const h=fixture();t.after(()=>h.agent.close());h.agent.runtime.journal.putAll=async tasks=>{for(const task of tasks)h.records.set(task.id,structuredClone(task));};
+ const active=await h.agent.start({skill:'work.delegate',goal:'synthetic active work',subjects:[{application:'workbuddy'}]},h.owner),ended=await h.agent.start({skill:'work.delegate',goal:'synthetic earlier work',subjects:[{application:'workbuddy'}]},h.owner);
+ await h.agent.control('stop',ended.id);const hidden=structuredClone(h.agent.runtime.tasks.get(ended.id));hidden.id='private-synthetic-task';hidden.scene='private';hidden.domain='private';hidden.visibilityFloor=2;h.agent.runtime.tasks.set(hidden.id,hidden);
+ let promptSeen=false;h.agent.interpreter.request=async opts=>{promptSeen=opts.messages[0].content.includes('clearList')&&opts.messages[0].content.includes('停止并清理当前列表');return {response:{text:JSON.stringify({kind:'control',operation:'clearList',all:true})}};};
+ const command=await h.agent.command('停止并清理当前列表',h.owner);const stopping=[];const originalStop=h.agent.runtime.stop.bind(h.agent.runtime);h.agent.runtime.stop=async(task,...args)=>{stopping.push(task.id);return originalStop(task,...args);};
+ await h.agent.runtime.tick(command.id);assert(promptSeen);assert.equal(h.agent.runtime.list().length,0);assert(!stopping.includes(command.id));assert(stopping.includes(active.id));assert.equal(h.agent.runtime.tasks.get(command.id).status,'completed');assert.equal(h.agent.runtime.tasks.get(command.id).state.resolution.operation,'clearList');assert.equal(h.agent.runtime.tasks.get(command.id).state.resolution.count,2);
+ for(const id of [active.id,ended.id]){assert(h.agent.runtime.tasks.get(id).state.listArchive);assert(h.records.has(id));}assert.equal(h.agent.runtime.tasks.get(hidden.id).state.listArchive,undefined);
+});
+test('clearList intent requires an explicit all-only control shape and ordinary stop keeps its card',async t=>{
+ const h=fixture();t.after(()=>h.agent.close());const validate=require('../src/main/agent-interpreter').validateAgentIntent;
+ assert.throws(()=>validate({kind:'control',operation:'clearList'}),/all:true/);assert.throws(()=>validate({kind:'control',operation:'clearList',all:false}),/all:true/);assert.throws(()=>validate({kind:'control',operation:'clearList',all:true,id:'one'}),/all:true/);
+ const started=await h.agent.start({skill:'work.delegate',goal:'synthetic stopped card',subjects:[{application:'workbuddy'}]},h.owner);assert((await h.agent.dispatch({kind:'control',operation:'stop',id:started.id},h.owner)).ok);assert.equal(h.agent.runtime.list().length,1);assert.equal(h.agent.runtime.tasks.get(started.id).state.listArchive,undefined);
+ const denied=await h.agent.dispatch({kind:'control',operation:'clearList',all:true,id:started.id},h.owner);assert.equal(denied.ok,false);assert.equal(h.agent.runtime.list().length,1);
+});
+test('clearList on an empty visible list completes normally through the original command task',async t=>{
+ const h=fixture();t.after(()=>h.agent.close());h.agent.interpreter.request=async()=>({response:{text:JSON.stringify({kind:'control',operation:'clearList',all:true})}});const command=await h.agent.command('清空当前任务',h.owner);await h.agent.runtime.tick(command.id);assert.equal(h.agent.runtime.tasks.get(command.id).status,'completed');assert.equal(h.agent.runtime.tasks.get(command.id).state.resolution.count,0);assert.deepEqual(h.agent.runtime.list(),[]);
 });

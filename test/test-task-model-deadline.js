@@ -1,0 +1,15 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');
+const {AgentInterpreter}=require('../src/main/agent-interpreter'),{requestVerification}=require('../src/main/verification-transport');
+test('task interpretation has a bounded reasoning deadline and adopts its existing Task repair profile',async()=>{
+ const seen=[],interpreter=new AgentInterpreter({skills:{catalog:()=>[]},request:async options=>{seen.push(options);return {response:{text:'{"kind":"chat","text":"synthetic reply"}'}};}});
+ await interpreter.interpret('synthetic task');await interpreter.interpret('synthetic task',{repairProfile:{requestTimeoutMs:180000}});assert.deepEqual(seen.map(o=>o.timeoutMs),[90000,180000]);assert.equal(seen[0].messages[1].content,seen[1].messages[1].content,'deadline adjustment must not drop or replace owner context');
+});
+test('a longer request remains immediately cancellable without another model attempt',async()=>{
+ const c=new AbortController(),entered=Promise.withResolvers();let attempts=0;
+ const pending=requestVerification({messages:[{role:'user',content:'synthetic'}],timeoutMs:180000,signal:c.signal},{selectFree:async()=> 'synthetic-free',chat:async options=>{attempts++;assert.equal(options.signal,c.signal);entered.resolve();return new Promise((resolve,reject)=>{options.signal.addEventListener('abort',()=>reject(Object.assign(Error('synthetic abort'),{code:'ABORT_ERR'})),{once:true});});}});await entered.promise;c.abort();await assert.rejects(pending,{code:'ABORT_ERR'});assert.equal(attempts,1);
+});
+test('the shorter Runtime round budget still cancels a long per-request allowance and seals late output',async t=>{
+ const {AgentRuntime}=require('../src/main/agent-runtime'),{ToolRegistry}=require('../src/main/agent-tools'),{SkillRegistry}=require('../src/main/agent-skills'),{checkedJSON}=require('../src/main/agent-json');let modelSignal,late;const records=new Map(),tools=new ToolRegistry(),skills=new SkillRegistry(tools).register({id:'test.deadline',version:1,description:'synthetic host deadline',tools:[],capabilities:[],run:async ctx=>{await checkedJSON({signal:ctx.signal,timeoutMs:180000,messages:[{role:'user',content:'synthetic'}]},v=>v,{request:async o=>{modelSignal=o.signal;return new Promise(r=>late=r);}});return {status:'completed'};}});
+ const runtime=new AgentRuntime({tools,skills,journal:{put:async task=>records.set(task.id,structuredClone(task)),authorized:async()=>true,list:async()=>[]},autoSchedule:false,ready:()=>true,epoch:()=>1,stepTimeoutMs:20});try{const started=await runtime.start({skill:'test.deadline',goal:'synthetic goal',subjects:[{application:'system'}]},{role:'owner',verified:true,sources:['synthetic-owner'],scene:'life'});const at=Date.now();await runtime.tick(started.id);assert(Date.now()-at<1000);assert(modelSignal.aborted);assert.equal(runtime.controllers.size,0);late({response:{text:'{"ok":true}'}});await new Promise(r=>setImmediate(r));assert.notEqual(runtime.tasks.get(started.id).status,'completed');}finally{await runtime.close();}
+});

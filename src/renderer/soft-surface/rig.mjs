@@ -4,7 +4,8 @@ import { installDualQuaternionSkin } from '../avatar-dual-quaternion-skin.mjs';
 // Blend rigid bone transforms as dual quaternions. Unlike linear matrix
 // blending, this keeps the cross-section full when an ear bends toward the face.
 class SoftAppendageRig {
- constructor(group,geometry,rest,material){
+ constructor(group,geometry,rest,material,options={}){
+  const modern=options.modern===true;
   this.group=group;this.geometry=geometry;this.rest=rest;this.segments=3;this.ready=false;
   installDualQuaternionSkin(material);
   this.mesh=new T.SkinnedMesh(geometry,material);this.mesh.frustumCulled=false;group.add(this.mesh);
@@ -14,7 +15,7 @@ class SoftAppendageRig {
    const chain=[],boneChain=[];
    for(let i=0;i<=this.segments;i++){
     const u=i/this.segments,y=.55+1.68*u;
-    const restPoint=new T.Vector3(side*(.47+.115*(y-.78)),y,-.02);
+    const restPoint=new T.Vector3(side*(modern?(.49+.16*(y-.70)):(.47+.115*(y-.78))),y,-.02);
     const parent=i?boneChain[i-1]:this.root,bone=new T.Bone();
     bone.name=(sideIndex?'right':'left')+'_ear_'+i;
     bone.position.copy(restPoint);if(i)bone.position.sub(chain[i-1].rest);
@@ -43,10 +44,22 @@ class SoftAppendageRig {
     const rise=Math.max(0,Math.min(1,(y-.42)/1.13)),separate=Math.max(0,Math.min(1,(y-.90)/.21)),lateralHead=Math.max(0,Math.min(1,Math.abs(x)/.30));
     const centerRelease=(1-separate*separate*(3-2*separate))*(1-lateralHead*lateralHead*(3-2*lateralHead));
     const w=rise*rise*(3-2*rise)*(1-.65*centerRelease),side=x<0?leftBase:rightBase,other=x<0?rightBase:leftBase;
-    const dominant=Math.max(blend,1-blend),otherSide=Math.min(blend,1-blend);
-    const lateral=Math.max(0,Math.min(1,Math.abs(x)/.20)),rootShare=(1-v)*lateral*lateral*(3-2*lateral);
+    const fade=Math.max(0,Math.min(1,v));
+    const otherSide=Math.min(blend,1-blend)*(modern?(1-fade*fade*(3-2*fade)):1);
+    const dominant=1-otherSide;
+    const lateral=Math.max(0,Math.min(1,Math.abs(x)/.20));
+    const jointBlend=v*v*(3-2*v);
+    const rootShare=(modern?(1-jointBlend):(1-v))*lateral*lateral*(3-2*lateral);
     indices[k]=0;weights[k]=1-w;indices[k+1]=side;weights[k+1]=w*dominant*rootShare;
     indices[k+2]=side+1;weights[k+2]=w*dominant*(1-rootShare);indices[k+3]=other+1;weights[k+3]=w*otherSide;
+   } else if(modern) {
+    // Smoothly distribute the entire ear across its remaining three joints.
+    const t=Math.max(0,Math.min(1,(v-1)/2)),u=t*t*(3-2*t);
+    const rise=Math.max(0,Math.min(1,(y-.42)/1.13)),weight=rise*rise*(3-2*rise),side=x<0?leftBase:rightBase;
+    indices[k]=0;weights[k]=1-weight;
+    indices[k+1]=side+1;weights[k+1]=weight*(1-u)*(1-u);
+    indices[k+2]=side+2;weights[k+2]=weight*2*u*(1-u);
+    indices[k+3]=side+3;weights[k+3]=weight*u*u;
    } else {
     const j=Math.min(this.segments-1,Math.floor(v)),f=v-j,along=f*f*(3-2*f);
     const rise=Math.max(0,Math.min(1,(y-.42)/1.13)),weight=rise*rise*(3-2*rise),side=x<0?leftBase:rightBase;
@@ -78,7 +91,7 @@ class SoftAppendageRig {
   this.ikTarget=new T.Vector3();this.ikRoot=new T.Vector3();this.ikWork=new T.Vector3();this.ikPrev=new T.Vector3();
   this.ikSource=Array.from({length:this.segments},()=>new T.Vector3());this.ikAxis=new T.Vector3();this.ikTangent=new T.Vector3();this.ikDesired=new T.Vector3();this.ikParent=new T.Vector3();
   // Frequency and damping ratio fall from the firm root toward the softer tip.
-  this.jointTuning=[null,{hz:6.5,damping:.95,maxAngle:.17,drive:.14},{hz:3.1,damping:.55,maxAngle:.50,drive:.48},{hz:1.9,damping:.40,maxAngle:.70,drive:.82}];
+  this.jointTuning=[null,modern?{hz:5.5,damping:.88,maxAngle:.22,drive:.18}:{hz:6.5,damping:.95,maxAngle:.17,drive:.14},{hz:3.1,damping:.55,maxAngle:.50,drive:.48},{hz:1.9,damping:.40,maxAngle:.70,drive:.82}];
   this.groupQ=new T.Quaternion();this.parentQ=new T.Quaternion();this.worldQ=new T.Quaternion();this.earTwist=new T.Quaternion();
   // Draw the actual bone origins and links as an x-ray overlay so the rig can
   // be inspected through the single opaque skinned surface.

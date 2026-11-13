@@ -2,6 +2,8 @@
 
 从项目根目录运行。默认回归、隔离 GUI 验证与真实账号实验分开，不能把调用成功或截图相近当成业务目标已完成。
 
+WorkBunny 实验、测试、调试默认运行源码开发版（`zsh tools/run-dev.sh`），使用独立 `.data/dev` 数据。只有安装/发布行为验证使用安装包。BOPER 原生修改后运行 `zsh tools/prepare-dev-boper.sh`，再从开发版启用或更新后台组件。
+
 ## 默认离线回归
 
 需要 macOS 原生构建环境、Node.js 22 以上和项目依赖：

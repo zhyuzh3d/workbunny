@@ -1,8 +1,9 @@
 'use strict';
 
 // A response owns a snapshot of unanswered inputs, not the inputs themselves.
-// Cancelling that response releases its work immediately and leaves the words
-// available to its successor. A stale completion can never consume that queue.
+// Cancelling that response releases its work immediately and leaves its
+// unacknowledged words available to its successor. A stale lease cannot consume
+// that queue; consuming input does not end or release its active response.
 class DialogueTurnScheduler {
   constructor() { this.channels = new Map(); this.sequence = 0; }
 
@@ -39,12 +40,17 @@ class DialogueTurnScheduler {
     const item = Object.assign(state.pending.get(key) || { key }, input, { key });
     state.pending.set(key, item);
     const inputs = [...state.pending.values()];
-    const lease = { controller, inputs, input: item,
+    const lease = { controller, inputs, input: item, consumed: false,
       isCurrent: () => this.channels.get(channel) === state && state.active === lease && !controller.signal.aborted,
       accept: () => { if (!lease.isCurrent()) return false; item.accepted = true; return true; },
-      finish: ({ ignored = false } = {}) => {
+      consume: ({ ignored = false } = {}) => {
         if (!lease.isCurrent() || lease.finished) return false;
         for (const entry of ignored ? [item] : inputs) if (state.pending.get(entry.key) === entry) state.pending.delete(entry.key);
+        lease.consumed = true;
+        return true;
+      },
+      finish: ({ ignored = false } = {}) => {
+        if (!lease.consume({ ignored })) return false;
         lease.finished = true;
         return true;
       },

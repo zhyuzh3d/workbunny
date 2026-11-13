@@ -41,11 +41,13 @@ class AvatarActionCatalog {
       assert(typeof duration === 'number' && Number.isFinite(duration) && duration > 0 && duration <= 300, 'invalid action duration');
       const weight = action.weight ?? 1;
       assert(typeof weight === 'number' && Number.isFinite(weight) && weight >= 0 && weight <= 100, 'invalid action weight');
+      assert(action.performanceMode === undefined || ['once', 'cycle'].includes(action.performanceMode), 'invalid performance mode');
       const key = `${this.namespace}_${localId}`;
       assert(key.length <= 80, 'action key too long');
       return Object.freeze({ key, localId, slot, label: readText(action.label, 80, 'action label'),
         use: readText(action.use, 300, 'action description'), duration, weight,
         loop: action.loop === true, idle: action.idle === true,
+        ...(action.performanceMode === undefined ? {} : { performanceMode: action.performanceMode }),
         autonomous: action.autonomous !== false, enabled: true, tag: 'llm',
         // Pack props are owned by the runtime, not missing external props.
         requiresProp: action.requiresExternalProp === true });

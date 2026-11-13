@@ -14,6 +14,15 @@ class AvatarCatalogRouter {
   select(...args) { return this.active().select(...args); }
   idle(...args) { return this.active().idle(...args); }
   prompt(...args) { return this.active().prompt(...args); }
+  ordinaryPrompt(posture = 'standing') {
+    const { categories = [], motions = [] } = this.catalog();
+    return categories.filter(group => motions.some(motion => motion.slot === group.id &&
+      motion.enabled !== false && !motion.deleted && motion.autonomous !== false && !motion.requiresProp &&
+      !motion.transition && !motion.postureChanging && Number(motion.weight ?? 1) > 0 &&
+      (motion.posture || 'standing') === posture)).map(group => ({ category: group.id,
+      meaning: group.label, use: String(group.description || '').slice(0, 60) }));
+  }
+  performanceSnapshot(options) { return require('./performance-catalog').buildPerformanceSnapshot(this, options); }
 }
 
 module.exports = { AvatarCatalogRouter };

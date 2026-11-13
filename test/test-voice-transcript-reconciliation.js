@@ -8,7 +8,7 @@ function makeObserver(belongs){
  const voice={direction:'incoming',kind:'voice',text:'[语音]',time:'',confidence:.98,leftAvatar:{x:.34,y:.57},voiceCenter:{x:.44,y:.57},voiceText:''};
  const next={direction:'incoming',kind:'text',text:'改成周四了。',time:'',confidence:.98,leftAvatar:{x:.34,y:.62}};
  let requests=0;
- const observer=new WeChatObserver({native:{},imageResize:()=>({mime:'image/png',preview:Buffer.from('image')}),request:async()=>({response:{text:JSON.stringify(requests++===0?{headerMatched:true,recipientUnread:false,draft:'',messages:[voice,next]}:{belongs})}})});
+ const observer=new WeChatObserver({native:{},imageResize:()=>({mime:'image/png',preview:Buffer.from('image')}),request:async()=>({response:{text:JSON.stringify(requests++===0?{headerText:"Alice",headerMatched:true,recipientUnread:false,draft:'',messages:[voice,next]}:{belongs})}})});
  return {observer,ocr};
 }
 test('a visually confirmed transcript stays attached to its voice, not a new message',async()=>{

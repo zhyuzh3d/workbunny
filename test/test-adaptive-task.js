@@ -8,7 +8,7 @@ function fixture(decide){const records=new Map(),reports=[];let requests=0;const
 }
 const uname={application:'system',command:'/usr/bin/uname',args:['-s'],impact:'read',purpose:'核对内核'};
 test('a new task repairs a proven non-dispatch using another command and completes from actual output',async()=>{
- const f=fixture(i=>i===0?{done:false,tool:'terminal.execute',args:{...uname,command:'/not-a-real-program'}}:i===1?{done:false,tool:'terminal.execute',args:uname}:{done:true,summary:'已从实际输出确认 Darwin。'});
+ const f=fixture((i,options)=>{if(i===1)assert.equal(options.maxTokens,8192,'the actual adaptive Action request starts with the supported output budget');return i===0?{done:false,tool:'terminal.execute',args:{...uname,command:'/not-a-real-program'}}:i===1?{done:false,tool:'terminal.execute',args:uname}:{done:true,summary:'已从实际输出确认 Darwin。'};});
  const start=await f.agent.start({skill:'system.operate',goal:'核对内核并自行解决路径错误',subjects:[{application:'system'}]},f.owner);
  for(let i=0;i<3;i++)await f.agent.runtime.tick(start.id);const task=f.agent.runtime.tasks.get(start.id);
  assert.equal(task.status,'completed');assert.equal(task.state.attempts.length,2);assert.equal(task.state.attempts[0].dispatched,false);assert.match(task.state.attempts[1].result.stdout,/Darwin/);assert.equal(f.reports.length,1);await f.agent.close();

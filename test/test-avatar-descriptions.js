@@ -13,7 +13,7 @@ test('rabbit body context follows the real package palette and preserves custom 
   let selected;
   const avatar = () => ({ key: 'builtin_soft_bunny', name: '兔兔', description: contextDescription('builtin_soft_bunny', '自定义兔兔描述。', runtime, selected) });
   const body = new Embodiment({ avatar, catalog: {}, send() {} });
-  assert.match(body.context().appearance.description, /自定义兔兔描述。.*葡萄紫（#9250d6）/);
+  assert.match(body.context().appearance.description, /自定义兔兔描述。.*莓果粉（#ed3185）/);
   for (const palette of runtime.palettes) {
     selected = palette.id;
     const description = body.context().appearance.description;
@@ -21,7 +21,7 @@ test('rabbit body context follows the real package palette and preserves custom 
     assert.ok(description.includes(palette.base));
   }
   selected = 'missing';
-  assert.match(body.context().appearance.description, /葡萄紫（#9250d6）/);
+  assert.match(body.context().appearance.description, /莓果粉（#ed3185）/);
   body.close();
 });
 

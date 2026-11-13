@@ -48,4 +48,26 @@ function regionsChanged(bitmap,first,second,regions,minChangedPixels=3){
   }return false;
  }catch{return true;}
 }
-module.exports={sameTargetRegion,sameActionTarget,regionsChanged};
+// Facts about already captured images, never a business-success predicate.
+// Compare the common screen area so a new estimated crop is not a new event.
+function alignedChangeFacts(bitmap,before,after){
+ const valid=r=>r&&['x','y','width','height'].every(k=>Number.isFinite(r[k]))&&r.width>0&&r.height>0;
+ const geometry=s=>({rect:s?.rect,pixelRect:s?.pixelRect||s?.rect,capturedAt:s?.capturedAt??s?.at,frameId:s?.visualFrameId||s?.frameId});
+ const result={schema:'bunny.image-comparison/v1',before:geometry(before),current:geometry(after),available:false,interpretation:'像素变化只描述已有两图的共同屏幕区域，不证明业务成功、失败或身份改变；结合原目标、实际内容与反例自主判断。'};
+ try{
+  const aRect=before?.pixelRect||before?.rect,bRect=after?.pixelRect||after?.rect;if(typeof bitmap!=='function'||!valid(aRect)||!valid(bRect))return {...result,reason:'missing-pixels-or-screen-rect'};
+  if(before.sourceRect&&after.sourceRect&&JSON.stringify(before.sourceRect)!==JSON.stringify(after.sourceRect))return {...result,reason:'display-geometry-changed'};
+  const decode=s=>bitmap(s.sourcePixels||Buffer.from(String(s.preview||'').split(',')[1]||'','base64')),a=decode(before),b=decode(after);
+  if(!a?.data||!b?.data||!a.width||!a.height||!b.width||!b.height)return {...result,reason:'pixels-unavailable'};
+  const x=Math.max(aRect.x,bRect.x),y=Math.max(aRect.y,bRect.y),right=Math.min(aRect.x+aRect.width,bRect.x+bRect.width),bottom=Math.min(aRect.y+aRect.height,bRect.y+bRect.height);
+  if(right<=x||bottom<=y)return {...result,reason:'no-screen-overlap'};
+  const step=Math.max(1,Math.ceil(Math.sqrt((right-x)*(bottom-y)/200000)));let samples=0,changed=0;
+  for(let sy=y+.5;sy<bottom;sy+=step)for(let sx=x+.5;sx<right;sx+=step){
+   const index=(r,img)=>(Math.min(img.height-1,Math.floor((sy-r.y)*img.height/r.height))*img.width+Math.min(img.width-1,Math.floor((sx-r.x)*img.width/r.width)))*4,ai=index(aRect,a),bi=index(bRect,b);
+   if(ai+2>=a.data.length||bi+2>=b.data.length)return {...result,reason:'pixels-unavailable'};samples++;
+   if(Math.max(...[0,1,2].map(c=>Math.abs(a.data[ai+c]-b.data[bi+c])))>24)changed++;
+  }
+  return {...result,available:true,method:before.sourcePixels&&after.sourcePixels?'captured-pixel-samples':'preview-pixel-samples',overlap:{x,y,width:right-x,height:bottom-y},cropChanged:JSON.stringify(aRect)!==JSON.stringify(bRect),sampleStep:step,sampledPixels:samples,changedPixels:changed,changedRatio:samples?changed/samples:null};
+ }catch{return {...result,reason:'pixels-unavailable'};}
+}
+module.exports={sameTargetRegion,sameActionTarget,regionsChanged,alignedChangeFacts};

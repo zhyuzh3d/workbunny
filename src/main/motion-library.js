@@ -36,7 +36,8 @@ class MotionLibrary {
       const slot = groupIds.has(override.slot) ? override.slot : groupIds.has(m.slot) ? m.slot : groups[0]?.id;
       return { ...m, posture: m.posture || 'standing', slot, label: text(override.label || m.label, 80), use: text(override.use ?? m.use, 300),
         loop: override.loop === undefined ? !!m.loop : !!override.loop, weight: 1,
-        enabled: !disabled.includes(m.key), tag: 'llm', idle: override.idle === undefined ? !!m.idle : !!override.idle };
+        enabled: !disabled.includes(m.key), tag: 'llm', idle: override.idle === undefined ? !!m.idle : !!override.idle,
+        performanceMode: override.performanceMode === 'auto' ? undefined : override.performanceMode ?? m.performanceMode };
     });
     return { categories: groups, motions, revision: config.settingsRevision || 0 };
   }
@@ -56,6 +57,7 @@ class MotionLibrary {
     if (!view.motions.some(m => m.idle && m.enabled)) throw Error('至少保留一个可随机使用的空闲动作');
     if ([...view.categories.flatMap(g => [g.label, g.description]), ...view.motions.flatMap(m => [m.label, m.use])].some(containsSecret)) throw Error('动作说明会提供给模型，请不要填写密码或密钥');
     for (const override of Object.values(lib.overrides || {})) {
+      if (override.performanceMode !== undefined && !['auto', 'once', 'cycle'].includes(override.performanceMode)) throw Error('表演播放方式应为自动、单次或周期重复');
       if (override.weight !== undefined && (!Number.isFinite(Number(override.weight)) || Number(override.weight) < 0 || Number(override.weight) > 100)) throw Error('随机权重应在0到100之间');
       if (override.slot !== undefined && !view.categories.some(g => g.id === override.slot)) throw Error('动作分类不存在');
     }
@@ -82,7 +84,7 @@ class MotionLibrary {
       library.categories = library.categories.filter(g => g.id !== change.id);
     } else if (change.type === 'motion-update') {
       if (!this.catalog(current).motions.some(m => m.key === change.key)) throw Error('动作不存在');
-      const allowed = ['slot', 'label', 'use', 'loop', 'idle'];
+      const allowed = ['slot', 'label', 'use', 'loop', 'idle', 'performanceMode'];
       library.overrides[change.key] = { ...library.overrides[change.key], ...Object.fromEntries(allowed.filter(k => change[k] !== undefined).map(k => [k, change[k]])) };
     } else if (change.type === 'motion-delete') {
       if (!this.catalog(current).motions.some(m => m.key === change.key)) throw Error('动作不存在');

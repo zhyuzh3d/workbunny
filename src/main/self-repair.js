@@ -6,7 +6,9 @@ const BLOCKED=new Set(['E_PERMISSION_REQUIRED','E_TASK_AUTH','E_APP_CIRCUIT','E_
 const OPTIONS={context:['compact_context','retry','defer'],schema:['repair_schema','retry','defer'],output:['increase_output','retry','defer'],response:['compact_response','retry','defer'],unexpected:['retry','defer'],stall:['reobserve','change_method','wait','ask_owner']};
 function diagnostic(value){
  if(!value||typeof value!=='object'||Array.isArray(value))return undefined;
- const result={};for(const key of ['operation','method','model'])if(typeof value[key]==='string'&&/^[a-zA-Z0-9_.:-]{1,80}$/u.test(value[key]))result[key]=value[key];
+ const result={};
+ if(value.modelRequest&&typeof value.modelRequest==='object'){const request={};for(const key of ['timeoutMs','nextTimeoutMs'])if(Number.isSafeInteger(value.modelRequest[key])&&value.modelRequest[key]>0&&value.modelRequest[key]<=180000)request[key]=value.modelRequest[key];for(const key of ['requestStarted','externalAction','budgetChanged'])if(typeof value.modelRequest[key]==='boolean')request[key]=value.modelRequest[key];if(Object.keys(request).length)result.modelRequest=request;}
+ for(const key of ['operation','method','model'])if(typeof value[key]==='string'&&/^[a-zA-Z0-9_.:-]{1,80}$/u.test(value[key]))result[key]=value[key];
  const inputOutcome=require('./boper-outcome').sanitize(value.inputOutcome);if(inputOutcome)result.inputOutcome=inputOutcome;
  if(value.visualState&&['login','security','occluded','ambiguous','absent','unclear','inactive','identity'].includes(value.visualState.kind)&&typeof value.visualState.requiresOwner==='boolean')result.visualState={kind:value.visualState.kind,requiresOwner:value.visualState.requiresOwner};
  if(value.inputReceipt&&typeof value.inputReceipt==='object'&&!Array.isArray(value.inputReceipt)){
@@ -118,6 +120,7 @@ function auditSchemas(catalog){
  for(const tool of catalog||[])if(tool.inputSchema){checked++;visit(tool.inputSchema);}
  return {checked,issues};
 }
+function afterModelTimeout(profile={},error){const previous=Number(error?.diagnostic?.modelRequest?.timeoutMs)||Number(profile.requestTimeoutMs)||25000;return {...profile,requestTimeoutMs:Math.min(180000,Math.max(90000,previous*2))};}
 function applyAction(profile={},action,{code}={}){
  // Input-window reductions belong to the one request rejected by the provider.
  // Persist content/output adjustments, never a previous request's input ceiling.
@@ -131,8 +134,11 @@ function applyAction(profile={},action,{code}={}){
 // One read-only retry changes the budget in the direction required by the
 // observed failure. The caller owns the attempt count; this never repeats an
 // action or alternates between opposite limits within another retry loop.
+function normalizeOutputBudget({maxTokens,vision=false}={}){
+ return maxTokens===undefined?(vision?4096:2048):Math.min(8192,Math.max(1,Number(maxTokens)||1));
+}
 function responseRecovery(options,error){
- const requested=Number(options.maxTokens)||4096,effective=error?.diagnostic?.completion?.maxOutputTokens,current=Number.isSafeInteger(effective)&&effective>0?effective:requested;
+ const requested=normalizeOutputBudget(options),effective=error?.diagnostic?.completion?.maxOutputTokens,current=Number.isSafeInteger(effective)&&effective>0?effective:requested;
  let maxTokens;
  if(error?.code==='E_OUTPUT_LIMIT'){
   if(current<requested||current>=8192)return null;
@@ -175,6 +181,6 @@ function applyProfile(options,profile){
   if(system)system.content+='\n'+hint;else messages.unshift({role:'system',content:hint});
  }
  const response=profile.responseLevel?{maxTokens:profile.responseLevel>1?1024:2048,thinking:'low',extraBody:{...options.extraBody,reasoning_effort:'low'}}:{};
- return {...options,messages,...(profile.maxTokens?{maxTokens:Math.min(8192,Math.max(4096,Number(profile.maxTokens)||4096))}:{}),...response};
+ return {...options,messages,...(Number.isFinite(profile.requestTimeoutMs)?{timeoutMs:Math.min(180000,Math.max(Number(options.timeoutMs)||0,Math.max(1,profile.requestTimeoutMs)))}:{}),...(profile.maxTokens?{maxTokens:Math.min(8192,Math.max(4096,Number(profile.maxTokens)||4096))}:{}),...response};
 }
-module.exports={OPTIONS,diagnostic,category,incident,advise,applyAction,applyProfile,responseRecovery,compactValue,auditSchemas};
+module.exports={OPTIONS,afterModelTimeout,diagnostic,category,incident,advise,applyAction,applyProfile,normalizeOutputBudget,responseRecovery,compactValue,auditSchemas};

@@ -1,4 +1,5 @@
 import { renderResultText } from './result-links.mjs';
+import { compactReplyText } from './dialogue-text.mjs';
 const LIMIT = 120;
 const key = row => ({ ts: row.ts, id: row.id });
 const day = ts => { const d = new Date(ts); return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`; };
@@ -38,7 +39,9 @@ export function createDialogueOverlay(pet, initialConfig) {
       const article = document.createElement('article'); article.className = 'dialogue-message ' + row.role; article.dataset.id = row.id;
       const label = document.createElement('div'); label.className = 'dialogue-speaker';
       label.textContent = row.role === 'user' ? config.buddy?.ownerName || '主人' : config.buddy?.name || 'Bunny';
-      const text = document.createElement('div'); text.className = 'dialogue-text';if(row.taskId&&row.links?.length)renderResultText(text,row.text,row.links,index=>pet.agentResultLink(row.taskId,index));else text.textContent = row.text;
+      const text = document.createElement('div'); text.className = 'dialogue-text';
+      const displayText = row.role === 'assistant' ? compactReplyText(row.text) : row.text;
+      if(row.taskId&&row.links?.length)renderResultText(text,displayText,row.links,index=>pet.agentResultLink(row.taskId,index));else text.textContent = displayText;
       article.append(label, text); fragment.append(article);
     }
     list.replaceChildren(fragment);

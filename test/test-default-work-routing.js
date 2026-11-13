@@ -3,7 +3,9 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const {AgentLearning}=require('../src/main/agent-learning'),{AgentInterpreter,AGENT_INSTRUCTION}=require('../src/main/agent-interpreter'),{loadSoftwarePackages}=require('../src/main/software-skill-package');
 test('default routing includes WorkBuddy web delivery experience, excludes unrelated runbooks, and states authorization exceptions',async()=>{
  const learning=new AgentLearning({packages:loadSoftwarePackages()}),knowledge=await learning.routingContext({id:'task',goal:'做一个网页小游戏',state:{},scene:'life'});
- assert(knowledge.some(k=>k.packageId==='workbuddy'));assert(!knowledge.some(k=>k.packageId==='wechat'));
+ assert(knowledge.some(k=>k.packageId==='workbuddy'));
+ const semantic=knowledge.filter(k=>k.packageId==='wechat');assert(semantic.length);assert(semantic.every(k=>k.purpose==='task-interpretation-not-authorization'));
+ assert(semantic.every(k=>!k.instructions.includes('## 附件与通用视觉工具')),'only declared task meanings enter interpretation, not the software runbook');
  const guide=knowledge.find(k=>k.packageId==='workbuddy').instructions;assert.match(guide,/最终可访问的网页入口/);assert.match(guide,/明确公开授权/);assert.match(guide,/本地文件用途按文件验收/);
  const full=loadSoftwarePackages().find(p=>p.id==='workbuddy').instructions;for(const condition of ['必要上下文','不发布','权限','本地文件','本机运行'])assert(full.includes(condition));
  let input;const interpreter=new AgentInterpreter({skills:{catalog:()=>[],get:()=>({id:'work.delegate'})},request:async options=>{input=JSON.parse(options.messages[1].content);return {response:{text:JSON.stringify({kind:'task',task:{skill:'work.delegate',goal:'制作可分享的网页小游戏',subjects:[{application:'workbuddy'}],workRequest:{goal:'制作并发布网页小游戏',criteria:'真实公开链接可访问',output:'files'}}})}};}});

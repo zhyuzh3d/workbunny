@@ -53,9 +53,10 @@ async function checkedJSON(options,validate,{request=requestVerification,onReque
     const requestOptions={...(retryOptions||options),messages,singleAttempt:true,...(recoveryReason?{recoveryReason}:{})};
     const began=Date.now(),report=(phase,completion,errorCode,budget,transport,schemaAudit,discardedChars)=>{try{onRequestDiagnostic?.({attempt:attempt+1,phase,elapsedMs:Date.now()-began,...(Number.isSafeInteger(discardedChars)&&discardedChars>0?{normalized:true,discardedChars}:{}),...(Number.isSafeInteger(requestOptions.maxTokens)?{requestedMaxOutputTokens:requestOptions.maxTokens}:{}),...(Number.isSafeInteger(requestOptions.inputBudgetTokens)?{requestedInputBudgetTokens:requestOptions.inputBudgetTokens}:{}),...(completion?{completion}:{}),...(budget?{budget}:{}),...(transport?{transport}:{}),...(schemaAudit?{schemaAudit}:{}),...(/^E_[A-Z0-9_]{1,60}$/u.test(errorCode||'')?{errorCode}:{})});}catch{}};
     report('started');
+    const trace=await require('./task-model-trace').begin(requestOptions,{attempt:attempt+1});
     let checked;
     try{
-      checked=await request(requestOptions);
+      checked=await trace.run(()=>request(requestOptions));
       const response=checked.response||{};
       const diagnostic=require('./self-repair').diagnostic({budget:response.contextBudget,completion:{model:response.model||checked.model,maxOutputTokens:response.contextBudget?.output,finishReason:response.finishReason,usage:response.usage}});
       report('completed',diagnostic?.completion,undefined,diagnostic?.budget);
@@ -65,17 +66,18 @@ async function checkedJSON(options,validate,{request=requestVerification,onReque
       report('failed',diagnostic?.completion,e.code,diagnostic?.budget,diagnostic?.transport,diagnostic?.schemaAudit);
       const transient=require('./workbuddy').isTransientConnectionError?.(e)||/timeout|超时|network|连接|fetch failed|ECONNRESET|ETIMEDOUT/iu.test(e.message||'');
       const repaired=require('./self-repair').responseRecovery(requestOptions,e);
-      if(!(transient||repaired)||attempt>0||options.signal?.aborted)throw e;
+      if(e.code==='E_MODEL_TIMEOUT'||!(transient||repaired)||attempt>0||options.signal?.aborted)throw e;
       retryOptions=repaired||requestOptions;recoveryReason=e.code;
       if(repaired){const reminder='上次回答'+(e.code==='E_PAYLOAD_TOO_LARGE'?'超过转发字节限制，本次缩减输出和推理预算':'达到token额度上限，本次提高输出额度')+'。保留同一份证据与目标，仅返回所需完整JSON；依据写简短结论，不复述输入、不展开推理过程，不添加其它内容。';if(system)system.content+='\n'+reminder;else messages.unshift({role:'system',content:reminder});}
       await new Promise(r=>setTimeout(r,500));continue;
     }
     let parsed;
-    try{parsed=structuredJSON(checked.response.text);const value=await validate(parsed.value);report('validated',undefined,undefined,undefined,undefined,undefined,parsed.discardedChars);return {value,model:checked.model,attempts:attempt+1};}
+    try{parsed=structuredJSON(checked.response.text);const value=await validate(parsed.value);trace.validated({discardedChars:parsed.discardedChars});report('validated',undefined,undefined,undefined,undefined,undefined,parsed.discardedChars);return {value,model:checked.model,attempts:attempt+1};}
     catch(e){
       error=e;
       const schemaAudit=require('./self-repair').diagnostic({schemaAudit:e.schemaAudit||{protocol:'structured-json',field:'response',expected:parsed?'schema-valid-value':'valid-json',actualType:parsed?valueType(parsed.value):typeof checked.response?.text}})?.schemaAudit;
       if(schemaAudit)e.schemaAudit=schemaAudit;
+      trace.failed(e,{schemaAudit});
       report('validation-failed',undefined,'E_MODEL_SCHEMA',undefined,undefined,schemaAudit);
       if(attempt===0){
         // Repair the actual rejected answer instead of asking the model to

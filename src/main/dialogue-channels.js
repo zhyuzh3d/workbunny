@@ -87,12 +87,13 @@ class DialogueChannels{
   const eventId=hash(channel.id+'\0'+eventKey),receiptId='dialogue-event:'+eventId;
   if(this.memory?.ready){const row=(await this.memory.db.request('get',{ids:[receiptId]})).rows?.[0];if(row){const record=this.memory.decode(row),snapshot=this.snapshot(channel);return {duplicate:true,...record.value,...(record.visibilityFloor>rank(snapshot.scene)||record.value.ownerOnly&&!snapshot.owner?{messages:[],expired:true}:{}),snapshot};}}
   if(channel.seen.includes(eventId))return {duplicate:true,snapshot:this.snapshot(channel),messages:[]};
-  const verified=messages.filter(m=>m.kind==='text'&&(m.incomingVerified||m.observedVerified));
+  const observed=messages.filter(m=>['text','voice','image','file','other'].includes(m.kind));
   const before=this.snapshot(channel);
   const validProof=()=>!signal?.aborted&&this.current(before);
   let authenticationIndex=-1,authenticationMethod;
-  for(const [index,message] of verified.entries()){
+  for(const [index,message] of observed.entries()){
    if(!this.security?.enabled||!validProof())break;
+   if(message.kind!=='text'||!message.incomingVerified&&!message.observedVerified)continue;
    if(message.origin==='bunny'||message.actualNew===false)continue;
    let candidate=this.security?.candidate?.(message.text)||(this.security?.matches(message.text)?{score:1,text:this.security.key}:null);
    if(!candidate)continue;
@@ -115,13 +116,13 @@ class DialogueChannels{
    scene:normalizeScene(this.getScene()), revision:channel.revision+1 } : { ...channel };
   const snapshot=this.snapshot(staged),ids=[],clean=[];
   const assertCurrent = () => { if (signal?.aborted) throw signal.reason || stale(); this.assert(original); };
-  for(let i=0;i<verified.length;i++){
+  for(let i=0;i<observed.length;i++){
    assertCurrent();
-   const message=verified[i],redacted=security.redact(message.text),content=redacted.trim()==='********'?'[identity verified]':redacted;
+   const message=observed[i],redacted=security.redact(message.text),content=redacted.trim()==='********'?(authenticate&&i===authenticationIndex?'[identity verified]':'[credential redacted]'):redacted;
    const characterId=message.characterId||'contact:'+hash(channel.id),id='dialogue-in:'+eventId+':'+i;
    const characterName=message.characterName||message.sender||channel.recipient;
    const observedUnderGrant=priorGrantStart!==null&&(Number.isFinite(message.observedAt)?message.observedAt>=priorGrantStart:!message.visualEvidence);
-   const ownerInput=snapshot.owner&&(observedUnderGrant||authenticate&&i>=authenticationIndex)&&message.actualNew!==false&&message.origin!=='bunny';
+   const ownerInput=snapshot.owner&&message.kind==='text'&&(message.incomingVerified===true||message.observedVerified===true)&&(observedUnderGrant||authenticate&&i>=authenticationIndex)&&message.actualNew!==false&&message.origin!=='bunny';
    if(this.memory?.ready){
     const result=await this.memory.addMessageOnce(id,'user',content,{scene:ownerInput?snapshot.scene:ordinaryScene(this.getScene()),channel:channel.application,channelId:channel.id,conversationId:channel.id,characterId,characterName,verifiedOwner:ownerInput,ownerOnly:ownerInput,allowSensitive:true,perception:message.perception});
     if(!result?.record)throw Error('渠道消息未能保存');ids.push(id);
@@ -179,10 +180,17 @@ class DialogueChannels{
   const role=await this.memory.cognition?.loadRoleView({repair:false});this.assert(snapshot);
   return {messages:rows.map(r=>({id:r.id,character:r.value.characterId,name:r.value.characterName,role:r.value.role,text:r.value.content,perception:require('./perception').record(r.value.perception)})),summary:summary?.text||'',memories,role:role?.text||'',sourceIds:[...new Set([...rows.map(r=>r.id),...memorySources])]}
  }
- async recordReply(channel,snapshot,key,text,sources=[],alreadySent=false){
+ async recordReply(channel,snapshot,key,text,sources=[],alreadySent=false,observation){
   if(!alreadySent)this.assert(snapshot);
   for(const entry of this.replies.values())if(entry.channelId===channel.id&&entry.key===key)entry.sent=true;
-  if(this.memory?.ready){await this.memory.addMessageOnce('dialogue-out:'+hash(channel.id+'\0'+key),'assistant',text,{scene:snapshot.scene,channel:channel.application,channelId:channel.id,conversationId:channel.id,characterId:'bunny',verifiedOwner:snapshot.owner,ownerOnly:snapshot.owner,allowSensitive:true,sources});this.memory.maintenance?.request('doze',{automatic:true});}
+  if(this.memory?.ready){
+   const observed=observation?typeof observation.observedText==='string'?observation.observedText:null:text;
+   if(observation)await this.memory.write([{id:'dialogue-delivery:'+hash(channel.id+'\0'+key),kind:'state',ts:this.clock(),domain:snapshot.scene,visibilityFloor:Math.max(rank(snapshot.scene),observation.visibilityFloor??rank(snapshot.scene)),value:{origin:'dialogue-delivery-v1',channelId:channel.id,ownerOnly:snapshot.owner,sources,desiredText:text,observedText:observed,deliveryAssessment:observation.deliveryAssessment||null}}]);
+   // A delivery assessment is useful evidence, but its desired body is not
+   // an actual assistant utterance. Unknown literal text stays unknown.
+   if(observed!==null)await this.memory.addMessageOnce('dialogue-out:'+hash(channel.id+'\0'+key),'assistant',observed,{scene:snapshot.scene,visibilityFloor:Math.max(rank(snapshot.scene),observation?.visibilityFloor??rank(snapshot.scene)),channel:channel.application,channelId:channel.id,conversationId:channel.id,characterId:'bunny',verifiedOwner:snapshot.owner,ownerOnly:snapshot.owner,allowSensitive:true,sources});
+   this.memory.maintenance?.request('doze',{automatic:true});
+  }
  }
  holdReply(channel,snapshot,key,decision,sources=[]){
   this.assert(snapshot);const ref='channel-reply:'+crypto.randomUUID();

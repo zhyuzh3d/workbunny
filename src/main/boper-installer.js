@@ -13,7 +13,7 @@ async function verifyVendor(bundle,execute){
  const {stderr,stdout}=await execute('/usr/bin/codesign',['-dv','--verbose=4',bundle]);
  if(!/(?:^|\n)TeamIdentifier=G43BCU2T37(?:\n|$)/u.test(stderr+'\n'+stdout))throw Error('现有虚拟 HID 组件签名身份不匹配，已停止；未覆盖现有驱动');
 }
-function resourceRoot(){return process.resourcesPath?path.join(process.resourcesPath,'boper'):path.resolve(__dirname,'../../resources/boper');}
+function resourceRoot(){return require('./packaged-resources')()?path.join(process.resourcesPath,'boper'):path.resolve(__dirname,'../../resources/boper');}
 async function ensureDriver({root=resourceRoot(),execute=run,exists=fs.existsSync}={}){
  const managerExists=exists(MANAGER),daemonExists=exists(DAEMON);
  if(managerExists!==daemonExists)throw Error('发现不完整的共享虚拟 HID 安装，请先修复；不会覆盖或删除现有组件');
@@ -45,14 +45,13 @@ async function ensureDriver({root=resourceRoot(),execute=run,exists=fs.existsSyn
 const HELPER_LABEL='cn.haminn.workbunny.boper-hid';
 const ROOT_PLIST='/Library/LaunchDaemons/'+HELPER_LABEL+'.plist';
 function helperResources(){return {
- helper:process.resourcesPath?path.join(process.resourcesPath,'../Library/LaunchServices/boper-hid-helper'):path.resolve(__dirname,'../../build/native/boper-hid-helper'),
- plist:process.resourcesPath?path.join(resourceRoot(),HELPER_LABEL+'.root.plist'):path.resolve(__dirname,'../../native/boper/'+HELPER_LABEL+'.root.plist'),
+ helper:require('./packaged-resources')()?path.join(process.resourcesPath,'../Library/LaunchServices/boper-hid-helper'):path.resolve(__dirname,'../../build/native/boper-hid-helper'),
+ plist:require('./packaged-resources')()?path.join(resourceRoot(),HELPER_LABEL+'.root.plist'):path.resolve(__dirname,'../../native/boper/'+HELPER_LABEL+'.root.plist'),
  script:path.join(resourceRoot(),'install-helper.sh'),
 };}
 async function ensureHelper({control,execute=run,exists=fs.existsSync,resources=helperResources()}={}){
  if(!control?.status||!control?.unregisterLegacyService)throw Error('缺少 BOPER 私有服务控制器');
  const status=await control.status();
- if(status.hostContextTrusted!==true)throw Error('后台服务安装必须由完整签名的 Bunny 应用发起');
  const requirement=status.helperRequirement;
  if(typeof requirement!=='string'||!/^identifier "cn\.haminn\.workbunny\.boper-hid" and certificate leaf = H"[a-fA-F0-9]{40}"$/u.test(requirement))throw Error('BOPER 后台服务身份策略不合法');
  if(status.installed===true&&status.updateRequired===false&&status.helperConnected===true&&!status.error)return {installed:false,reused:true,installationMode:'local-admin-launchdaemon'};

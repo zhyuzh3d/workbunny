@@ -21,5 +21,5 @@ body.dialogue-input-open #dialogueOverlay { bottom: calc(var(--dock-bottom) + 42
 #dialogueBtn .dialogue-mode-icon { width: 16px; height: 16px; }
 body.dialogue-behind #dialogueOverlay { z-index: 0; }
 body.dialogue-open.dialogue-behind #stage { pointer-events: none; }
-body.dialogue-avatar-hidden #stage, body.dialogue-avatar-hidden #ground, body.dialogue-avatar-hidden #loading { visibility: hidden; pointer-events: none; }
+body.dialogue-avatar-hidden #stage, body.dialogue-avatar-hidden #loading { visibility: hidden; pointer-events: none; }
 #dialogueBtn:focus-visible, #dialogueLatest:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

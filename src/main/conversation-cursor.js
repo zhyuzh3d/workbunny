@@ -21,11 +21,29 @@ function alignment(previous,current){
     }if(ends.length===1)return {end:ends[0],size};
   }return {uncertain:true};
 }
+function adjudicatedAlignment(context,decision){
+  const reject=()=>{throw Object.assign(Error('会话对齐裁决只能引用原观察的有序索引，不得改写正文、角色或认证'),{code:'E_CONVERSATION_ALIGNMENT'});};
+  if(!context||!decision||Object.keys(decision).some(k=>!['uncertain','matches','reason'].includes(k))||typeof decision.uncertain!=='boolean'||typeof decision.reason!=='string'||!decision.reason.trim()||decision.reason.length>1000)reject();
+  if(decision.uncertain){if(decision.matches!==undefined&&(!Array.isArray(decision.matches)||decision.matches.length))reject();return {uncertain:true};}
+  if(!Array.isArray(decision.matches)||!decision.matches.length||decision.matches.length>16)reject();let before=-1,now=-1;
+  for(const pair of decision.matches){
+    if(!pair||Object.keys(pair).some(k=>!['previousIndex','currentIndex'].includes(k))||!Number.isInteger(pair.previousIndex)||!Number.isInteger(pair.currentIndex)||pair.previousIndex<=before||pair.currentIndex<=now)reject();
+    const a=context.previous[pair.previousIndex],b=context.current[pair.currentIndex];if(!a||!b||a.direction!==b.direction||(a.kind||'text')!==(b.kind||'text'))reject();before=pair.previousIndex;now=pair.currentIndex;
+  }
+  if(before!==context.previous.length-1)reject();
+  return {end:now+1,size:decision.matches.length,adjudicated:true};
+}
 class ConversationCursor{
   constructor(state={}){if(state.ready&&state.schema!=='bunny.conversation/v3')throw Object.assign(new Error('会话观察格式已更新，旧基线需要重新交办'),{code:'E_TASK_AUTH'});this.state={schema:'bunny.conversation/v3',ready:false,sequence:0,baseline:[],recent:[],...structuredClone(state)};}
-  observe(messages,{ownerChannel=false,sentMessages=[]}={}){
+  alignmentContext(messages){
+    const recent=this.state.recent||[],previous=this.state.baseline.map((k,i)=>this.state.baselineMessages?.[i]?.key===k?this.state.baselineMessages[i]:recent.findLast(m=>m.key===k));
+    if(!previous.length||previous.some(m=>!m))return null;
+    const view=(m,index)=>({index,direction:m.direction,kind:m.kind||'text',text:m.text||''});return {previous:previous.map(view),current:messages.map(view)};
+  }
+  observe(messages,{ownerChannel=false,sentMessages=[],alignmentDecision}={}){
     const current=messages.map(m=>({...m,key:key(m)}));
-    const delta=this.state.ready?alignment(this.state.baseline,current):{baseline:true};
+    let delta=this.state.ready?alignment(this.state.baseline,current):{baseline:true};
+    if(delta.uncertain&&alignmentDecision&&!ownerChannel)delta=adjudicatedAlignment(this.alignmentContext(messages),alignmentDecision);
     if(delta.uncertain)return {uncertain:true,messages:[]};
     if(!delta.baseline&&delta.size===1){
       const seenOwn=new Set(this.state.recent.filter(m=>m.origin==='bunny'&&m.kind==='text').map(m=>m.key));
@@ -36,24 +54,33 @@ class ConversationCursor{
       // reobserve; never requeue the whole history as new incoming messages.
       if(replayedOwn)return {uncertain:true,messages:[]};
     }
-    this.state.baseline=current.map(m=>m.key).slice(-16);this.state.ready=true;
+    this.state.baselineMessages=current.slice(-16).map(({key,direction,kind,text})=>({key,direction,kind,text}));while(this.state.baselineMessages.length>1&&Buffer.byteLength(JSON.stringify(this.state.baselineMessages))>24000)this.state.baselineMessages.shift();
+    this.state.baseline=this.state.baselineMessages.map(m=>m.key);this.state.ready=true;
     if(delta.baseline){this.state.recent=current.map(m=>({...m,origin:'visible-history'})).slice(-40);this.boundRecent();return {baseline:true,messages:[]};}
     const fresh=current.slice(delta.end),incoming=[];
     for(const message of fresh){
       this.state.sequence++;
-      this.state.consumedSentIds??=[];const own=message.direction==='outgoing'&&sentMessages.find(s=>!this.state.consumedSentIds.includes(s.id)&&sentMatches(s,message));
+      const pending=this.state.lastDeliveryReceipt?.observedText===null?this.state.lastDeliveryReceipt:null;
+      this.state.consumedSentIds??=[];const own=message.direction==='outgoing'&&sentMessages.find(s=>(!this.state.consumedSentIds.includes(s.id)||s.id===pending?.operationId)&&sentMatches(s,message));
+      const ownIntent=message.direction==='outgoing'&&!!pending&&pending.intentMessageKey===message.key;
       if(own){this.state.consumedSentIds.push(own.id);this.state.consumedSentIds=this.state.consumedSentIds.slice(-100);}
-      const observed={...message,...(own?{text:own.text}:{}),sequence:this.state.sequence,origin:own?'bunny':'screen'};
+      const observed={...message,...(own?{text:own.text}:ownIntent&&pending.desiredTextRef?{text:pending.desiredTextRef}:{}),...(delta.adjudicated?{alignment:{source:'task-brain',reason:alignmentDecision.reason}}:{}),sequence:this.state.sequence,origin:own||ownIntent?'bunny':'screen'};
       this.state.recent.push(observed);
-      if(!own&&(message.direction==='incoming'||ownerChannel&&message.direction==='outgoing'))incoming.push(observed);
+      if(!own&&!ownIntent&&(message.direction==='incoming'||ownerChannel&&message.direction==='outgoing'))incoming.push(observed);
     }
     this.boundRecent();
     return {messages:incoming};
   }
   noteSent(text,receipt={}){
     if(receipt.operationId){this.state.consumedSentIds??=[];this.state.consumedSentIds.push(receipt.operationId);this.state.consumedSentIds=this.state.consumedSentIds.slice(-100);}
+    if(Object.hasOwn(receipt,'observedText')){
+      this.state.lastDeliveryReceipt=structuredClone(receipt);
+      if(typeof receipt.observedText!=='string')return;
+      text=receipt.observedText;
+    }
     const message={direction:'outgoing',kind:'text',text,time:'',origin:'bunny',receipt,sequence:++this.state.sequence};
     message.key=/^[a-f0-9]{64}$/u.test(receipt.messageKey||'')?receipt.messageKey:key(message);this.state.baseline.push(message.key);this.state.baseline=this.state.baseline.slice(-16);
+    if(this.state.baselineMessages){this.state.baselineMessages.push({key:message.key,direction:message.direction,kind:message.kind,text:message.text});this.state.baselineMessages=this.state.baselineMessages.slice(-16);}
     this.state.recent.push(message);this.boundRecent();
   }
   boundRecent(){this.state.recent=this.state.recent.slice(-60);while(this.state.recent.length>1&&Buffer.byteLength(JSON.stringify(this.state.recent))>24000)this.state.recent.shift();}
@@ -118,4 +145,4 @@ function locateObserved(state,messages,sequence){
 }
 const hasNewInput=event=>(event.messages||[]).some(m=>m.origin!=='bunny'&&
   (m.direction==='incoming'&&m.incomingVerified||event.ownerChannel===true&&m.direction==='outgoing'&&m.observedVerified));
-module.exports={ConversationCursor,alignment,normalize,messageKey:key,locateObserved,hasNewInput};
+module.exports={ConversationCursor,alignment,adjudicatedAlignment,normalize,messageKey:key,locateObserved,hasNewInput};

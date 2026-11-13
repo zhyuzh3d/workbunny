@@ -1,0 +1,13 @@
+{
+  "ov_world_jog_back": { "sourceId": "hanami-overte__world-jog-back", "mode": "cycle" },
+  "ov_world_jog": { "sourceId": "hanami-overte__world-jog", "mode": "cycle" },
+  "ov_world_run_back": { "sourceId": "hanami-overte__world-run-back", "mode": "cycle" },
+  "ov_world_strafe_left_fast": { "sourceId": "hanami-overte__world-strafe-left-fast", "mode": "cycle" },
+  "ov_world_strafe_left_jog": { "sourceId": "hanami-overte__world-strafe-left-jog", "mode": "cycle" },
+  "ov_world_strafe_left": { "sourceId": "hanami-overte__world-strafe-left", "mode": "cycle" },
+  "ov_world_strafe_right_jog": { "sourceId": "hanami-overte__world-strafe-right-jog", "mode": "cycle" },
+  "ov_world_walk_back_fast": { "sourceId": "hanami-overte__world-walk-back-fast", "mode": "cycle" },
+  "ov_world_walk_back": { "sourceId": "hanami-overte__world-walk-back", "mode": "cycle" },
+  "motion_walk": { "sourceId": "workbunny-builtins__motion_walk", "mode": "cycle" },
+  "motion_run": { "sourceId": "legacy-unverified__motion_run", "mode": "cycle" }
+}

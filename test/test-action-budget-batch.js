@@ -1,0 +1,64 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');
+const budgets=require('../src/main/bounded-wait'),{ActionLifecycle}=require('../src/main/action-lifecycle');
+const {AgentService}=require('../src/main/agent-service'),{AgentRuntime}=require('../src/main/agent-runtime');
+const {DesktopService}=require('../src/main/desktop-service');
+test('nested model and lifecycle signals inherit the original Action deadline and timeout reason',async()=>{
+ let expire;const outer=budgets.createBoundedWait({timeoutMs:1000,code:'E_ACTION_TIMEOUT',setTimer:fn=>{expire=fn;return 1;},clearTimer(){}}),action=new ActionLifecycle().start({id:'input',taskId:'task',parentSignal:outer.signal});
+ let innerDelay;const inner=budgets.createBoundedWait({signal:action.signal,timeoutMs:90000,code:'E_MODEL_TIMEOUT',setTimer:(_fn,ms)=>{innerDelay=ms;return 2;},clearTimer(){}});
+ assert.equal(budgets.deadlineAt(action.signal),budgets.deadlineAt(outer.signal));assert.equal(budgets.deadlineAt(inner.signal),budgets.deadlineAt(outer.signal));assert(innerDelay<=1000);
+ const pending=inner.run(()=>new Promise(()=>{}));expire();await assert.rejects(pending,{code:'E_ACTION_TIMEOUT'});assert(action.signal.aborted);inner.close();outer.close();action.finish();
+ const expiredController=new AbortController();budgets.inheritDeadline(expiredController.signal,null,Date.now()-1);const expired=budgets.createBoundedWait({controller:expiredController,timeoutMs:90000,code:'E_ACTION_TIMEOUT',setTimer:()=>1,clearTimer(){}});let invoked=false;await assert.rejects(expired.run(()=>{invoked=true;}),{code:'E_ACTION_TIMEOUT'});assert.equal(invoked,false);expired.close();
+});
+test('conversation preparation shares its caller deadline and cannot start the GUI after a late preparation result',async()=>{
+ let expire,release,entered,signal,lane;const began=new Promise(r=>entered=r),gate=new Promise(r=>release=r),outer=budgets.createBoundedWait({timeoutMs:1000,code:'E_ACTION_TIMEOUT',setTimer:fn=>{expire=fn;return 1;},clearTimer(){}});let starts=0,laneFinished=false;
+ const service={runtime:{stepTimeoutMs:360000},getWeChatOwnership:()=> 'owner',scene:{assertTaskIdentity:async(_task,o)=>{signal=o.signal;entered();await gate;}},canOperateForTask:async()=>true,conversationDesktop:{running:false,start:async()=>{starts++;return {ok:false};}},serialConversation:run=>(lane=run().finally(()=>{laneFinished=true;}))};
+ const result=AgentService.prototype.executeConversation.call(service,{task:{state:{}},recipient:'Fixture',operation:'send',message:'Synthetic note',signal:outer.signal});await began;assert.equal(budgets.deadlineAt(signal),budgets.deadlineAt(outer.signal));expire();await assert.rejects(result,{code:'E_ACTION_TIMEOUT'});assert(signal.aborted);assert.equal(laneFinished,false,'timeout must not release an underlying still-pending lane');release();await lane;assert.equal(starts,0);outer.close();
+});
+function recoveryFixture(){
+ const op={id:'original-input',tool:'conversation.send',effect:'write',status:'intent',actionId:'original-action',args:{application:'wechat',recipient:'Fixture',message:'Synthetic note'},inputOutcome:{dispatched:true,reportsSubmitted:48,completion:'unknown'}},task={id:'synthetic-task',skill:'conversation.send',goal:'Send the authorized note',subjects:[{application:'wechat',recipient:'Fixture'}],capabilities:['conversation.send'],authority:{verified:true},scene:'life',visibilityFloor:1,status:'needs_attention',state:{},operations:{'original-input':op},actionRuns:{'original-action':{id:'original-action'}}};
+ const tools=new(require('../src/main/agent-tools').ToolRegistry)();require('../src/main/conversation-tools').registerConversationTools(tools,{scene:{},execute:async()=>({})});
+ const runtime={tasks:new Map([[task.id,task]]),stepTimeoutMs:30,list:()=>[{id:task.id}],canControl:()=>true,owns:t=>t===task,clock:Date.now,save:async()=>{},controllers:new Map(),publish(){},schedule(){},operations:{isRunning:()=>false},withModelTrace:AgentRuntime.prototype.withModelTrace,modelTraceScope:AgentRuntime.prototype.modelTraceScope};
+ return {task,op,runtime,tools};
+}
+test('automatic reconciliation preparation is bounded from entry and cancellation preserves its actual input history',async()=>{
+ const {task,op,runtime,tools}=recoveryFixture();let signal,resumes=0,suspends=0,lane;
+ const physical={id:'physical',recipient:'Fixture',message:'Synthetic note',sources:[task.id],submitAttemptedAt:10,proofBefore:{taskId:'physical',preview:'synthetic'},steps:[]};op.physicalId=physical.id;
+ const service={runtime,tools,conversationDesktop:{task:physical,running:false,resume:async()=>{resumes++;return {ok:true};},suspend:async()=>{suspends++;}},canOperate:async()=>true,scene:{assertHealthy:async o=>{signal=o.signal;await new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));}},serialConversation:run=>(lane=run()),reconcileConversation:AgentService.prototype.reconcileConversation};
+ // Parent and nested waits share one deadline; either may publish the same
+ // timeout first. The public result must retain that exact reason in both cases.
+ const result=await AgentService.prototype.reconcile.call(service,task.id).catch(error=>({ok:false,code:error.code}));assert.equal(result.ok,false);assert.equal(result.code,'E_ACTION_TIMEOUT');await lane;assert(signal.aborted);assert.equal(resumes,0);assert.equal(suspends,1);assert.equal(runtime.controllers.size,0);assert.equal(op.status,'intent');assert.equal(op.inputOutcome.reportsSubmitted,48);
+});
+test('reconciliation model calls retain the canonical Task, Action and original Operation trace scope',async()=>{
+ const {task,op,runtime,tools}=recoveryFixture(),entries=[];runtime.stepTimeoutMs=1000;runtime.modelTrace={memory:{generation:1},clock:Date.now,accepts:()=>true,record:entry=>entries.push(structuredClone(entry)),gap(){}};
+ const service={runtime,tools,serialConversation:run=>run(),reconcileConversation:async(_task,_op,_resume,{signal})=>{
+  await require('../src/main/agent-json').checkedJSON({signal,messages:[{role:'user',content:'Synthetic read-only recovery'}]},v=>v,{request:async()=>({response:{text:'{"ok":true}'}})});return {ok:false,error:'Keep original uncertainty'};
+ }};
+ await AgentService.prototype.reconcile.call(service,task.id);assert(entries.length);assert(entries.every(e=>e.taskId===task.id&&e.actionId==='original-action'&&e.parentOperationId===op.id));assert(Object.values(task.operations).some(o=>o.kind==='model'&&o.parentOperationId===op.id));assert.equal(op.status,'intent');assert.equal(op.inputOutcome.reportsSubmitted,48);
+});
+for(const variant of ['submit-tail','valid-prefix'])test('a valid '+variant+' executes once and leaves unsupported optional wait/screenshot tails to the original observation loop',async t=>{
+ const calls=[],requests=[],raw=variant==='submit-tail'?{action:'key',key:'return',modifiers:[],purpose:'submit',then:[{action:'wait',waitMs:1000},{action:'screenshot'}]}:{action:'type',purpose:'task',text:'Synthetic note',then:[{action:'key',key:'return',modifiers:[],purpose:'submit'},{action:'wait',waitMs:1000},{action:'screenshot'}]},original=structuredClone(raw);
+ const service=new DesktopService({native:{setInputContext(){},close:async()=>{}},modelRequest:async options=>{requests.push(options);return {text:JSON.stringify(requests.length===1?raw:{action:'done',completed:true,evidence:'The actual outgoing item is visible',receipt:{observed:'delivered',basis:'Visible result after submission',observedText:null}})};}});t.after(()=>service.close());
+ service.task={id:'physical',target:'wechat',operation:'send',recipient:'Fixture',message:'Synthetic note',goal:'Send one authorized synthetic note',scene:'life',domain:'life',visibilityFloor:1,steps:[],startedAt:Date.now(),workModel:'hy3'};service.running=true;service.generation=1;service.controller=new AbortController();service.visualSessions=new Map([['wechat',{observe:async()=>({}),identity:()=>({mode:'visual',sessionId:'session'})}]]);
+ service.capture=async()=>service.screenshot={at:Date.now(),frameId:'frame-'+requests.length,preview:'data:image/png;base64,c3ludGhldGlj',captureSource:'CGDisplayStream',perceptionSource:'vision-model',ocr:[],rect:{x:0,y:0,width:200,height:100},width:200,height:100};service.assertScreenshotCurrent=async()=>{};service.act=async action=>{calls.push(action.action);return {performed:true};};
+ await service.run(1,{...service.task});assert.deepEqual(calls,variant==='submit-tail'?['key']:['type','key']);assert.equal(requests.length,2,'one execution plan plus one original result observation, no schema-repair request');assert.deepEqual(raw,original);assert.equal(service.task.submissionAttempts.length,1);const feedback=service.task.steps[0].batchFeedback;assert.equal(feedback.discardedFollowingSteps,2);assert.equal(feedback.discardedTailExecuted,false);assert.equal(feedback.acceptedFollowingSteps,variant==='valid-prefix'?1:0);const lastPayload=JSON.parse(requests[1].messages.find(m=>m.role==='user').content[0].text);assert.deepEqual(lastPayload.steps[0].batchFeedback,feedback);
+});
+test('an invalid primary is never accepted just because its optional tail can be discarded',async()=>{
+ let requests=0;const service={task:{id:'physical',steps:[]},progress:()=>({snapshot:()=>({})}),update(){},modelRequest:async()=>{requests++;return {text:'{"action":"click","x":2,"y":0.3,"then":[{"action":"wait"}]}'};}};
+ await assert.rejects(DesktopService.prototype.nextAction.call(service,{id:'physical',target:'wechat',operation:'send',goal:'Send the authorized note',recipient:'Fixture',message:'Synthetic note',workModel:'hy3'},{ocr:[],preview:'synthetic'},new AbortController().signal),{code:'E_MODEL_SCHEMA'});assert.equal(requests,2);
+});
+test('terminal done with an optional tail remains a strict protocol error rather than a tolerated success',async()=>{
+ let requests=0;const service={task:{id:'physical',steps:[]},progress:()=>({snapshot:()=>({})}),update(){},modelRequest:async()=>{requests++;return {text:'{"action":"done","completed":true,"evidence":"A claimed result","then":[{"action":"screenshot"}]}'};}};
+ await assert.rejects(DesktopService.prototype.nextAction.call(service,{id:'physical',target:'wechat',operation:'send',goal:'Send an authorized note',recipient:'Fixture',message:'Synthetic note',workModel:'hy3'},{ocr:[],preview:'synthetic'},new AbortController().signal),{code:'E_MODEL_SCHEMA'});assert.equal(requests,2);
+});
+test('a supersede cancellation after real native input never reports not dispatched or erases the original receipt',async()=>{
+ const controller=new AbortController(),action={superseded:false},outcome={dispatched:true,inputKinds:['click'],inputKindsComplete:true,reportsSubmitted:48,releaseConfirmed:true,completion:'local-submitted'},task={id:'canonical',state:{},operations:{input:{id:'input',inputOutcome:outcome}}};let lane;
+ const service={runtime:{stepTimeoutMs:1000,tasks:new Map([['canonical',task]]),save:async()=>{}},getWeChatOwnership:()=> 'owner',canOperateForTask:async()=>true,scene:{assertTaskIdentity:async()=>{}},serialConversation:run=>(lane=run()),conversationDesktop:{running:false,task:null,start:async function(value){this.task={...value,id:'physical',status:'running',steps:[{action:'click',state:'input-sent',inputReceipt:{inputOutcome:outcome}}]};this.running=true;action.superseded=true;controller.abort();return {ok:true};},suspend:async function(){this.running=false;this.task.status='paused';this.task.note='Superseded after native input';}}};
+ const result=await AgentService.prototype.executeConversation.call(service,{task,operationId:'input',action,recipient:'Fixture',operation:'open',signal:controller.signal});await lane;assert.notEqual(result.dispatched,false);assert.equal(result.inputOutcome.reportsSubmitted,48);assert.equal(task.operations.input.inputOutcome,outcome);assert.equal(task.operations.input.inputOutcome.dispatched,true);
+});
+test('the desktop keeps its physical lane until preparation settles and preserves the inherited Action timeout code',async t=>{
+ const service=new DesktopService({native:{setInputContext(){},close:async()=>{}},planner:async()=>{throw Error('No plan may run after expiry');}});t.after(()=>service.close());service.task={id:'physical',target:'demo',goal:'Synthetic current board',scene:'life',domain:'life',visibilityFloor:1,steps:[],startedAt:Date.now()};service.running=true;service.generation=1;service.controller=new AbortController();
+ budgets.inheritDeadline(service.controller.signal,null,Date.now()+15);
+ service.visualSessions=new Map([['demo',{observe:async({signal})=>new Promise(resolve=>signal.addEventListener('abort',resolve,{once:true})),identity:()=>({mode:'visual',sessionId:'session'})}]]);
+ await assert.rejects(service.run(1,{...service.task}),{code:'E_ACTION_TIMEOUT'});assert.equal(service.guiLeaseHeld,false);assert.equal(service.task.steps.length,0);
+});

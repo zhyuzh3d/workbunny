@@ -27,7 +27,7 @@ CERT="${WORKBUNNY_BOPER_CERT_SHA1:-$(security find-certificate -c "${WORKBUNNY_S
 python3 - "$OUT/BoperSecurity.h" "$CERT" <<'PY'
 import json,sys
 path,cert=sys.argv[1:]
-identities={'HOST':'cn.haminn.workbunny','RUNTIME':'cn.haminn.workbunny.boper-runtime','HELPER':'cn.haminn.workbunny.boper-hid'}
+identities={'RUNTIME':'cn.haminn.workbunny.boper-runtime','HELPER':'cn.haminn.workbunny.boper-hid'}
 with open(path,'w') as f:
     f.write('// Generated signing policy: exact identifier and pinned certificate.\n')
     for role,identity in identities.items():

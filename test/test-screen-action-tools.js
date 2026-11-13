@@ -16,8 +16,10 @@ async function setup(application='demo',options={}){
  const refresh=async()=>{const frame=await h.visual.observe({relocate:true});task.state.screenAnchors={[application]:{mode:'visual',identity:frame.identity,sessionId:frame.identity.sessionId,frameId:frame.visualFrameId,visualFrameId:frame.visualFrameId,at:Date.now(),rect:frame.desktopRect,mainRegion:frame.mainRegion,previewWidth:frame.width,previewHeight:frame.height,ocr:frame.texts}};return frame;};
  const frame=await refresh(),tool=tools.get('screen.action'),run=async args=>tool.execute(tool.validate({application,frameId:task.state.screenAnchors[application]?.frameId||frame.visualFrameId,...args}),{task});return {...h,h,tools,tool,lease,task,faults,refresh,run,frame};
 }
-test('one current visual anchor is consumed under the shared GUI lease without claiming business completion',async()=>{
- const f=await setup(),args={action:'click',targetType:'icon',pixelX:80,pixelY:45};const result=await f.run(args);assert(result.verified);assert.match(result.receipt.businessResult,/业务结果待自主判断/);assert.equal(f.calls.at(-1).op,'displayInput');assert.equal(f.calls.at(-1).args.x,100);assert(f.lease.isFree());await assert.rejects(f.run(args),e=>e.dispatched===false);assert.equal(f.calls.filter(c=>c.op==='displayInput').length,1);assert(f.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
+test('known operations can share a fresh anchor while each input retains live pixel guards and GUI ownership',async()=>{
+ const f=await setup(),args={action:'click',targetType:'icon',pixelX:80,pixelY:45};const result=await f.run(args);assert(result.verified);assert.match(result.receipt.businessResult,/业务结果待自主判断/);assert.equal(f.calls.at(-1).op,'displayInput');assert.equal(f.calls.at(-1).args.x,100);assert(f.lease.isFree());
+ await f.run({action:'key',key:'a',modifiers:['cmd']});assert.equal(f.calls.filter(c=>c.op==='displayInput').length,2);assert(f.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
+ paint(f.h.image,{x:.2,y:.12,width:.3,height:.15},250);const changed=await f.run(args);assert(changed.visualFeedback.checks[0].identityChanged);assert.equal(f.calls.filter(c=>c.op==='displayInput').length,3,'ordinary changes reach the task as feedback');assert(f.task.state.screenAnchors.demo);
 });
 test('WeChat navigation cannot directly send text, close the app or use the clipboard',async()=>{
  const f=await setup('wechat'),base={application:'wechat',frameId:f.frame.visualFrameId};
@@ -37,15 +39,15 @@ test('projected WeChat send and close regions reject left clicks while right-cli
  const f=await setup('wechat');for(const [pixelX,pixelY]of [[140,85],[1,1]])await assert.rejects(f.run({action:'click',targetType:'icon',pixelX,pixelY}),e=>e.dispatched===false);await f.run({action:'click',button:'right',pixelX:140,pixelY:85});assert.equal(f.calls.filter(c=>c.op==='displayInput').length,1);
 });
 test('failed visual preflight is undispatched while a native input timeout remains uncertain',async()=>{
- const f=await setup();paint(f.h.image,{x:.2,y:.12,width:.3,height:.15},250);await assert.rejects(f.run({action:'click',targetType:'icon',pixelX:80,pixelY:45}),e=>e.dispatched===false);assert(!f.calls.some(c=>c.op==='displayInput'));
+ const f=await setup();f.task.goal='Make a payment';paint(f.h.image,{x:.2,y:.12,width:.3,height:.15},250);await assert.rejects(f.run({action:'click',targetType:'icon',pixelX:80,pixelY:45}),e=>e.dispatched===false);assert(!f.calls.some(c=>c.op==='displayInput'));
  const late=await setup('demo',{onInput:()=>{throw Error('input receipt timeout');}});await assert.rejects(late.run({action:'click',targetType:'icon',pixelX:80,pixelY:45}),e=>e.dispatched!==false);assert.equal(late.calls.filter(c=>c.op==='displayInput').length,1);
 });
 test('VLM labels locate text, destructive controls and stale frames never receive input',async()=>{
  const f=await setup();f.h.location.texts=[row('继续')];await f.refresh();await f.run({action:'click',label:'继续'});assert.equal(f.calls.at(-1).args.x,68);assert.throws(()=>f.tool.validate({application:'demo',frameId:'frame',action:'click',label:'删除'}),/破坏/);
  await f.refresh();f.task.state.screenAnchors.demo.at-=31000;await assert.rejects(f.run({action:'click',label:'继续'}),e=>e.dispatched===false);
 });
-test('moved targets reject stale keyboard and text evidence without querying any app metadata',async()=>{
- const f=await setup();paint(f.h.image,{x:.2,y:.12,width:.3,height:.15},250);for(const args of [{action:'type',text:'test'},{action:'key',key:'a',modifiers:['cmd']}])await assert.rejects(f.run(args),e=>e.dispatched===false);assert(!f.calls.some(c=>c.op==='displayInput'));assert(f.calls.every(c=>c.op==='displayCapture'));
+test('major-impact targets retain strict keyboard and text evidence without querying any app metadata',async()=>{
+ const f=await setup();f.task.goal='Make a payment';paint(f.h.image,{x:.2,y:.12,width:.3,height:.15},250);for(const args of [{action:'type',text:'test'},{action:'key',key:'a',modifiers:['cmd']}])await assert.rejects(f.run(args),e=>e.dispatched===false);assert(!f.calls.some(c=>c.op==='displayInput'));assert(f.calls.every(c=>c.op==='displayCapture'));
 });
 test('authentication text in a visual observation stops navigation input without a login click',async()=>{
  const f=await setup('wechat');f.task.state.screenAnchors.wechat.ocr=[row('为了你的账号安全，请重新登录。')];for(const action of [{action:'key',key:'f',modifiers:['cmd']},{action:'click',targetType:'icon',pixelX:80,pixelY:45},{action:'scroll',pixelX:80,pixelY:45,deltaY:100},{action:'type',recipient:'Alice',text:'Alice',purpose:'navigation'}])await assert.rejects(f.run(action),e=>e.code==='E_APP_CIRCUIT'&&e.dispatched===false);assert(f.faults.length>=1);assert(!f.calls.some(c=>c.op==='displayInput'));

@@ -42,7 +42,7 @@ test('GUI contention before dispatch preserves the event and retries promptly wi
  h.runtime.diagnoseRepair=async()=>{diagnoses++;return {action:'retry'};};h.runtime.failed=async()=>{failures++;};
  const {id}=await h.runtime.start(spec,owner);await h.runtime.enqueue(id,{key:'pending'});await h.runtime.tick(id);
  const task=h.runtime.tasks.get(id);assert.equal(task.nextCheckAt,2000);assert.equal(task.inbox.length,1);assert.equal(task.status,'waiting');assert.equal(diagnoses,0);assert.equal(failures,0);assert.equal(task.state.lastFailure,undefined);
- busy=false;await h.runtime.tick(id);assert.equal(task.inbox.length,0);assert.equal(h.calls.length,1);await h.runtime.close();
+ busy=false;await h.runtime.tick(id);assert.equal(task.inbox.length,1,'manual ticks cannot bypass the durable retry deadline');assert.equal(h.calls.length,0);h.advance();await h.runtime.tick(id);assert.equal(task.inbox.length,0);assert.equal(h.calls.length,1);await h.runtime.close();
 });
 test('a transient visual failure is analyzed and reobserved in the same action without losing its event or repeating a write',async()=>{
  let uncertain=true;const diagnoses=[];
@@ -509,4 +509,20 @@ test('legacy stop-failure notes migrate into a durable terminal barrier before u
 test('a stuck storage and admission queue cannot hold the stop acknowledgement or block real cancellation forever',async()=>{
  const h=setup(async()=>({status:'waiting'})),{id}=await h.runtime.start(spec,owner);h.runtime.stopTimeoutMs=20;h.runtime.stopAckTimeoutMs=20;let release,stops=0;const gate=new Promise(r=>release=r);h.journal.put=async task=>{await gate;h.records.set(task.id,structuredClone(task));};void h.runtime.admission(()=>gate);h.runtime.stopTask=async()=>{stops++;};
  const work=h.runtime.control('stop',id);assert.equal(h.runtime.tasks.get(id).status,'stopped');const result=await work;assert.equal(stops,1);assert.equal(result.ok,true);assert.equal(result.persistenceVerified,false);assert.match(result.message,/保存失败或未确认/);assert.equal(h.runtime.capacity().active,0);release();await new Promise(r=>setImmediate(r));assert.equal(h.runtime.tasks.get(id).status,'stopped');assert.equal(h.records.get(id).status,'stopped');await h.runtime.close();
+});
+test('a failed initial task checkpoint backs off locally without model work or rapid wakes, then resumes after storage recovers',async t=>{
+ let now=1000,runs=0,diagnoses=0,writes=0,broken=true;
+ const h=setup(async()=>{runs++;return {status:'waiting',nextCheckAt:100000};});t.after(()=>h.runtime.close());h.runtime.clock=()=>now;h.runtime.diagnoseRepair=async()=>{diagnoses++;return null;};
+ const {id}=await h.runtime.start(spec,owner),put=h.journal.put;h.journal.put=async task=>{writes++;if(broken)throw Object.assign(Error('synthetic stale epoch'),{code:'stale_epoch',vaultOperation:'write',requestId:writes});return put(task);};
+ await h.runtime.tick(id);const task=h.runtime.tasks.get(id);assert.equal(task.status,'waiting');assert.equal(task.state.storageWait.nextAt,2000);assert.equal(task.state.lastFailure.code,'stale_epoch');assert.equal(task.updatedAt,1000);assert.equal(runs,0);assert.equal(diagnoses,0);
+ for(let i=0;i<100;i++)await h.runtime.tick(id);assert.equal(task.counters.wakes,1);assert.equal(writes,1);
+ now=2000;await h.runtime.tick(id);assert.equal(task.counters.wakes,2);assert.equal(task.state.storageWait.nextAt,4000);assert.equal(writes,2);
+ now=3999;await h.runtime.tick(id);assert.equal(task.counters.wakes,2);broken=false;now=4000;await h.runtime.tick(id);assert.equal(runs,1);assert.equal(diagnoses,0);assert.equal(task.state.storageWait,undefined);assert.equal(h.records.get(id).state.storageWait,undefined);assert.equal(task.state.goalRevision,undefined);
+});
+test('a recovery checkpoint failure cannot bypass storage backoff or ask another model to repair an unsavable task',async t=>{
+ let now=1000,runs=0,writes=0,diagnoses=0;const h=setup(async()=>{runs++;throw Object.assign(Error('synthetic non-dispatch'),{dispatched:false});});t.after(()=>h.runtime.close());h.runtime.clock=()=>now;h.runtime.diagnoseRepair=async()=>{diagnoses++;return {action:'change_method'};};
+ const {id}=await h.runtime.start(spec,owner),put=h.journal.put;h.journal.put=async task=>{if(++writes>1)throw Object.assign(Error('synthetic storage failure'),{code:'stale_epoch'});return put(task);};
+ await h.runtime.tick(id);const task=h.runtime.tasks.get(id);assert.equal(task.status,'waiting');assert.equal(task.state.storageWait.nextAt,2000);assert.equal(task.state.lastFailure.code,'stale_epoch');assert.equal(diagnoses,0);assert.equal(runs,1);assert.equal(writes,2);
+ for(let i=0;i<100;i++)await h.runtime.tick(id);assert.equal(runs,1);assert.equal(writes,2);assert.equal(task.counters.wakes,1);
+ await h.runtime.control('stop',id);now=100000;await h.runtime.tick(id);assert.equal(h.runtime.tasks.get(id).status,'stopped');assert.equal(runs,1);
 });

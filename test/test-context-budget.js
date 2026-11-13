@@ -23,7 +23,7 @@ test('a legacy Grok cache gets documented capacity without a network call; long 
   assert.equal(JSON.stringify(options),original,'wire fitting never edits original messages');
 });
 test('unknown models keep a conservative fallback but no longer count UTF8 bytes as tokens',()=>{
-  const options=request(250,{model:'unknown-model',contextWindow:32768});
+  const options=request(200,{model:'unknown-model',contextWindow:32768});
   const result=budget.fitRequest(options);
   assert(Buffer.byteLength(JSON.stringify(options))>result.contextBudget.inputBudget);
   assert(result.contextBudget.estimate<result.contextBudget.inputBudget);

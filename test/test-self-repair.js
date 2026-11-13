@@ -96,3 +96,12 @@ test('new external facts permit a new recovery decision while repeated errors do
  phase=1;await h.runtime.tick(id);assert.equal(diagnoses,3);assert.equal(h.runtime.tasks.get(id).status,'waiting');assert.equal(h.runtime.tasks.get(id).state.selfRepair.attempts,1);
  await h.runtime.close();
 });
+test('a real model timeout changes the next Task deadline and converges at the existing recovery budget without UI replay',async()=>{
+ const deadlines=[];let diagnoses=0;
+ const h=harness(async({task,signal})=>{await checkedJSON({signal,timeoutMs:90000,repairProfile:task.state.selfRepair?.profile,messages:[{role:'system',content:'synthetic request'},{role:'user',content:'{}'}]},v=>v,{request:async options=>{deadlines.push(options.timeoutMs);throw Object.assign(Error('synthetic model timeout'),{code:'E_MODEL_TIMEOUT',diagnostic:{modelRequest:{timeoutMs:options.timeoutMs,requestStarted:true,externalAction:false}}});}});return {status:'completed'};},async()=>{diagnoses++;return {action:'continue',source:'llm',nextStep:'Continue the same Task'};});
+ const {id}=await h.start();for(let i=0;i<12;i++){await h.runtime.tick(id);h.advance();}const task=h.runtime.tasks.get(id),run=Object.values(task.actionRuns)[0];assert.deepEqual(deadlines,[90000,180000,180000,180000]);assert.equal(task.state.selfRepair.profile.requestTimeoutMs,180000);assert.equal(task.status,'needs_attention');assert.equal(run.recoveryState.status,'exhausted');assert.equal(diagnoses,3);assert.equal(h.calls.length,0);assert.equal(task.state.lastFailure.diagnostic.modelRequest.requestStarted,true);assert.equal(task.state.lastFailure.diagnostic.modelRequest.externalAction,false);
+ for(let i=0;i<5;i++){h.advance();await h.runtime.tick(id);}assert.equal(deadlines.length,4);await h.runtime.close();
+});
+test('Task deadline tuning is bounded and preserves messages, authority and output budgets',()=>{
+ const messages=[{role:'user',content:'synthetic required owner goal'}],options={messages,maxTokens:2048,timeoutMs:90000};const profile=repair.afterModelTimeout({contextLevel:0},Object.assign(Error('timeout'),{diagnostic:{modelRequest:{timeoutMs:90000}}}));const tuned=repair.applyProfile(options,profile);assert.equal(tuned.timeoutMs,180000);assert.deepEqual(tuned.messages,messages);assert.equal(tuned.maxTokens,2048);assert.equal(options.timeoutMs,90000);assert.equal(repair.applyProfile(options,{requestTimeoutMs:9999999}).timeoutMs,180000);assert.equal(repair.applyProfile(options,{requestTimeoutMs:30000}).timeoutMs,90000);
+});

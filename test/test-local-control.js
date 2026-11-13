@@ -20,6 +20,27 @@ test('speech controls use the shared registry, validate strict bounded arguments
  for(scene of ['private','work'])assert.equal((await call({action:'status'})).result.structuredContent.error.code,'E_LOCAL_SCENE');
  assert.equal(calls.length,1);
 });
+test('task inspection uses the shared registry with a single ID, cancellation and life-scene isolation',async t=>{
+ let scene='life';const calls=[],root=await fs.mkdtemp(path.join(os.tmpdir(),'wb-task-control-'));
+ const server=new LocalControl({endpoint:socketPath(root),methods:ownerMethods({getScene:()=>scene,setScene:()=>{},boperControl:()=>({}),inspectTask:async(params,context)=>{calls.push({params,signal:context.signal});return {ok:true,id:params.id,artifact:{path:'/synthetic/private/task.json'}};}})});
+ await server.start();t.after(async()=>{await server.close();await fs.rm(root,{recursive:true,force:true});});
+ const call=args=>sendRequest(server.endpoint,{schema:SCHEMA,id:randomUUID(),method:'tools.call',params:{name:'task_inspect',arguments:args}});
+ const result=await call({id:'synthetic-task'});assert.equal(result.result.structuredContent.id,'synthetic-task');assert(calls[0].signal instanceof AbortSignal);
+ for(const args of [{},{id:'../other'},{id:'task',scene:'private'},{id:'task',directory:'/other'}])assert.equal((await call(args)).result.structuredContent.error.code,'E_LOCAL_PARAMS');
+ for(scene of ['work','private'])assert.equal((await call({id:'synthetic-task'})).result.structuredContent.error.code,'E_LOCAL_SCENE');assert.equal(calls.length,1);
+});
+test('registered task tools validate exact targets and keep status available during a pending owner mutation',async t=>{
+ const entered=Promise.withResolvers(),release=Promise.withResolvers(),calls=[],root=await fs.mkdtemp(path.join(os.tmpdir(),'wb-task-tools-'));
+ const taskControls={list:async p=>({ok:true,tasks:[{id:'new-task',createdAt:p.since}]}),status:async p=>({ok:true,id:p.id,status:'paused'}),control:async(p,c)=>{calls.push({p,signal:c.signal});entered.resolve();await release.promise;return {ok:true};},command:async p=>({ok:true,id:'new-task'})};
+ const server=new LocalControl({endpoint:socketPath(root),methods:ownerMethods({getScene:()=> 'life',setScene:()=>{},boperControl:()=>({}),taskControls})});await server.start();
+ t.after(async()=>{release.resolve();await server.close();await fs.rm(root,{recursive:true,force:true});});
+ const call=(name,args)=>sendRequest(server.endpoint,{schema:SCHEMA,id:randomUUID(),method:'tools.call',params:{name,arguments:args}});
+ assert.deepEqual((await call('task_list',{since:100,limit:1})).result.structuredContent.tasks,[{id:'new-task',createdAt:100}]);for(const args of [{},{since:-1},{since:100,limit:21},{since:100,goal:'no-content-query'}])assert.equal((await call('task_list',args)).result.structuredContent.error.code,'E_LOCAL_PARAMS');
+ const pending=call('task_control',{id:'synthetic',operation:'upgrade'});await entered.promise;assert.equal((await call('task_status',{id:'synthetic'})).result.structuredContent.status,'paused');
+ assert.equal((await call('task_control',{id:'synthetic',operation:'resume'})).result.structuredContent.error.code,'E_LOCAL_BUSY');release.resolve();await pending;
+ for(const args of [{id:'../private',operation:'resume'},{id:'synthetic',operation:'execute'},{id:'synthetic',operation:'resume',scene:'private'}])assert.equal((await call('task_control',args)).result.structuredContent.error.code,'E_LOCAL_PARAMS');
+ assert.equal(calls.length,1);assert(calls[0].signal instanceof AbortSignal);assert.equal((await call('task_command',{text:'synthetic goal'})).result.structuredContent.id,'new-task');
+});
 test('mutations remain serialized while status stays available and timed-out work is never replayed',async t=>{
  const gate=Promise.withResolvers(),entered=Promise.withResolvers();const f=await fixture(t,{timeoutMs:60,setScene:async()=>{entered.resolve();await gate.promise;}});const pending=f.call('scene_set',{scene:'life'});await entered.promise;assert.equal((await f.call('scene_get')).result.structuredContent.scene,'life');assert.equal((await f.call('boper_enable')).result.isError,true);const timeout=await pending;assert.equal(timeout.error.code,'E_LOCAL_TIMEOUT');assert.equal(f.calls.filter(x=>x[0]==='scene').length,1);assert.equal((await f.call('boper_test')).result.structuredContent.error.code,'E_LOCAL_BUSY');gate.resolve();await new Promise(r=>setImmediate(r));
 });
@@ -36,4 +57,11 @@ test('official SDK Client negotiates MCP 2025-11-25 and discovers/calls the real
 test('bunnyctl is an official MCP client with one JSON result and no native binding or conversation access',async t=>{
  const f=await fixture(t);const run=await new Promise((resolve,reject)=>execFile(process.execPath,[path.join(__dirname,'../tools/bunnyctl.cjs'),'--socket',f.endpoint,'scene','set','life'],{timeout:6000},(error,stdout,stderr)=>error?reject(Object.assign(error,{stdout,stderr})):resolve({stdout,stderr})));const lines=run.stdout.trim().split('\n');assert.equal(lines.length,1);assert.equal(JSON.parse(lines[0]).structuredContent.scene,'life');assert.equal(run.stderr,'');assert.deepEqual(f.calls,[['scene','life']]);
  const source=await fs.readFile(path.join(__dirname,'../src/main/index.js'),'utf8');assert.match(source,/setScene:scene=>applySettings\(\{memory:\{scene\}\}\)/);assert.match(source,/pet:boper-control'[\s\S]{0,150}return controlBoper\(action\)/);
+});
+test('task_evidence is registered read-only, requires exact bounded crop arguments and refuses other scenes',async t=>{
+ let scene='life';const calls=[],root=await fs.mkdtemp(path.join(os.tmpdir(),'wb-evidence-control-'));
+ const server=new LocalControl({endpoint:socketPath(root),methods:ownerMethods({getScene:()=>scene,setScene:()=>{},boperControl:()=>({}),inspectTaskEvidence:async(p,c)=>{calls.push({p,signal:c.signal});return {ok:true,id:p.id,artifact:{path:'/synthetic/private/crop.png'}};}})});await server.start();t.after(async()=>{await server.close();await fs.rm(root,{recursive:true,force:true});});
+ const params={id:'synthetic-task',session:'00000000-0000-4000-8000-000000000001',incidentId:'a'.repeat(32),captureId:'b'.repeat(32),region:{x:1,y:2,width:100,height:20}},call=p=>sendRequest(server.endpoint,{schema:SCHEMA,id:randomUUID(),method:'tools.call',params:{name:'task_evidence',arguments:p}});
+ assert.equal((await call(params)).result.structuredContent.ok,true);assert(calls[0].signal instanceof AbortSignal);for(const p of [{...params,region:undefined},{...params,region:{x:0,y:0,width:1000,height:1000}},{...params,path:'/other'},{...params,id:'../other'}])assert.equal((await call(p)).result.structuredContent.error.code,'E_LOCAL_PARAMS');
+ scene='private';assert.equal((await call(params)).result.structuredContent.error.code,'E_LOCAL_SCENE');assert.equal(calls.length,1);
 });

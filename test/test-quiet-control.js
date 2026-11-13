@@ -11,7 +11,7 @@ test('the typed entry uses the same complete-command rule and preserves mixed re
   dialogueReady:()=>true,screenLocked:false,config:{load:()=>({memory:{enabled:false}})},memory:{addMessage:async()=>{}},composing:false,stopSpeaking(){},voiceTurns:{reset(){}},lastHeardAt:0,autonomy:null,
   pushHistory:async()=>({id:'fixture-owner'}),send(){},QUIET_WORDS:quiet,quietUntil:0,presentedReplies:new Set(),think:request=>requests.push(request.userText),
   dialogueScheduler:()=>({interrupt(){}}),dialogueScope:()=> 'fixture',require:require('node:module').createRequire(path.resolve('src/main/index.js'))};
- vm.runInNewContext(source.slice(source.indexOf("ipcMain.handle('pet:say'"),source.indexOf('async function applySettings(')),context);
+ vm.runInNewContext(source.slice(source.indexOf('async function submitTypedDialogue('),source.indexOf('async function applySettings(')),context);
  const mixed='先别讲故事了，告诉我晚饭吃什么。';await handler({}, {text:mixed});assert.deepEqual(requests,[mixed]);assert.equal(context.quietUntil,0);
  await handler({}, {text:'请先安静一下'});assert(context.quietUntil>Date.now());assert.deepEqual(requests,[mixed]);
 });

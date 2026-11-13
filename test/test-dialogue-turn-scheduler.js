@@ -55,3 +55,46 @@ test('channels cancel independently and already-started effects remain with thei
   assert.deepEqual(next.inputs[0].effect, { phase: 'settled', taskId: 'fixture-task' });
   assert.equal(next.inputs[1].effect, undefined); assert(remote.isCurrent());
 });
+
+test('consuming acknowledged inputs preserves the active lease and does not claim completion', () => {
+  const s = new DialogueTurnScheduler(), first = start(s, 'typed:1', 'first acknowledged input');
+  const active = start(s, 'typed:2', 'second acknowledged input');
+  assert.equal(active.consumed, false);
+  assert.equal(first.consume(), false, 'a stale lease cannot consume its successor inputs');
+  assert(active.consume());
+  assert(active.isCurrent());
+  assert.equal(active.controller.signal.aborted, false);
+  assert.equal(active.finished, undefined);
+  assert.equal(active.consumed, true);
+  assert.equal(s.channels.get('local').active, active);
+  assert.deepEqual(active.inputs.map(row => row.text), ['first acknowledged input', 'second acknowledged input']);
+  assert.equal(s.channels.get('local').pending.size, 0);
+  assert(active.consume(), 'acknowledgement is idempotent for the active lease');
+  assert(active.finish(), 'the same response can finish normally after consumption');
+  assert.equal(active.finished, true); assert.equal(active.consume(), false);
+});
+
+test('cancelled acknowledged work cannot resurrect through a new input or an ignored candidate', () => {
+  const s = new DialogueTurnScheduler(), active = start(s, 'typed:1', 'acknowledged goal', { accepted: true });
+  assert(active.consume());
+  s.interrupt({ scope: 'scene:1' });
+  assert.equal(active.isCurrent(), false); assert.equal(active.finished, undefined);
+  assert.equal(s.resumable({ scope: 'scene:1' }), null);
+  const ignored = start(s, 'voice:2', 'ambient words', { accepted: false });
+  assert.deepEqual(ignored.inputs.map(row => row.text), ['ambient words']);
+  assert(ignored.finish({ ignored: true })); ignored.release();
+  assert.equal(s.resumable({ scope: 'scene:1' }), null);
+  assert.deepEqual(start(s, 'typed:3', 'new owner input').inputs.map(row => row.text), ['new owner input']);
+});
+
+test('release without consumption continues to preserve an unfinished ordinary input', () => {
+  const s = new DialogueTurnScheduler(), pending = start(s, 'typed:1', 'unfinished ordinary question', { accepted: true });
+  pending.release();
+  assert.equal(pending.consumed, false);
+  assert.equal(s.resumable({ scope: 'scene:1' }).text, 'unfinished ordinary question');
+  const next = start(s, 'typed:2', 'new detail');
+  assert.deepEqual(next.inputs.map(row => row.text), ['unfinished ordinary question', 'new detail']);
+  assert.equal(pending.consume(), false);
+  assert(next.finish()); next.release();
+  assert.equal(s.resumable({ scope: 'scene:1' }), null);
+});

@@ -109,6 +109,7 @@ function requestHTTP({ baseURL, apiKey, model, messages, maxTokens = 220, timeou
       messages: messages.map(require('./context-budget').wire),
       stream: true,
     });
+    const trace=require('./task-model-trace').wire({...JSON.parse(payload),provider});
     const secure = url.protocol === 'https:';
     let request, response, settled = false;
     const finish = (error, result) => {
@@ -117,10 +118,11 @@ function requestHTTP({ baseURL, apiKey, model, messages, maxTokens = 220, timeou
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
       if (error) {
+        trace.failed(error);
         response?.destroy();
         request?.destroy();
         reject(error);
-      } else resolve(result);
+      } else {trace.complete(result);resolve(result);}
     };
     const abort = () => finish(aborted());
     // The deadline includes socket queueing and slow streaming responses.

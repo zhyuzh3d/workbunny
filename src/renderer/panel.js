@@ -320,10 +320,11 @@ function paintSpeaker(status) {
 function paintScale() {
   const isPack = AVATAR_LIST.find(a => a.key === avatarKey)?.kind === 'avatar-pack';
   for (const b of $('sizeRow').children) {
-    const k = Number(b.dataset.k); b.hidden = !!isPack && k === 1;
-    b.textContent = isPack ? ({ .25:'50%', .5:'100%', 1:'100%', 1.5:'150%', 2:'200%' })[k] : ({ .25:'50% 半身', .5:'100% 半身', 1:'100% 全身', 1.5:'150% 放大', 2:'200% 放大' })[k];
-    b.classList.toggle('on', Math.abs(k - (isPack && viewScale === 1 ? .5 : viewScale)) < 0.01);
+    b.classList.toggle('on', Math.abs(Number(b.dataset.k) - viewScale) < 0.01);
   }
+  $('framingSection').hidden = !!isPack;
+  const framing = pendingValue('window.vrmFraming', 'half');
+  for (const b of $('framingRow').children) b.classList.toggle('on', b.dataset.framing === framing);
 }
 async function setScale(k) {
   viewScale = Number(k) || 1;
@@ -645,7 +646,8 @@ function syncTts(c, acknowledged = []) {
     avatarKey = AVATAR_LIST.find(a => a.key === c.avatar || a.file === c.avatar || a.label === c.avatar)?.key || avatarKey;
     paintAvatars();
   }
-  if (!edits.has('window.scale')) { viewScale = c.window?.scale || 1; paintScale(); }
+  if (!edits.has('window.scale')) viewScale = c.window?.scale || .5;
+  paintScale();
   if (!edits.has('brain') && (JSON.stringify(previous?.brain) !== JSON.stringify(c.brain) || acknowledged.includes('brain'))) {
     initBrainDraft(); paintBrain();
   }
@@ -887,6 +889,13 @@ function buildMotionList() {
     $('sizeRow').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-k]');
       if (b) setScale(Number(b.dataset.k)).catch(e => { $('sfNote').textContent = e.message; });
+    });
+    $('framingRow').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-framing]');
+      if (!b) return;
+      const framing = b.dataset.framing;
+      edit('window.vrmFraming', framing); paintScale();
+      persist({ window: { vrmFraming: framing } }).catch(error => { $('sfNote').textContent = error.message; });
     });
     $('brainSource').addEventListener('change', () => {
       stashBrain();

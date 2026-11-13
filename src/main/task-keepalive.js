@@ -1,6 +1,7 @@
 'use strict';
 const recovery=require('./action-recovery');
 const {createBoundedWait}=require('./bounded-wait');
+const {hasUncertainEffect}=require('./operation-ledger');
 
 // Called by the existing scheduler, never by an additional timer. This is
 // liveness, not business-progress detection or permission to replay effects.
@@ -20,17 +21,19 @@ class TaskKeepalive{
       !runtime.current(task, runtime.tokens.get(task.id), true)) return;
   const group = runtime.actionGroups.get(task.id);
   if (group?.parent?.signal.aborted || !group && runtime.controllers?.has(task.id)) return;
-  const runs = Object.values(task.actionRuns).filter(run => run.status === 'waiting' &&
+  const allRuns = Object.values(task.actionRuns), runs = allRuns.filter(run => run.subscription !== true && run.status === 'waiting' &&
     (!run.eventKey || task.inbox.some(event => event.key === run.eventKey)));
-  const passive = ['conversation.manage', 'screen.watch'].includes(task.skill) && !task.inbox.length;
+  const passive = !task.inbox.length && (['conversation.manage', 'screen.watch'].includes(task.skill) || allRuns.some(run => run.subscription === true));
   const workers = [...(group?.workers.values() || [])];
-  const pendingEffects = Object.values(task.operations).filter(op => op.effect === 'write' && op.status === 'intent');
+  const pendingEffects = Object.values(task.operations).filter(hasUncertainEffect);
   for (const run of runs.length ? runs : passive ? [] : [null]) {
     if (run ? workers.some(worker => worker.eventKey === (run.eventKey || undefined)) : workers.length) continue;
     if(recovery.held(run||task.state)||runtime.mainReviews?.active?.taskId===task.id)continue;
     const key = this.key(task, run);
     if (this.pending.has(key) || pendingEffects.some(op => !run || op.actionId === run.id)) continue;
     const state = this.state(task, run);
+    if (state.wait?.reason === 'timer' || run?.progress?.waitReason === 'timer') continue;
+    if (run?.goalAction && run.after && require('./goal-actions').selected(task, now).id !== run.id) continue;
     yield { run, state, key, at: Math.max(state.lastActivityAt + this.idleMs, state.wait?.until || 0) };
   }
  }

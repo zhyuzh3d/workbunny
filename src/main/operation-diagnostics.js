@@ -31,6 +31,7 @@ function sanitize(value={}){
   else if(NUMBERS.has(key)&&Number.isFinite(v)&&Math.abs(v)<=Number.MAX_SAFE_INTEGER)out[key]=v;
   else if(FLAGS.has(key)&&typeof v==='boolean')out[key]=v;
   else if(['schemaAudit','completion'].includes(key)){const safe=require('./self-repair').diagnostic({[key]:v});if(safe?.[key])out[key]=safe[key];}
+  else if(key==='inputOutcome'){const safe=require('./boper-outcome').sanitize(v);if(safe)out.inputOutcome=safe;}
   else if(CHOICES[key]?.includes(v))out[key]=v;
   else if(['tool','nativeOperation'].includes(key)&&typeof v==='string'&&/^[a-zA-Z][a-zA-Z0-9_.-]{0,79}$/u.test(v))out[key]=v;
   else if(key==='code'&&typeof v==='string'&&/^(?:E_[A-Z0-9_]{1,60}|ABORT_ERR)$/u.test(v))out.code=v;
@@ -188,7 +189,8 @@ const record=(stage,fields)=>bind().record(stage,fields);
 // A bounded metadata-only reconstruction, also usable after a process restart.
 // Monotonic/sequence ordering is authoritative within a session; wall time is
 // only a cross-session reference and may have been adjusted by the system.
-async function readTimeline(root,{from=0,to=Number.MAX_SAFE_INTEGER,limit=200}={}){
+async function readTimeline(root,{from=0,to=Number.MAX_SAFE_INTEGER,limit=200,session,incidentId,captureId}={}){
+ if(session!==undefined&&!/^[a-f0-9-]{36}$/u.test(session)||[incidentId,captureId].some(value=>value!==undefined&&!/^[a-f0-9]{32}$/u.test(value)))throw Error('invalid diagnostic selector');
  const st=await fsp.lstat(root);if(!st.isDirectory()||st.isSymbolicLink()||st.mode&0o077||process.getuid&&st.uid!==process.getuid())throw Error('private diagnostics directory required');
  const names=(await fsp.readdir(root)).filter(n=>/^events-[a-f0-9-]+\.ndjson$/u.test(n));
  const files=await Promise.all(names.map(async name=>({name,stat:await fsp.lstat(path.join(root,name))})));
@@ -198,7 +200,7 @@ async function readTimeline(root,{from=0,to=Number.MAX_SAFE_INTEGER,limit=200}={
   const handle=await fsp.open(path.join(root,file.name),fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);let body;try{body=await handle.readFile('utf8');}finally{await handle.close();}
   for(const line of body.split('\n')){if(!line)continue;try{
    const v=JSON.parse(line);if(v.schema!=='bunny.operation-diagnostic/v1'||!STAGES.has(v.stage)||!/^[a-f0-9-]{36}$/u.test(v.session)||!Number.isSafeInteger(v.seq)||v.seq<1||!Number.isFinite(v.at)||!Number.isFinite(v.monoUs))throw Error('invalid');
-   if(v.at<from||v.at>to)continue;
+   if(v.at<from||v.at>to||session!==undefined&&v.session!==session||incidentId!==undefined&&v.incidentId!==incidentId||captureId!==undefined&&v.captureId!==captureId)continue;
    const safe=sanitize(v);for(const id of IDS)if(/^[a-f0-9]{32}$/u.test(v[id]||''))safe[id]=v[id];
    events.push({schema:v.schema,session:v.session,seq:v.seq,at:v.at,utc:new Date(v.at).toISOString(),monoUs:v.monoUs,stage:v.stage,droppedBefore:Number.isSafeInteger(v.droppedBefore)&&v.droppedBefore>=0?v.droppedBefore:0,...safe});
   }catch{incomplete=true;}}

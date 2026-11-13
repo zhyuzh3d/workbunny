@@ -2,8 +2,8 @@
 #import <Foundation/Foundation.h>
 #import <mach/mach_time.h>
 
-// Deliberately separate Mach services and interfaces: a signed worker cannot
-// call the host's authority methods, even when launched outside Bunny.
+// Local console programs manage KEY groups over the control interface. The
+// separate input interface still admits only the pinned BOPER runtime.
 static NSString *const BoperControlService = @"cn.haminn.workbunny.boper-hid.control";
 static NSString *const BoperInputService = @"cn.haminn.workbunny.boper-hid.input";
 static NSString *const BoperDaemonPlist = @"cn.haminn.workbunny.boper-hid.plist";
@@ -11,8 +11,8 @@ static NSString *const BoperInstalledHelper = @"/Library/PrivilegedHelperTools/c
 static NSString *const BoperInstalledPlist = @"/Library/LaunchDaemons/cn.haminn.workbunny.boper-hid.plist";
 typedef void (^BoperReply)(NSDictionary *reply);
 @protocol BoperHostProtocol
-- (void)statusWithReply:(BoperReply)reply;
-- (void)recoverWithReply:(BoperReply)reply;
+- (void)status:(NSDictionary *)request reply:(BoperReply)reply;
+- (void)recover:(NSDictionary *)request reply:(BoperReply)reply;
 - (void)authorize:(NSDictionary *)request reply:(BoperReply)reply;
 - (void)renew:(NSDictionary *)request reply:(BoperReply)reply;
 - (void)revoke:(NSDictionary *)request reply:(BoperReply)reply;
@@ -27,9 +27,7 @@ static inline NSXPCInterface *BoperInterface(Protocol *protocol) {
   NSXPCInterface *iface = [NSXPCInterface interfaceWithProtocol:protocol];
   NSSet *classes = [NSSet setWithObjects:NSDictionary.class,NSArray.class,NSString.class,NSNumber.class,NSNull.class,nil];
   if (protocol == @protocol(BoperHostProtocol)) {
-    [iface setClasses:classes forSelector:@selector(statusWithReply:) argumentIndex:0 ofReply:YES];
-    [iface setClasses:classes forSelector:@selector(recoverWithReply:) argumentIndex:0 ofReply:YES];
-    for (NSString *name in @[@"authorize:reply:",@"renew:reply:",@"revoke:reply:"]) {
+    for (NSString *name in @[@"status:reply:",@"recover:reply:",@"authorize:reply:",@"renew:reply:",@"revoke:reply:"]) {
       SEL sel = NSSelectorFromString(name);
       [iface setClasses:classes forSelector:sel argumentIndex:0 ofReply:NO];
       [iface setClasses:classes forSelector:sel argumentIndex:0 ofReply:YES];
@@ -45,6 +43,26 @@ static inline NSXPCInterface *BoperInterface(Protocol *protocol) {
 }
 static inline NSDictionary *BoperError(NSString *code, NSString *message) {
   return @{@"ok":@NO,@"error":@{@"code":code,@"message":message}};
+}
+// Fixed-length ASCII avoids Unicode normalization and ambiguous group names.
+static inline bool BoperValidKey(id value) {
+  if (![value isKindOfClass:NSString.class] || [value length] != 24) return false;
+  for (NSUInteger i=0;i<24;++i) {
+    unichar c=[value characterAtIndex:i];
+    if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='_'||c=='-')) return false;
+  }
+  return true;
+}
+static inline bool BoperGroupMatches(NSDictionary *request, NSString *key, NSString *session) {
+  if (!BoperValidKey(request[@"key"]) || ![request[@"key"] isEqual:key]) return false;
+  id requestedSession=request[@"inputSessionId"];
+  return !requestedSession || ([requestedSession isKindOfClass:NSString.class] && [requestedSession isEqual:session]);
+}
+static inline bool BoperGroupCanRecover(NSDictionary *request, NSString *key, bool active, bool transition) {
+  return BoperValidKey(request[@"key"]) && !transition && (!active || [request[@"key"] isEqual:key]);
+}
+static inline bool BoperWorkerCanStop(NSDictionary *request, bool currentWorker, NSString *session) {
+  return currentWorker && [request[@"inputSessionId"] isKindOfClass:NSString.class] && [request[@"inputSessionId"] isEqual:session];
 }
 static inline uint64_t BoperContinuousNs(void) {
   static mach_timebase_info_data_t info;

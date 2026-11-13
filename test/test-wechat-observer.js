@@ -21,8 +21,8 @@ function badge(image,x=50,value=250){for(let n=0;n<4;n++)image.data[(40*image.wi
 async function baseline(h,id='watch'){const w={id,recipient:'Alice'};await h.observer.sample(w);await h.observer.commit(w);return w;}
 
 function header(text = 'Alice') { return [{ text, confidence: 0.99, x: 0.42, y: 0.10, width: 0.16, height: 0.03 }]; }
-function inspection({ headerMatched = true, messages = [], recipientUnread = false, draft = '' } = {}) {
-  return JSON.stringify({ headerMatched, recipientUnread, draft, messages });
+function inspection({ headerText = 'Alice', headerMatched = true, messages = [], recipientUnread = false, draft = '' } = {}) {
+  return JSON.stringify({ headerText, headerMatched, recipientUnread, draft, messages });
 }
 const sidebarMetric = ({ changed = 4, stable = 0, since = 0 } = {}) => ({
   ratio: changed / 102400, changedPixels: changed, totalPixels: 102400, sinceLastRatio: since,
@@ -51,15 +51,22 @@ async function testSmallSidebarBadgeRequiresSameRoiSpatialOverlap(){
 async function testWindowBindingUsesBackgroundWindowIdentity(){const h=pixels(),w=await baseline(h);assert.equal(w.identity.mode,'visual');assert(!JSON.stringify(w.identity).match(/window|pid|bundle/u));assert(h.calls.every(c=>c.op==='displayCapture'&&!('windowId'in c.args)));}
 
 async function inspectHarness({recipient='Alice',recipientAliases=[],ocr=header(),response=inspection({messages:[]})}={}){const h=harness({ocr,responses:[response]});const view=await h.observer.inspect({id:'inspect-1',recipient,recipientAliases,policy:'notify'},{pngBase64},new AbortController().signal);return {...h,view};}
-async function testOcrHeaderIsRequiredDespiteModelClaim() {
-  const { view } = await inspectHarness({ ocr: header('Bob'), response: inspection({ headerMatched: true, messages: [message('incoming', '旧消息')] }) });
-  assert.equal(view.headerMatched, false, 'the model cannot override OCR showing a different chat title');
+async function testActualHeaderMustMatchDespiteBooleanClaim() {
+  const { view } = await inspectHarness({ ocr: header('Alice'), response: inspection({ headerText:'Bob', headerMatched: true, messages: [message('incoming', '旧消息')] }) });
+  assert.equal(view.headerMatched, false, 'a positive boolean or sidebar name cannot override the actual different title');
+  assert.equal(view.headerText,'Bob','the planning context retains the actual observed title');
   assert.deepEqual(view.messages, [], 'wrong-header content is discarded');
+  const noCoarse=await inspectHarness({ocr:[],response:inspection({headerText:'Alice'})});
+  assert.equal(noCoarse.view.headerMatched,true,'explicit screenshot title reading is not vetoed by optional coarse transcription');
+  const moved=await inspectHarness({ocr:[{text:'Alice',confidence:.99,x:.09,y:.025,width:.05,height:.02}],response:inspection({headerText:'Alice'})});
+  assert.equal(moved.view.headerMatched,true,'a fixed coordinate threshold does not determine chat identity');
+  for(const headerText of ['ALICE','A lice'])assert.equal((await inspectHarness({response:inspection({headerText})})).view.headerMatched,false,'distinct visible names are not silently merged');
+  await assert.rejects(inspectHarness({response:JSON.stringify({headerMatched:true,recipientUnread:false,draft:'',messages:[]})}),/字段|结果/u);
 }
 
 async function testConfirmedAliasCanBindHeader() {
   const { view } = await inspectHarness({ recipient: 'Alice', recipientAliases: ['爱丽丝'], ocr: header('爱丽丝'),
-    response: inspection({ headerMatched: true, messages: [message('incoming', '你好')] }) });
+    response: inspection({ headerText:'爱丽丝', headerMatched: true, messages: [message('incoming', '你好')] }) });
   assert.equal(view.headerMatched, false, 'a spoken alias is not the canonical display name on the WeChat header');
   assert.deepEqual(view.messages, [], 'an alias-looking header cannot authorize reading or replying');
 }
@@ -198,7 +205,7 @@ async function run() {
   await testEqualChangedAreaIsNotEvidenceOfStability();
   await testSmallSidebarBadgeRequiresSameRoiSpatialOverlap();
   await testWindowBindingUsesBackgroundWindowIdentity();
-  await testOcrHeaderIsRequiredDespiteModelClaim();
+  await testActualHeaderMustMatchDespiteBooleanClaim();
   await testConfirmedAliasCanBindHeader();
   await testDirectionsAndNonTextKindsArePreserved();
   await testIncomingVerificationRequiresVisualAndOcrEvidence();

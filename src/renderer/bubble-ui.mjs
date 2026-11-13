@@ -1,3 +1,5 @@
+import { compactReplyText } from './dialogue-text.mjs';
+
 export function clampBubbleTop(anchorY, bubbleHeight, viewportHeight, margin = 8, gap = 12) {
   const maxHeight = Math.max(0, viewportHeight - margin * 2);
   const height = Math.min(Math.max(0, bubbleHeight), maxHeight);
@@ -108,14 +110,14 @@ export function createBubbleController(bubble, textElement, { setTimeoutFn = set
         paint('', { animate: true });
       }
       streamText += String(delta);
-      paint(streamText, { keepScroll: true, animate: false });
+      paint(compactReplyText(streamText), { keepScroll: true, animate: false });
       scheduleHide(9000);
     },
     finish(text, holdMs) {
       const finalText = String(text || '');
       if (!finalText) { streaming = false; return; }
-      if (streaming && streamText === finalText) paint(finalText, { keepScroll: true, animate: false });
-      else paint(finalText);
+      if (streaming && streamText === finalText) paint(compactReplyText(finalText), { keepScroll: true, animate: false });
+      else paint(compactReplyText(finalText));
       streaming = false; streamText = '';
       scheduleHide(holdMs || 9000);
     },

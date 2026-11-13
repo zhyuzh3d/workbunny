@@ -93,12 +93,12 @@ function terms(value){
 
 // Experience is task data, not instructions or an authorization grant. Keep
 // the original source/status and select complete passages before truncating.
-function selectExperience(items,{applications=[],query='',mode='summary',maxTokens=1800,maxItems=4}={}){
+function selectExperience(items,{applications=[],query='',mode='summary',maxTokens=1800,maxItems=4,completeSections=false}={}){
  const allowed=new Set(applications.filter(Boolean)),words=[...terms(query)],limit=Math.max(100,Math.min(MAX_INPUT_TOKENS,Number(maxTokens)||1800)),max=Math.max(0,Math.min(12,maxItems));
  const candidates=(Array.isArray(items)?items:[]).filter(item=>item&&typeof item.instructions==='string'&&item.instructions.trim()&&experienceApplications(item).every(app=>app==='common'||allowed.has(app))).slice(0,64);
  const passages=[];
  for(const [itemIndex,item]of candidates.entries()){
-  let heading='';const parts=item.instructions.trim().split(/\n\s*\n/u).map(value=>value.trim()).filter(Boolean);
+  let heading='';const parts=item.instructions.trim().split(completeSections?/(?=^##\s)/mu:/\n\s*\n/u).map(value=>value.trim()).filter(Boolean);
   for(const [index,value]of parts.entries()){
    if(/^(?:#{1,6}[^\n]*(?:\n|$))+$/u.test(value)){heading=value;continue;}
    passages.push({itemIndex,index,value,heading,matches:words.filter(word=>value.toLowerCase().includes(word))});
@@ -116,7 +116,7 @@ function selectExperience(items,{applications=[],query='',mode='summary',maxToke
   const old=render(prior),content=render(next),delta=textTokens(content)-textTokens(old);
   if(used+delta<=limit){chosen.set(passage.itemIndex,next);used+=delta;}
  }
- if(!chosen.size&&max&&ranked.length){
+ if(!chosen.size&&max&&ranked.length&&!completeSections){
   const first=ranked[0],content=require('./context-budget').textPrefixWithinBudget(first.value,limit);if(content.trim())chosen.set(first.itemIndex,[{...first,value:content,heading:''}]);
  }
  return [...chosen].map(([index,parts])=>{

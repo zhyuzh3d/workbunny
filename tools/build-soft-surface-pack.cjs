@@ -1,8 +1,8 @@
 'use strict';
-// Build the official data-only package from the original, locally maintained preview.
+// Build the official data-only package from the approved locally maintained source.
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
 const { crc32 } = require('../src/main/avatar-pack-zip');
-const source = process.argv[2] || path.resolve(__dirname, '../../Workbunny-designs/bunny-3d');
+const source = process.argv[2] || path.resolve(__dirname, '../../Workbunny-designs/bunny-3d-approved-20261113');
 const output = process.argv[3] || path.resolve(__dirname, '../src/renderer/assets/avatar-packs/soft-bunny.wbavatar');
 global.window = {}; require(path.join(source,'model-data.js')); require(path.join(source,'performances.js'));
 const original = global.window.BunnyPerformances.list;
@@ -13,8 +13,8 @@ const pose = (p, id) => ({ id, duration:p.duration, frames:p.frames.map(([t,v,e]
  autoBlink:['见面与交流','好奇与思考','难过与安慰','放松与休息'].includes(p.group) && p.duration > 2.05 && !p.frames.some(f=>['wl','wr','heart','star','diamond','joy'].some(k=>(f[1][k]||0)>.08)), idea:p.name==='灵光一闪', smokeBoost:p.name==='气到冒烟' });
 const idle = { id:0,duration:3,frames:[[0,{}],[.5,{squash:.06,earTurn:.035}],[1,{}]],flights:[],ballFlights:[],fx:'',vfx:'',orbit:false,ballSpec:null,countdown:false,turns:{},comic:null,autoBlink:true,idea:false,smokeBoost:false };
 const actions = { categories:categories.map(([id,label])=>({id,label,description:`用于表达${label}`})), actions:[{id:'idle',category:'idle',label:'平静呼吸',use:'平静自然待机',duration:idle.duration,loop:true,idle:true}, ...original.map(p=>({id:stableId(p),category:group.get(p.group),label:p.name,use:`${p.intent}；${p.description}`,duration:p.duration,loop:false}))] };
-const graph = {palette:{base:'#9250d6',inner:'#ff759b'},defaultPalette:'plum',palettes:[
- {id:'plum',label:'葡萄紫',base:'#9250d6',inner:'#ff759b'}, {id:'rose',label:'莓果粉',base:'#ed4986',inner:'#ffa5c8'},
+const graph = {palette:{base:'#ed3185',inner:'#ff9bc8'},defaultPalette:'rose',palettes:[
+ {id:'plum',label:'葡萄紫',base:'#9250d6',inner:'#ff759b'}, {id:'rose',label:'莓果粉',base:'#ed3185',inner:'#ff9bc8'},
  {id:'lilac',label:'天空蓝',base:'#397cd6',inner:'#ff91b3'}, {id:'cream',label:'蜜橘黄',base:'#f0a72b',inner:'#f46e78'},
  {id:'black',label:'黑色',base:'#16141c',inner:'#e782a3'}, {id:'white',label:'白色',base:'#f6f4f5',inner:'#f493b1'}
 ],actions:[{id:'idle',loop:true,performance:idle},...original.map(p=>({id:stableId(p),loop:false,performance:pose(p,p.id)}))]};

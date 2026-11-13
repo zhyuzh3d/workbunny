@@ -5,6 +5,7 @@ const string = maxLength => ({ type: 'string', minLength: 1, maxLength });
 const control = action => object({ action: { const: action } }, ['action']);
 const intent = { anyOf: [
   require('./hearing-hotword-tools').ACTION_SCHEMA,
+  object({ action: { const: 'avatar_select' }, avatar: { type: 'integer', minimum: 1, maximum: 512 }, reply: string(500) }, ['action', 'avatar']),
   ...['stop', 'status', 'resume'].map(control),
   object({ action: { const: 'self_update' }, ops: { type: 'array', minItems: 1, maxItems: 8, items: object({ op: { enum: ['add', 'replace', 'remove', 'lock', 'unlock', 'lock_all', 'unlock_all'] }, entryId: string(100), text: string(400), facet: { enum: ['identity', 'trait', 'value', 'behavior', 'interest'] }, condition: string(160), lock: { type: 'boolean' } }, ['op']) } }, ['action', 'ops']),
   ...['remember', 'learn_experience'].map(action => object({ action: { const: action }, content: string(1200), quotes: { type: 'array', minItems: 1, maxItems: 4, items: string(500) } }, ['action', 'content', 'quotes'])),
@@ -18,7 +19,9 @@ const intent = { anyOf: [
   }, ['action', 'target', 'goal', 'criteria']),
 ] };
 const schema = { anyOf: [
-  object({ kind: { const: 'chat' }, text: { ...string(8000), description: '自然对话正文。动作或情绪控制仅放<m>单个分类ID或具体动作ID</m>、<e>单个情绪ID</e>标签中；分类和具体ID不拼接，控制ID不写入普通正文。' } }, ['kind', 'text']),
+  { ...object({ kind: { const: 'chat' }, text: { ...string(8000), minLength: 0, description: '自然对话正文。动作或情绪控制仅放<m>单个分类ID或具体动作ID</m>、<e>单个情绪ID</e>标签中；分类和具体ID不拼接，控制ID不写入普通正文。仅有有效performance时可为空。' },
+    performance: { ...string(600), description: '可选的本次表演要求，一两句，不含密码或密钥；要求本身不显示或朗读。' } }, ['kind', 'text']),
+    anyOf: [{ properties: { text: { minLength: 1 } } }, { required: ['performance'] }] },
   object({ kind: { const: 'action' }, intent }, ['kind', 'intent']),
   object({ kind: { const: 'skip' } }, ['kind']),
 ] };
@@ -28,7 +31,7 @@ const schema = { anyOf: [
 const CAPABILITIES = Object.freeze({ workbuddy: 'json_object', deepseek: 'json_object', grok: 'json_schema' });
 function responseFormat(provider, capability = CAPABILITIES[provider] || 'json_object', { cognitive = false,allowTurnDisposition=false } = {}) {
   const c = require('./dialogue-cognition');
-  const replySchema=allowTurnDisposition?{anyOf:[object({...schema.anyOf[0].properties,turnDisposition:{enum:['keep','replace']}},['kind','text','turnDisposition']),...schema.anyOf.slice(1)]}:schema;
+  const replySchema=allowTurnDisposition?{anyOf:[{...schema.anyOf[0],properties:{...schema.anyOf[0].properties,turnDisposition:{enum:['keep','replace']}},required:['kind','text','turnDisposition']},...schema.anyOf.slice(1)]}:schema;
   const cognitionSchema = object({ protocol: { const: 'dialogue-v2' }, stages: { type: 'array', minItems: 3, maxItems: 3, items: { anyOf: [
     object({ stage: { const: 'review' }, grade: { enum: c.GRADES }, note: { type: 'string', maxLength: 300 }, grasp: { enum: c.GRASP }, pace: { enum: c.PACE } }, ['stage', 'grade', 'note', 'grasp', 'pace']),
     object({ stage: { const: 'reply' }, reply: replySchema }, ['stage', 'reply']),
@@ -56,17 +59,18 @@ function validateReply(raw, { allowActions = true, cognitive = false, allowEmpty
   let text = '';
   const gate = makeActionGate(delta => { text += delta; }, { requireEnvelope: true });
   gate.push(raw); gate.flush();
-  if (gate.error || (!allowActions && (gate.controlled || !text.trim()))) {
+  if (gate.error || (!allowActions && (gate.controlled || gate.performance || !text.trim()))) {
     const error = new Error('模型回复未通过对话协议校验'); error.code = 'E_REPLY_PROTOCOL'; throw error;
   }
   const parsed = require('./dialogue-actions').parseStrictJson(raw);
   return { text, ...(parsed.kind === 'chat' && parsed.text !== text ? { taggedText: parsed.text } : {}), intent: gate.intent, skipped: gate.skipped,
+    ...(gate.performance ? { performance: gate.performance } : {}),
     ...(disposition?{turnDisposition:disposition}:{}) };
 }
 
 // Cognition is optional metadata. If only that metadata is invalid, a strictly
 // validated, unambiguous chat can still be delivered. Never recover actions or
-// skip decisions from an invalid envelope.
+// skip decisions or performance requests from an invalid envelope.
 function recoverCognitiveChat(raw,{allowTurnDisposition=false}={}) {
   let value;
   try { value = require('./dialogue-actions').parseStrictJson(raw); } catch { return null; }
@@ -77,7 +81,7 @@ function recoverCognitiveChat(raw,{allowTurnDisposition=false}={}) {
     if (replies.length !== 1 || Object.keys(replies[0]).some(k => !['stage', 'reply'].includes(k))) return null;
     inner = replies[0].reply;
   }
-  if (!inner || inner.kind !== 'chat') return null;
+  if (!inner || inner.kind !== 'chat' || Object.hasOwn(inner, 'performance')) return null;
   const innerRaw = JSON.stringify(inner);
   try {
     const validated = validateReply(innerRaw, { allowActions: false,allowTurnDisposition });

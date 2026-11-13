@@ -1,4 +1,8 @@
 'use strict';
+const deadlines=new WeakMap();
+const deadlineAt=signal=>signal&&deadlines.get(signal);
+function inheritDeadline(signal,parent,at=Infinity){const end=Math.min(deadlineAt(signal)??Infinity,deadlineAt(parent)??Infinity,at);if(signal&&Number.isFinite(end))deadlines.set(signal,end);return end;}
+const remainingMs=(signal,fallback=Infinity)=>Math.max(0,Math.min(fallback,Number.isFinite(deadlineAt(signal))?deadlineAt(signal)-Date.now():Infinity));
 
 // This bounds the caller's wait, not an underlying mutation. Never use it to
 // release a serial write lane while its previous write can still be running.
@@ -10,8 +14,9 @@ function createBoundedWait({ signal, controller = new AbortController(), timeout
   signal?.addEventListener('abort', cancel, { once: true });
   if (signal?.aborted) cancel();
   const duration = Number(timeoutMs);
-  const timer = setTimer(() => controller.abort(Object.assign(new Error(message), { code })),
-    Number.isFinite(duration) && duration > 0 ? duration : 55000);
+  const now=Date.now(),end=inheritDeadline(controller.signal,signal,now+(Number.isFinite(duration)&&duration>0?duration:55000));
+  if(end<=now&&!controller.signal.aborted)controller.abort(Object.assign(new Error(message),{code}));
+  const timer = setTimer(() => controller.abort(Object.assign(new Error(message), { code })),Math.max(0,end-now));
   const run = (invoke, limit = {}) => new Promise((resolve, reject) => {
     let settled = false, stepTimer;
     const finish = (error, value) => {
@@ -30,4 +35,4 @@ function createBoundedWait({ signal, controller = new AbortController(), timeout
   });
   return { signal: controller.signal, run, close() { clearTimer(timer); signal?.removeEventListener('abort', cancel); } };
 }
-module.exports = { createBoundedWait };
+module.exports = { createBoundedWait,deadlineAt,inheritDeadline,remainingMs };

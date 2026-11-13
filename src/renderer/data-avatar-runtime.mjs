@@ -3,6 +3,7 @@ import { AvatarHitTest } from './avatar-hit-test.mjs';
 import { AvatarSpringChains } from './avatar-spring-chain.mjs';
 import { validateAvatarBindings } from '../shared/avatar-binding-schema.mjs';
 import { installDualQuaternionSkin } from './avatar-dual-quaternion-skin.mjs';
+import { playbackRepetitions } from './performance-playback.mjs';
 
 const ID = /^[a-z][a-z0-9_-]{0,79}$/;
 const NAMESPACE = /^[a-z][a-z0-9_-]{0,23}$/;
@@ -94,11 +95,14 @@ export class DataAvatarRuntime {
 
   getCapabilities() { return { features: [...FEATURES], expressions: [] }; }
   getActions() { return [...this.actions.keys()]; }
+  getActionDuration(key) { return this.actions.get(key)?.timeline.duration; }
 
   play(request) {
     const action = this.actions.get(request?.key);
     if (!this.root || !action) return { ok: false, error: 'unknown-action' };
-    this.current = { action, loop: request.loop === undefined ? action.loop : request.loop === true };
+    const repetitions = playbackRepetitions(request, action);
+    if (repetitions === null) return { ok: false, error: 'invalid-repetitions' };
+    this.current = { action, repetitions, loop: repetitions > 1, totalElapsed: 0 };
     this.elapsed = 0;
     this.apply(0);
     return { ok: true };
@@ -119,16 +123,18 @@ export class DataAvatarRuntime {
   update(dt) {
     if (!this.current || !Number.isFinite(dt) || dt < 0) return;
     const current = this.current, duration = current.action.timeline.duration;
+    current.totalElapsed += dt;
     this.elapsed += dt;
-    if (current.loop) {
-      this.elapsed %= duration;
-      this.apply(this.elapsed);
-    } else if (this.elapsed >= duration) {
+    const totalDuration = duration * current.repetitions;
+    if (Number.isFinite(totalDuration) && current.totalElapsed + Number.EPSILON * Math.max(1, totalDuration) * 8 >= totalDuration) {
       this.apply(duration);
       this.current = null;
       this.context.onFinished?.(current.action.key);
       if (!this.current && this.root) this.play({ key: this.defaultIdle, loop: true });
-    } else this.apply(this.elapsed);
+    } else {
+      if (current.loop) this.elapsed %= duration;
+      this.apply(this.elapsed);
+    }
     this.springs?.step(dt);
   }
 

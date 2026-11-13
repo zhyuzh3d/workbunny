@@ -35,6 +35,13 @@ struct Failure : std::runtime_error {
 struct KeyboardState { uint8_t modifiers = 0; std::set<uint16_t> keys; };
 struct PointerState { uint8_t buttons = 0; };
 struct DesktopPoint { double x = 0, y = 0; };
+struct WheelStep { int vertical = 0, horizontal = 0; };
+// The tool's wheel signs describe semantic scrolling, not raw device motion.
+// macOS applies its natural-scroll preference to both HID wheel axes. Cancel
+// that inversion here so the same requested sign keeps the same meaning.
+inline WheelStep hidWheelStep(int vertical, int horizontal, bool naturalScrolling) {
+  return naturalScrolling ? WheelStep{-vertical, -horizontal} : WheelStep{vertical, horizontal};
+}
 struct DesktopRect {
   double x, y, width, height;
   bool contains(DesktopPoint p) const { return std::isfinite(p.x) && std::isfinite(p.y) && p.x >= x && p.y >= y && p.x < x + width && p.y < y + height; }

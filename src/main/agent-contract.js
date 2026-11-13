@@ -16,7 +16,7 @@ function fields(value, allowed, label) {
 }
 function clone(value) { return structuredClone(value); }
 function taskSpec(value) {
-  fields(value, ['skill','goal','criteria','subjects','policy','parameters','schedule','completion','context','delivery','workContext','workRequest','title'], '任务');
+  fields(value, ['skill','goal','criteria','subjects','policy','parameters','schedule','completion','context','delivery','workContext','workRequest','title','interactionChannels'], '任务');
   const skill = text(value.skill, '技能', 100);
   if (!/^[a-z][a-z0-9_.-]+$/u.test(skill)) throw new Error('技能标识不合法');
   if (!Array.isArray(value.subjects) || !value.subjects.length || value.subjects.length > 12) throw new Error('任务需要1到12个明确对象');
@@ -37,7 +37,8 @@ function taskSpec(value) {
   if (!['manual','first_match','goal'].includes(completion)) throw new Error('任务完成条件不合法');
   const parameters = value.parameters ?? {};
   if (!plain(parameters) || Buffer.byteLength(JSON.stringify(parameters)) > 32000) throw new Error('任务参数过大或不合法');
-  let delivery,workContext,workRequest;
+  let delivery,workContext,workRequest,interactionChannels;
+  if(value.interactionChannels!==undefined)interactionChannels=require('./interaction-policy').validateTaskChannels(value.interactionChannels);
   if(value.workRequest!==undefined){fields(value.workRequest,['goal','criteria','context','output'],'制作任务');if(!['work.delegate','software.execute','system.operate'].includes(skill))throw Error('制作任务只适用于工作委派');if(value.workRequest.output!==undefined&&!['auto','text','files'].includes(value.workRequest.output))throw Error('制作输出类型无效');workRequest={...(value.workRequest.output?{output:value.workRequest.output}:{}),goal:text(value.workRequest.goal,'制作目标',6000),...(value.workRequest.criteria?{criteria:text(value.workRequest.criteria,'制作条件',3000)}:{}),...(value.workRequest.context?{context:text(value.workRequest.context,'制作背景',12000)}:{})};}
   if(value.delivery!==undefined){fields(value.delivery,['channel','recipient','includeFiles'],'结果渠道');if(!['speech','wechat'].includes(value.delivery.channel))throw new Error('结果渠道不合法');
     if(value.delivery.channel==='speech'&&value.delivery.recipient!==undefined)throw new Error('语音渠道不能指定收件人');
@@ -47,7 +48,7 @@ function taskSpec(value) {
     workContext=Object.fromEntries(Object.entries(value.workContext).map(([key,v])=>[key,text(v,'工作位置',key==='directory'?1000:160)]));}
   return { skill,...(value.title?{title:text(value.title,'任务标题',80)}:{}), goal: text(value.goal,'任务目标',6000), criteria: text(value.criteria ?? value.goal,'验收条件',3000), subjects,
     policy: text(value.policy ?? '', '任务规则', 6000, true), parameters: clone(parameters), completion,
-    ...(value.context===undefined?{}:{context:text(value.context,'任务上下文',12000,true)}),...(delivery?{delivery}:{}),...(workContext?{workContext}:{}),...(workRequest?{workRequest}:{}),
+    ...(value.context===undefined?{}:{context:text(value.context,'任务上下文',12000,true)}),...(delivery?{delivery}:{}),...(workContext?{workContext}:{}),...(workRequest?{workRequest}:{}),...(interactionChannels?{interactionChannels}:{}),
     schedule: { intervalSeconds, activeIntervalSeconds, ...(schedule.durationMinutes == null ? {} : { durationMinutes: schedule.durationMinutes }) } };
 }
 function authority(value, scene = 'life') {

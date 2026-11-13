@@ -1,7 +1,7 @@
 {
   "schema": "bunny.software-skill/v1",
   "id": "wechat",
-  "version": 11,
+  "version": 21,
   "skills": [
     "conversation.manage",
     "conversation.send",
@@ -15,7 +15,7 @@
   "resources": [
     {
       "path": "guide.md",
-      "sha256": "b4b7965befa49e127568bb5aa8f83018eff7d4cfdc59555e57e5906f2688f648"
+      "sha256": "d740630793f32c515ad53c22812366905ced1c82f8d09216935705d7f4f27b71"
     }
   ],
   "toolProtocol": "bunny.screen/v2",
@@ -52,5 +52,8 @@
       "readPriorContent": false,
       "paste": "boper-shortcut"
     }
-  }
+  },
+  "interpretationSections": [
+    "任务含义：主动发消息、自动回复与对话"
+  ]
 }

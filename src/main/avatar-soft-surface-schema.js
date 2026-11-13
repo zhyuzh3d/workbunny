@@ -6,10 +6,15 @@ const object = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && O
 const number = (v, limit = 30) => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= limit;
 const assert = (v, msg) => { if (!v) throw Error(msg); };
 function validateSurfaceModel(model) {
-  assert(object(model, ['positions','indices','well']), 'invalid surface model');
+  assert(object(model, ['positions','indices','well','normals']), 'invalid surface model');
   const { positions: p, indices: ix, well: w } = model;
   assert(Array.isArray(p) && p.length >= 9 && p.length <= 450000 && p.length % 3 === 0 && p.every(n => number(n, 10)), 'invalid surface positions');
   assert(Array.isArray(w) && w.length === p.length / 3 && w.every(n => number(n, 1) && n >= 0), 'invalid surface colors');
+  if (model.normals !== undefined) {
+    const n = model.normals;
+    assert(Array.isArray(n) && n.length === p.length && n.every(v => number(v, 1.001)), 'invalid surface normals');
+    for (let i = 0; i < n.length; i += 3) { const length2 = n[i] ** 2 + n[i + 1] ** 2 + n[i + 2] ** 2; assert(length2 > .90 && length2 < 1.10, 'invalid surface normal length'); }
+  }
   assert(Array.isArray(ix) && ix.length >= 3 && ix.length <= 900000 && ix.length % 3 === 0 && ix.every(n => Number.isInteger(n) && n >= 0 && n < w.length), 'invalid surface indices');
 }
 function validateSurfaceGraph(graph, catalog) {

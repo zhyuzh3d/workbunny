@@ -30,7 +30,7 @@ test('cross-target visual observation/action have independent anchors, default i
  const run=async(name,args)=>{const checked=tools.check(name,args,t);return checked.tool.execute(checked.input,{task:t});};
  const wx=await run('screen.observe',{application:'wechat'}),demo=await run('screen.observe',{application:'demo'});assert.equal(wx.available,true);assert.equal(demo.available,true);assert.notEqual(t.state.screenAnchors.wechat.sessionId,t.state.screenAnchors.demo.sessionId);
  await assert.rejects(run('screen.action',{application:'demo',frameId:wx.frameId,action:'click',targetType:'icon',pixelX:80,pixelY:45}),e=>e.dispatched===false);
- const effect=await run('screen.action',{application:'demo',frameId:demo.frameId,action:'click',targetType:'icon',pixelX:80,pixelY:45});assert(effect.receipt.inputPerformed);assert(t.state.screenAnchors.wechat);assert.equal(t.state.screenAnchors.demo,undefined);
+ const effect=await run('screen.action',{application:'demo',frameId:demo.frameId,action:'click',targetType:'icon',pixelX:80,pixelY:45});assert(effect.receipt.inputPerformed);assert(t.state.screenAnchors.wechat);assert(t.state.screenAnchors.demo,'confirmed input retains the current same-session visual anchor');
  assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));assert(!JSON.stringify(h.calls).match(/windowId|bundleId|"pid"|frontmost|recognize/u));
 });
 test('legacy WeChat account grants are not inherited, while independent structured identities retain their old contract',async()=>{

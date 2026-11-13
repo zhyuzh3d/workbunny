@@ -1713,6 +1713,9 @@ func displayInput(_ request: [String: Any]) throws -> [String: Any] {
         throw DesktopError(message: "视觉输入证据无效或过期，未读取窗口信息且未派发", dispatched: false)
     }
     if action == "click" || action == "scroll" {
+        // The sole host BOPER owner prepares the pointer within this request's
+        // session, obtains a fresh CGDisplayStream preflight, then commits at
+        // the prepared position. This entrance proof is never retimestamped.
         guard let x = number(request["x"]), let y = number(request["y"]), region.contains(CGPoint(x: x, y: y)) else {
             throw DesktopError(message: "键鼠位置不在视觉确认区域内", dispatched: false)
         }

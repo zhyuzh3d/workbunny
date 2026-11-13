@@ -7,6 +7,7 @@ const {createAgentJournal}=require('./agent-journal');
 const {AgentLearning,registerLearning}=require('./agent-learning');
 const {AgentInterpreter}=require('./agent-interpreter');
 const {ConversationBrain}=require('./conversation-brain');
+const {stagedConversationRead}=require('./desktop-service');
 const {conversationSkill,subjectKey}=require('./conversation-skill');
 const {registerConversationTools}=require('./conversation-tools');
 const {sendOnceSkill,readOnceSkill}=require('./conversation-once-skills');
@@ -18,6 +19,16 @@ const {authority:validateAuthority,TERMINAL,clone,capacityNote}=require('./agent
 const {waitAdmission}=require('./task-admission');
 const taskDirectoryFallback=service=>service.taskDirectory||require('path').join(require('os').tmpdir(),'workbunny-workspaces');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function deliveryAssessment(physical){
+ if(physical.deliveryAssessment)return structuredClone(physical.deliveryAssessment);
+ return {completed:null,evidence:physical.evidence||'',receipt:physical.deliveryReceipt?structuredClone(physical.deliveryReceipt):null,source:'legacy-visual-record'};
+}
+function observedDeliveryText(assessment){const receipt=assessment?.receipt;if(Object.hasOwn(receipt||{},'observedText'))return typeof receipt.observedText==='string'?receipt.observedText:null;return typeof receipt?.text==='string'?receipt.text:null;}
+function conversationReceipt(physical,{recipient=physical.recipient,desiredText=physical.message,desiredTextRef,visible=true,wechatOwnership=physical.wechatOwnership}={}){
+ const assessment=deliveryAssessment(physical),observed=visible?observedDeliveryText(assessment):null;
+ return {operationId:physical.id,recipient,submittedAt:physical.submitAttemptedAt,verifiedAt:Date.now(),...(desiredTextRef?{desiredTextRef}:{desiredText}),...(typeof desiredText==='string'?{intentMessageKey:require('./conversation-cursor').messageKey({direction:'outgoing',kind:'text',text:desiredText})}:{}),observedText:observed,
+  deliveryAssessment:visible?assessment:{completed:assessment.completed,evidenceWithheld:true,physicalTaskId:physical.id},...(observed!==null?{sentText:observed,messageKey:require('./conversation-cursor').messageKey({direction:'outgoing',kind:'text',text:observed})}:{}),...(physical.attachmentDelivered?{kind:'file',transferComplete:true}:{}),wechatOwnership};
+}
 const bindingKey=(s,scene)=>scene+'\0'+s.application+':'+String(s.recipient).normalize('NFKC').toLowerCase();
 const describeTask=t=>`${t.goal}：${t.note}${t.schedule?.intervalSeconds?'；每'+t.schedule.intervalSeconds+'秒检查':''}${t.expiresAt?'；到期时间 '+new Date(t.expiresAt).toLocaleString('zh-CN'):''}`;
 function recoveryDiagnostic(service,stage,task,{error,code,reason,physical,checks}={}){
@@ -26,6 +37,7 @@ function recoveryDiagnostic(service,stage,task,{error,code,reason,physical,check
   const diagnostic={stage:safe(stage),...(safe(task?.id)?{taskId:task.id}:{}),...(safe(physical?.id||task?.state?.job?.jobId)?{jobId:physical?.id||task.state.job.jobId}:{}),
    code:typeof (code||error?.code)==='string'&&/^E_[A-Z0-9_]{1,64}$/.test(code||error.code)?code||error.code:'E_RECOVERY_EXCEPTION',reason:safe(reason)||'task-recovery-failed'};
   const vault=require('./vault-db').vaultErrorDiagnostic(error);if(vault){diagnostic.vault=vault;if(vault.nativeCode&&diagnostic.code==='E_RECOVERY_EXCEPTION')diagnostic.code='E_VAULT_REQUEST_FAILED';}
+  const budget=require('./context-budget').diagnostic(error?.diagnostic?.budget);if(budget)diagnostic.budget=budget;
   if(checks&&typeof checks==='object')diagnostic.checks=Object.fromEntries(Object.entries(checks).filter(([key,value])=>/^[a-zA-Z][a-zA-Z0-9]{0,47}$/.test(key)&&typeof value==='boolean').slice(0,24));
   if(error){diagnostic.errorType=['Error','TypeError','RangeError','SyntaxError'].includes(error.name)?error.name:'Error';const site=String(error.stack||'').match(/src\/main\/([a-zA-Z0-9_.-]+):(\d+):(\d+)/);if(site)diagnostic.site={file:site[1],line:Number(site[2]),column:Number(site[3])};}
   if(physical){diagnostic.physicalStatus=['running','starting','monitoring','verifying','awaiting','review','paused','stopped','accepted','cancelled','skipped'].includes(physical.status)?physical.status:'unknown';diagnostic.pendingState=['draft-unknown','unknown','sent','observed'].includes(physical.followUpPending?.state)?physical.followUpPending.state:'none';const lifecycle=physical.controllerLifecycle;if(lifecycle?.schema==='bunny.controller-lifecycle/v1')diagnostic.controllerLifecycle={state:['suspended','stopped'].includes(lifecycle.state)?lifecycle.state:'unknown',intent:['host-suspend','user-stop','business-stop'].includes(lifecycle.intent)?lifecycle.intent:'unknown',terminal:lifecycle.terminal===true};diagnostic.round=require('./workbuddy-observation').submissionRound(physical);diagnostic.monitorStatus=['ok','running','failed','stopped','abandoned','awaiting'].includes(physical.monitorStatus)?physical.monitorStatus:'unknown';diagnostic.hasBoundSession=!!(physical.monitorSessionId||physical.sessionId);diagnostic.hasMessageKey=typeof physical.monitorMessageKey==='string'&&!!physical.monitorMessageKey;}
@@ -70,17 +82,22 @@ class AgentService{
   require('./judgment').registerJudgment(this.tools,{request});
   require('./task-memory-tools').registerTaskMemoryTools(this.tools,{memory,isCurrent:t=>this.runtime?.tasks.get(t.id)===t&&!['paused','stopping','stopped','expired','completed'].includes(t.status)});
   require('./hearing-hotword-tools').registerHearingHotwordTools(this.tools,{hearingHotwords,isCurrent:t=>this.runtime?.tasks.get(t.id)===t&&!['paused','stopping','stopped','expired','completed'].includes(t.status)});
-  this.skills.register(conversationSkill({brain:{decide:a=>this.dialogueDecision(a)},channelDialogue:!!channels,decisionCurrent:d=>!d.channelReply||!!this.channels?.validReply(d.channelReply),selfChannel:s=>s.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',canOperate:t=>this.canOperateForTask(t),observationBlocked:t=>this.interactiveConflict(t),ownerBindings:(s,a)=>!!this.channels||this.isOwner(s,a),sentMessages:(s,t)=>this.ownMessages(s,t)}));
+  this.skills.register(conversationSkill({request:request||require('./verification-transport').requestVerification,brain:{decide:a=>this.dialogueDecision(a)},channelDialogue:!!channels,decisionCurrent:d=>!d.channelReply||!!this.channels?.validReply(d.channelReply),selfChannel:s=>s.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',canOperate:t=>this.canOperateForTask(t),observationBlocked:t=>this.interactiveConflict(t),ownerBindings:(s,a)=>!!this.channels||this.isOwner(s,a),sentMessages:(s,t)=>this.ownMessages(s,t)}));
   this.skills.register(sendOnceSkill).register(readOnceSkill).register(workDelegationSkill);
   this.skills.register(screenWatchSkill({request}));
   this.skills.register(require('./result-delivery').forwardResultSkill);
   this.skills.register(require('./system-tools').systemSkill({request}));
   this.skills.register(require('./software-task-skill').softwareTaskSkill({request,bitmap}));
+  require('./goal-actions').registerGoalTools(this.tools,{reconcile:(id,args,options)=>this.runtime.reconcileEffect(id,args,options)});
   require('./tool-input-schemas').applySchemas(this.tools);
   this.softwarePackages=require('./software-skill-package').loadSoftwarePackages();
   this.learning=new AgentLearning({memory,skills:this.skills,packages:this.softwarePackages,request});if(memory)memory.agentLearning=this.learning;registerLearning(this.tools,this.skills,this.learning);
-  this.runtime=new AgentRuntime({journal:journal||createAgentJournal(memory),tools:this.tools,skills:this.skills,ready,epoch,getScene,autoSchedule,prepare:async t=>{if(await this.sensitivePolicy.isSensitive(JSON.stringify([t.goal,t.context,t.state.ownerRequest,t.state.ownerContext,t.state.taskContextEvidence])))t.state.sensitiveContext=true;this.learning.applyPrepared(t,await this.learning.prepare(t));if(t.parameters.sourceTaskId&&t.skill==='work.delegate'){const source=this.runtime.tasks.get(t.parameters.sourceTaskId);if(!source?.state.job||!this.runtime.list().some(r=>r.id===source.id))throw Error('没有可继续的原工作任务');t.state.priorJob=clone(source.state.job);t.state.resultRevision=(source.state.result?.revision||0)+1;const contextEvidence=require('./work-order').mergeTaskContextEvidence(source.state.taskContextEvidence,t.state.taskContextEvidence);if(contextEvidence){t.state.taskContextEvidence=contextEvidence;t.state.ownerContext=require('./work-order').ownerContext(contextEvidence)||t.state.ownerContext;if(await this.sensitivePolicy.isSensitive(JSON.stringify(contextEvidence)))t.state.sensitiveContext=true;}t.sources=[...new Set([...t.sources,source.id,...(contextEvidence?.sourceIds||[])])];t.visibilityFloor=Math.max(t.visibilityFloor,source.visibilityFloor); }if(t.skill==='result.forward'){const source=this.runtime.tasks.get(t.parameters.sourceTaskId);if(!source?.state.result||!this.runtime.list().some(r=>r.id===source.id))throw Error('没有可读取的已回收成果');t.state.result=clone(source.state.result);t.sources=[...new Set([...t.sources,source.id])];t.visibilityFloor=Math.max(t.visibilityFloor,source.visibilityFloor); }if(t.parameters.behavior==='owner'){const binding=this.bindings.get(bindingKey(t.subjects[0],t.scene));if(binding?.wechatIdentity)t.state.sceneIdentity={wechat:clone(binding.wechatIdentity)};}},completed:t=>this.learning.completed(t),settled:(t,r)=>this.learning.settled(t,r),failed:(t,e)=>this.learning.failed(t,e),
-    reviewTask,mainReviewOptions,reflectAction:args=>this.reflectRecovery(args,reasoningRequest||request),onRecoveryDiagnostic:(stage,task,error)=>recoveryDiagnostic(this,stage,task,{error}),emit:tasks=>this.emit(this.status(tasks)),report:r=>this.routeReport(r),authorize:(tool,args,task,options)=>this.authorization?.check(tool,args,task,options),stopTask:(t,options)=>this.stopTask(t,options),observeWhileActive:(task,event,signal)=>{const subject=task.skill==='conversation.manage'&&task.subjects.find(s=>subjectKey(s)===event.subjectKey);return subject?this.startConversationObservation(task,subject,{signal}):undefined;},diagnoseRepair:args=>require('./self-repair').advise({...args,request}),remindIdle:args=>this.continueIdle(args,request)});
+  this.runtime=new AgentRuntime({journal:journal||createAgentJournal(memory),tools:this.tools,skills:this.skills,ready,epoch,getScene,autoSchedule,request,prepare:async t=>{if(await this.sensitivePolicy.isSensitive(JSON.stringify([t.goal,t.context,t.state.ownerRequest,t.state.ownerContext,t.state.taskContextEvidence])))t.state.sensitiveContext=true;this.learning.applyPrepared(t,await this.learning.prepare(t));if(t.parameters.sourceTaskId&&t.skill==='work.delegate'){const source=this.runtime.tasks.get(t.parameters.sourceTaskId);if(!source?.state.job||!this.runtime.list().some(r=>r.id===source.id))throw Error('没有可继续的原工作任务');t.state.priorJob=clone(source.state.job);t.state.resultRevision=(source.state.result?.revision||0)+1;const contextEvidence=require('./work-order').mergeTaskContextEvidence(source.state.taskContextEvidence,t.state.taskContextEvidence);if(contextEvidence){t.state.taskContextEvidence=contextEvidence;t.state.ownerContext=require('./work-order').ownerContext(contextEvidence)||t.state.ownerContext;if(await this.sensitivePolicy.isSensitive(JSON.stringify(contextEvidence)))t.state.sensitiveContext=true;}t.sources=[...new Set([...t.sources,source.id,...(contextEvidence?.sourceIds||[])])];t.visibilityFloor=Math.max(t.visibilityFloor,source.visibilityFloor); }if(t.skill==='result.forward'){const source=this.runtime.tasks.get(t.parameters.sourceTaskId);if(!source?.state.result||!this.runtime.list().some(r=>r.id===source.id))throw Error('没有可读取的已回收成果');t.state.result=clone(source.state.result);t.sources=[...new Set([...t.sources,source.id])];t.visibilityFloor=Math.max(t.visibilityFloor,source.visibilityFloor); }if(t.parameters.behavior==='owner'){const binding=this.bindings.get(bindingKey(t.subjects[0],t.scene));if(binding?.wechatIdentity)t.state.sceneIdentity={wechat:clone(binding.wechatIdentity)};}},completed:t=>this.learning.completed(t),settled:(t,r)=>this.learning.settled(t,r),failed:(t,e)=>this.learning.failed(t,e),
+    reviewTask,mainReviewOptions,reflectAction:args=>this.reflectRecovery(args,reasoningRequest||request),onRecoveryDiagnostic:(stage,task,error)=>recoveryDiagnostic(this,stage,task,{error}),emit:tasks=>{this.syncConversationObservation();this.emit(this.status(tasks));},report:r=>this.routeReport(r),authorize:(tool,args,task,options)=>this.authorization?.check(tool,args,task,options),stopTask:(t,options)=>this.stopTask(t,options),observeWhileActive:(task,event,signal)=>{
+      if(task.skill!=='conversation.manage')return;
+      this.syncConversationObservation();
+    },diagnoseRepair:args=>require('./self-repair').advise({...args,request}),remindIdle:args=>this.continueIdle(args,request)});
+  this.runtime.modelTrace=new(require('./task-model-trace').TaskModelTrace)({memory,getScene,onGap:gap=>this.log('[model-trace-gap]',gap)});
   this.resources=new(require('./task-resources').TaskResources)({getTask:id=>this.runtime.tasks.get(id),tasks:()=>this.runtime.tasks.values(),save:t=>this.runtime.save(t),native:this.scene.native,lease:desktop?.lease,handlers:{workbuddy:async(entry,signal)=>{
     const task=this.runtime.tasks.get(entry.taskId),physical=task&&await this.workOperation(task,entry.identity.jobId);if(!physical)return {verified:false,reason:'原工作执行记录缺失，未停止其它对话'};
     if(signal.aborted)return {verified:false,reason:'清理总时限已到'};if(!this.stopWork)return {verified:false,reason:'WorkBuddy 停止接口暂不可用'};const receipt=await this.stopWork(physical,{signal});
@@ -109,7 +126,7 @@ class AgentService{
   let scene=task.scene;
   if(this.channels&&task.skill==='conversation.manage'){
    if(!physical.channelAuthorization)throw require('./dialogue-channels').stale();
-   physical.channelConversation=true;
+   physical.channelConversation=stagedConversationRead(physical);
   }
   if(physical.channelAuthorization){
    const channel=await this.channels?.ensure({application:'wechat',recipient:physical.recipient},physical.scope||this.scene.knownIdentity);
@@ -158,8 +175,8 @@ class AgentService{
  async continueIdle({task,run,event,signal,reminder,idleMs,failure},request){
   const assembler=require('./context-assembler');
   const assembled=await assembler.assembleContext({purpose:'task.continue',signal,configuration:task.state.contextTuning,fragments:[
-   {id:'core',required:true,load:async()=>({goal:task.workRequest?.goal||task.goal,criteria:task.workRequest?.criteria||task.criteria,context:task.context,policy:task.policy,subjects:task.subjects,taskId:task.id,actionId:run?.id||null,idleMs,note:task.note,failure,recovery:run?.recovery||task.state.recoveryGuidance,episode:run?.recoveryState||task.state.recoveryState,scheduledNextAt:task.nextCheckAt,progress:run?.progress?new(require('./action-progress').ActionProgress)(run.progress).snapshot():null,pendingEvent:event?{type:event.type,key:event.key,subjectKey:event.subjectKey}:null,knownResult:task.state.result?{summary:task.state.result.summary}:null,lastFailure:task.state.lastFailure,confirmedEffects:Object.values(task.operations).filter(o=>o.status==='confirmed'&&o.effect==='write').slice(-8).map(o=>({tool:o.tool,operationId:o.id,receipt:o.result?.receipt,exitCode:o.result?.exitCode})),authority:{channel:task.authority.channel,scene:require('./dialogue-channels').ordinaryScene(task.scene)}})},
-   {id:'tools',required:true,load:async()=>this.tools.catalog(undefined,task).map(t=>({name:t.name,description:t.description}))},
+   {id:'core',required:true,load:async()=>({taskTiming:require('./operation-evidence').taskTiming(task),observationSources:require('./operation-evidence').conversationSources(task),goal:task.workRequest?.goal||task.goal,criteria:task.workRequest?.criteria||task.criteria,context:task.context,policy:task.policy,subjects:task.subjects,delivery:task.delivery,taskId:task.id,actionId:run?.id||null,idleMs,note:task.note,failure,recovery:run?.recovery||task.state.recoveryGuidance,episode:run?.recoveryState||task.state.recoveryState,scheduledNextAt:task.nextCheckAt,progress:run?.progress?new(require('./action-progress').ActionProgress)(run.progress).snapshot():null,pendingEvent:event?{type:event.type,key:event.key,subjectKey:event.subjectKey}:null,knownResult:task.state.result?{summary:task.state.result.summary}:null,lastFailure:task.state.lastFailure,confirmedEffects:Object.values(task.operations).filter(o=>o.status==='confirmed'&&o.effect==='write').slice(-8).map(o=>({tool:o.tool,operationId:o.id,receipt:o.result?.receipt,exitCode:o.result?.exitCode})),authority:{channel:task.authority.channel,scene:require('./dialogue-channels').ordinaryScene(task.scene)}})},
+   {id:'tools',required:true,load:async()=>this.tools.catalog(undefined,task)},
    {id:'attempts',recent:true,maxLimit:8,parameters:{limit:6,maxTokens:1600},load:async p=>(task.state.attempts||[]).slice(-p.limit)},
    {id:'knowledge',maxLimit:4,parameters:{limit:4,maxTokens:1800},load:async p=>assembler.experienceContext(task,{mode:p.detail,maxTokens:p.maxTokens,maxItems:p.limit})}
   ]});
@@ -341,7 +358,7 @@ class AgentService{
   if(action==='restoreList')return this.runtime.restoreList();
   if(action==='resume'&&this.runtime.tasks.get(id)?.state.stopRequest)return {ok:false,error:'任务已停止，不会继续或再次清理；请交办独立新任务'};
   if(action==='resume'){this.authorization?.notified.delete(id);this.workRecoveryRequests.add(id);}
-  if(action==='resume'&&Object.values(this.runtime.tasks.get(id)?.operations||{}).some(op=>op.effect==='write'&&op.status==='intent')){
+  if(action==='resume'&&!this.skills.get(this.runtime.tasks.get(id)?.skill).goalDirected&&Object.values(this.runtime.tasks.get(id)?.operations||{}).some(op=>op.effect==='write'&&op.status==='intent')){
     const recovered=await this.reconcile(id,{resumeDraft:true});if(!recovered.ok)return recovered;
   }
   const result=await this.runtime.control(action,id,{expectedRevision,...(action==='resume'?{commitGate,isCurrent,signal}:{})});
@@ -507,13 +524,13 @@ class AgentService{
   const answer=await this.dispatch(decision,actor,{signal,ownerRequest:raw,ownerContext:task.state.ownerContext,taskContextEvidence:task.state.taskContextEvidence,excludeTaskId:task.id});
   if(!isLive()||signal.aborted)throw Error('交办已取消');
   this.intakeLog(task,'responded',decision.kind);
-  await report(answer.text||answer.error||'已处理','resolution-response');task.state.resolution={kind:decision.kind};return {status:answer.ok?'completed':'needs_attention',note:answer.text||answer.error,state:task.state};
+  await report(answer.text||answer.error||'已处理','resolution-response');task.state.resolution={kind:decision.kind,...(decision.kind==='control'?{operation:decision.operation}:{}),...(Number.isInteger(answer.count)?{count:answer.count}:{})};return {status:answer.ok?'completed':'needs_attention',note:answer.text||answer.error,state:task.state};
   }finally{signal?.removeEventListener('abort',cancelled);}
  }
  async dispatch(decision,actor,{signal,ownerRequest,ownerContext,taskContextEvidence:contextEvidence,excludeTaskId,commitGate,isCurrent=()=>true}={}){
   if(signal?.aborted)return {ok:false,text:'交办已取消，没有开始任务。'};
   if(!isCurrent())return {ok:false,text:'这次请求已被后续输入替换，没有发起操作。'};
-  if(decision.kind!=='chat'&&!(decision.kind==='control'&&['pause','stop','status'].includes(decision.operation)))await waitAdmission(commitGate,{signal,live:isCurrent});
+  if(decision.kind!=='chat'&&!(decision.kind==='control'&&['pause','stop','status','clearList'].includes(decision.operation)))await waitAdmission(commitGate,{signal,live:isCurrent});
   contextEvidence=contextEvidence?require('./work-order').taskContextEvidence(contextEvidence,{sourceIds:actor.sources}):null;
   if(decision.kind==='chat')return {ok:true,text:decision.text};
   if(decision.kind==='wechat_identity'){if(!['dialogue','bound-contact'].includes(actor.channel)||!this.setWeChatOwnership)return {ok:false,text:'请在本机设置中选择当前微信归属。'};await this.setWeChatOwnership(decision.ownership);return {ok:true,text:decision.ownership==='bunny'?'已记住：这是Bunny自己的微信，后续无需代发标记。':`已记住：这是主人微信，后续代发都会带${require('../shared/external-message').MARK}。`};}
@@ -538,6 +555,13 @@ class AgentService{
     return {...result,text:this.channels?(decision.enabled?'已登记渠道；主人权限由实际新消息中的身份密钥认证。':'已撤销这个渠道当前的主人权限。'):decision.enabled?`已将 ${decision.subject.recipient} 绑定为主人交办入口。`:'已解除该主人入口绑定。'};
   }
   if(decision.kind==='control'){
+    if(decision.operation==='clearList'){
+      if(decision.all!==true||Object.hasOwn(decision,'id'))return {ok:false,text:'清空任务列表需要明确整个当前列表，不接受单个任务ID。'};
+      // The resolving command must finish its own normal reporting path. A
+      // terminal task.resolve is already excluded from the current UI list.
+      const ids=this.runtime.list().filter(t=>t.id!==excludeTaskId).map(t=>t.id),result=await this.runtime.archiveList(ids);
+      return {...result,text:result.message||(result.ok?'当前任务列表已清空，历史记录与资料已保留。':result.error)};
+    }
     if(decision.all){const result=await this.runtime.controlAll(decision.operation,{excludeIds:excludeTaskId?[excludeTaskId]:[],...(decision.operation==='resume'?{commitGate,isCurrent,signal}:{})});return {...result,text:decision.operation==='status'?result.tasks.map(describeTask).join('\n')||'目前没有任务。':result.message||(result.ok?'全部任务状态已更新。':result.error)};}
     const candidates=this.runtime.list().filter(t=>t.id!==excludeTaskId&&!TERMINAL.has(t.status));
     const ids=decision.all?candidates.map(t=>t.id):decision.id?[decision.id]:candidates.length===1?[candidates[0].id]:[];
@@ -549,23 +573,66 @@ class AgentService{
   const result=await this.start(decision.task,actor,{signal,ownerRequest,ownerContext,taskContextEvidence:contextEvidence,commitGate,isCurrent});
   return {...result,text:result.queued?'新任务已保存为待启动。'+capacityNote:result.ok?'已接到任务，我会按你的目标执行并跟进。':result.error};
  }
+ async alignConversationObservation(task,subject,state,priorCursor,view,signal,ownerChannel){
+  if(ownerChannel||!this.brain?.alignObservation)return null;
+  const context=new(require('./conversation-cursor').ConversationCursor)(priorCursor).alignmentContext(view.messages||[]);if(!context)return null;
+  let channelId;
+  try{if(this.channels)channelId=this.channels.descriptor(subject,task.state.sceneIdentity?.wechat||this.scene.knownIdentity).id;}catch{return null;}
+  const channelVersion=()=>{const channel=channelId&&this.channels.channels.get(channelId);return channel?this.channels.snapshot(channel):null;};
+  if(channelVersion()?.owner===true)return null;
+  const version=()=>JSON.stringify([task.privacyEpoch,task.state.goalRevision,task.state.controlRevision,task.goal,task.criteria,task.policy,task.subjects,task.authority,task.capabilities,this.scene.captureGeneration,channelVersion()]);
+  const revision=version(),current=()=>!signal?.aborted&&!this.runtime.closed&&(!this.runtime.canControl||this.runtime.canControl(task))&&this.runtime.tasks.get(task.id)===task&&!task.state.stopRequest&&!TERMINAL.has(task.status)&&task.status!=='paused'&&task.state.conversations?.[subjectKey(subject)]===state&&state.cursor===priorCursor&&version()===revision;
+  const fingerprint=crypto.createHash('sha256').update(JSON.stringify([revision,priorCursor.baseline,(view.messages||[]).map(require('./conversation-cursor').messageKey)])).digest('hex'),key=task.id+':'+subjectKey(subject);
+  if(!current())return null;
+  if(state.alignmentReview?.fingerprint===fingerprint)return {decision:state.alignmentReview.decision,isCurrent:current};
+  this.conversationAlignments??=new Map();
+  const pending=this.conversationAlignments.get(key);if(pending){await pending.catch(()=>{});if(!current())return null;if(state.alignmentReview?.fingerprint===fingerprint)return {decision:state.alignmentReview.decision,isCurrent:current};}
+  const work=(async()=>{
+   const budget=require('./bounded-wait').createBoundedWait({signal,timeoutMs:Math.min(this.runtime.stepTimeoutMs||90000,90000),code:'E_CONVERSATION_ALIGNMENT_TIMEOUT',message:'本轮观察对齐判断达到时限，原基线与新观察保留'});
+   try{
+    const run=Object.values(task.actionRuns||{}).find(r=>r.subscription&&r.scope==='subject:'+subjectKey(subject)),invoke=()=>this.brain.alignObservation({task,subject,context,signal:budget.signal});
+    const decision=await budget.run(()=>this.runtime.withModelTrace?this.runtime.withModelTrace(task,run,{signal:budget.signal,isCurrent:current},invoke):invoke());
+    if(!current())return null;require('./conversation-cursor').adjudicatedAlignment(context,decision);
+    state.alignmentReview={fingerprint,decision,observationId:view.observationId,at:Date.now()};await this.runtime.save(task);return current()?{decision,isCurrent:current}:null;
+   }catch(error){
+    if(current()){state.alignmentReview={fingerprint,decision:{uncertain:true,reason:'本次对齐仍不确定，保留原文等待新观察'},code:error.code||'E_CONVERSATION_ALIGNMENT',observationId:view.observationId,at:Date.now()};await this.runtime.save(task);}
+    return null;
+   }finally{budget.close();}
+  })();this.conversationAlignments.set(key,work);
+  try{return await work;}finally{if(this.conversationAlignments.get(key)===work)this.conversationAlignments.delete(key);}
+ }
  // Record a newly visible message before applying any replacement policy.
  async observeConversationDelta(task,subject,signal,{force=false,view:providedView}={}){
-  const key=subjectKey(subject),state=task.state.conversations?.[key];if(!state?.cursor?.ready||!['running','needs_attention','waiting_permission'].includes(task.status)||signal?.aborted)return false;
-  const view=providedView||await this.scene.observe(subject,{force,repairProfile:task.state.selfRepair?.profile});
-  if(signal?.aborted||!['running','needs_attention','waiting_permission'].includes(task.status)||this.runtime.tasks.get(task.id)!==task||!view.headerMatched||view.unstable||view.unavailable)return false;
+  const key=subjectKey(subject),state=task.state.conversations?.[key];if(!state?.cursor?.ready||!['waiting','running','needs_attention','waiting_permission'].includes(task.status)||signal?.aborted)return false;
+  const view=providedView||await this.runtime.observeSubscription(task,{tool:'conversation.observe',args:{...subject,force}},{signal,scope:'subject:'+key});
+  if(signal?.aborted||!['waiting','running','needs_attention','waiting_permission'].includes(task.status)||this.runtime.tasks.get(task.id)!==task||!view.headerMatched||view.unstable||view.unavailable)return false;
   const priorCursor=state.cursor;
-  const cursor=new (require('./conversation-cursor').ConversationCursor)(priorCursor),delta=cursor.observe(view.messages||[],{ownerChannel:task.parameters.behavior==='owner'||subject.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',sentMessages:this.ownMessages(subject,task)});
+  const ownerChannel=task.parameters.behavior==='owner'||subject.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',sentMessages=this.ownMessages(subject,task),cursor=new (require('./conversation-cursor').ConversationCursor)(priorCursor);
+  let delta=cursor.observe(view.messages||[],{ownerChannel,sentMessages}),alignmentCurrent=()=>true;
+  if(delta.uncertain){
+   const aligned=await AgentService.prototype.alignConversationObservation.call(this,task,subject,state,priorCursor,view,signal,ownerChannel),decision=aligned?.decision;
+   if(!decision||decision.uncertain||signal?.aborted||state.cursor!==priorCursor||this.runtime.tasks.get(task.id)!==task)return false;
+   alignmentCurrent=aligned.isCurrent;
+   delta=cursor.observe(view.messages||[],{ownerChannel,sentMessages,alignmentDecision:decision});
+  }
   if(delta.uncertain||!delta.messages.length)return false;
   const nextCursor=cursor.snapshot();
   const result=await this.runtime.enqueue(task.id,{key:`conversation:${key}:${nextCursor.sequence}`,subjectKey:key,type:'conversation.messages',ownerChannel:task.parameters.behavior==='owner'||subject.recipient==='文件传输助手'&&this.getWeChatOwnership()==='owner',messages:delta.messages}, {
     recoveryEvidence:delta.messages.some(message=>message.incomingVerified===true||message.observedVerified===true||message.voiceVerified===true),
-    current: () => !signal?.aborted && task.state.conversations?.[key]?.cursor === priorCursor,
+    current: () => !signal?.aborted && alignmentCurrent() && task.state.conversations?.[key]?.cursor === priorCursor,
     advance: target => {
       if (target.state.conversations?.[key]) target.state.conversations[key].cursor = clone(nextCursor);
     },
   });
   return result.ok;
+ }
+ // The same read-only observation loop belongs to the Task lifecycle, so
+ // a model/GUI Action ending or waiting cannot disarm its message subscription.
+ syncConversationObservation(){
+  if(!this.runtime)return;this.conversationObservers??=new Map();const wanted=new Map();
+  for(const task of this.runtime.tasks.values())if(task.skill==='conversation.manage'&&!task.state.stopRequest&&!task.state.listArchive&&task.privacyEpoch===this.epoch()&&require('./memory-scope').canRead(this.getScene(),task)&&['waiting','running','needs_attention','waiting_permission'].includes(task.status))for(const subject of task.subjects)wanted.set(task.id+':'+subjectKey(subject),{task,subject});
+  for(const [key,entry]of this.conversationObservers)if(!wanted.has(key)||wanted.get(key).task!==entry.task){entry.controller.abort();entry.stop();this.conversationObservers.delete(key);}
+  for(const [key,{task,subject}]of wanted)if(!this.conversationObservers.has(key)){const controller=new AbortController(),stop=this.startConversationObservation(task,subject,{signal:controller.signal});this.conversationObservers.set(key,{task,controller,stop});}
  }
  // A read-only observer runs independently of model planning and GUI actions.
  startConversationObservation(task,subject,action){
@@ -578,6 +645,26 @@ class AgentService{
   return ()=>{controller.abort();action.signal.removeEventListener('abort',forward);void run.catch(()=>{});};
  }
  async executeConversation(args){
+  const ownedPhysical=()=>args.action&&this.conversationDesktop?.actionControl===args.action?this.conversationDesktop?.task:null;
+  const retainDispatchFacts=(result,physical)=>{const outcomes=require('./boper-outcome'),steps=physical?.steps||[],actual=args.task?.operations?.[args.operationId]?.inputOutcome||steps.find(s=>outcomes.hasEffects(s.inputReceipt?.inputOutcome))?.inputReceipt?.inputOutcome;
+   return result.dispatched===false&&(outcomes.hasEffects(actual)||steps.some(s=>!['wait','done'].includes(s.action)&&['intent','input-sent'].includes(s.state)))?{...result,dispatched:undefined,...(actual?{inputOutcome:outcomes.sanitize(actual)}:{})}:result;};
+  if(args.signal?.aborted)return retainDispatchFacts({ok:false,dispatched:false,code:args.action?.superseded?'E_ACTION_SUPERSEDED':'ABORT_ERR',error:'任务已取消；原输入事实保留'},ownedPhysical());
+  const budget=require('./bounded-wait').createBoundedWait({signal:args.signal,timeoutMs:this.runtime?.stepTimeoutMs||360000,code:'E_ACTION_TIMEOUT',message:'本轮会话Action达到总时限，保留实际输入与未知结果'});
+  let work;
+  try{return await budget.run(signal=>(work=AgentService.prototype.executeConversationOwned.call(this,{...args,signal})));}
+  catch(error){
+   if(args.action?.superseded&&work){
+    const physical=ownedPhysical();
+    const remaining=require('./bounded-wait').remainingMs(budget.signal);if(remaining<=0)throw error;
+    const drain=require('./bounded-wait').createBoundedWait({timeoutMs:remaining,code:'E_ACTION_TIMEOUT',message:'原动作取消收尾达到剩余时限，保留真实输入与未知结果'});
+    try{
+     return retainDispatchFacts(await drain.run(()=>work),physical);
+    }finally{drain.close();}
+   }
+   throw error;
+  }finally{budget.close();}
+ }
+ async executeConversationOwned(args){
   const originAuthorization=args.task?.state?.returnTo?.channelSnapshot;
   if(!args.channelAuthorization&&originAuthorization&&this.channels?.channels.get(originAuthorization.channelId)?.recipient===args.recipient){this.channels.assert(originAuthorization);args={...args,channelAuthorization:originAuthorization};}
   const replyRef=typeof args.message==='string'&&args.message.startsWith('channel-reply:')?args.message:null;
@@ -586,15 +673,19 @@ class AgentService{
   if(held&&!held.snapshot.owner&&await this.sensitivePolicy.isSensitive(held.decision.reply))held.decision.reply='这涉及主人的隐私，我不能提供。';
   if(held)args={...args,message:held.decision.reply,channelAuthorization:held.snapshot};
   const ownership=this.getWeChatOwnership();args={...args,wechatOwnership:ownership,...(args.operation==='send'?{message:require('./wechat-identity').markedMessage(args.message,ownership)}:{})};
-  const channelConversation=!!this.channels&&args.task?.skill==='conversation.manage';
+  // Ordinary sends/opening use the same autonomous visual planner as a
+  // one-shot message. Channel authority and the exact outbound text remain
+  // host-bound; only locked media reads need the staged menu protocol.
+  const channelConversation=!!this.channels&&args.task?.skill==='conversation.manage'&&stagedConversationRead({target:'wechat',operation:args.operation,readRequest:args.readRequest});
   const execute=async()=>{
     if(args.signal?.aborted)return {ok:false,dispatched:false,error:'任务已暂停，未执行输入'};
-    await this.scene.assertHealthy({signal:args.signal});
-    if(this.channels&&!args.channelAuthorization&&(channelConversation||args.operation==='send')){
+    if(this.scene.assertTaskIdentity)await this.scene.assertTaskIdentity(args.task,{signal:args.signal});
+    else await this.scene.assertHealthy({signal:args.signal});
+    if(this.channels&&!args.channelAuthorization&&(args.task?.skill==='conversation.manage'||args.operation==='send')){
       const channel=await this.channels.ensure({application:'wechat',recipient:args.recipient},args.task.state.sceneIdentity?.wechat||this.scene.knownIdentity);
       args={...args,channelAuthorization:this.channels.snapshot(channel)};
     }
-    if(channelConversation)this.channels.assert(args.channelAuthorization);
+    if(args.channelAuthorization)this.channels.assert(args.channelAuthorization);
     if(!await this.canOperateForTask(args.task))return {ok:false,dispatched:false,code:'E_GUI_BUSY',error:'等待电脑空闲后再操作，消息已保留'};
     const service=this.conversationDesktop;
     if(!service||service.running)return {ok:false,dispatched:false,code:'E_GUI_BUSY',error:'桌面操作正在进行，稍后继续'};
@@ -612,7 +703,10 @@ class AgentService{
     };
     try{
       if(held)this.channels.assert(held.snapshot);
-      const result=await service.start({target:'wechat',recipient,operation,readRequest:args.readRequest,message,attachment,wechatOwnership,channelAuthorization:args.channelAuthorization,channelConversation,
+      const continued=(operationId&&task.operations[operationId]?.continuedFrom||[]).map(link=>task.operations[link.operationId]).find(op=>op.physicalId);
+      if(continued&&(service.task?.id!==continued.physicalId||service.task.recipient!==recipient||operation!=='send'))return {ok:false,dispatched:false,code:'E_EFFECT_REVIEW',error:'原受控输入现场已不在当前执行器，先重新观察，不新建或重填旧草稿'};
+      const result=continued?await service.resume({...await this.conversationResumeOptions(task,service.task),requestSignal:signal}):await service.start({requestSignal:signal,target:'wechat',recipient,operation,readRequest:args.readRequest,message,attachment,wechatOwnership,channelAuthorization:args.channelAuthorization,channelConversation,
+        parentTaskContext:{taskId:task.id,actionId:task.operations?.[operationId]?.actionId||null,...require('./operation-evidence').taskTiming(task),goalRevision:task.state.goalRevision||0,controlRevision:task.state.controlRevision||0,observationSources:require('./operation-evidence').conversationSources(task),executionFeedback:require('./operation-evidence').guiFailure(task,operationId),goal:task.goal,criteria:task.criteria||'',policy:task.policy||'',context:[task.context||'',...(task.state.outcomeFeedback?.length?['本Task前次执行与实际观察的结果反馈；执行声明不是验收事实，保持原目标/权限并据此反思、换策略：'+JSON.stringify(task.state.outcomeFeedback.slice(-3))]:[])].filter(Boolean).join('\n'),ownerRequest:task.state.ownerRequest||''},
         goal:args.goal||(attachment?`只向「${recipient}」发送本任务真实附件 ${message} 一次，type purpose:task将触发文件粘贴；确认预览后发送。不能输入文件名充当附件。`:operation==='send'?`只向「${recipient}」发送本任务message字段的完整原文一次。`:`打开微信会话「${recipient}」，核对顶部标题，并显示该会话的最新消息；若有“新消息”按钮可点击，或在聊天内容区向下滚动到末尾。允许搜索该联系人，type必须标记purpose:navigation；禁止输入消息正文、修改草稿或发送。`),
         criteria:args.criteria||(operation==='send'?'本次新增完整右侧已发送气泡，输入框清空；不能只是历史或草稿。':'顶部标题精确匹配指定联系人，聊天内容位于最新消息，未留下新消息跳转提示。'),
         origin:'agent',inputSource:'text',scene:held?.snapshot.scene||args.channelAuthorization?.scene||task.scene,visibilityFloor:Math.max(task.visibilityFloor,args.channelAuthorization?require('./memory-scope').rank(args.channelAuthorization.scene):0),sources:[task.id,...(held?.sources||[])],privacyEpoch:task.privacyEpoch,
@@ -622,12 +716,13 @@ class AgentService{
       if(operationId&&task.operations[operationId])task.operations[operationId].physicalId=service.task.id;
       if(operation==='send'){if(held)held.transmittedText=service.task.message||message;task.state.outboundMessages??=[];task.state.outboundMessages.push({id:service.task.id,recipient,message:replyRef||service.task.message||message,messageHash:crypto.createHash('sha256').update(service.task.message||message).digest('hex'),...(held?{channelReply:{channelId:held.channelId,snapshot:held.snapshot,key:held.key,sources:held.sources}}:{}),messageKey:require('./conversation-cursor').messageKey({direction:'outgoing',kind:service.task.attachment?'file':'text',text:service.task.message||message}),kind:service.task.attachment?'file':'text',status:'pending',at:Date.now()});task.state.outboundMessages=task.state.outboundMessages.slice(-60);}
       await this.runtime.save(task);
-      const deadline=Date.now()+145000;
+      const deadline=require('./bounded-wait').deadlineAt(signal);
       while(service.running&&!signal?.aborted&&Date.now()<deadline)await sleep(200);
       if(stopPromise)await stopPromise;
       if(service.running)await service.suspend({cause:'action-timeout',reason:'操作达到时限，保留实际状态，禁止重发'});
       if(held&&!this.channels.current(held.snapshot)&&!service.task.submitAttemptedAt)await this.revokeChannelOutputs([held.channelId]);
       let current=service.task;
+      if(operationId&&task.operations[operationId]&&current.executionFeedback?.taskId===task.id)task.operations[operationId].executionFeedback=structuredClone(current.executionFeedback);
       task.state.conversationProgress={recipient,phase:current.submitAttemptedAt?'submitted':current.draftInserted?'draft':'opening',at:Date.now()};
       if(operationId&&task.operations[operationId])task.operations[operationId].progress={...task.state.conversationProgress};
       if(operation==='send'&&current.status==='paused'&&current.submitAttemptedAt&&!signal?.aborted)await sleep(1600);
@@ -636,10 +731,11 @@ class AgentService{
         // One bounded read-only fallback, never a second start/send. Resume's
         // submitAttempted guard permits only wait/scroll/done.
         service.displayRegionAnchor=null;
-        const resumed=await service.resume(await this.conversationResumeOptions(task,service.task));
-        if(resumed.ok){const until=Date.now()+110000;while(service.running&&!signal?.aborted&&Date.now()<until)await sleep(200);if(service.running)await service.suspend({cause:'action-timeout',reason:'只读核对达到时限，禁止重发'});current=service.task;}
+        const resumed=Date.now()<deadline?await service.resume({...await this.conversationResumeOptions(task,service.task),requestSignal:signal}):{ok:false};
+        if(resumed.ok){while(service.running&&!signal?.aborted&&Date.now()<deadline)await sleep(200);if(service.running)await service.suspend({cause:'action-timeout',reason:'只读核对达到原Action时限，保留记录且禁止重发'});current=service.task;}
       }
       if(/(?:截图|原生请求).*超时|目标窗口已关闭/u.test(current.note||''))await this.scene.trip(current.note+'；已停止微信相关输入，等待重新核对');
+      const visualFeedback={schema:'bunny.visual-feedback/v1',checks:(current.steps||[]).flatMap(step=>step.visualFeedback?.checks||[]).slice(-12)};
       if(args.readRequest?.kind==='attachment-save'){
         const saved=await require('./file-tools').savedFile(args.readRequest.destination);
         if(saved)return {ok:true,verified:true,receipt:saved};
@@ -651,7 +747,7 @@ class AgentService{
         if(!current.submitAttemptedAt&&!draftMayExist){const outgoing=task.state.outboundMessages?.find(m=>m.id===current.id);if(outgoing){outgoing.status='not_dispatched';await this.runtime.save(task);}}
         let failure=Object.assign(Error(current.note||'操作尚未完成'),{...(current.errorCode?{code:current.errorCode}:{}),...(current.errorDiagnostic?{diagnostic:require('./self-repair').diagnostic(current.errorDiagnostic)}:{})});
         if(this.scene.classifyFailure)failure=await this.scene.classifyFailure(failure);
-        return {ok:false,dispatched:!current.submitAttemptedAt&&!draftMayExist?false:undefined,error:failure.message,...(failure.diagnostic?{diagnostic:failure.diagnostic}:{}),...((action?.superseded&&!current.submitAttemptedAt&&!draftMayExist)?{code:'E_ACTION_SUPERSEDED'}:failure.code?{code:failure.code}:{})};
+        return {ok:false,dispatched:!current.submitAttemptedAt&&!draftMayExist?false:undefined,error:failure.message,visualFeedback,...(failure.diagnostic?{diagnostic:failure.diagnostic}:{}),...((action?.superseded&&!current.submitAttemptedAt&&!draftMayExist)?{code:'E_ACTION_SUPERSEDED'}:failure.code?{code:failure.code}:{})};
       }
       if(operation==='send'){
         if(current.sendState!=='confirmed')return {ok:false,error:'未能核实本次发送'};
@@ -661,8 +757,8 @@ class AgentService{
         await service.accept({automatic:true,report:'已核对本次新增的完整已发送气泡和空输入框。'});
       }
       const sent=task.state.outboundMessages?.find(m=>m.id===current.id);if(sent){sent.status='confirmed';await this.runtime.save(task);}
-      if(held){const channel=this.channels.channels.get(held.channelId);await this.channels.recordReply(channel,held.snapshot,held.key,current.message||message,held.sources,true);if(held.key.startsWith('report:'))await this.acknowledgeReport(held.key.slice(7));}
-      return {ok:true,verified:true,...(operation==='read'?{text:current.readText}:{}),receipt:{operationId:current.id,recipient,submittedAt:current.submitAttemptedAt,verifiedAt:Date.now(),sentText:replyRef||current.message||message,...(replyRef?{messageKey:require('./conversation-cursor').messageKey({direction:'outgoing',kind:'text',text:current.message||message})}:{}),...(current.attachmentDelivered?{kind:"file",transferComplete:true}:{}),wechatOwnership,backend:service.screenshot?.captureSource}};
+      if(held){const channel=this.channels.channels.get(held.channelId),assessment=deliveryAssessment(current);await this.channels.recordReply(channel,held.snapshot,held.key,current.message||message,held.sources,true,{observedText:observedDeliveryText(assessment),deliveryAssessment:assessment,visibilityFloor:current.visibilityFloor});if(held.key.startsWith('report:'))await this.acknowledgeReport(held.key.slice(7));}
+      return {ok:true,verified:true,visualFeedback,...(operation==='open'?{executionClaim:{completed:true,physicalId:current.id,evidence:String(current.evidence||'').slice(0,800)}}:{}),...(operation==='read'?{text:current.readText}:{}),receipt:operation==='send'?{...conversationReceipt(current,{recipient,desiredText:current.message||message,desiredTextRef:replyRef,visible:require('./memory-scope').canRead(task.scene,{domain:current.domain||current.scene||held?.snapshot.scene||args.channelAuthorization?.scene||task.scene,visibilityFloor:current.visibilityFloor??require('./memory-scope').rank(current.domain||current.scene||held?.snapshot.scene||args.channelAuthorization?.scene||task.scene)}),wechatOwnership}),backend:service.screenshot?.captureSource}:{operationId:current.id,recipient,verifiedAt:Date.now(),wechatOwnership}};
     }finally{if(service.actionControl===action){service.actionControl=null;service.beforeReplyInput=null;}if(service.actionStopPromise===stopPromise)service.actionStopPromise=null;signal?.removeEventListener('abort',stop);}
   };
   return this.serialConversation(execute);
@@ -767,7 +863,7 @@ class AgentService{
     :received.messages;
   const ownerInput=snapshot.owner&&phase==='incoming'?currentText.filter(m=>Number.isSafeInteger(m.sequence)&&m.sequence>0&&m.text.trim()&&m.text!=='[identity verified]'):[];
   const attachments=phase==='incoming'?incoming.filter(m=>m.kind==='file'&&m.direction==='incoming'&&m.incomingVerified&&m.fileName&&Number.isSafeInteger(m.sequence)&&m.sequence>0):[];
-  const currentInput=[...currentText,...attachments].sort((a,b)=>a.sequence-b.sequence);
+  const currentInput=[...currentText,...attachments.filter(file=>!currentText.some(m=>m.sequence===file.sequence&&m.kind===file.kind&&m.visualEvidence?.observationId===file.visualEvidence?.observationId&&m.perception?.evidenceId===file.perception?.evidenceId))].sort((a,b)=>a.sequence-b.sequence);
   const context=await this.channels.context(channel,snapshot,currentText.map(m=>m.text).join('\n'));
   context.authentication={enabled:this.channels.security?.enabled===true,configured:!!this.channels.security?.key};
   if(received.authenticated&&snapshot.owner&&received.ownerRevision===snapshot.revision)context.authenticationEvent={type:'owner-authenticated',credentialOnly:!ownerInput.length,replayed:received.duplicate===true,expiresAt:snapshot.expiresAt};
@@ -848,7 +944,7 @@ class AgentService{
     task.state.reconciliation??={};const prior=task.state.reconciliation[op.id]||{count:0,at:0};
     const delay=Math.min(300000,5000*2**Math.min(prior.count,6));if(prior.at&&Date.now()-prior.at<delay)return;
     task.state.reconciliation[op.id]={count:prior.count+1,at:Date.now(),phase:'checking'};await this.runtime.save(task);
-    let checked;try{checked=await this.reconcile(task.id,{resumeDraft:op.tool!=='work.submit'||this.workRecoveryRequests.has(task.id)});}catch(error){checked={ok:false,error:error.message};}
+    let checked;try{checked=await this.reconcile(task.id,{resumeDraft:op.tool!=='work.submit'||this.workRecoveryRequests.has(task.id)});}catch(error){checked={ok:false,error:error.message,...(error.code?{code:error.code}:{})};}
     if(this.runtime.tasks.get(task.id)!==task||task.state.stopRequest||task.status==='stopping'||TERMINAL.has(task.status))return;
     task.state.lastCheckedAt=Date.now();
     if(checked.ok){delete task.state.recoveryRequestedAt;await this.control('resume',task.id);}
@@ -869,11 +965,15 @@ class AgentService{
     ?this.runtime.confirmReconciled(task.id,op.id,{ok:true,verified:true,receipt})
     :{ok:false,error:'原目录中暂未核实文件，保留另存操作等待核对'};
   }
-  return this.serialConversation(() => this.reconcileConversation(task, op, resumeDraft));
+  let checked;try{checked=this.tools.check(op.tool,op.args,task);}catch{return {ok:false,code:'E_TASK_AUTH',error:'原操作的已注册工具、参数或授权已变化，保留原输入等待核对'};}
+  const effects=require('./effect-review'),revision=effects.version(task),budget=require('./bounded-wait').createBoundedWait({timeoutMs:this.runtime?.stepTimeoutMs||360000,code:'E_ACTION_TIMEOUT',message:'本轮效果核对达到总时限，原输入与未知结果已保留'});
+  const current=()=>!budget.signal.aborted&&this.runtime.tasks.get(id)===task&&!task.state.stopRequest&&!TERMINAL.has(task.status)&&task.operations[op.id]===op&&op.status==='intent'&&effects.version(task)===revision&&this.tools.get(op.tool)===checked.tool;
+  const run=task.actionRuns?.[op.actionId],invoke=()=>require('./task-model-trace').scope({operationId:op.id,parentOperationId:op.id},()=>effects.scope({task,operation:op,tool:checked.tool,input:checked.input,signal:budget.signal,isCurrent:current,save:()=>this.runtime.save(task)},()=>this.serialConversation(()=>this.reconcileConversation(task,op,resumeDraft,{signal:budget.signal,isCurrent:current}))));
+  try{return await budget.run(()=>typeof this.runtime.withModelTrace==='function'?this.runtime.withModelTrace(task,run,{signal:budget.signal,isCurrent:current},invoke):invoke());}finally{budget.close();}
  }
- async reconcileConversation(task, op, resumeDraft) {
+ async reconcileConversation(task, op, resumeDraft,{signal,isCurrent=()=>true}={}) {
   const { id } = task, service = this.conversationDesktop;
-  const live = () => this.runtime.canControl(task) && !task.state.stopRequest && !TERMINAL.has(task.status) && task.status !== 'stopping' &&
+  const live = () => !signal?.aborted&&isCurrent()&&this.runtime.canControl(task) && !task.state.stopRequest && !TERMINAL.has(task.status) && task.status !== 'stopping' &&
     task.operations[op.id] === op && op.status === 'intent' && !this.runtime.operations.isRunning(task, op);
   if (!live()) return { ok: false, error: '任务或原操作已变化，未继续核对' };
   if(!service)return {ok:false,error:'微信操作服务暂不可用，稍后继续核对'};
@@ -901,8 +1001,8 @@ class AgentService{
   if(resumeDraft&&!physical.attachment&&!physical.submitAttemptedAt&&physical.draftInserted&&
       contentSteps.some(step=>step.state==='input-sent')&&submitSteps.every(step=>step.state==='not-dispatched')){
     if(this.runtime.controllers.has(id)||service.running||!await this.canOperate())return {ok:false,error:'等待电脑空闲后核对输入状态'};
-    await this.scene.assertTaskIdentity?.(task);
-    const view=await this.scene.observe({application:'wechat',recipient},{force:true});
+    await this.scene.assertTaskIdentity?.(task,{signal});
+    const view=await this.scene.observe({application:'wechat',recipient},{force:true,signal});
     if (!live()) return { ok: false, error: '任务已变化，未继续核对' };
     const normalize=s=>String(s||'').normalize('NFKC').replace(/\s+/gu,'');
     const visibleOutgoing=Array.isArray(view.messages)&&view.messages.some(m=>m.direction==='outgoing'&&normalize(m.text)===normalize(physical.message));
@@ -931,16 +1031,16 @@ class AgentService{
     if(!resumeDraft||typeof service.clearSupersededDraft!=='function')return {ok:false,error:'新消息使旧回复草稿过期，正在等待安全核对'};
     if(this.runtime.controllers.has(id)||service.running||!await this.canOperate())return {ok:false,error:'等待电脑空闲后替换旧回复草稿'};
     if(!physical.draftInserted&&contentSteps.some(step=>['intent','input-sent'].includes(step.state))){
-      const view=await this.scene.observe({application:'wechat',recipient},{force:true});
+      const view=await this.scene.observe({application:'wechat',recipient},{force:true,signal});
       if(view.headerMatched&&view.draft===physical.message)physical.draftInserted=true;
     }
     if(!live()||this.runtime.controllers.has(id)||!['needs_attention','paused'].includes(task.status))return {ok:false,error:'等待其他动作完成后替换旧草稿'};
-    const controller=new AbortController();this.runtime.controllers.set(id,controller);this.runtime.publish();
+    const controller=new AbortController(),reconcileBudget=require('./bounded-wait').createBoundedWait({controller,signal,timeoutMs:this.runtime?.stepTimeoutMs||360000,code:'E_ACTION_TIMEOUT',message:'本轮效果核对达到总时限'});this.runtime.controllers.set(id,controller);this.runtime.publish();
     const stop=()=>{void service.suspend({cause:'action-cancel',reason:'替换旧回复已停止'}).catch(()=>{});};controller.signal.addEventListener('abort',stop,{once:true});
     try{
       physical.supersededByNewMessage=true;service.task=physical;
       const cleared=await service.clearSupersededDraft({...await this.conversationResumeOptions(task,physical),observe:async()=>{
-        this.scene.invalidate();return this.scene.observe({application:'wechat',recipient},{force:true});
+        this.scene.invalidate();return this.scene.observe({application:'wechat',recipient},{force:true,signal});
       }});
       if(!cleared.ok)return cleared;
       op.status='not_dispatched';op.lifecycle={...(op.lifecycle||{}),phase:'cancelled',reason:'newer-event'};op.finishedAt=Date.now();
@@ -950,39 +1050,41 @@ class AgentService{
         if(this.runtime.tasks.get(id)===task)await this.runtime.save(task);return {ok:false,error:'任务已停止，旧草稿清理结果已记录'};
       }
       task.status='paused';task.note='旧回复草稿已核对并清除，正在合并新消息';await this.runtime.save(task);return {ok:true,staleDraftCleared:true};
-    }catch(error){return {ok:false,error:error.message};}
-    finally{controller.signal.removeEventListener('abort',stop);if(this.runtime.controllers.get(id)===controller)this.runtime.controllers.delete(id);this.runtime.publish();this.runtime.schedule();}
+    }catch(error){return {ok:false,error:error.message,...(error.code?{code:error.code}:{})};}
+    finally{reconcileBudget.close();controller.signal.removeEventListener('abort',stop);if(this.runtime.controllers.get(id)===controller)this.runtime.controllers.delete(id);this.runtime.publish();this.runtime.schedule();}
   }
   if(resumeDraft&&!physical.submitAttemptedAt&&!physical.draftInserted&&!physical.attachment&&
       contentSteps.some(step=>['intent','input-sent'].includes(step.state))&&
       !submitSteps.some(step=>['intent','input-sent'].includes(step.state))){
     if(this.runtime.controllers.has(id)||service.running||!await this.canOperate())return {ok:false,error:'请等待当前操作结束或电脑空闲后核对'};
     try{
-      await this.scene.assertTaskIdentity?.(task);
-      const view=await this.scene.observe({application:'wechat',recipient},{force:true});
+      await this.scene.assertTaskIdentity?.(task,{signal});
+      const view=await this.scene.observe({application:'wechat',recipient},{force:true,signal});
       if(view.headerMatched&&view.draft===physical.message){physical.draftInserted=true;physical.draftInsertedAt=contentSteps.at(-1).at||Date.now();}
-    }catch(error){return {ok:false,error:error.message};}
+    }catch(error){return {ok:false,error:error.message,...(error.code?{code:error.code}:{})};}
   }
   const continuingDraft=resumeDraft&&!physical.submitAttemptedAt&&physical.draftInserted&&!physical.attachment;
   if(!continuingDraft&&(!physical.submitAttemptedAt||service.wechatBeforeSubmit?.taskId!==physical.id)){
-    if(physical.submitAttemptedAt)try{await this.scene.observe({application:'wechat',recipient},{force:true});}catch{}
+    if(physical.submitAttemptedAt)try{await this.scene.observe({application:'wechat',recipient},{force:true,signal});}catch{}
     return {ok:false,error:'缺少本次发送前的画面，已尝试观察并保留待核对状态；不会自动重发'};
   }
   if(!await this.canOperate()||!live()||this.runtime.controllers.has(id)||service.running)return {ok:false,error:'请等待当前操作结束或电脑空闲后核对'};
-  const controller=new AbortController();this.runtime.controllers.set(id,controller);this.runtime.publish();
+  const controller=new AbortController(),reconcileBudget=require('./bounded-wait').createBoundedWait({controller,signal,timeoutMs:this.runtime?.stepTimeoutMs||360000,code:'E_ACTION_TIMEOUT',message:'本轮效果核对达到总时限'});this.runtime.controllers.set(id,controller);this.runtime.publish();
   const stop=()=>{void service.suspend({cause:'action-cancel',reason:'只读核对已停止'}).catch(()=>{});};controller.signal.addEventListener('abort',stop,{once:true});
   try{
-    await this.scene.assertHealthy();if(await require('./workbuddy-free').freeModel({vision:true,signal:controller.signal})!=='hy3')throw Error('免费视觉模型暂不可用');
-    service.task=physical;physical.privacyEpoch=task.privacyEpoch;physical.workModel=physical.attachment?'deepseek-v4.1-flash':'hy3';const result=await service.resume(await this.conversationResumeOptions(task,physical));if(!result.ok)return result;
-    const deadline=Date.now()+120000;while(service.running&&!controller.signal.aborted&&Date.now()<deadline)await sleep(200);
+    await this.scene.assertHealthy({signal:controller.signal});if(await require('./workbuddy-free').freeModel({vision:true,signal:controller.signal})!=='hy3')throw Error('免费视觉模型暂不可用');
+    if(!live())return {ok:false,error:'目标、权限或原操作已变化，未恢复旧输入'};
+    service.task=physical;physical.privacyEpoch=task.privacyEpoch;physical.workModel=physical.attachment?'deepseek-v4.1-flash':'hy3';const result=await service.resume({...await this.conversationResumeOptions(task,physical),requestSignal:controller.signal});if(!result.ok)return result;
+    const deadline=require('./bounded-wait').deadlineAt(controller.signal);while(service.running&&!controller.signal.aborted&&Date.now()<deadline)await sleep(200);
     if(service.running)await service.suspend({cause:'action-timeout',reason:'只读核对达到时限，未重发'});
+    if(!live())return {ok:false,error:'目标、权限或原操作已变化，核对结果未确认旧操作'};
     if(physical.sendState!=='confirmed'||physical.status!=='review')return {ok:false,error:physical.note||'尚未确认本次发送，没有重发'};
     await service.accept({automatic:true,report:continuingDraft?'已视觉核对并续完原草稿，核验新增完整气泡。':'只读对照本次发送前后画面，已核验新增完整气泡。'});
     const sent=task.state.outboundMessages?.find(m=>m.id===physical.id);if(sent)sent.status='confirmed';
-    if(sent?.channelReply){const info=sent.channelReply,channel=this.channels.channels.get(info.channelId);await this.channels.recordReply(channel,info.snapshot,info.key,physical.message,info.sources,true);if(info.key.startsWith('report:'))await this.acknowledgeReport(info.key.slice(7));}
-    return this.runtime.confirmReconciled(id,op.id,{ok:true,verified:true,receipt:{operationId:physical.id,recipient:physical.recipient,submittedAt:physical.submitAttemptedAt,verifiedAt:Date.now(),sentText:reference?rawMessage:physical.message,...(reference?{messageKey:outgoingEntry.messageKey}:{}),wechatOwnership:physical.wechatOwnership,reconciled:true,continuedDraft:continuingDraft}});
-  }catch(error){return {ok:false,error:error.message};}
-  finally{controller.signal.removeEventListener('abort',stop);if(this.runtime.controllers.get(id)===controller)this.runtime.controllers.delete(id);this.runtime.publish();this.runtime.schedule();}
+    if(sent?.channelReply){const info=sent.channelReply,channel=this.channels.channels.get(info.channelId);const assessment=deliveryAssessment(physical);await this.channels.recordReply(channel,info.snapshot,info.key,physical.message,info.sources,true,{observedText:observedDeliveryText(assessment),deliveryAssessment:assessment,visibilityFloor:physical.visibilityFloor});if(info.key.startsWith('report:'))await this.acknowledgeReport(info.key.slice(7));}
+    return this.runtime.confirmReconciled(id,op.id,{ok:true,verified:true,receipt:{...conversationReceipt(physical,{desiredTextRef:reference?rawMessage:undefined,visible:require('./memory-scope').canRead(task.scene,{domain:physical.domain||physical.scene||task.scene,visibilityFloor:physical.visibilityFloor??require('./memory-scope').rank(physical.domain||physical.scene||task.scene)})}),reconciled:true,continuedDraft:continuingDraft}});
+  }catch(error){return {ok:false,error:error.message,...(error.code?{code:error.code}:{})};}
+  finally{reconcileBudget.close();controller.signal.removeEventListener('abort',stop);if(this.runtime.controllers.get(id)===controller)this.runtime.controllers.delete(id);this.runtime.publish();this.runtime.schedule();}
  }
  async continueWork(task,signal){
   const service=this.desktop,id=task.state.priorJob.jobId;
@@ -1110,9 +1212,14 @@ class AgentService{
   return this.waitForWorkSubmission(current,signal,task);
  }
  async deliverWork(message,task,signal,index,operationId){
-  if(task.delivery?.channel==='wechat'){await this.scene.assertTaskIdentity?.(task);const view=await this.scene.observe?.({application:'wechat',recipient:task.delivery.recipient},{force:true});if(view?.unavailable)return {ok:false,dispatched:false,error:view.reason};if(view?.headerMatched&&view.draft)return {ok:false,dispatched:false,error:'会话已有草稿，保留内容等待空闲后发送成果'};}
-  if(index!==undefined){const file=task.state.result?.artifacts?.[index];if(task.delivery?.channel!=='wechat'||!file)throw Object.assign(Error('没有本任务授权的成果附件'),{dispatched:false});const attachment=await require('./wechat-identity').deliveryAttachment(file,{taskId:task.id,ownership:this.getWeChatOwnership(),directory:this.deliveryDirectory});return this.executeConversation({operation:'send',recipient:task.delivery.recipient,message:require('path').basename(attachment.path),attachment,task,signal,operationId});}
-  if(task.delivery?.channel!=='wechat'||!task.state.result||message!==require('./task-result').deliveryText(task.state.result))throw Object.assign(Error('结果或交付对象不属于当前任务'),{dispatched:false});
+  if(signal?.aborted)throw Object.assign(Error('成果交付已取消'),{code:'ABORT_ERR',dispatched:false});
+  if(task.delivery?.channel!=='wechat'||!task.delivery.recipient)throw Object.assign(Error('交付对象不属于当前任务'),{dispatched:false});
+  if(!task.state.result)throw Object.assign(Error('最终成果尚未回收；工作完成后输出done:true和summary，由宿主保存成果并自动交付，不另建交付Action'),{code:'E_RESULT_NOT_READY',dispatched:false});
+  const file=index!==undefined?task.state.result.artifacts?.[index]:null;
+  if(index!==undefined&&!file)throw Object.assign(Error('没有本任务授权的成果附件'),{dispatched:false});
+  if(index===undefined&&message!==require('./task-result').deliveryText(task.state.result))throw Object.assign(Error('交付正文不属于本任务已回收成果'),{dispatched:false});
+  await this.scene.assertTaskIdentity?.(task);const view=await this.scene.observe?.({application:'wechat',recipient:task.delivery.recipient},{force:true,signal});if(view?.unavailable)return {ok:false,dispatched:false,error:view.reason};if(view?.headerMatched&&view.draft)return {ok:false,dispatched:false,error:'会话已有草稿，保留内容等待空闲后发送成果'};
+  if(index!==undefined){const attachment=await require('./wechat-identity').deliveryAttachment(file,{taskId:task.id,ownership:this.getWeChatOwnership(),directory:this.deliveryDirectory});return this.executeConversation({operation:'send',recipient:task.delivery.recipient,message:require('path').basename(attachment.path),attachment,task,signal,operationId});}
   return this.executeConversation({operation:'send',recipient:task.delivery.recipient,message,task,signal,operationId});
  }
  async workStatus(id,task,signal){
@@ -1254,6 +1361,6 @@ class AgentService{
   return {completed:false,report:current.note||'WorkBuddy正在执行'};
  }
  async invalidate(reason){this.priorResultReviewAuthorizations.clear();this.workRecoveryRequests.clear();await this.runtime.invalidate(reason);this.scene.invalidate();}
- async close(){this.priorResultReviewAuthorizations.clear();this.workRecoveryRequests.clear();await this.runtime.close();await this.scene.close();}
+ async close(){for(const entry of this.conversationObservers?.values()||[]){entry.controller.abort();entry.stop();}this.conversationObservers?.clear();await this.runtime.modelTrace?.flush({timeoutMs:1000});this.priorResultReviewAuthorizations.clear();this.workRecoveryRequests.clear();await this.runtime.close();await this.scene.close();}
 }
-module.exports={AgentService};
+module.exports={AgentService,conversationReceipt};

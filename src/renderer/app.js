@@ -18,12 +18,16 @@ import { createTaskControls } from './task-controls.mjs';
 import { observeInputRegions } from './window-input-regions.mjs';
 import { createBubbleController } from './bubble-ui.mjs';
 import { renderResultText } from './result-links.mjs';
+import { compactReplyText } from './dialogue-text.mjs';
 import { characterText } from './character-name.mjs';
 import { createAvatarLighting } from './avatar-lighting.mjs';
 import { lightingForAvatar } from './avatar-lighting-profiles.mjs';
 import { DataAvatarRuntime } from './data-avatar-runtime.mjs';
 import { SoftSurfaceRuntime } from './soft-surface/runtime.mjs';
+import { createBunnyStudioLighting, BUNNY_STUDIO } from './soft-surface/bunny-studio-lighting.mjs';
 import { disposeAvatarScene } from './avatar-scene.mjs';
+import { createPerformanceOccupancy } from './performance-occupancy.mjs';
+import { performancePlaybackPlan } from './performance-playback.mjs';
 
 /* ═══════════ 常量 ═══════════ */
 /* 形象列表由主进程扫 assets/models/*.vrm 得到（丢个文件进来就能换角色），
@@ -171,6 +175,38 @@ let bodyPosture = 'standing', activeTransition = null, pendingMotion = null, mot
 let standingHeadY = null; const postureHeadPosition = new THREE.Vector3();
 let loading = false;
 let loadingAvatarKey = null;
+const performanceBody = createPerformanceOccupancy(event => pet.motionStarted?.(event));
+let performanceTimer = null, performancePlayback = null;
+function clearPerformanceTimer() { clearTimeout(performanceTimer); performanceTimer = null; }
+function finishPerformance(entry, phase = 'finished', idle = true) {
+  if (!performanceBody.finish(entry, phase)) return false;
+  clearPerformanceTimer();
+  if (idle && !activeTransition) {
+    if (dataAvatar) { if (dataAvatar.play({ key: dataAvatar.defaultIdle, loop: true }).ok) currentMotion = dataAvatar.defaultIdle; }
+    else toIdle(0.35);
+  }
+  return true;
+}
+function cancelPerformance(id) {
+  const entry = performanceBody.cancel(id);
+  if (!entry) return;
+  clearPerformanceTimer();
+  ++motionRequestRevision;
+  if (pendingMotion?.performanceId === id) pendingMotion = null;
+  if (!activeTransition) {
+    if (dataAvatar) { if (dataAvatar.play({ key: dataAvatar.defaultIdle, loop: true }).ok) currentMotion = dataAvatar.defaultIdle; }
+    else toIdle(0.35);
+  }
+}
+function startPerformance(entry, loop, holdMs, playback = null) {
+  if (!performanceBody.isCurrent(entry)) return;
+  performanceBody.started(entry, playback);
+  if (loop && !playback) {
+    clearPerformanceTimer();
+    const duration = Number.isFinite(holdMs) ? Math.max(250, Math.min(30000, holdMs)) : 4000;
+    performanceTimer = setTimeout(() => finishPerformance(entry), duration);
+  }
+}
 
 let emoTimer = 0;
 let blinkTimer = 2.2, blinkRemaining = 0;
@@ -215,13 +251,25 @@ camera.position.set(0, 1.2, 3);
 
 const avatarLighting = createAvatarLighting(scene,renderer);
 const ambient = avatarLighting.ambient;
+let bunnyStudioLighting = null;
 
 /* 内置角色使用灯光工作台确认的完整配置；个人模型保留原始系数回退。
  * 已确认的配置包含模型系数，必须按绝对值应用，避免再次缩放。 */
 const LIGHT_BASE = { ambient: 1.9, key: 2.1, rim: 1.15, fill: .5 };
 function applyAvatarLight(scale = 1) {
   const s = Math.max(0.4, Math.min(1.2, Number(scale) || 1));
-  avatarLighting.apply(lightingForAvatar(avatarKey,s));
+  const studio = avatarKey === 'builtin_soft_bunny' && dataAvatar?.studioAppearance;
+  if (studio) {
+    bunnyStudioLighting ||= createBunnyStudioLighting(scene);
+    avatarLighting.group.visible = false; bunnyStudioLighting.group.visible = true;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = BUNNY_STUDIO.exposure;
+    renderer.shadowMap.enabled = false;
+  } else {
+    if (bunnyStudioLighting) bunnyStudioLighting.group.visible = false;
+    avatarLighting.group.visible = true;
+    avatarLighting.apply(lightingForAvatar(avatarKey,s));
+  }
 }
 
 const clock = new THREE.Clock();
@@ -239,24 +287,12 @@ const pointerSmooth = new THREE.Vector2(0, 0);
 /* ═══════════ 相机取景 ═══════════ */
 let fitInfo = { dist: 3, centerY: 1, visibleH: 2, modelH: 1.5 };
 
-/* 角色取景：100% 半身 / 100% 全身 / 150% 放大；半身内部值沿用 0.5。
- * 超过 100% 时窗口会跟着撑大（她真的变大，而不是被窗口裁掉），
- * 所以取景比例只有「小于 100%」时才需要压 —— 放大交给窗口。 */
+/* 显示大小与 VRM 取景独立；缩放以窗口底部中心为锚点。 */
 let viewScale = 0.5;
+let vrmFraming = 'half';
 
-/* 侧面板占掉右侧多少像素时，角色要往左让位。
- * 让位不是把相机歪过去（会有透视畸变），而是直接把角色挪到剩余区域的中间 ——
- * 面板一关，她又自己滑回正中。影子跟着一起走，否则会看见"影子留在原地"。 */
-const groundEl = document.getElementById('ground');
-
-/* ── 半身与全身分别取景，再按画布尺寸缩放 ──
- *   50% 半身：内部值 0.25。沿用 100% 半身取景，画布尺寸减半，底部 UI 不缩放。
- *   半身 ：内部值 0.5。窗口一点不变，等于把镜头推近：只取头顶到胯，
- *          头压在画面上部的主视觉区，下面留够气泡的位置。
- *          桌面角落里的小尺寸要的是「一张脸」，不是「一个小人」。
- *   100% ：全身。脚落在窗口最下方 2%，头顶上方留出气泡位（原来的构图）。
- *   150% ：全身不变形，窗口按 1.5 倍撑开 —— 她真的变大了，而不是被窗口裁掉。
- * 宽度也一起算：切到胯的时候胳膊不能出画，所以拿肩宽反算一个最小视野。 */
+/* 半身与全身分别计算取景，并按大小缩放画布。
+ * 半身取头顶到胯，宽度也考虑肩膀；全身保留脚部和头顶的气泡空间。 */
 let dialogueRestTop = null;
 let restHeadY = 0;
 function updateDialoguePlacement() {
@@ -280,7 +316,7 @@ function fitCamera(obj) {
   const center = box.getCenter(new THREE.Vector3());
   if (dialogueRestTop?.root !== obj) dialogueRestTop = { root: obj, x: center.x, y: box.max.y, z: center.z };
   const fovR = (camera.fov * Math.PI) / 180;
-  const bust = viewScale <= 0.51;
+  const bust = vrmFraming === 'half';
 
   let visibleH;
   let aimY;
@@ -311,8 +347,6 @@ function fitCamera(obj) {
   camera.updateProjectionMatrix();
   fitInfo = { dist, centerY: aimY, visibleH, modelH: size.y, bust };
   updateDialoguePlacement();
-  // 半身的时候脚在画面外，影子留在窗口下沿会像个浮空的黑块 —— 直接收掉
-  groundEl.style.opacity = bust ? '0' : '1';
 }
 
 function syncUIWidth() {
@@ -367,10 +401,11 @@ function clipFor(key) {
   return clips.get(key);
 }
 
-function playMotion(key, { loop = false, fade = FADE, requestId, reason = 'idle' } = {}) {
+function playMotion(key, { loop = false, fade = FADE, requestId, reason = 'idle', performanceId, isTransition = false, repetitions } = {}) {
+  if (!performanceBody.allows({ reason, performanceId }) && reason !== 'transition') return false;
   const requestedKey = key;
-  const report = ok => { if (requestId || reason !== 'transition') pet.motionStarted?.({ key: ok ? key : requestedKey, avatar: avatarKey, requestId, reason, ok }); };
-  if (activeTransition && reason !== 'transition') { if (requestId) report(false); return; }
+  const report = ok => { if (reason !== 'performance' && (requestId || reason !== 'transition')) pet.motionStarted?.({ key: ok ? key : requestedKey, avatar: avatarKey, requestId, reason, ok }); };
+  if (activeTransition && reason !== 'transition' && !isTransition) { if (requestId) report(false); return; }
   if (loading && requestId) { report(false); return; }
   let clip = key && motionEnabled(key) ? clipFor(key) : null;
   if (!clip) { key = randomIdle(); loop = true; clip = clipFor(key); }
@@ -380,14 +415,15 @@ function playMotion(key, { loop = false, fade = FADE, requestId, reason = 'idle'
   if (requestId) expressiveUntil = performance.now() + Math.max(1200, Math.min(12000, clip.duration * 1000));
   next.enabled = true;
   next.setEffectiveTimeScale(1);
-  next.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1);
-  next.clampWhenFinished = !loop;
+  const finiteRepetitions = Number.isInteger(repetitions) && repetitions >= 1 ? repetitions : null;
+  next.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? (finiteRepetitions ?? Infinity) : 1);
+  next.clampWhenFinished = !loop || finiteRepetitions !== null;
 
   if (next === currentAction) {
-    if (!loop) next.reset().play();
+    if (!loop || reason === 'performance') next.reset().play();
     currentMotion = key;
     paintMotionActive(); report(true);
-    return;
+    return true;
   }
   if (currentAction) {
     crossFadeMotionAction(next, currentAction, Math.max(0.25, fade), motionActions);
@@ -398,6 +434,7 @@ function playMotion(key, { loop = false, fade = FADE, requestId, reason = 'idle'
   currentAction = next;
   currentMotion = key;
   paintMotionActive(); report(true);
+  return true;
 }
 
 /* ═══════════ 槽位 → 具体动作 ═══════════
@@ -428,7 +465,7 @@ function playSlot(slot, fade = 0.22) {
 }
 
 function playOneShot(key, fade = 0.2, metadata = {}) {
-  playMotion(key, { loop: !!MOTIONS.find(m => m.key === key)?.loop, fade, ...metadata });
+  return playMotion(key, { loop: !!MOTIONS.find(m => m.key === key)?.loop, fade, ...metadata });
 }
 
 const AWAY_MS = 30 * 60e3;
@@ -615,32 +652,53 @@ function loadMotions() {
   return Promise.all([...new Set(initial)].filter(k => MOTIONS.some(m => m.key === k)).map(loadMotion));
 }
 function cancelPendingMotion() {
-  if (pendingMotion?.requestId) pet.motionStarted?.({ key: pendingMotion.key, avatar: avatarKey, requestId: pendingMotion.requestId, ok: false });
+  if (pendingMotion?.reason === 'performance') {
+    if (performanceBody.current()?.performanceId === pendingMotion.performanceId) finishPerformance(performanceBody.current(), 'cancelled', false);
+  } else if (pendingMotion?.requestId) pet.motionStarted?.({ key: pendingMotion.key, avatar: avatarKey, requestId: pendingMotion.requestId, ok: false });
   pendingMotion = null;
 }
 async function requestMotion(event) {
+  const entry = event.reason === 'performance' ? performanceBody.current() : null;
+  if (event.reason === 'performance' && (!entry || entry.performanceId !== event.performanceId)) return;
+  if (!performanceBody.allows(event)) {
+    if (event.requestId) pet.motionStarted?.({ ...event, avatar: avatarKey, ok: false });
+    return;
+  }
+  const fail = () => {
+    if (entry) finishPerformance(entry, 'failed');
+    else pet.motionStarted?.({ ...event, avatar: avatarKey, ok: false });
+  };
   const revision = ++motionRequestRevision;
   const item = MOTIONS.find(m => m.key === event.key);
-  if (!item || !motionEnabled(item.key)) { pet.motionStarted?.({ ...event, avatar: avatarKey, ok: false }); return; }
+  if (!item || !motionEnabled(item.key)) { fail(); return; }
   if (activeTransition) { cancelPendingMotion(); pendingMotion = event; return; }
   const desired = item.posture || 'standing';
-  if (item.transition && (item.transition === 'sit' ? bodyPosture === 'sitting' : bodyPosture === 'standing')) {
-    pet.motionStarted?.({ ...event, avatar: avatarKey, ok: false }); return;
-  }
+  if (item.transition && (item.transition === 'sit' ? bodyPosture === 'sitting' : bodyPosture === 'standing')) { fail(); return; }
   const bridge = desired !== bodyPosture ? (bodyPosture === 'standing' ? SIT_ENTER : SIT_EXIT) : null;
-  if (bridge && (!event.allowPostureChange || !motionEnabled(bridge))) { pet.motionStarted?.({ ...event, avatar: avatarKey, ok: false }); return; }
+  if (bridge && (!event.allowPostureChange || !motionEnabled(bridge))) { fail(); return; }
   const currentAvatar = avatarKey;
   const loaded = await Promise.all([loadMotion(item.key), ...(bridge ? [loadMotion(bridge)] : [])]);
-  if (revision !== motionRequestRevision || currentAvatar !== avatarKey || loading || loaded.some(v => !v) || !clips.has(item.key) || (bridge && !clips.has(bridge))) {
-    pet.motionStarted?.({ ...event, avatar: currentAvatar, ok: false }); return;
-  }
+  if (entry && !performanceBody.isCurrent(entry)) return;
+  if (revision !== motionRequestRevision || currentAvatar !== avatarKey || loading || loaded.some(v => !v) || !clips.has(item.key) || (bridge && !clips.has(bridge))) { fail(); return; }
   if (bridge) {
     cancelPendingMotion(); pendingMotion = event;
-    activeTransition = { to: desired };
-    playMotion(bridge, { loop: false, fade: 0.4, reason: 'transition' });
+    activeTransition = { to: desired, performanceEntry: entry };
+    if (!playMotion(bridge, { loop: false, fade: 0.4, reason: 'transition' })) {
+      activeTransition = null; pendingMotion = null; fail();
+    }
   } else {
-    if (item.transition) activeTransition = { to: item.transition === 'sit' ? 'sitting' : 'standing' };
-    playOneShot(item.key, item.transition ? 0.4 : 0.28, { ...event, loop: !!item.idle || (event.reason === 'manual' && !!item.loop), reason: item.transition ? 'transition' : event.reason });
+    if (item.transition) activeTransition = { to: item.transition === 'sit' ? 'sitting' : 'standing', performanceEntry: entry };
+    let playback = null;
+    if (entry) {
+      try { playback = performancePlaybackPlan(event.performancePlayback, clipFor(item.key)?.duration); }
+      catch { if (item.transition) activeTransition = null; fail(); return; }
+    }
+    const loop = playback ? playback.cycles > 1 : entry ? !!item.loop : !!item.idle || (event.reason === 'manual' && !!item.loop);
+    const ok = playOneShot(item.key, item.transition ? 0.4 : 0.28, { ...event, loop, repetitions: playback?.cycles, isTransition: !!item.transition, reason: entry ? 'performance' : item.transition ? 'transition' : event.reason });
+    if (entry) {
+      if (ok) { performancePlayback = { entry, action: currentAction }; startPerformance(entry, loop, event.holdMs, playback); }
+      else { if (item.transition) activeTransition = null; fail(); }
+    }
   }
 }
 
@@ -657,11 +715,11 @@ async function loadDataModel(bytes) {
   if (!gltf.scene) throw Error('形象模型没有场景');
   return { root: gltf.scene, dispose: () => disposeAvatarScene(gltf.scene) };
 }
-async function createDataAvatar(payload, onFinished) {
+async function createDataAvatar(payload, onFinished, avatarKey) {
   const instance = payload.runtime.engine === 'soft-surface-v1' ? new SoftSurfaceRuntime() : new DataAvatarRuntime();
   try { await instance.load({ loadModel: () => loadDataModel(payload.model),
     loadSurface: () => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payload.model)),
-    camera, disposeRoot: disposeAvatarScene, onFinished }, payload.runtime); }
+    camera, avatarKey, disposeRoot: disposeAvatarScene, onFinished }, payload.runtime); }
   catch (error) { instance.dispose(); throw error; }
   const box = new THREE.Box3().setFromObject(instance.visualRoot || instance.root);
   if (box.isEmpty() || !Number.isFinite(box.min.x) || !Number.isFinite(box.max.y)) { instance.dispose(); throw Error('形象模型没有可见范围'); }
@@ -680,7 +738,6 @@ function fitDataAvatar() {
   camera.position.set(center.x, aimY, center.z + dist); camera.lookAt(center.x, aimY, center.z); camera.updateProjectionMatrix();
   fitInfo = { dist, centerX: center.x, centerY: aimY, centerZ: center.z, visibleH, modelH: size.y, bust: false };
   updateDialoguePlacement();
-  groundEl.style.opacity = '0';
 }
 function clearMountedAvatar() {
   if (mixer) {
@@ -759,13 +816,16 @@ function mountVrm({ candidate, hidden, bounds, thumb, avoidance }) {
   mixer.addEventListener('finished', event => {
     if (event.action !== currentAction) return;
     expressiveUntil = 0;
+    const completedPerformance = activeTransition?.performanceEntry || (performancePlayback?.action === event.action ? performancePlayback.entry : null);
+    if (performancePlayback?.action === event.action) performancePlayback = null;
     if (activeTransition) {
       bodyPosture = activeTransition.to; activeTransition = null;
       idleKey = bodyPosture === 'sitting' ? SIT_IDLE : IDLE;
       pet.bodyPosture?.({ avatar: avatarKey, posture: bodyPosture });
       const next = pendingMotion; pendingMotion = null;
-      if (next) void requestMotion(next); else toIdle(0.4);
-    } else toIdle(0.35);
+      if (next) void requestMotion(next);
+      else { finishPerformance(completedPerformance, 'finished', false); toIdle(0.4); }
+    } else if (!finishPerformance(completedPerformance, 'finished')) toIdle(0.35);
     paintMotionActive();
   });
 }
@@ -776,18 +836,21 @@ async function loadAvatar(key) {
   loading = true;
   loadingAvatarKey = key;
   ++motionRequestRevision;
+  if (performanceBody.current()) finishPerformance(performanceBody.current(), 'cancelled', false);
   cancelPendingMotion();
   setLoading(true, `正在努力加载 ${info.label || '角色'}…`);
   let nextData, nextVrm, gltf, payload, mounted = false;
   try {
     if (info.kind === 'avatar-pack') {
       payload = await pet.avatarPackData(key);
-      nextData = await createDataAvatar(payload, () => {
+      nextData = await createDataAvatar(payload, finishedKey => {
         if (dataAvatar === nextData && avatarKey === key) {
+          const entry = performanceBody.current();
+          if (entry && entry.key === finishedKey) finishPerformance(entry, 'finished', false);
           currentMotion = nextData.defaultIdle;
           pet.motionStarted?.({ key: currentMotion, avatar: key, reason: 'idle', ok: true });
         }
-      });
+      }, key);
       nextData.setPalette?.(cfg.avatarPalettes?.[key]);
     } else {
       const motionsReady = loadMotions();
@@ -1565,7 +1628,13 @@ async function switchAvatar(k, { persist = true } = {}) {
   const revision = ++avatarSwitchRevision, previousKey = avatarKey;
   if (persist) void pet.config({ avatar: k }).catch(error => showBubble(error.message, 2200));
   if (loading) { queuedAvatar = k === loadingAvatarKey ? null : k; return; }
-  if (k === avatarKey) return;
+  if (k === avatarKey) {
+    // A cancelled replacement can restore this still-mounted body without
+    // loading it again. Reconfirm it so the host leaves its loading state.
+    pet.bodyPosture?.({ avatar: k, posture: bodyPosture });
+    pet.bodyReady?.({ avatar: k, expressions: Object.keys(vrm?.expressionManager?.expressionMap || {}) });
+    return;
+  }
   const row = document.getElementById('avRow');
   const btns = row ? [...row.children] : [];
   // 按钮置灰但面板留着 —— 换角色的时候其他 UI 一律照常显示
@@ -1636,7 +1705,7 @@ function frame() {
       const headY = postureHeadPosition.y - vrm.scene.position.y;
       if (bodyPosture === 'standing' && !activeTransition) standingHeadY = headY;
       const sittingView = bodyPosture === 'sitting' || activeTransition?.to === 'sitting';
-      const targetY = viewScale <= 0.51 && sittingView && standingHeadY != null ? Math.max(0, Math.min(0.65, standingHeadY - headY)) : 0;
+      const targetY = vrmFraming === 'half' && sittingView && standingHeadY != null ? Math.max(0, Math.min(0.65, standingHeadY - headY)) : 0;
       vrm.scene.position.y += (targetY - vrm.scene.position.y) * Math.min(1, dt * 4);
     }
 
@@ -1741,6 +1810,10 @@ function wire() {
       }
       case 'config':
         cfg = ev.config;
+        if (vrmFraming !== cfg.window?.vrmFraming) {
+          vrmFraming = cfg.window?.vrmFraming || 'half';
+          if (vrm) fitCamera(vrm.scene);
+        }
         dataAvatar?.setPalette?.(cfg.avatarPalettes?.[avatarKey]);
         if (!dataAvatar && currentMotion && !motionEnabled(currentMotion)) toIdle(0.25);
         paintVoiceControls();
@@ -1769,7 +1842,7 @@ function wire() {
       case 'chat':
         document.getElementById('bubble').classList.remove('notice');
         if (ev.role === 'user') { clearWebSources(); noteMaster(); if (ev.source !== 'keyboard') showBubble(ev.text, 3000); }
-        else if (ev.role === 'assistant') {bubbleController.finish(ev.text, 9000);if(ev.taskId&&ev.links?.length)renderResultText(document.getElementById('bubbleText'),ev.text,ev.links,index=>pet.agentResultLink(ev.taskId,index));}
+        else if (ev.role === 'assistant') {bubbleController.finish(ev.text, 9000);if(ev.taskId&&ev.links?.length)renderResultText(document.getElementById('bubbleText'),compactReplyText(ev.text),ev.links,index=>pet.agentResultLink(ev.taskId,index));}
         break;
       case 'recall':
         paintRecallButton(ev.entries);
@@ -1800,15 +1873,36 @@ function wire() {
         break;
       }
       case 'motion': {
+        if (ev.cancelPerformance) { cancelPerformance(ev.cancelPerformance); break; }
+        let entry = null;
+        if (ev.reason === 'performance') {
+          entry = performanceBody.begin(ev, avatarKey);
+          if (!entry) break;
+          clearPerformanceTimer();
+          // A previous transition may still be settling; its queued target is stale.
+          cancelPendingMotion();
+        } else if (!performanceBody.allows(ev)) {
+          if (ev.requestId) pet.motionStarted?.({ ...ev, avatar: avatarKey, ok: false });
+          break;
+        }
         if (dataAvatar) {
-          const result = !loading ? dataAvatar.play({ key: ev.key }) : { ok: false };
+          let playback = null, valid = true;
+          if (entry) {
+            try { playback = performancePlaybackPlan(ev.performancePlayback, dataAvatar.getActionDuration?.(ev.key)); }
+            catch { valid = false; }
+          }
+          const result = !loading && valid ? dataAvatar.play({ key: ev.key, ...(playback ? { repetitions: playback.cycles } : {}) }) : { ok: false };
           if (result.ok) currentMotion = ev.key;
-          pet.motionStarted?.({ key: ev.key, avatar: avatarKey, requestId: ev.requestId, reason: ev.reason, ok: !!result.ok });
+          if (entry) {
+            if (result.ok) startPerformance(entry, !!dataAvatar.current?.loop, ev.holdMs, playback);
+            else finishPerformance(entry, 'failed');
+          } else pet.motionStarted?.({ key: ev.key, avatar: avatarKey, requestId: ev.requestId, reason: ev.reason, ok: !!result.ok });
           break;
         }
         // 模型给的是槽位名（cheer），也可能是具体 key（手动列表复用这条路）
         const k = ev.requestId ? ev.key : resolveMotion(ev.key);
         if (k) void requestMotion({ ...ev, key: k });
+        else if (entry) finishPerformance(entry, 'failed');
         else pet.motionStarted?.({ key: ev.key, avatar: avatarKey, requestId: ev.requestId, ok: false });
         break;
       }
@@ -1912,7 +2006,7 @@ function wire() {
       case 'toidle':
         // 动作列表窗口里的「回到待机」
         ambientTimer = 26;
-        if (dataAvatar) { dataAvatar.play({ key: dataAvatar.defaultIdle, loop: true }); currentMotion = dataAvatar.defaultIdle; }
+        if (dataAvatar) { if (!performanceBody.current()) { dataAvatar.play({ key: dataAvatar.defaultIdle, loop: true }); currentMotion = dataAvatar.defaultIdle; } }
         else toIdle(0.3);
         break;
       case 'asrLevel': {
@@ -2215,6 +2309,7 @@ setInterval(() => {
     MOTIONS = Array.isArray(init.motions) ? init.motions : [];
     if (Array.isArray(init.motionGroups) && init.motionGroups.length) MOTION_GROUPS = init.motionGroups;
     viewScale = (cfg.window && cfg.window.scale) || 0.5;
+    vrmFraming = cfg.window?.vrmFraming || 'half';
     paintScale();
     paintVoiceControls();
     wire();
@@ -2266,11 +2361,15 @@ window.__playSlot = (slot) => playSlot(slot, 0.2);
 window.__scale = (k) => { setScale(k); return viewScale; };
 window.__light = (scale) => {
   if (scale !== undefined) { applyAvatarLight(scale); renderer.render(scene, camera); }
+  const studio = bunnyStudioLighting?.group.visible ? {
+    ambient: BUNNY_STUDIO.hemisphere,
+    lights: bunnyStudioLighting.group.children.filter(light => light.isRectAreaLight).map(light => ({ position: light.position.toArray(), width: light.width, height: light.height, intensity: light.intensity })),
+  } : null;
   return {
-  ambient: +ambient.intensity.toFixed(2),
+  ambient: +(studio?.ambient ?? ambient.intensity).toFixed(2),
   key: +avatarLighting.getLight('key').intensity.toFixed(2),
-  factor: +((ambient.intensity || 0) / LIGHT_BASE.ambient).toFixed(2),
-  avatar: avatarKey, profile: avatarLighting.snapshot(),
+  factor: +(((studio?.ambient ?? ambient.intensity) || 0) / LIGHT_BASE.ambient).toFixed(2),
+  avatar: avatarKey, profile: avatarLighting.snapshot(), studio,
   };
 };
 /* 取景自检：把关键点投到屏幕上，验证"半身/全身"两种构图到底落在哪几行像素 */

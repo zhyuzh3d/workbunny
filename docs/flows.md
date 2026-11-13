@@ -13,8 +13,8 @@ flowchart TB
     Memory --> Tools["受管工具资源与不可变快照"]
     Chat -->|"已授权目标；先回应"| Task["任务系统：AgentService / AgentRuntime"]
     Task --> Context
-    Task --> Action["Action：语义调度与程序组合"]
-    Action --> Operation["Operation：真实工具 / 视觉键鼠 / 文件 / 接口"]
+    Task --> Action["Action：推进小目标，可包含多轮模型和操作"]
+    Action --> Operation["Operation：一次 LLM / 命令 / 截图 / BOPER 键鼠"]
     Operation --> Perception["感知与实际回执：来源、转换、证据"]
     Perception --> Action
     Action -->|"自主核查与结果"| Task
@@ -101,7 +101,9 @@ stateDiagram-v2
     running --> paused: 主人暂停
     waiting --> paused: 主人暂停
     paused --> ready: 主人继续，保留原任务
-    running --> completed: Bunny 确认目标完成
+    running --> paused: 任务脑自判成功，提交结果终审
+    paused --> completed: 督导接受本次结果
+    paused --> waiting: 督导附指导退回，任务脑自行整改
     waiting --> expired: Task 到期
     ready --> stopped: 主人停止，立即封住调度与回调
     running --> stopped: 主人停止或取消，立即释放名额
@@ -267,6 +269,9 @@ flowchart TD
     Local -->|"预算到达；障碍仍不确定"| Yield["让出本轮资源；不冒充自我挂起或失败"]
     Monitor["原调度器监测：运行期限、无进展、WorkBuddy 异常"] --> Request
     Suspend --> Request["原 Task / Action.mainReview：登记、持久化、去重"]
+    Success["任务脑新自判成功：原 Task 保存 completionProposal"] --> Request
+    Decision -->|"accept 本次结果"| Completed["原 Task completed；完成回调持久化认领一次"]
+    Decision -->|"不合格：指导整改"| Active
     Yield --> Request
     Request --> Self["SelfSystem：共享身份、记忆、Summary、经验与最新相关情景；独立调用状态"]
     Self --> Decision["主脑高层决定与可修订指导；不执行工具"]
@@ -282,7 +287,9 @@ flowchart TD
     Services["模型或保存无响应"] --> Bounded["逻辑有界退让；物理请求/实际写入仍被原链跟踪"]
 ```
 
-普通建议不取消正常 worker；仅明确检查点重启且无其它活跃 scope 时可隔离唯一失效调用。所有新输入仍走原权限、GUI lease、操作账本和派发前检查。后台模型满额是普通等待，为主人对话保留容量；主脑督导不直接说话，不借主人对话的 busy 或 controller。主进程与任务系统是程序组织，主脑与任务脑是 LLM 认知用途；不存在第二人格或执行账本。
+未知效果 → 新鲜只读观察 → 任务脑显式评估可控影响 → 可信工具policy及原权限允许 → 一次新Operation采用新策略 → 依据实际效果继续与原结果终审；旧unknown和原生回执保留，旧key不重放。导航完成可同轮整理回执，不为凑额外审核步骤停住。明确方法限制在目录和派发准入中共同生效；错误定位可由screen.reset抛弃后重新观察，不清实际效果。
+
+正常推进不逐步审批。自判成功或失败挂起才提交整体审阅，或实际耗时、空转、卡住异常时由监测触发。退回保持同一任务、授权和账本，清旧规划与结果缓存；整改后新结果再次提交。已外发交付不倒带。普通建议不取消正常 worker；仅明确检查点重启且无其它活跃 scope 时可隔离唯一失效调用。所有新输入仍走原权限、GUI lease、操作账本和派发前检查。后台模型满额是普通等待，为主人对话保留容量；主脑督导不直接说话，不借主人对话的 busy 或 controller。主进程与任务系统是程序组织，主脑与任务脑是 LLM 认知用途；不存在第二人格或执行账本。
 
 ## 8. 感知、经验吸收与工具演进
 

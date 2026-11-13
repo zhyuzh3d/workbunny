@@ -199,6 +199,11 @@ app.whenReady().then(async () => {
   win = new BrowserWindow({ width: 560, height: 760, show: false, webPreferences: { contextIsolation: false, nodeIntegration: false, sandbox: true } });
   await win.loadFile(fixture);
   await waitFor(() => evaluate('!!window.fixture?.controller'), 'module init');
+  await evaluate(`window.fixture.controller.appendDelta('第一行\\n'); window.fixture.controller.appendDelta('  \\n第二行')`);
+  assert.equal(await evaluate("document.getElementById('bubbleText').textContent"), '第一行\n第二行', 'streamed reply compacts blank lines across chunks');
+  await evaluate(`window.fixture.controller.finish('第一行\\n  \\n第二行', 60000)`);
+  assert.equal(await evaluate("document.getElementById('bubbleText').textContent"), '第一行\n第二行', 'completed reply matches streamed display');
+  await evaluate('window.fixture.controller.hide()');
   // DOM input events exercise production handlers in an isolated hidden window.
   await testViewportAndScaleBounds();
   await testShortTextCompactAndNewTurnResetsScroll();

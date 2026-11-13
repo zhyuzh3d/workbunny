@@ -8,6 +8,29 @@ test('unchanged conversation pixels reuse the actual interpretation despite a dr
  const body=Buffer.from(draft);body.fill(255,(50*100+50)*4,(50*100+52)*4);assert.equal(scene.reuseObservation({recipient:'Alice'},{preview:url(body),at:3}),null);assert.equal(scene.reuseObservation({recipient:'Bob'},{preview:url(draft)}),null);scene.knownIdentity=fixture().visual.identity();assert.equal(scene.reuseObservation({recipient:'Alice'},{preview:url(draft)}),null);
 });
 function setup(){const h=fixture(),faults=[];let inspections=0;h.location.texts=[{text:'Alice',confidence:1,x:.4,y:.06,width:.2,height:.03}];const scene=new WeChatScene({native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap,subjects:()=>[{application:'wechat',recipient:'Alice'},{application:'wechat',recipient:'文件传输助手'}],onCircuit:async fault=>faults.push(fault)});scene.visual=h.visual;scene.observer.visual=h.visual;scene.observer.inspect=async()=>{inspections++;return {headerMatched:true,messages:[],draft:''};};return {h,scene,faults,inspections:()=>inspections,advance:()=>{scene.lastAt-=60000;}};}
+test('conversation views preserve the source observation ID for the common operation evidence ledger',async()=>{
+ const f=setup();f.scene.observer.inspect=async()=>({headerMatched:true,messages:[],draft:'',observationId:'synthetic-source-frame'});
+ const view=await f.scene.observe({recipient:'Alice'});assert.equal(view.observationId,'synthetic-source-frame');assert(f.h.calls.every(c=>c.op==='displayCapture'));
+});
+test('an explicit target reaches semantic inspection without coarse title text or fixed title coordinates',async()=>{
+ for(const texts of [[],[{text:'Alice',confidence:.99,x:.09,y:.025,width:.05,height:.02}]]){
+  const f=setup();f.h.location.texts=texts;let requested;
+  f.scene.observer.inspect=async target=>{requested=target.recipient;return {headerMatched:true,observationId:'actual-title-source',messages:[],draft:''};};
+  const view=await f.scene.observe({recipient:'Alice'});assert.equal(requested,'Alice');assert.equal(view.headerMatched,true);assert.equal(view.observationId,'actual-title-source');assert(f.h.calls.every(c=>c.op==='displayCapture'));
+ }
+});
+test('unchanged pixels cannot keep a negative interpretation from before the requested target was supplied',async()=>{
+ const f=setup();f.scene.subjects=()=>[];f.h.location.texts=[];
+ assert.equal((await f.scene.capture()).headerMatched,false);assert.equal(f.inspections(),0);
+ const view=await f.scene.observe({recipient:'Alice'});assert.equal(view.headerMatched,true);assert.equal(f.inspections(),1);
+});
+test('a different requested target gets semantic inspection after an unchanged negative result',async()=>{
+ const f=setup(),requested=[];
+ f.scene.observer.inspect=async target=>{requested.push(target.recipient);return {headerMatched:target.recipient==='文件传输助手',messages:[],draft:''};};
+ assert.equal((await f.scene.observe({recipient:'Alice'})).headerMatched,false);
+ assert.equal((await f.scene.observe({recipient:'文件传输助手'})).headerMatched,true);
+ assert.deepEqual(requested,['Alice','文件传输助手']);
+});
 test('shared unchanged scene reuses VLM interpretation for multiple contacts without OCR or app queries',async()=>{
  const f=setup();assert((await f.scene.observe({recipient:'Alice'})).headerMatched);await f.scene.observe({recipient:'文件传输助手'});assert.equal(f.inspections(),1);f.advance();assert.equal((await f.scene.observe({recipient:'Alice'})).changed,false);assert.equal(f.inspections(),1);assert.equal(f.h.requests.length,1);assert(f.h.calls.every(c=>c.op==='displayCapture'));
 });
@@ -45,11 +68,27 @@ test('a single unclassified false remains an observation failure rather than an 
  }
 });
 test('read-only identity checks accept a visible inactive target without granting input or latching a circuit',async()=>{
- const f=setup(),task={state:{}};f.h.location.active=false;
+ const f=setup(),task={state:{}};f.h.location.active=false;f.h.location.focusRegion=null;f.h.location.focusEvidence='';
  await f.scene.assertTaskIdentity(task);assert.equal(task.state.sceneIdentity.wechat.mode,'visual');assert.equal(f.scene.circuit,null);
+ assert.equal(f.h.calls.length,0,'runtime scope refresh does not launch another identity inspection');await f.scene.observe({recipient:'Alice'});
  assert(f.h.calls.every(c=>c.op==='displayCapture'));const frame=[...f.h.visual.frames.values()].at(-1).result;
- await assert.rejects(f.h.visual.input(frame.visualFrameId,{action:'click',x:100,y:60}),e=>e.code==='E_VISUAL_TARGET');
+ await assert.rejects(f.h.visual.input(frame.visualFrameId,{action:'key',key:'enter'}),e=>e.code==='E_VISUAL_TARGET');
  assert(f.h.calls.every(c=>c.op==='displayCapture'));
+});
+test('explicit read-only reconnection can rebind the original task to a visible inactive target without granting input',async()=>{
+ const f=setup(),{AgentService}=require('../src/main/agent-service');f.h.location.active=false;f.h.location.focusRegion=null;f.h.location.focusEvidence='';
+ const old=f.h.visual.identity(),task={id:'synthetic-reconnect-task',goal:'Preserve the original goal',policy:'Inspect latest visible entries only',state:{sceneIdentity:{wechat:old},conversations:{old:{cursor:{ready:true}}}},inbox:[{key:'old-identity-event'}],operations:{}};
+ f.scene.circuit={kind:'identity',reason:'synthetic previous identity',at:1};let saves=0;
+ const service={scene:f.scene,runtime:{tasks:new Map([[task.id,task]]),list:()=>[task],save:async()=>{saves++;}},emit:()=>{},status:()=>({})};
+ const result=await AgentService.prototype.reconnectWeChat.call(service,task.id);
+ assert.equal(result.ok,true);assert.equal(f.scene.circuit,null);assert.notEqual(task.state.sceneIdentity.wechat.sessionId,old.sessionId);assert.deepEqual(task.state.sceneIdentity.wechat,f.scene.knownIdentity);
+ assert.equal(task.goal,'Preserve the original goal');assert.equal(task.policy,'Inspect latest visible entries only');assert.equal(task.state.previousWeChatIdentity.sessionId,old.sessionId);assert.deepEqual(task.inbox,[]);assert.equal(task.state.conversations,undefined);assert.equal(saves,1);
+ assert.equal(f.h.visual.anchor.active,false,'observation cannot manufacture active input permission');
+ const frame=[...f.h.visual.frames.values()].at(-1).result;
+ await assert.rejects(f.h.visual.input(frame.visualFrameId,{action:'key',key:'enter',modifiers:[]}),e=>e.code==='E_VISUAL_TARGET'&&e.dispatched===false);
+ assert(f.h.calls.every(call=>call.op==='displayCapture'));
+ task.operations.unknown={effect:'write',status:'intent'};const before=f.h.calls.length,identity=f.scene.knownIdentity;
+ const blocked=await AgentService.prototype.reconnectWeChat.call(service,task.id);assert.equal(blocked.ok,false);assert.equal(f.h.calls.length,before);assert.equal(f.scene.knownIdentity,identity);
 });
 test('a fresh scene health judgment can retire the planning frame and conservatively refuse its input',async()=>{
  const f=setup(),{DesktopService}=require('../src/main/desktop-service'),service=Object.create(DesktopService.prototype);
@@ -62,15 +101,18 @@ test('a fresh scene health judgment can retire the planning frame and conservati
  // A second location judgment can move the model's main-region box while
  // the actual pixels remain unchanged, invalidating the action's first frame.
  f.h.location={...f.h.location,mainRegion:{x:.14,y:.1,width:.76,height:.8}};f.h.visual.anchor.needsRelocate=true;
- await assert.rejects(service.actVisualInput({action:'scroll',x:.6,y:.5,deltaY:-100},scope,shot,1),e=>e.code==='E_VISUAL_TARGET'&&e.message==='视觉帧已过期，请重新观察'&&e.dispatched===false);
+ await assert.rejects(service.actVisualInput({action:'scroll',x:.6,y:.5,deltaY:-100},scope,shot,1),e=>e.code==='E_VISUAL_TARGET'&&e.dispatched===false);
  assert.equal(f.h.requests.length,2,'the fresh scene judgment is preserved');
  assert(f.h.calls.every(call=>call.op==='displayCapture'),'the revoked planning frame cannot authorize input');
  await f.scene.trip('synthetic security boundary','security');
  await assert.rejects(service.actVisualInput({action:'scroll',x:.6,y:.5,deltaY:-100},scope,shot,1),e=>e.code==='E_APP_CIRCUIT');
  assert.equal(f.h.calls.filter(call=>call.op==='displayInput').length,0,'a bound frame cannot waive a known security boundary');
 });
-test('a restored legacy window identity is not adopted into the new visual session',async()=>{
- const f=setup(),task={state:{sceneIdentity:{wechat:{pid:76,windowId:8}}}};await assert.rejects(f.scene.assertTaskIdentity(task),e=>e.code==='E_APP_CIRCUIT');assert.equal(f.faults.length,1);assert(!f.h.calls.some(c=>c.op==='displayInput'));
+test('old runtime or legacy window cache metadata is replaced without inventing an account-change incident',async()=>{
+ for(const old of [{pid:76,windowId:8},fixture().visual.identity()]){
+  const f=setup(),task={goal:'original goal',state:{sceneIdentity:{wechat:old}}};await f.scene.assertTaskIdentity(task);
+  assert.deepEqual(task.state.sceneIdentity.wechat,f.h.visual.identity());assert.equal(task.goal,'original goal');assert.equal(f.scene.circuit,null);assert.equal(f.faults.length,0);assert.equal(f.h.calls.length,0);
+ }
 });
 test('a physical activation failure reaches the shared scene with its security classification and actual input receipt',async()=>{
  const f=setup(),{AgentService}=require('../src/main/agent-service'),service=Object.create(AgentService.prototype),task={id:'synthetic-conversation-task',skill:'conversation.manage',state:{},operations:{},scene:'life',visibilityFloor:1};

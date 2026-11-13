@@ -109,14 +109,23 @@ test('visual dispatch rejects missing or mismatched menu approval and rechecks t
   const h=fixture();h.native.close=()=>{};h.native.cancel=()=>{};h.location.software='WeChat';h.location.texts=[heading,ocr('转文字',.54,.4)];
   let revokeOnCapture=false,current=true;const request=h.native.request;h.native.request=async(op,args)=>{const result=await request(op,args);if(op==='displayCapture'&&revokeOnCapture)current=false;return result;};
   const service=new DesktopService({native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap,sensitivePolicy:{checkChannel:()=>{if(!current)throw require('../src/main/dialogue-channels').stale();}}});t.after(()=>service.close());
-  const scope=h.visual.identity();service.visualSessions=new Map([['wechat',h.visual]]);service.task={target:'wechat',scene:'life',domain:'life',visibilityFloor:1,recipient:task.recipient,channelConversation:true,channelAuthorization:{account:require('../src/main/visual-session').visualAccount(scope),scene:'life'}};service.running=true;service.generation=1;service.controller=new AbortController();
+  const scope=h.visual.identity();service.visualSessions=new Map([['wechat',h.visual]]);service.task={target:'wechat',operation:'read',readRequest:{kind:'voice-transcript',sequence:1},scene:'life',domain:'life',visibilityFloor:1,recipient:task.recipient,channelConversation:true,channelAuthorization:{account:require('../src/main/visual-session').visualAccount(scope),scene:'life'}};service.running=true;service.generation=1;service.controller=new AbortController();
   const shot=await service.captureVisual(scope,1),action={action:'click',x:.58,y:.41},approval={action,shot,target:box(.54,.4,.08,.018),related:[heading],menu:true,next:null};
   await assert.rejects(service.act(action,scope,shot,1),denied);
   await assert.rejects(service.act(action,scope,shot,1,{approval:{...approval,shot:{...shot}}}),denied);
   revokeOnCapture=true;await assert.rejects(service.act(action,scope,shot,1,{approval}),{code:'E_CHANNEL_CHANGED'});assert.equal(h.calls.filter(c=>c.op==='displayInput').length,0);
   current=true;revokeOnCapture=false;await service.act(action,scope,shot,1,{approval});assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
 });
-test('the production desktop guard invokes same-frame text refinement only when its contact label is missing',async t=>{
+test('ordinary channel input still rechecks authority after fresh pixels without staged approval',async t=>{
+ for(const operation of ['open','send']){
+  const h=fixture();h.native.close=()=>{};h.native.cancel=()=>{};h.location.software='WeChat';let revoke=false,current=true,checks=0;const native=h.native.request;
+  h.native.request=async(op,...args)=>{const result=await native(op,...args);if(op==='displayCapture'&&revoke)current=false;return result;};
+  const service=new DesktopService({native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap,sensitivePolicy:{checkChannel:()=>{checks++;if(!current)throw require('../src/main/dialogue-channels').stale();},check:async()=>({})}});t.after(()=>service.close());const scope=h.visual.identity();service.visualSessions=new Map([['wechat',h.visual]]);
+  service.task={...task,target:'wechat',operation,scene:'life',domain:'life',visibilityFloor:1,channelConversation:true,channelAuthorization:{account:require('../src/main/visual-session').visualAccount(scope),scene:'life'}};service.running=true;service.generation=1;service.controller=new AbortController();
+  const shot=await service.captureVisual(scope,1),action={action:'click',x:.6,y:.4};revoke=true;await assert.rejects(service.act(action,scope,shot,1),{code:'E_CHANNEL_CHANGED'});assert(checks>=2);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,0);
+ }
+});
+test('ordinary authorized navigation does not require independent role or text approval when coarse labels are missing',async t=>{
  for(const known of [false,true]){
   const h=fixture();h.native.close=()=>{};h.native.cancel=()=>{};h.location={...h.location,software:'WeChat',region:box(0,0,1,1),mainRegion:box(0,0,1,1),texts:[heading,...(known?[ocr(task.recipient,.15,.24)]:[])]};
   let refined=0,clicked=false;const visualRequest=h.visual.request,nativeRequest=h.native.request;
@@ -125,15 +134,15 @@ test('the production desktop guard invokes same-frame text refinement only when 
   h.native.request=async(op,args)=>{const result=await nativeRequest(op,args);if(op==='displayInput'){assert.equal(args.action,'click');clicked=true;}return result;};
   const service=new DesktopService({native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap,planner:async()=>clicked?{action:'done',completed:true,evidence:'synthetic target opened'}:{action:'click',x:.2,y:.25},modelRequest:async()=>({text:JSON.stringify({kind:'contact',box:box(.13,.22,.16,.05)})})});t.after(()=>service.close());
   service.visualSessions=new Map([['wechat',h.visual]]);service.task={id:'synthetic-open-'+known,target:'wechat',operation:'open',recipient:task.recipient,goal:'open synthetic contact',scene:'life',domain:'life',visibilityFloor:1,steps:[],channelConversation:true,channelAuthorization:{account:require('../src/main/visual-session').visualAccount(h.visual.identity()),scene:'life'},workModel:'hy3',startedAt:Date.now()};service.running=true;service.generation=1;service.controller=new AbortController();
-  await service.run(1,{...service.task});assert.equal(service.task.status,'review');assert.equal(refined,known?0:1);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
+  await service.run(1,{...service.task});assert.equal(service.task.status,'review');assert.equal(refined,0);assert.equal(h.calls.filter(c=>c.op==='displayInput').length,1);assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
  }
 });
 
-test('the normal reply executor rejects a message-area click and continues with a scoped visual reply', async t => {
+test('an authorized channel reply uses the normal visual plan without independent input approval or action rewriting', async t => {
   const inputs = [];
   let step = 0, draft = false, sent = false;
   let h;h=fixture({onInput:()=>{}});h.native.close=()=>{};h.native.cancel=()=>{};h.location={...h.location,software:'WeChat',region:box(0,0,1,1),mainRegion:box(0,0,1,1),identityRegion:box(.02,.02,.2,.12),focusRegion:box(.4,.72,.42,.12),texts:[heading,ocr('发送',.88,.92)]};
-  const request=h.native.request;h.native.request=async(op,input)=>{const result=await request(op,input);if(op==='displayInput'){inputs.push(input);if(input.action==='type')draft=true;if(input.action==='click'&&input.y>108){sent=true;draft=false;}h.location.texts=[heading,ocr('发送',.88,.92),...(draft?[ocr(task.message,.46,.78)]:sent?[ocr(task.message,.64,.45)]:[])];h.visual.anchor.needsRelocate=true;}return result;};
+  const request=h.native.request;h.native.request=async(op,input)=>{const result=await request(op,input);if(op==='displayInput'){inputs.push(input);if(input.action==='type')draft=true;if(input.action==='key'&&input.key==='enter'){sent=true;draft=false;}h.location.texts=[heading,ocr('发送',.88,.92),...(draft?[ocr(task.message,.46,.78)]:sent?[ocr(task.message,.64,.45)]:[])];h.visual.anchor.needsRelocate=true;}return result;};
   const service = new DesktopService({
     native:h.native,imageResize:bytes=>bytes,imageCrop:h.crop,bitmap:h.bitmap,
     planner: async () => {
@@ -142,12 +151,7 @@ test('the normal reply executor rejects a message-area click and continues with 
       assert(sent);
       return { action: 'done', completed: true, evidence: 'Confirmed the new reply', receipt: { observed: 'delivered', basis: 'New reply visible' } };
     },
-    modelRequest: async options => {
-      const { allowed } = JSON.parse(options.messages.find(m=>m.role==='user').content[0].text);
-      if(!allowed)return {text:JSON.stringify({matched:true,composer:box(.4,.72,.42,.12),nextAction:null})};
-      if (allowed.composer) return { text: JSON.stringify({ kind: 'composer', box: box(.4, .72, .42, .12) }) };
-      assert(allowed.send);
-      return { text: JSON.stringify({ kind: 'send', box: box(.86, .90, .12, .07) }) };
+    modelRequest: async () => { assert.fail('ordinary sends must not request staged role approval');
     },
   });
   t.after(()=>service.close());service.visualSessions=new Map([['wechat',h.visual]]);
@@ -158,7 +162,7 @@ test('the normal reply executor rejects a message-area click and continues with 
   service.controller = new AbortController();
   await service.run(1, { ...service.task });
   assert.equal(service.task.sendState, 'confirmed');
-  assert.deepEqual(inputs.map(input => input.action), ['click', 'type', 'click']);
-  assert.equal(inputs[1].text, task.message);assert(inputs[0].y>80);
+  assert.deepEqual(inputs.map(input => input.action), ['click', 'type', 'key']);
+  assert.equal(inputs[1].text, task.message);assert(inputs[0].y<80,'the approved visual plan is not rewritten into an independently selected composer click');
   assert(h.calls.every(c=>['displayCapture','displayInput'].includes(c.op)));
 });
